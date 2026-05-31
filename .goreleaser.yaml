@@ -1,0 +1,86 @@
+version: 2
+
+project_name: deepact
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: deepact
+    main: .
+    binary: deepact
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: deepact
+    name: deepact
+  draft: false
+  prerelease: auto
+
+brews:
+  - name: deepact
+    repository:
+      owner: deepact
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/deepact/deepact
+    description: "A terminal-native AI coding agent with guarded execution and dual-model routing."
+    license: "MIT"
+    test: |
+      system "#{bin}/deepact --version"
+    install: |
+      bin.install "deepact"
+
+nfpms:
+  - id: packages
+    package_name: deepact
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: deepact
+    homepage: https://github.com/deepact/deepact
+    description: "A terminal-native AI coding agent with guarded execution and dual-model routing."
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin

@@ -1,0 +1,32 @@
+# Binaries
+deepact
+*.exe
+
+# Build
+dist/
+bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (user secrets)
+.env
+*.local.toml
+
+# Session data (local only)
+sessions/
+artifacts/
+
+# Test
+coverage.out
+*.test
+
+# Dependencies
+vendor/
