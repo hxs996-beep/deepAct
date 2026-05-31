@@ -439,11 +439,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if isTerminalEscapeResidue(allRunes) {
 				return m, nil // discard both ['['] + ['<65;25;31M']
 			}
+			// Not escape residue and msg is KeyRunes: reinject the held '['
+			// and process the current runes as normal input.
+			m.inputBuf.insertRunes([]rune{'['})
+			m.inputBuf.HandleKey(msg)
+			return m, nil
 		}
-		// Not escape residue — reinject the held '[' and process current msg normally
-		m.inputBuf.insertRunes([]rune{'['})
-		m.inputBuf.HandleKey(msg)
-		return m, nil
+		// Non-Runes message after a lone '[': the '[' was almost certainly
+		// part of an escape sequence (e.g., on Windows where SGR mouse events
+		// arrive as MouseMsg instead of KeyRunes). Discard the held '[' and
+		// fall through to normal handling of the current message.
+		// This prevents '[' from being injected into the input buffer when
+		// rapid mouse wheel events produce ghost '[' characters.
 	}
 	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
 		m.pendingOpenBracket = true
