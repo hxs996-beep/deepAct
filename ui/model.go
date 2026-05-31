@@ -174,6 +174,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.scrollOffset < 0 {
 				m.scrollOffset = 0
 			}
+		case tea.MouseButtonLeft:
+			// Click: select or activate input
+		case tea.MouseButtonRight:
+			// Right-click: nothing
+		}
+		// Clamp scroll offset after any wheel change to prevent overflow
+		// on Windows where rapid wheel events can accumulate before View() clamps.
+		if m.width > 0 && m.height > 0 {
+			cw := m.width
+			bodyLines := len(m.renderBody(cw))
+			bh := m.height - renderedHeight(renderStatusBar(m.status, m.scrollOffset, cw)) - renderedHeight(renderInputLine(m))
+			if bh < 1 {
+				bh = 1
+			}
+			if maxS := bodyLines - bh; maxS > 0 && m.scrollOffset > maxS {
+				m.scrollOffset = maxS
+			}
 		}
 		return m, nil
 	case tea.WindowSizeMsg:

@@ -51,33 +51,21 @@ func isTerminalEscapeResidue(runes []rune) bool {
 		return true
 	}
 
-	// ---- CSI '<' split: <digits;digits;digitsM ----
-	// On Windows 10, SGR mouse sequences split at buffer boundaries, sending
-	// '<65;25;31M' without the preceding '['. The '<' alone is not caught by
-	// CSI private prefix (needs '[' prefix) or SGR mouse tail (needs digit start).
+	// ---- CSI '<' split with multi-digit params: <digits;digits;digitsM ----
+	// When SGR mouse sequences split at buffer boundaries, the '<' prefix and
+	// three semicolon-delimited numbers end with M/m. Use simple string matching
+	// since this pattern is extremely specific.
 	if len(runes) >= 5 && runes[0] == '<' {
-		// Pattern: < + 1+ digits + ';' + 1+ digits + ';' + 1+ digits + 'M'/'m'
-		last := len(runes) - 1
-		if (runes[last] == 'M' || runes[last] == 'm') && runes[last-1] >= '0' && runes[last-1] <= '9' {
-			j := last - 2
-			if j >= 0 && runes[j] == ';' {
-				j--
-				if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-					for j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-						j--
-					}
-					if j >= 0 && runes[j] == ';' {
-						j--
-						if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-							for j >= 1 && runes[j] >= '0' && runes[j] <= '9' {
-								j--
-							}
-							if j >= 0 && runes[j] == '<' && j == 0 {
-								return true
-							}
-						}
-					}
-				}
+		s := string(runes)
+		last := s[len(s)-1]
+		if (last == 'M' || last == 'm') && strings.Count(s, ";") == 2 {
+			// Split by ';' to check each segment is digits
+			parts := strings.Split(s, ";")
+			if len(parts) == 3 &&
+				parts[0][0] == '<' && isAllDigits(parts[0][1:]) &&
+				isAllDigits(parts[1]) &&
+				isAllDigits(parts[2][:len(parts[2])-1]) {
+				return true
 			}
 		}
 	}
@@ -109,32 +97,16 @@ func isTerminalEscapeResidue(runes []rune) bool {
 	// When the [< prefix was filtered in a prior message, the remaining tail
 	// (e.g. "64;24;31M") arrives as a separate message. This pattern is
 	// extremely specific and never appears in legitimate input.
-	if len(runes) >= 5 {
-		// Pattern: 1+ digits, ';', 1+ digits, ';', 1+ digits, 'M' or 'm'
-		last := len(runes) - 1
-		if (runes[last] == 'M' || runes[last] == 'm') && runes[last-1] >= '0' && runes[last-1] <= '9' {
-			// Walk backwards: digits, then ';', then digits, then ';', then digits
-			j := last - 2
-			if j >= 0 && runes[j] == ';' {
-				j--
-				if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-					for j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-						j--
-					}
-					if j >= 0 && runes[j] == ';' {
-						j--
-						if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-							// All the way back to start or first non-digit
-							for j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
-								j--
-							}
-							if j < 0 {
-								// Entire slice matches digits;digits;digitsM/m
-								return true
-							}
-						}
-					}
-				}
+	if len(runes) >= 5 && runes[0] >= '0' && runes[0] <= '9' {
+		s := string(runes)
+		last := s[len(s)-1]
+		if (last == 'M' || last == 'm') && strings.Count(s, ";") == 2 {
+			parts := strings.Split(s, ";")
+			if len(parts) == 3 &&
+				isAllDigits(parts[0]) &&
+				isAllDigits(parts[1]) &&
+				isAllDigits(parts[2][:len(parts[2])-1]) {
+				return true
 			}
 		}
 	}
@@ -172,6 +144,19 @@ func isColorHexValue(s string) bool {
 			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// isAllDigits returns true if s is non-empty and contains only ASCII digits 0-9.
+func isAllDigits(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
 		}
 	}
 	return true
