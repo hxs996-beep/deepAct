@@ -110,10 +110,8 @@ type ProgressMsg struct {
 }
 
 const (
-	logoDelay      = 500 * time.Millisecond
-	spinnerRate    = 100 * time.Millisecond
-	statusBarLines = 1
-	inputLines     = 3
+	logoDelay   = 500 * time.Millisecond
+	spinnerRate = 100 * time.Millisecond
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -418,7 +416,17 @@ func (m Model) View() string {
 		}
 		lines = lines[start:end]
 	}
-	body := lipgloss.NewStyle().Width(contentWidth).Height(bodyHeight).Render(strings.Join(lines, "\n"))
+	// Pad body to exactly bodyHeight lines manually. On Windows conhost,
+	// lipgloss.Height() can miscount ANSI-wrapped lines, producing off-by-one
+	// padding that causes the status bar to overflow and leave residual lines.
+	for len(lines) < bodyHeight {
+		lines = append(lines, "")
+	}
+	if len(lines) > bodyHeight {
+		lines = lines[:bodyHeight]
+	}
+	body := lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
+
 	var full string
 	switch {
 	case suggestionPopup != "" && optionsPopup != "":
@@ -429,16 +437,6 @@ func (m Model) View() string {
 		full = lipgloss.JoinVertical(lipgloss.Left, body, optionsPopup, inputLine, statusLine)
 	default:
 		full = lipgloss.JoinVertical(lipgloss.Left, body, inputLine, statusLine)
-	}
-	// Safety guard: clamp total output to terminal height to prevent
-	// Windows terminal overflow where a wrong bodyHeight leaves
-	// residual status-bar lines filling the screen.
-	if m.height > 0 {
-		outLines := strings.Split(full, "\n")
-		if len(outLines) > m.height {
-			outLines = outLines[:m.height]
-			full = strings.Join(outLines, "\n")
-		}
 	}
 	return full
 }
@@ -636,14 +634,6 @@ func (m *Model) updateSuggestions() {
 		m.suggestions = nil
 		m.selectedSuggestion = 0
 	}
-}
-
-func (m Model) bodyHeight() int {
-	h := m.height - statusBarLines - inputBoxHeight(m)
-	if h < 1 {
-		h = 1
-	}
-	return h
 }
 
 func (m Model) handleApiKeyInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1473,9 +1463,6 @@ func renderStatusBar(status StatusInfo, scrollOffset int, width int) string {
 		float64(status.TokensOut)/1000.0,
 		shortcutHint,
 	)
-	if scrollOffset > 0 {
-		line += fmt.Sprintf(" | ⇧%d", scrollOffset)
-	}
 	if width > 0 {
 		line = lipgloss.NewStyle().Width(width).Render(line)
 	}

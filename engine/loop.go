@@ -45,7 +45,7 @@ type Engine struct {
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopGuard(4), // block after 4 repeats of same (tool, path)
+		loop:  NewLoopGuard(12), // block after 12 repeats of same (tool, path)
 	}
 	e := &Engine{
 		model:      deps.Model,

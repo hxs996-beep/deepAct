@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"runtime"
+
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -42,7 +44,13 @@ func initStyles() {
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
-		StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
+		// Windows conhost.exe has issues with background color ANSI reset causing
+		// status-bar background to leak into subsequent lines on rapid scroll renders.
+		if runtime.GOOS == "windows" {
+			StatusBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+		} else {
+			StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
+		}
 		InputPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
 		InputBoxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("243")).Padding(0, 1)
 		ErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
