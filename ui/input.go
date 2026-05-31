@@ -93,21 +93,17 @@ func isTerminalEscapeResidue(runes []rune) bool {
 		}
 	}
 
-	// ---- SGR mouse event tail: digits;digits;digitsM/m ----
-	// When the [< prefix was filtered in a prior message, the remaining tail
-	// (e.g. "64;24;31M") arrives as a separate message. This pattern is
-	// extremely specific and never appears in legitimate input.
-	if len(runes) >= 5 && runes[0] >= '0' && runes[0] <= '9' {
+	// ---- SGR mouse event fragments ----
+	// SGR format: buttons;col;rowM (e.g. "65;25;31M" or "<65;25;31M").
+	// When split at PTY buffer boundaries, fragments arrive in various forms:
+	//   "65;25;31M" (full tail)        "5;42M" (one semicolon, partial)
+	//   ";35;42M" (starts with ;)      ";35;42M35" (concatenated garbage)
+	// Any sequence containing semicolon-delimited digits ending in M/m is
+	// deterministically SGR residue — never legitimate keyboard input.
+	if len(runes) >= 4 {
 		s := string(runes)
-		last := s[len(s)-1]
-		if (last == 'M' || last == 'm') && strings.Count(s, ";") == 2 {
-			parts := strings.Split(s, ";")
-			if len(parts) == 3 &&
-				isAllDigits(parts[0]) &&
-				isAllDigits(parts[1]) &&
-				isAllDigits(parts[2][:len(parts[2])-1]) {
-				return true
-			}
+		if looksLikeSGRFragment(s) {
+			return true
 		}
 	}
 
@@ -144,6 +140,42 @@ func isColorHexValue(s string) bool {
 			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// looksLikeSGRFragment checks if s looks like a fragment of an SGR mouse event
+// that leaked past Bubble Tea's terminal layer. SGR mouse format is:
+// buttons;col;rowM  (e.g. "65;25;31M") prefixed by ESC[<.
+//
+// We catch any split variant: full tails ("65;25;31M"), single-semicolon
+// fragments ("5;42M"), semicolon-prefixed fragments (";35;42M"), and
+// concatenated garbage (";35;42M35" from multiple events in one buffer read).
+func looksLikeSGRFragment(s string) bool {
+	nSemi := strings.Count(s, ";")
+	if nSemi == 0 || nSemi > 4 {
+		return false
+	}
+	last := s[len(s)-1]
+	if last != 'M' && last != 'm' {
+		return false
+	}
+	// The last segment before M/m must be digits only
+	parts := strings.Split(s, ";")
+	lastPart := parts[len(parts)-1]
+	lastPart = lastPart[:len(lastPart)-1] // strip trailing M/m
+	if !isAllDigits(lastPart) {
+		return false
+	}
+	// All other segments must be digits (or start with < which is the SGR prefix)
+	for i := 0; i < len(parts)-1; i++ {
+		seg := parts[i]
+		if len(seg) > 0 && seg[0] == '<' {
+			seg = seg[1:]
+		}
+		if len(seg) > 0 && !isAllDigits(seg) {
+			return false
 		}
 	}
 	return true
