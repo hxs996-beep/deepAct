@@ -51,6 +51,37 @@ func isTerminalEscapeResidue(runes []rune) bool {
 		return true
 	}
 
+	// ---- CSI '<' split: <digits;digits;digitsM ----
+	// On Windows 10, SGR mouse sequences split at buffer boundaries, sending
+	// '<65;25;31M' without the preceding '['. The '<' alone is not caught by
+	// CSI private prefix (needs '[' prefix) or SGR mouse tail (needs digit start).
+	if len(runes) >= 5 && runes[0] == '<' {
+		// Pattern: < + 1+ digits + ';' + 1+ digits + ';' + 1+ digits + 'M'/'m'
+		last := len(runes) - 1
+		if (runes[last] == 'M' || runes[last] == 'm') && runes[last-1] >= '0' && runes[last-1] <= '9' {
+			j := last - 2
+			if j >= 0 && runes[j] == ';' {
+				j--
+				if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
+					for j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
+						j--
+					}
+					if j >= 0 && runes[j] == ';' {
+						j--
+						if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
+							for j >= 1 && runes[j] >= '0' && runes[j] <= '9' {
+								j--
+							}
+							if j >= 0 && runes[j] == '<' && j == 0 {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// ---- CPR (Cursor Position Report): [<row>;<col>R ----
 	// Terminal response to \x1b[6n (DSR). The ESC byte is consumed by the
 	// terminal layer, leaving [<row>;<col>R as visible residue.

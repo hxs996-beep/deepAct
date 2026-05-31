@@ -79,8 +79,9 @@ type Model struct {
 	height       int
 	engine       EngineRunner
 	streaming    string
-	apiKeyInput  string
-	ready        bool
+	apiKeyInput           string
+	pendingOpenBracket    bool // Windows: lone '[' held to check if it's escape split
+	ready                 bool
 	progressChan chan ProgressMsg
 	scrollOffset int
 	cancelled    bool
@@ -409,6 +410,28 @@ func (m Model) View() string {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// ---- Terminal escape split bracket tracker ----
+	// On Windows 10, SGR mouse sequences [<65;25;31M can arrive split at buffer
+	// boundaries: '[' alone, then '<65;25;31M'. A lone '[' cannot be distinguished
+	// from user input, so we hold it: if the next message completes an escape
+	// sequence, discard both; otherwise reinject '[' and process as normal input.
+	if m.pendingOpenBracket {
+		m.pendingOpenBracket = false
+		if msg.Type == tea.KeyRunes {
+			allRunes := append([]rune{'['}, msg.Runes...)
+			if isTerminalEscapeResidue(allRunes) {
+				return m, nil // discard both ['['] + ['<65;25;31M']
+			}
+		}
+		// Not escape residue — reinject the held '[' and process current msg normally
+		m.inputBuf.insertRunes([]rune{'['})
+		m.inputBuf.HandleKey(msg)
+		return m, nil
+	}
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
+		m.pendingOpenBracket = true
+		return m, nil
+	}
 	// ---- Global hotkeys ----
 
 	// Ctrl+Q: quit
