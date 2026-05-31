@@ -378,17 +378,24 @@ func (m Model) View() string {
 	}
 
 	suggestionPopup := renderSuggestions(m, contentWidth)
-	suggestionHeight := renderedHeight(suggestionPopup)
-
 	optionsPopup := renderOptionsPopup(m, contentWidth)
-	optionsHeight := renderedHeight(optionsPopup)
 
 	// Render footer first to measure actual heights
 	statusLine := renderStatusBar(m.status, m.scrollOffset, contentWidth)
 	inputLine := renderInputLine(m)
 	actualStatusHeight := renderedHeight(statusLine)
 	actualInputHeight := renderedHeight(inputLine)
-	bodyHeight := m.height - actualStatusHeight - actualInputHeight - suggestionHeight - optionsHeight
+
+	// Only count popup lines for popups that are actually shown
+	bodyHeight := m.height - actualStatusHeight - actualInputHeight
+	if suggestionPopup != "" {
+		suggestionHeight := renderedHeight(suggestionPopup)
+		bodyHeight -= suggestionHeight
+	}
+	if optionsPopup != "" {
+		optionsHeight := renderedHeight(optionsPopup)
+		bodyHeight -= optionsHeight
+	}
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}
@@ -422,6 +429,16 @@ func (m Model) View() string {
 		full = lipgloss.JoinVertical(lipgloss.Left, body, optionsPopup, inputLine, statusLine)
 	default:
 		full = lipgloss.JoinVertical(lipgloss.Left, body, inputLine, statusLine)
+	}
+	// Safety guard: clamp total output to terminal height to prevent
+	// Windows terminal overflow where a wrong bodyHeight leaves
+	// residual status-bar lines filling the screen.
+	if m.height > 0 {
+		outLines := strings.Split(full, "\n")
+		if len(outLines) > m.height {
+			outLines = outLines[:m.height]
+			full = strings.Join(outLines, "\n")
+		}
 	}
 	return full
 }
