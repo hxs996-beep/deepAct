@@ -183,6 +183,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cw := m.width
 			bodyLines := len(m.renderBody(cw))
 			bh := m.height - renderedHeight(renderStatusBar(m.status, m.scrollOffset, cw)) - renderedHeight(renderInputLine(m))
+			if s := renderSuggestions(m, cw); s != "" {
+				bh -= renderedHeight(s)
+			}
+			if o := renderOptionsPopup(m, cw); o != "" {
+				bh -= renderedHeight(o)
+			}
 			if bh < 1 {
 				bh = 1
 			}
@@ -426,6 +432,20 @@ func (m Model) View() string {
 		lines = lines[:bodyHeight]
 	}
 	body := lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
+
+	// On Windows conhost, lipgloss may produce extra visual lines due to
+	// ANSI wrapping miscount. Trim body content from the newest end until
+	// the rendered body fits within bodyHeight, so total output never
+	// exceeds terminal height. Trimming from the end preserves scroll
+	// position.
+	for len(lines) > 0 {
+		bodyVisual := strings.Split(body, "\n")
+		if len(bodyVisual) <= bodyHeight {
+			break
+		}
+		lines = lines[:len(lines)-1]
+		body = lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
+	}
 
 	var full string
 	switch {

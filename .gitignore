@@ -30,3 +30,6 @@ coverage.out
 
 # Dependencies
 vendor/
+
+# AI assistant artifacts
+.claude/

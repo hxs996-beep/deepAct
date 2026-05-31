@@ -70,9 +70,14 @@ func (c *CompressionOrchestrator) compressAging(state *TaskState, history []Mess
 		freshStart = 0
 	}
 
+	// Protect the last assistant message without tool_calls from compression.
+	// This is the assistant's most recent "thinking" response — it provides
+	// critical context for the next turn. Compressing it loses key decisions/analysis.
+	lastAssistantIdx := findLastAssistantWithoutToolCalls(history)
+
 	compressed := make([]Message, 0, len(history))
 	for i, msg := range history {
-		if i >= freshStart {
+		if i >= freshStart || i == lastAssistantIdx {
 			compressed = append(compressed, msg)
 			continue
 		}
@@ -81,12 +86,24 @@ func (c *CompressionOrchestrator) compressAging(state *TaskState, history []Mess
 	return compressed
 }
 
+// findLastAssistantWithoutToolCalls returns the index of the last assistant message
+// that has no tool_calls (i.e., a pure text response). Returns -1 if none found.
+func findLastAssistantWithoutToolCalls(history []Message) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
 func compressMessageByType(msg Message) Message {
 	switch msg.Role {
 	case "tool":
 		return compressToolMessage(msg)
 	case "assistant":
-		return compressAssistantMessage(msg)
+		return msg // 不截断，交给 Archive 层做 Flash 模型摘要
 	case "user":
 		return msg
 	default:
@@ -122,14 +139,30 @@ func compressToolMessage(msg Message) Message {
 
 func compressAssistantMessage(msg Message) Message {
 	content := msg.Content
-	if len(content) <= 300 {
+	if len(content) <= 500 {
 		return msg
 	}
-	lines := strings.SplitN(content, "\n", 4)
-	if len(lines) <= 3 {
+	// Preserve up to 500 characters, snapping to the nearest newline boundary
+	// so we don't cut mid-sentence or mid-code-block.
+	keepLen := 500
+	if keepLen > len(content) {
+		keepLen = len(content)
+	}
+	// Walk forward from keepLen to find the next newline (natural boundary)
+	snap := strings.Index(content[keepLen:], "\n")
+	if snap >= 0 && snap < 200 {
+		keepLen += snap + 1 // include the newline
+	} else {
+		// Walk backward to find the previous newline
+		lastNL := strings.LastIndex(content[:keepLen], "\n")
+		if lastNL > 300 {
+			keepLen = lastNL + 1
+		}
+	}
+	if keepLen >= len(content) {
 		return msg
 	}
-	msg.Content = strings.Join(lines[:3], "\n") + "\n..."
+	msg.Content = content[:keepLen] + "... (compressed)"
 	// NOTE: ReasoningContent is NOT cleared here.
 	// DeepSeek requires reasoning_content to be echoed verbatim on the next API call
 	// when the assistant produced tool_calls with thinking mode.
@@ -150,9 +183,12 @@ func (c *CompressionOrchestrator) compressCodeCollapse(state *TaskState, history
 		freshStart = 0
 	}
 
+	// Protect the last assistant message without tool_calls from compression.
+	lastAssistantIdx := findLastAssistantWithoutToolCalls(history)
+
 	compressed := make([]Message, 0, len(history))
 	for i, msg := range history {
-		if i >= freshStart {
+		if i >= freshStart || i == lastAssistantIdx {
 			compressed = append(compressed, msg)
 			continue
 		}
@@ -167,7 +203,7 @@ func compressMessageWithCodeCollapse(msg Message) Message {
 	case "tool":
 		return compressToolWithCodeCollapse(msg)
 	case "assistant":
-		return compressAssistantMessage(msg)
+		return msg // 不截断，交给 Archive 层做 Flash 模型摘要
 	case "user":
 		return msg
 	default:
@@ -353,6 +389,11 @@ func inferToolName(msg Message) string {
 // index that doesn't break a turn boundary. A turn ends at an assistant message
 // WITHOUT tool_calls, or a user message. Splitting between an assistant-with-tool_calls
 // and its tool messages would leave orphan tool messages in the fresh window.
+//
+// IMPORTANT: When the boundary is an assistant message without tool_calls, we walk
+// further back to include its paired user message in the fresh window. This preserves
+// the full "user → assistant" turn context rather than splitting the pair.
+//
 // Returns the index to split at (old=[:idx], fresh=[idx:]), or -1 if not found.
 func findSafeSplitPoint(history []Message, minFresh int) int {
 	if len(history) <= minFresh {
@@ -371,8 +412,13 @@ func findSafeSplitPoint(history []Message, minFresh int) int {
 			return i + 1 // split AFTER this message
 		}
 		if msg.Role == "assistant" && len(msg.ToolCalls) == 0 {
-			// Assistant without tool calls — a clean response boundary
-			return i + 1
+			// Assistant without tool calls — a clean response boundary.
+			// Walk further back to include its paired user message, so the
+			// complete "user → assistant" turn stays in the fresh window.
+			if i > 0 && history[i-1].Role == "user" {
+				return i - 1 // split BEFORE the paired user, keep the pair intact
+			}
+			return i // split before this assistant, keep it in fresh window
 		}
 		// Assistant with tool_calls is NOT a safe boundary (tool messages follow)
 	}
@@ -393,6 +439,22 @@ func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Me
 	freshStart := findSafeSplitPoint(history, FreshTurns*3)
 	if freshStart < 0 {
 		return c.compressAging(state, history), nil
+	}
+
+	// Protect the last pure-text assistant from being archived.
+	// Aging and CodeCollapse both skip compression for this message via
+	// findLastAssistantWithoutToolCalls; Archive must do the same by
+	// extending the fresh window to include its entire turn (user+assistant).
+	if lastIdx := findLastAssistantWithoutToolCalls(history); lastIdx >= 0 && lastIdx < freshStart {
+		// Walk backward from the assistant to find its paired user message.
+		pairedUser := lastIdx
+		for i := lastIdx; i >= 0; i-- {
+			if history[i].Role == "user" {
+				pairedUser = i
+				break
+			}
+		}
+		freshStart = pairedUser
 	}
 
 	oldHistory := history[:freshStart]
@@ -579,6 +641,311 @@ func buildCompressionPrompt(state *TaskState, history []Message) string {
 		builder.WriteString(msg.Role + ": " + content + "\n")
 	}
 	return builder.String()
+}
+
+func (c *CompressionOrchestrator) EstimateTokens(messages []ModelMessage) int {
+	if c.estimator != nil {
+		return c.estimator.EstimateTokens(messages)
+	}
+	return 0
+}
+
+// === ModelMessage variants — shared with SubAgentRunner ===
+
+// CompressModelMessages applies the same layered compression to ModelMessage history.
+// goal is used for archive prompt when no TaskState is available (e.g. sub-agents).
+func (c *CompressionOrchestrator) CompressModelMessages(layer CompressionLayer, goal string, history []ModelMessage) ([]ModelMessage, error) {
+	switch layer {
+	case LayerToolGovernance:
+		return history, nil
+	case LayerStaleEviction:
+		return c.compressModelAging(goal, history), nil
+	case LayerCodeCollapse:
+		return c.compressModelCodeCollapse(goal, history), nil
+	case LayerFullCompact:
+		return c.compressModelArchive(goal, history)
+	default:
+		return history, nil
+	}
+}
+
+func (c *CompressionOrchestrator) compressModelAging(_ string, history []ModelMessage) []ModelMessage {
+	if len(history) <= FreshTurns*3 {
+		return history
+	}
+
+	freshStart := len(history) - FreshTurns*3
+	if freshStart < 0 {
+		freshStart = 0
+	}
+
+	lastAssistantIdx := findLastAssistantWithoutToolCallsModel(history)
+
+	compressed := make([]ModelMessage, 0, len(history))
+	for i, msg := range history {
+		if i >= freshStart || i == lastAssistantIdx {
+			compressed = append(compressed, msg)
+			continue
+		}
+		compressed = append(compressed, compressModelMessageByType(msg))
+	}
+	return compressed
+}
+
+func (c *CompressionOrchestrator) compressModelCodeCollapse(_ string, history []ModelMessage) []ModelMessage {
+	if len(history) <= FreshTurns*3 {
+		return history
+	}
+
+	freshStart := len(history) - FreshTurns*3
+	if freshStart < 0 {
+		freshStart = 0
+	}
+
+	lastAssistantIdx := findLastAssistantWithoutToolCallsModel(history)
+
+	compressed := make([]ModelMessage, 0, len(history))
+	for i, msg := range history {
+		if i >= freshStart || i == lastAssistantIdx {
+			compressed = append(compressed, msg)
+			continue
+		}
+		compressed = append(compressed, compressModelMessageWithCodeCollapse(msg))
+	}
+	return compressed
+}
+
+func (c *CompressionOrchestrator) compressModelArchive(goal string, history []ModelMessage) ([]ModelMessage, error) {
+	if c.model == nil || len(history) <= FreshTurns*3 {
+		return c.compressModelAging(goal, history), nil
+	}
+
+	freshStart := findSafeSplitPointModel(history, FreshTurns*3)
+	if freshStart < 0 {
+		return c.compressModelAging(goal, history), nil
+	}
+
+	if lastIdx := findLastAssistantWithoutToolCallsModel(history); lastIdx >= 0 && lastIdx < freshStart {
+		pairedUser := lastIdx
+		for i := lastIdx; i >= 0; i-- {
+			if history[i].Role == "user" {
+				pairedUser = i
+				break
+			}
+		}
+		freshStart = pairedUser
+	}
+
+	oldHistory := history[:freshStart]
+	freshHistory := history[freshStart:]
+
+	summary, err := c.generateModelArchiveSummary(goal, oldHistory)
+	if err != nil {
+		return c.compressModelAging(goal, history), nil
+	}
+
+	result := make([]ModelMessage, 0, len(freshHistory)+1)
+	result = append(result, ModelMessage{
+		Role:    "system",
+		Content: "[SESSION ARCHIVE]\n" + summary,
+	})
+	result = append(result, freshHistory...)
+	return result, nil
+}
+
+func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, history []ModelMessage) (string, error) {
+	prompt := buildModelArchivePrompt(goal, history)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	req := ModelRequest{
+		Model: FlashModel,
+		Messages: []ModelMessage{
+			{Role: "system", Content: archiveSystemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0,
+		JsonMode:    true,
+	}
+
+	resp, err := c.model.Complete(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("archive summary: %w", err)
+	}
+	return resp.Message.Content, nil
+}
+
+func buildModelArchivePrompt(goal string, history []ModelMessage) string {
+	var b strings.Builder
+	b.WriteString("Compress this coding session segment:\n\n")
+
+	if goal != "" {
+		b.WriteString("Task goal: " + goal + "\n\n")
+	}
+
+	prevArchive := extractPreviousArchiveModel(history)
+	if prevArchive != "" {
+		b.WriteString("Previous archive summary (extend this, do NOT repeat):\n")
+		b.WriteString(prevArchive + "\n\n")
+	}
+
+	b.WriteString("New conversation to compress:\n")
+	for _, msg := range history {
+		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
+			continue
+		}
+		content := msg.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, content))
+	}
+
+	return b.String()
+}
+
+func extractPreviousArchiveModel(history []ModelMessage) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if strings.HasPrefix(history[i].Content, "[SESSION ARCHIVE]") {
+			content := history[i].Content
+			content = strings.TrimPrefix(content, "[SESSION ARCHIVE]")
+			content = strings.TrimSpace(content)
+			return content
+		}
+	}
+	return ""
+}
+
+func findLastAssistantWithoutToolCallsModel(history []ModelMessage) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+func findSafeSplitPointModel(history []ModelMessage, minFresh int) int {
+	if len(history) <= minFresh {
+		return 0
+	}
+	start := len(history) - minFresh
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role == "user" || msg.Role == "system" {
+			return i + 1
+		}
+		if msg.Role == "assistant" && len(msg.ToolCalls) == 0 {
+			if i > 0 && history[i-1].Role == "user" {
+				return i - 1
+			}
+			return i
+		}
+	}
+	return 0
+}
+
+func compressModelMessageByType(msg ModelMessage) ModelMessage {
+	switch msg.Role {
+	case "tool":
+		return compressModelToolMessage(msg)
+	case "assistant":
+		return msg // 不截断，交给 Archive 层做 Flash 模型摘要
+	case "user":
+		return msg
+	default:
+		return msg
+	}
+}
+
+func compressModelToolMessage(msg ModelMessage) ModelMessage {
+	content := msg.Content
+	if len(content) <= 200 {
+		return msg
+	}
+
+	toolName := inferModelToolName(msg)
+	switch toolName {
+	case "read":
+		msg.Content = compressFileRead(content)
+	case "grep":
+		msg.Content = compressGrepResult(content)
+	case "bash":
+		msg.Content = compressBashOutput(content)
+	case "glob":
+		msg.Content = compressGlobResult(content)
+	case "edit", "write":
+		msg.Content = compressEditResult(content)
+	default:
+		if len(content) > 500 {
+			msg.Content = content[:500] + "\n... (compressed)"
+		}
+	}
+	return msg
+}
+
+func compressModelMessageWithCodeCollapse(msg ModelMessage) ModelMessage {
+	switch msg.Role {
+	case "tool":
+		return compressModelToolWithCodeCollapse(msg)
+	case "assistant":
+		return msg
+	case "user":
+		return msg
+	default:
+		return msg
+	}
+}
+
+func compressModelToolWithCodeCollapse(msg ModelMessage) ModelMessage {
+	content := msg.Content
+	if len(content) <= 200 {
+		return msg
+	}
+
+	toolName := inferModelToolName(msg)
+	switch toolName {
+	case "read":
+		msg.Content = compressCodeCollapseRead(content)
+	case "grep":
+		msg.Content = compressGrepResult(content)
+	case "bash":
+		msg.Content = compressBashOutput(content)
+	case "glob":
+		msg.Content = compressGlobResult(content)
+	case "edit", "write":
+		msg.Content = compressEditResult(content)
+	default:
+		if len(content) > 500 {
+			msg.Content = content[:500] + "\n... (compressed)"
+		}
+	}
+	return msg
+}
+
+func inferModelToolName(msg ModelMessage) string {
+	content := strings.ToLower(msg.Content)
+	if strings.HasPrefix(content, "file:") || strings.Contains(content, "lines)") {
+		return "read"
+	}
+	if strings.Contains(content, "match") && strings.Contains(content, ":") {
+		return "grep"
+	}
+	if strings.HasPrefix(content, "found") && strings.Contains(content, "file") {
+		return "glob"
+	}
+	if strings.Contains(content, "exit code") || strings.Contains(content, "$ ") {
+		return "bash"
+	}
+	if strings.Contains(content, "edited") || strings.Contains(content, "wrote") {
+		return "edit"
+	}
+	return ""
 }
 
 // ParseArchiveSummary extracts structured data from flash model's JSON output

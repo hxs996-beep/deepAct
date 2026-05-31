@@ -112,13 +112,17 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
+
+	contextAssembler := context.NewContextAssembler(workDir, estimator)
+	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
+	runner.SetCompressor(compressor)
+
 	agentReg := engine.NewDefaultRegistry(runner)
 	runner.SetRegistry(agentReg)
 
 	checker := policy.NewChecker(0.45)
 	checker.SetModelClient(client)
 	checker.SetModelName(config.ModelName)
-	contextAssembler := context.NewContextAssembler(workDir, estimator)
 
 	store, err := session.NewStore(defaultSessionDir())
 	if err != nil {
@@ -130,7 +134,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Tools:      toolExecutor,
 		Policy:     checker,
 		Context:    contextAssembler,
-		Compressor: engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName),
+		Compressor: compressor,
 		Session:    store,
 		Router:     router.NewRouter(0.55),
 		Agents:     agentReg,
