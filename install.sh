@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="deepact/deepact"
+REPO="hxs996-beep/deepAct"
 BIN="deepact"
 INSTALL_DIR="${DEEPACT_INSTALL:-/usr/local/bin}"
 

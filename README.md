@@ -101,12 +101,18 @@ curl -sSfL https://raw.githubusercontent.com/deepact/deepact/main/install.sh | s
 ```
 Installs to `/usr/local/bin`. Set `DEEPACT_INSTALL=~/.local/bin` to override.
 
+**Windows (PowerShell):**
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.ps1 | iex"
+```
+Installs to `%LOCALAPPDATA%\deepact` and adds it to your user PATH.
+
 **Go (if you have Go 1.24+):**
 ```bash
 go install github.com/deepact/deepact@latest
 ```
 
-**Manual:** Download the latest binary from [GitHub Releases](https://github.com/deepact/deepact/releases), extract, and place `deepact` in your `$PATH`.
+**Manual:** Download the latest binary from [GitHub Releases](https://github.com/deepact/deepact/releases), extract, and place `deepact` (Linux/macOS) or `deepact.exe` (Windows) in your `$PATH`.
 
 ### Set your API key
 

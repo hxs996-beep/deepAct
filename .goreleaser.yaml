@@ -53,15 +53,15 @@ changelog:
 
 release:
   github:
-    owner: deepact
-    name: deepact
+    owner: hxs996-beep
+    name: deepAct
   draft: false
   prerelease: auto
 
 brews:
   - name: deepact
     repository:
-      owner: deepact
+      owner: hxs996-beep
       name: homebrew-tap
     directory: Formula
     homepage: https://github.com/deepact/deepact
