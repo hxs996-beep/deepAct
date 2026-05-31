@@ -354,6 +354,11 @@ func (m Model) View() string {
 		contentWidth = 80
 	}
 
+	// API key prompt: full-screen centered, no bottom bars, no cursor blink
+	if m.state == stateApiKeyPrompt {
+		return strings.Join(m.renderBody(contentWidth), "\n")
+	}
+
 	suggestionPopup := renderSuggestions(m, contentWidth)
 	suggestionHeight := renderedHeight(suggestionPopup)
 
@@ -736,8 +741,15 @@ func (m Model) renderBody(width int) []string {
 		lines = append(lines, "")
 	}
 	if m.state == stateApiKeyPrompt {
-		lines = append(lines, "Enter your DEEPSEEK_API_KEY:")
-		lines = append(lines, InputPromptStyle.Render("> ")+strings.Repeat("*", len(m.apiKeyInput)))
+		lines = append(lines, "┌──────────────────────────────────────────────┐")
+		lines = append(lines, "│  Welcome to DeepAct!                        │")
+		lines = append(lines, "│  🔑 DeepSeek API Key 需要配置才能使用。      │")
+		lines = append(lines, "│  获取地址: https://platform.deepseek.com     │")
+		lines = append(lines, "│                                              │")
+		lines = append(lines, "│  输入你的 API Key 后按 Enter 确认           │")
+		lines = append(lines, "└──────────────────────────────────────────────┘")
+		lines = append(lines, "")
+		lines = append(lines, "  "+InputPromptStyle.Render("API Key > ")+strings.Repeat("*", len(m.apiKeyInput))+"█")
 		return lines
 	}
 	if len(m.toolTree) > 0 {
