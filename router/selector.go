@@ -41,11 +41,5 @@ func (r *DefaultRouter) computeRiskScore(ctx engine.RouteContext) float64 {
 		score += 0.30
 	}
 
-	if ctx.EditScopeFiles > 3 {
-		score += 0.20
-	} else if ctx.EditScopeFiles > 0 {
-		score += 0.10
-	}
-
 	return score
 }

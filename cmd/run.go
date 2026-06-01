@@ -16,6 +16,7 @@ import (
 	"github.com/deepact/deepact/policy"
 	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
+	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
 	"github.com/deepact/deepact/tools/builtin"
 	"github.com/deepact/deepact/ui"
@@ -129,6 +130,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 
+	// Initialize skill registry with built-in methodology skills
+	skillReg := skill.NewRegistry(0.45)
+	skill.RegisterBuiltinSkills(skillReg)
+
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
@@ -138,6 +143,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Router:     router.NewRouter(0.55),
 		Agents:     agentReg,
+		Skills:     skillReg,
 	}
 	return config, deps, nil
 }

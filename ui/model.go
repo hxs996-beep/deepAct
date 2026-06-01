@@ -1473,9 +1473,10 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 }
 
 func renderStatusBar(status StatusInfo, scrollOffset int, width int) string {
-	shortcutHint := "Alt+drag copy | Alt+Enter newline"
-	if runtime.GOOS == "darwin" {
-		shortcutHint = "⌥+drag copy | ⌥+Enter newline"
+	shortcutHint := "drag copy | Alt+Enter newline"
+	switch runtime.GOOS {
+	case "darwin":
+		shortcutHint = "drag copy | ⌥+Enter newline"
 	}
 
 	line := fmt.Sprintf(" ↑%.1fK ↓%.1fK | %s",

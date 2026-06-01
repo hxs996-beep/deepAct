@@ -386,30 +386,26 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	return ActionNone
 }
 
-// HandleMouse handles mouse events for text selection with modifier keys.
-// On Mac: Option (Alt) + left drag selects and copies.
-// On Win: Shift + left drag selects and copies.
+// HandleMouse handles mouse events for text selection.
+// Any left-click drag or right-click drag selects text and copies on release.
+// Simple click (press + release without motion) clears selection without copying.
+//
+// A Release-position fallback handles terminals where MouseActionMotion events
+// are not generated during drag (e.g., Windows ConPTY). In that case the final
+// selection range is inferred from the Release event's cursor position.
 //
 // Returns ActionCopySelected + the selected text, or ActionNone + "".
 func (ib *InputBuffer) HandleMouse(msg tea.MouseMsg, innerWidth int) (InputAction, string) {
-	if msg.Button != tea.MouseButtonLeft {
+	if msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight {
 		return ActionNone, ""
 	}
 
-	// Modifier must be held to activate selection mode
-	isMod := msg.Alt || msg.Shift
-
 	switch msg.Action {
 	case tea.MouseActionPress:
-		if isMod {
-			pos := mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
-			ib.selStart = pos
-			ib.selEnd = pos
-			ib.dragging = true
-		} else {
-			ib.clearSelection()
-			ib.dragging = false
-		}
+		pos := mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
+		ib.selStart = pos
+		ib.selEnd = pos
+		ib.dragging = true
 		return ActionNone, ""
 
 	case tea.MouseActionMotion:
@@ -422,6 +418,11 @@ func (ib *InputBuffer) HandleMouse(msg tea.MouseMsg, innerWidth int) (InputActio
 	case tea.MouseActionRelease:
 		if ib.dragging && ib.selStart >= 0 {
 			ib.dragging = false
+			// On Windows ConPTY, MouseActionMotion may not fire during drag.
+			// Use the Release position as a fallback to determine selection end.
+			if ib.selEnd == ib.selStart {
+				ib.selEnd = mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
+			}
 			start, end := selectionRange(ib.selStart, ib.selEnd)
 			if start < end {
 				text := string(ib.text[start:end])
