@@ -29,8 +29,6 @@
 
 - One primary type per file (e.g., `scorer.go` contains `Scorer`)
 - Test files: `*_test.go` in the same package
-- Integration tests: `*_integration_test.go` with build tags
-- Mocks: in `internal/mocks/` or via `go:generate`
 
 ### Naming
 
@@ -47,9 +45,9 @@
 ### Layer Dependency Rules
 
 ```
-cmd/ → app/ → engine/, router/, policy/, context/, memory/
+cmd/ → engine/, router/, policy/, context/
                  ↓
-              tools/, llm/, retrieval/
+              tools/, llm/
                  ↓
               session/, artifact/
                  ↓
@@ -69,7 +67,6 @@ Every cross-layer call MUST go through a defined interface:
 - Engine ↔ Tools: via `Tool` interface
 - Engine ↔ LLM: via `ModelClient` interface
 - Engine ↔ Policy: via `PolicyChecker` interface
-- App ↔ Engine: via `Engine` interface
 - UI ↔ Engine: via event channel (no direct method calls)
 
 ### State Management
@@ -153,14 +150,7 @@ Every destructive action (file edit, shell command) must pass through:
 - Every exported function must have tests
 - Table-driven tests preferred
 - Mock external dependencies (LLM, file system, LSP)
-- Coverage target: >80% for core packages (engine/, router/, policy/)
-
-### Integration Tests
-
-- Test full agent loop with recorded API responses
-- Test session persistence (save/load/fork/rewind)
-- Test cross-platform paths (use `filepath` everywhere)
-- Test tool execution with sandboxed environment
+- Coverage target: >50% for core packages (engine/, router/, policy/)
 
 ### Test Patterns
 
@@ -210,6 +200,11 @@ refactor(tools): extract ToolResultEnvelope to shared type
 test(policy): add design guard anti-pattern detection tests
 ```
 
+### Push Rules (MANDATORY)
+
+- **git push 必须先询问用户** — 获得用户确认后才能执行 push
+- **代码编译成功即止** — 不需要额外验证（lint、test 等），除非用户明确要求
+
 ### Branch Naming
 
 ```
@@ -248,10 +243,8 @@ refactor/<module>-<what>
 
 ### Context Budget
 
-- Default limit: 128K tokens (not full 1M)
-- Monitor token usage per turn
-- Compact when approaching 80% of budget
-- Pro escalation can expand to 256K when justified
+- Default limit: 1M tokens (configurable via `max_budget_tokens` in config.toml)
+- Layered compression: 45% StaleEviction → 65% CodeCollapse → 85% FullCompact (Flash archive)
 
 ### Streaming
 
@@ -273,10 +266,9 @@ refactor/<module>-<what>
 
 1. Create file in `tools/builtin/<name>.go`
 2. Implement `Tool` interface (Spec + Run)
-3. Register in `tools/registry.go`
+3. Register via `registry.Register()` in `cmd/run.go`
 4. Add tests in `tools/builtin/<name>_test.go`
 5. Update tool schema in system prompt template
-6. Document in DESIGN.md Appendix
 
 ### Adding a New Guard
 
@@ -292,7 +284,6 @@ refactor/<module>-<what>
 2. Expose via `ModelClient` interface
 3. Update router if routing logic changes
 4. Test with recorded API responses
-5. Document API quirks in DESIGN.md Appendix B
 
 ---
 
@@ -309,4 +300,3 @@ Before merging any PR:
 - [ ] Cross-platform: uses `filepath` not `path`, no hardcoded separators
 - [ ] Documentation updated if interface changed
 - [ ] `golangci-lint` passes
-- [ ] Design aligns with DESIGN.md architecture

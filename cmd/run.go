@@ -16,6 +16,7 @@ import (
 	"github.com/deepact/deepact/policy"
 	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
+	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
 	"github.com/deepact/deepact/tools/builtin"
 	"github.com/deepact/deepact/ui"
@@ -112,28 +113,37 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
+
+	contextAssembler := context.NewContextAssembler(workDir, estimator)
+	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
+	runner.SetCompressor(compressor)
+
 	agentReg := engine.NewDefaultRegistry(runner)
 	runner.SetRegistry(agentReg)
 
 	checker := policy.NewChecker(0.45)
 	checker.SetModelClient(client)
 	checker.SetModelName(config.ModelName)
-	contextAssembler := context.NewContextAssembler(workDir, estimator)
 
 	store, err := session.NewStore(defaultSessionDir())
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 
+	// Initialize skill registry with built-in methodology skills
+	skillReg := skill.NewRegistry(0.45)
+	skill.RegisterBuiltinSkills(skillReg)
+
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
 		Policy:     checker,
 		Context:    contextAssembler,
-		Compressor: engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName),
+		Compressor: compressor,
 		Session:    store,
 		Router:     router.NewRouter(0.55),
 		Agents:     agentReg,
+		Skills:     skillReg,
 	}
 	return config, deps, nil
 }

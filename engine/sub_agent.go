@@ -25,6 +25,7 @@ type SubAgentRunner struct {
 	flashModelName   string // Flash model for cheaper agents
 	maxContextTokens int    // context window limit; 0 = use defaultSubAgentContext
 	onProgress       ProgressFunc
+	compressor       *CompressionOrchestrator
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -66,6 +67,12 @@ func (r *SubAgentRunner) SetSessionID(id string) {
 // SetMaxContextTokens overrides the default context window limit for this runner.
 func (r *SubAgentRunner) SetMaxContextTokens(tokens int) {
 	r.maxContextTokens = tokens
+}
+
+// SetCompressor sets the CompressionOrchestrator for layered compression (same as main agent).
+// When set, replaces the simple compressSubHistory with the full 4-layer strategy.
+func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
+	r.compressor = c
 }
 
 // contextLimit returns the effective context window limit.
@@ -136,8 +143,19 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			}, nil
 		default:
 		}
-		// Compress history if approaching context limit (80% threshold)
-		if estimatedTokens(history) > compressThreshold {
+		// Compress history using layered strategy (same as main agent) when compressor is set.
+		// Falls back to simple truncation if compressor is nil.
+		if r.compressor != nil {
+			tokens := r.compressor.EstimateTokens(history)
+			if tokens > 0 {
+				layer, should := r.compressor.ShouldCompress(tokens, limit)
+				if should {
+					if compressed, err := r.compressor.CompressModelMessages(layer, input.Goal, history); err == nil {
+						history = compressed
+					}
+				}
+			}
+		} else if estimatedTokens(history) > compressThreshold {
 			history = compressSubHistory(history)
 		}
 

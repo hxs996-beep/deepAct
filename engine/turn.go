@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -266,16 +267,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
-	// Record the first destructive path-bearing operation for loop detection.
-	// read/grep/glob are exploratory — repeating them on the same file is normal.
+	// Record the first operation for loop detection.
+	// lastOp includes a content-based hash so different edits on the same file,
+	// or different reads of the same file, are recognized as distinct operations.
 	for _, c := range regularCalls {
-		if c.Name != "edit" && c.Name != "write" {
+		path := extractPathFromArgs(c.Input)
+		if path == "" {
 			continue
 		}
-		if path := extractPathFromArgs(c.Input); path != "" {
-			result.LastOp = c.Name + ":" + path
-			break
-		}
+		result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
+		break
 	}
 	return result, nil
 }
@@ -458,6 +459,36 @@ func extractPathFromArgs(input json.RawMessage) string {
 		return p
 	}
 	return ""
+}
+
+// contentSignature returns a short hash of the tool call's input arguments,
+// used to distinguish operations with different content on the same file.
+// The hash is derived from content-bearing fields (pattern, old_string, content)
+// rather than the full JSON, so trivial changes like path or filename don't
+// collapse the signature.
+func contentSignature(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	// Collect content-bearing fields only
+	var parts []string
+	for _, key := range []string{"pattern", "old_string", "new_string", "content", "command", "symbol"} {
+		if v, ok := m[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				parts = append(parts, key+"="+s)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	combined := strings.Join(parts, "&")
+	h := sha256.Sum256([]byte(combined))
+	return fmt.Sprintf("%x", h[:4])
 }
 
 func containsString(slice []string, s string) bool {

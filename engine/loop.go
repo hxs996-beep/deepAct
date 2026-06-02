@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/deepact/deepact/skill"
 	dlog "github.com/deepact/deepact/internal/log"
 )
 
@@ -23,6 +24,7 @@ type EngineDeps struct {
 	Session    SessionStore
 	Router     ModelRouter
 	Agents     *AgentRegistry
+	Skills     *skill.Registry
 }
 
 type Engine struct {
@@ -34,6 +36,7 @@ type Engine struct {
 	session    SessionStore
 	router     ModelRouter
 	agents     *AgentRegistry
+	skills     *skill.Registry
 	config     EngineConfig
 	state      *TaskState
 	history    []Message
@@ -56,6 +59,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		session:    deps.Session,
 		router:     deps.Router,
 		agents:     deps.Agents,
+		skills:     deps.Skills,
 		config:     cfg,
 		state:      &TaskState{TaskID: cfg.SessionID},
 		history:    make([]Message, 0),
@@ -246,6 +250,34 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		didExecute = true
 	}
 
+	// Match skills against user message and inject matching skill content.
+	// Skills are methodology templates (debugging, brainstorming, verification)
+	// that shape the agent's approach to the current task.
+	if e.skills != nil {
+		matched := e.skills.Match(userMsg)
+		if len(matched) > 0 {
+			var skillTexts []string
+			for _, s := range matched {
+				skillTexts = append(skillTexts, s.Content)
+			}
+			skillMsg := fmt.Sprintf(
+				"[SKILLS — matched: %s]\n\nThe following methodology templates have been activated for this task. Follow them precisely.\n\n%s",
+				joinSkillNames(matched),
+				strings.Join(skillTexts, "\n\n---\n\n"),
+			)
+			e.history = append(e.history, Message{Role: "user", Content: skillMsg, Timestamp: time.Now()})
+			if e.config.OnProgress != nil {
+				for _, s := range matched {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "skill_activated",
+						Name:   s.Name,
+						Detail: s.Description,
+					})
+				}
+			}
+		}
+	}
+
 	// Scope is implicitly confirmed when user sends any message
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
@@ -292,7 +324,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			break
 		}
 
-		// Detect loops: same tool+path repeated 5+ times without progress
+		// Detect loops: same tool+path+content repeated 5+ times.
+		// Content signature is derived from content-bearing fields (old_string,
+		// pattern, content, etc.), so different edits on the same file or different
+		// reads of the same file are treated as distinct operations.
 		if turnResult.LastOp != "" {
 			if turnResult.LastOp == lastOp {
 				consecutiveSameOp++
@@ -401,4 +436,12 @@ func msgIsChinese(msg string) bool {
 		}
 	}
 	return false
+}
+
+func joinSkillNames(skills []*skill.Skill) string {
+	names := make([]string, len(skills))
+	for i, s := range skills {
+		names[i] = s.Name
+	}
+	return strings.Join(names, ", ")
 }

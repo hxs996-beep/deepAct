@@ -30,3 +30,11 @@ coverage.out
 
 # Dependencies
 vendor/
+
+# AI assistant artifacts
+.claude/
+.ldflags_temp  
+build/  
+build_release.ps1  
+package_release.ps1  
+dist/ 
