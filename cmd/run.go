@@ -116,6 +116,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	contextAssembler := context.NewContextAssembler(workDir, estimator)
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
+	if config.FlashModelName != "" {
+		compressor.SetFlashModelName(config.FlashModelName)
+	}
 	runner.SetCompressor(compressor)
 
 	agentReg := engine.NewDefaultRegistry(runner)
@@ -141,10 +144,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Context:    contextAssembler,
 		Compressor: compressor,
 		Session:    store,
-		Router:     router.NewRouter(0.55),
 		Agents:     agentReg,
 		Skills:     skillReg,
+		Router:     router.NewRouter(0.55),
 	}
+	// Apply model names from config to router
+	deps.Router.(*router.DefaultRouter).ModelName = config.ModelName
+	deps.Router.(*router.DefaultRouter).FlashModelName = config.FlashModelName
 	return config, deps, nil
 }
 

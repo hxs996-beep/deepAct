@@ -13,19 +13,28 @@ type TokenEstimator interface {
 }
 
 type CompressionOrchestrator struct {
-	model     ModelClient
-	estimator TokenEstimator
-	modelName string
+	model          ModelClient
+	estimator      TokenEstimator
+	modelName      string
+	flashModelName string
 }
 
 func NewCompressionOrchestrator(model ModelClient, estimator TokenEstimator, modelName string) *CompressionOrchestrator {
-	return &CompressionOrchestrator{model: model, estimator: estimator, modelName: modelName}
+	return &CompressionOrchestrator{
+		model:          model,
+		estimator:      estimator,
+		modelName:      modelName,
+		flashModelName: "deepseek-v4-flash",
+	}
+}
+
+func (c *CompressionOrchestrator) SetFlashModelName(name string) {
+	c.flashModelName = name
 }
 
 const (
-	FreshTurns = 9
+	FreshTurns = 50
 	AgingTurns = 24
-	FlashModel = "deepseek-v4-flash"
 )
 
 func (c *CompressionOrchestrator) ShouldCompress(currentTokens, maxTokens int) (CompressionLayer, bool) {
@@ -34,11 +43,11 @@ func (c *CompressionOrchestrator) ShouldCompress(currentTokens, maxTokens int) (
 	}
 	ratio := float64(currentTokens) / float64(maxTokens)
 	switch {
-	case ratio >= 0.85:
+	case ratio >= 0.95:
 		return LayerFullCompact, true
-	case ratio >= 0.65:
+	case ratio >= 0.85:
 		return LayerCodeCollapse, true
-	case ratio >= 0.45:
+	case ratio >= 0.65:
 		return LayerStaleEviction, true
 	default:
 		return LayerToolGovernance, false
@@ -130,43 +139,9 @@ func compressToolMessage(msg Message) Message {
 	case "edit", "write":
 		msg.Content = compressEditResult(content)
 	default:
-		if len(content) > 500 {
-			msg.Content = content[:500] + "\n... (compressed)"
-		}
+		// 保留完整内容 — 三层压缩（aging → code collapse → archive）
+		// 已经控制 token budget，不需要硬编码截断
 	}
-	return msg
-}
-
-func compressAssistantMessage(msg Message) Message {
-	content := msg.Content
-	if len(content) <= 500 {
-		return msg
-	}
-	// Preserve up to 500 characters, snapping to the nearest newline boundary
-	// so we don't cut mid-sentence or mid-code-block.
-	keepLen := 500
-	if keepLen > len(content) {
-		keepLen = len(content)
-	}
-	// Walk forward from keepLen to find the next newline (natural boundary)
-	snap := strings.Index(content[keepLen:], "\n")
-	if snap >= 0 && snap < 200 {
-		keepLen += snap + 1 // include the newline
-	} else {
-		// Walk backward to find the previous newline
-		lastNL := strings.LastIndex(content[:keepLen], "\n")
-		if lastNL > 300 {
-			keepLen = lastNL + 1
-		}
-	}
-	if keepLen >= len(content) {
-		return msg
-	}
-	msg.Content = content[:keepLen] + "... (compressed)"
-	// NOTE: ReasoningContent is NOT cleared here.
-	// DeepSeek requires reasoning_content to be echoed verbatim on the next API call
-	// when the assistant produced tool_calls with thinking mode.
-	// Clearing it causes 400 errors: "reasoning_content must be passed back to the API".
 	return msg
 }
 
@@ -230,9 +205,8 @@ func compressToolWithCodeCollapse(msg Message) Message {
 	case "edit", "write":
 		msg.Content = compressEditResult(content)
 	default:
-		if len(content) > 500 {
-			msg.Content = content[:500] + "\n... (compressed)"
-		}
+		// 保留完整内容 — 三层压缩（aging → code collapse → archive）
+		// 已经控制 token budget，不需要硬编码截断
 	}
 	return msg
 }
@@ -328,8 +302,8 @@ func compressGrepResult(content string) string {
 	for f := range files {
 		fileList = append(fileList, f)
 	}
-	if len(fileList) > 5 {
-		fileList = fileList[:5]
+	if len(fileList) > 50 {
+		fileList = fileList[:50]
 		fileList = append(fileList, "...")
 	}
 	return fmt.Sprintf("found %d matches in [%s]", matchCount, strings.Join(fileList, ", "))
@@ -340,8 +314,8 @@ func compressBashOutput(content string) string {
 	first := ""
 	if len(lines) > 0 {
 		first = lines[0]
-		if len(first) > 100 {
-			first = first[:100] + "..."
+		if len(first) > 1000 {
+			first = first[:1000] + "..."
 		}
 	}
 	return fmt.Sprintf("%s (%d lines)", first, len(lines))
@@ -359,10 +333,7 @@ func compressGlobResult(content string) string {
 }
 
 func compressEditResult(content string) string {
-	if len(content) <= 300 {
-		return content
-	}
-	return content[:300] + "\n... (edit details compressed)"
+	return content
 }
 
 func inferToolName(msg Message) string {
@@ -513,7 +484,7 @@ func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, histo
 	defer cancel()
 
 	req := ModelRequest{
-		Model: FlashModel,
+		Model: c.flashModelName,
 		Messages: []ModelMessage{
 			{Role: "system", Content: archiveSystemPrompt},
 			{Role: "user", Content: prompt},
@@ -545,7 +516,7 @@ Rules:
 - key_findings = information that would be expensive to re-discover
 - Omit empty arrays
 - Be terse: each string should be 1 short sentence max
-- Total output must be under 2000 tokens`
+- Total output must be under 10000 tokens`
 
 func buildArchivePrompt(state *TaskState, history []Message) string {
 	var b strings.Builder
@@ -569,11 +540,7 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
 		}
-		content := msg.Content
-		if len(content) > 500 {
-			content = content[:500] + "..."
-		}
-		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, content))
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
 
 	// Include existing TaskState decisions as context
@@ -608,13 +575,6 @@ func extractPreviousArchive(history []Message) string {
 	return ""
 }
 
-func filterToolOutput(content string) string {
-	if len(content) > 2000 {
-		return content[:2000] + "..."
-	}
-	return content
-}
-
 func shouldCollapse(content string, modified map[string]struct{}) bool {
 	for path := range modified {
 		if strings.Contains(content, path) {
@@ -634,11 +594,7 @@ func buildCompressionPrompt(state *TaskState, history []Message) string {
 	}
 	builder.WriteString("\nRecent messages:\n")
 	for _, msg := range history {
-		content := msg.Content
-		if len(content) > 300 {
-			content = content[:300] + "..."
-		}
-		builder.WriteString(msg.Role + ": " + content + "\n")
+		builder.WriteString(msg.Role + ": " + msg.Content + "\n")
 	}
 	return builder.String()
 }
@@ -760,7 +716,7 @@ func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, histo
 	defer cancel()
 
 	req := ModelRequest{
-		Model: FlashModel,
+		Model: c.flashModelName,
 		Messages: []ModelMessage{
 			{Role: "system", Content: archiveSystemPrompt},
 			{Role: "user", Content: prompt},
@@ -795,11 +751,7 @@ func buildModelArchivePrompt(goal string, history []ModelMessage) string {
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
 		}
-		content := msg.Content
-		if len(content) > 500 {
-			content = content[:500] + "..."
-		}
-		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, content))
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
 
 	return b.String()
@@ -882,9 +834,8 @@ func compressModelToolMessage(msg ModelMessage) ModelMessage {
 	case "edit", "write":
 		msg.Content = compressEditResult(content)
 	default:
-		if len(content) > 500 {
-			msg.Content = content[:500] + "\n... (compressed)"
-		}
+		// 保留完整内容 — 三层压缩（aging → code collapse → archive）
+		// 已经控制 token budget，不需要硬编码截断
 	}
 	return msg
 }
@@ -921,9 +872,8 @@ func compressModelToolWithCodeCollapse(msg ModelMessage) ModelMessage {
 	case "edit", "write":
 		msg.Content = compressEditResult(content)
 	default:
-		if len(content) > 500 {
-			msg.Content = content[:500] + "\n... (compressed)"
-		}
+		// 保留完整内容 — 三层压缩（aging → code collapse → archive）
+		// 已经控制 token budget，不需要硬编码截断
 	}
 	return msg
 }

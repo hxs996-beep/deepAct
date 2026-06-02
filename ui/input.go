@@ -181,6 +181,18 @@ func looksLikeSGRFragment(s string) bool {
 	return true
 }
 
+// isAllBackslash returns true if all runes in the slice are backslash (\) characters.
+// Used to detect leaked escape sequence terminators (ST = ESC \) from DCS/OSC
+// sequences that split across PTY buffer boundaries.
+func isAllBackslash(runes []rune) bool {
+	for _, r := range runes {
+		if r != '\\' {
+			return false
+		}
+	}
+	return len(runes) > 0
+}
+
 // isAllDigits returns true if s is non-empty and contains only ASCII digits 0-9.
 func isAllDigits(s string) bool {
 	if len(s) == 0 {

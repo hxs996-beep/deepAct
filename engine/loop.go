@@ -43,12 +43,18 @@ type Engine struct {
 	guards     *GuardSystem
 	hall       *ConferenceHall
 	evalStore  EvalStore
+
+	// pendingPinnedMessages holds messages (e.g., skill activations) that should
+	// be appended at the END of the assembled messages array for the current
+	// Run() call, rather than mixed into e.history. This preserves the stable
+	// prefix cache across turns — history only grows with actual conversation.
+	pendingPinnedMessages []string
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopGuard(12), // block after 12 repeats of same (tool, path)
+		loop:  NewLoopGuard(6), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
 		model:      deps.Model,
@@ -253,6 +259,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Match skills against user message and inject matching skill content.
 	// Skills are methodology templates (debugging, brainstorming, verification)
 	// that shape the agent's approach to the current task.
+	// IMPORTANT: Skills are appended as pinned messages at the END of the messages
+	// array (not mixed into e.history) to preserve the stable prefix cache.
 	if e.skills != nil {
 		matched := e.skills.Match(userMsg)
 		if len(matched) > 0 {
@@ -265,7 +273,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				joinSkillNames(matched),
 				strings.Join(skillTexts, "\n\n---\n\n"),
 			)
-			e.history = append(e.history, Message{Role: "user", Content: skillMsg, Timestamp: time.Now()})
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
 			if e.config.OnProgress != nil {
 				for _, s := range matched {
 					e.config.OnProgress(ProgressEvent{

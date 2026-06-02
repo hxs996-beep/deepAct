@@ -80,7 +80,8 @@ type Model struct {
 	engine       EngineRunner
 	streaming    string
 	apiKeyInput           string
-	pendingOpenBracket    bool // Windows: lone '[' held to check if it's escape split
+	pendingOpenBracket    bool   // Windows: lone '[' held to check if it's escape split
+	afterResidue          bool   // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
 	ready                 bool
 	progressChan chan ProgressMsg
 	scrollOffset int
@@ -149,19 +150,43 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Clear transient input flags on non-key events. This prevents stale
+	// pendingEsc from persisting across TickMsg or WindowSizeMsg events,
+	// which would cause the next Enter to insert a newline instead of submit.
+	switch msg.(type) {
+	case tea.KeyMsg:
+		// flags are managed in handleKey
+	default:
+		m.pendingEsc = false
+		m.afterResidue = false
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
 		// Input box selection + scroll
 		if m.state == stateReady && m.inputBuf != nil {
-			innerW := m.width - 4
+			innerW := m.width - 6
 			if innerW < 20 {
 				innerW = 20
 			}
-			action, selText := m.inputBuf.HandleMouse(msg, innerW)
-			if action == ActionCopySelected && selText != "" {
-				return m, copyToClipboardCmd(selText)
+			// Convert screen-absolute mouse coordinates to input-box-relative.
+			// mouseToTextPos expects (0,0) = top-left of the content area inside
+			// the input box, but Bubble Tea gives us absolute terminal coords.
+			// Input box layout: top border (1), content (N), bottom border (1).
+			inputBoxH := inputBoxHeight(m)
+			inputBoxY := m.height - inputBoxH - 1 // status bar is always 1 line
+			adjY := msg.Y - inputBoxY - 1         // -1 for top border => content line
+			contentH := inputBoxH - 2              // content area height (no borders)
+			if adjY >= 0 && adjY < contentH && inputBoxY >= 0 {
+				adjX := msg.X - 2 // subtract left border + left padding
+				msg.Y = adjY
+				msg.X = adjX
+				action, selText := m.inputBuf.HandleMouse(msg, innerW)
+				if action == ActionCopySelected && selText != "" {
+					return m, copyToClipboardCmd(selText)
+				}
 			}
 		}
 		switch msg.Button {
@@ -510,6 +535,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinners = nil
 			m.toolTree = nil
 			m.streaming = ""
+			m.pendingEsc = false
+			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
 		} else if m.state == stateReady {
 			if m.showSuggestions {
@@ -523,6 +550,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pendingEsc = true
 		}
 		return m, nil
+	}
+
+	// ---- Escape residue context tracking (before state gating) ----
+	// On Mac, terminal DCS/OSC sequences end with ST (ESC \). Bubble Tea
+	// consumes the ESC but the \ leaks through as visible characters.
+	// Track residue batches and discard trailing backslash terminators.
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+		if m.afterResidue {
+			if isAllBackslash(msg.Runes) {
+				// These backslashes are the ST (String Terminator) bytes
+				// from a DCS/OSC sequence whose ESC was consumed by BT.
+				m.afterResidue = false
+				return m, nil
+			}
+			m.afterResidue = false
+		}
+		if isTerminalEscapeResidue(msg.Runes) {
+			m.afterResidue = true
+			return m, nil
+		}
 	}
 
 	// ---- API key prompt ----
@@ -736,6 +783,8 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.state = stateRunning
+	m.pendingEsc = false
+	m.afterResidue = false
 	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
 	return m, tea.Batch(
 		m.engine.Run(content),

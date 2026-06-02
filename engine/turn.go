@@ -45,6 +45,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	messages := e.context.Build(e.state, e.history, nil)
 
+	// Append pinned messages (skill activations, etc.) at the very end
+	// for highest recency attention. Clear after first use so subsequent
+	// turns within the same Run() call don't repeat them.
+	for _, pm := range e.pendingPinnedMessages {
+		messages = append(messages, ModelMessage{Role: "user", Content: pm})
+	}
+	e.pendingPinnedMessages = nil
+
 	modelName := e.config.ModelName
 	if e.router != nil {
 		rctx := RouteContext{
@@ -433,11 +441,7 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 
 func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	if e.state != nil && e.state.Goal == "" {
-		goal := userMsg
-		if len(goal) > 200 {
-			goal = goal[:200]
-		}
-		e.state.Goal = goal
+		e.state.Goal = userMsg
 	}
 }
 

@@ -126,7 +126,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		agentName = "sub"
 	}
 	limit := r.contextLimit()
-	compressThreshold := limit * 80 / 100
+	compressThreshold := limit * 95 / 100
 	var totalUsage ModelUsage
 	consecutiveIntermediate := 0
 	lastOpKey := ""
@@ -380,12 +380,8 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 	sb.WriteString("(analysis timed out — listing discoveries)\n")
 	for _, msg := range history {
 		if msg.Role == "tool" && msg.Content != "" {
-			digest := msg.Content
-			if len(digest) > 200 {
-				digest = digest[:200] + "..."
-			}
 			sb.WriteString("- ")
-			sb.WriteString(digest)
+			sb.WriteString(msg.Content)
 			sb.WriteString("\n")
 		}
 	}
@@ -570,8 +566,8 @@ func compressSubHistory(history []ModelMessage) []ModelMessage {
 		}
 	}
 
-	// Keep fresh: last 3 turns
-	keepTurns := 3
+	// Keep fresh: last 20 turns
+	keepTurns := 20
 	if keepTurns > len(turns) {
 		keepTurns = len(turns)
 	}
@@ -594,11 +590,8 @@ func compressSubHistory(history []ModelMessage) []ModelMessage {
 	for idx := 0; idx < len(rest); idx++ {
 		if freshRange[idx] {
 			result = append(result, rest[idx])
-		} else if rest[idx].Role == "tool" && len(rest[idx].Content) > 300 {
-			// Truncate old tool results
-			msg := rest[idx]
-			msg.Content = rest[idx].Content[:300] + "\n... (compressed)"
-			result = append(result, msg)
+		} else if rest[idx].Role == "tool" {
+			result = append(result, rest[idx])
 		} else {
 			result = append(result, rest[idx])
 		}
