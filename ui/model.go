@@ -94,6 +94,9 @@ type Model struct {
 	suggestions        []Suggestion
 	selectedSuggestion int
 
+	// External skill names (loaded from .deepact/skills/) for / suggestions
+	skillSuggestions []Suggestion
+
 	// Active options (plan selection / review actions)
 	activeOptions  []string
 	selectedOption int
@@ -367,6 +370,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cost := estimateCost(msg.TokensIn, msg.TokensOut, msg.CacheHit, msg.ModelName, &m.pricing)
 			m.status.Cost = cost
 			m.status.SessionCost += cost
+		case "skill_activated":
+			m.messages = append(m.messages, DisplayMessage{
+				Role:    "system",
+				Content: fmt.Sprintf("🧠 Skill activated: **%s** — %s", msg.Name, msg.Detail),
+			})
 		}
 		return m, waitForProgress(m.progressChan)
 	case StatusUpdateMsg:
@@ -662,6 +670,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// SetSkillSuggestions provides external skill entries (name + description) for
+// display as /-prefixed suggestions in the input box.
+func (m *Model) SetSkillSuggestions(skills []Suggestion) {
+	m.skillSuggestions = skills
+}
+
 // updateSuggestions checks the current input and shows/hides slash command suggestions.
 func (m *Model) updateSuggestions() {
 	val := m.inputBuf.Value()
@@ -687,6 +701,17 @@ func (m *Model) updateSuggestions() {
 	for _, cmd := range slashCommands {
 		if strings.HasPrefix(strings.ToLower(cmd.Command), prefix) {
 			matches = append(matches, cmd)
+		}
+	}
+	// Also match external skill names as /-shortcuts
+	for _, skill := range m.skillSuggestions {
+		// Match against "/<skillname>" (e.g. /brainstorming)
+		short := "/" + skill.Command
+		if strings.HasPrefix(short, prefix) {
+			matches = append(matches, Suggestion{
+				Command:     "/skill " + skill.Command,
+				Description: skill.Description,
+			})
 		}
 	}
 
