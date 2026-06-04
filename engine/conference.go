@@ -188,7 +188,7 @@ type repoMapProvider interface {
 //  2. Text matching layer (preSearch) — keyword grep results
 //  3. Structure layer (buildRepoMapContext) — project directory tree
 //
-// Total cap: ~7000 bytes. Use in both main-agent handoffs and conference planning.
+// Total cap: ~1000000 bytes.
 func buildCodebaseContext(workDir, goal, repoMapSymbols string) string {
 	if workDir == "" {
 		return ""
@@ -198,8 +198,8 @@ func buildCodebaseContext(workDir, goal, repoMapSymbols string) string {
 
 	// Layer 1: Symbol layer — Go AST symbol map (optional, from RepoMap)
 	if repoMapSymbols != "" {
-		if len(repoMapSymbols) > 3000 {
-			repoMapSymbols = repoMapSymbols[:3000] + "\n... (symbol context truncated)"
+		if len(repoMapSymbols) > 1000000 {
+			repoMapSymbols = repoMapSymbols[:1000000] + "\n... (symbol context truncated)"
 		}
 		sb.WriteString("\n### RepoMap (Go AST Symbols)\n")
 		sb.WriteString(repoMapSymbols)
@@ -209,8 +209,8 @@ func buildCodebaseContext(workDir, goal, repoMapSymbols string) string {
 	// Layer 2: Text matching layer — keyword grep results from goal
 	ps := preSearch(workDir, goal)
 	if ps != "" {
-		if len(ps) > 3000 {
-			ps = ps[:3000] + "\n... (search results truncated)"
+		if len(ps) > 1000000 {
+			ps = ps[:1000000] + "\n... (search results truncated)"
 		}
 		sb.WriteString(ps)
 		sb.WriteString("\n")
@@ -219,16 +219,16 @@ func buildCodebaseContext(workDir, goal, repoMapSymbols string) string {
 	// Layer 3: Structure layer — project directory tree
 	structure := buildRepoMapContext(workDir)
 	if structure != "" {
-		if len(structure) > 1000 {
-			structure = structure[:1000] + "\n... (structure truncated)"
+		if len(structure) > 1000000 {
+			structure = structure[:1000000] + "\n... (structure truncated)"
 		}
 		sb.WriteString(structure)
 		sb.WriteString("\n")
 	}
 
 	result := sb.String()
-	if len(result) > 7000 {
-		result = result[:7000] + "\n... (codebase context truncated)"
+	if len(result) > 1000000 {
+		result = result[:1000000] + "\n... (codebase context truncated)"
 	}
 	return result
 }
@@ -330,15 +330,15 @@ func preSearch(workDir, goal string) string {
 		rgPath = "grep"
 	}
 	totalBytes := 0
-	maxBytes := 4000
+	maxBytes := 1000000
 	seen := make(map[string]bool)
 	for _, kw := range keywords {
 		if totalBytes >= maxBytes {
 			break
 		}
-		args := []string{"--no-heading", "-n", "-C", "2", "-m", "3", "--", kw, workDir}
+		args := []string{"--no-heading", "-n", "-C", "5", "-m", "8", "--", kw, workDir}
 		if rgPath == "grep" {
-			args = []string{"-rn", "-C", "2", "-m", "3", "--", kw, workDir}
+			args = []string{"-rn", "-C", "5", "-m", "8", "--", kw, workDir}
 		}
 		cmd := execCommand(rgPath, args...)
 		if cmd == nil {
@@ -378,8 +378,8 @@ func preSearch(workDir, goal string) string {
 	}
 
 	result := sb.String()
-	if len(result) > 5000 {
-		result = result[:5000] + "\n... (truncated)"
+	if len(result) > 1000000 {
+		result = result[:1000000] + "\n... (truncated)"
 	}
 	if result == "" || result == "\n## Pre-search Results\n" {
 		return ""
@@ -423,7 +423,7 @@ func extractKeywords(goal string) []string {
 		if !seen[lower] {
 			seen[lower] = true
 			result = append(result, w)
-			if len(result) >= 5 {
+			if len(result) >= 15 {
 				break
 			}
 		}
@@ -777,9 +777,6 @@ func (h *ConferenceHall) runChallengerReview(ctx context.Context, zh bool) (*Eng
 
 	// Collect what was built: assistant summary + modified file list + key diffs
 	implSummary := h.engine.getLastAssistantContent()
-	if len(implSummary) > 1000 {
-		implSummary = implSummary[:1000]
-	}
 	modifiedFiles := strings.Join(state.ModifiedFiles, ", ")
 	keyDiffs := h.collectKeyDiffs(3) // up to 3 key diffs from history
 
@@ -826,8 +823,8 @@ func (h *ConferenceHall) runChallengerReview(ctx context.Context, zh bool) (*Eng
 
 ### 结论
 <总结哪些符合方案、哪些有偏差、以及任何问题>`,
-			truncateStr(board.Goal, 400),
-			truncateStr(board.Plan, 800),
+			board.Goal,
+			board.Plan,
 			implSummary,
 			modifiedFiles,
 			keyDiffs)
@@ -873,8 +870,8 @@ func (h *ConferenceHall) runChallengerReview(ctx context.Context, zh bool) (*Eng
 
 ### Verdict
 <summary of what matches the plan, what diverges, and any concerns>`,
-			truncateStr(board.Goal, 400),
-			truncateStr(board.Plan, 800),
+			board.Goal,
+			board.Plan,
 			implSummary,
 			modifiedFiles,
 			keyDiffs)
@@ -923,12 +920,7 @@ func (h *ConferenceHall) collectKeyDiffs(n int) string {
 		}
 		// Check if this is an edit/write result containing a diff
 		if strings.Contains(msg.Content, "--- a/") || strings.Contains(msg.Content, "+++ b/") {
-			// Trim to a reasonable size
-			diff := msg.Content
-			if len(diff) > 800 {
-				diff = diff[:800] + "\n... (truncated)"
-			}
-			diffs = append(diffs, diff)
+			diffs = append(diffs, msg.Content)
 			count++
 		}
 	}
@@ -1069,9 +1061,6 @@ func (h *ConferenceHall) runFullReview(ctx context.Context, reviewCtx ReviewCont
 	}
 
 	implSummary := h.engine.getLastAssistantContent()
-	if len(implSummary) > 1000 {
-		implSummary = implSummary[:1000]
-	}
 	modifiedFiles := strings.Join(state.ModifiedFiles, ", ")
 	keyDiffs := h.collectKeyDiffs(3)
 
@@ -1118,8 +1107,8 @@ func (h *ConferenceHall) runFullReview(ctx context.Context, reviewCtx ReviewCont
 
 ### 结论
 <总结哪些符合方案、哪些有偏差、以及任何问题>`,
-			truncateStr(board.Goal, 400),
-			truncateStr(board.Plan, 800),
+			board.Goal,
+			board.Plan,
 			implSummary,
 			modifiedFiles,
 			keyDiffs)
@@ -1165,8 +1154,8 @@ func (h *ConferenceHall) runFullReview(ctx context.Context, reviewCtx ReviewCont
 
 ### Verdict
 <summary of what matches the plan, what diverges, and any concerns>`,
-			truncateStr(board.Goal, 400),
-			truncateStr(board.Plan, 800),
+			board.Goal,
+			board.Plan,
 			implSummary,
 			modifiedFiles,
 			keyDiffs)

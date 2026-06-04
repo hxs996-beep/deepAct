@@ -45,6 +45,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	messages := e.context.Build(e.state, e.history, nil)
 
+	// Append pinned messages (skill activations, etc.) at the very end
+	// for highest recency attention. Clear after first use so subsequent
+	// turns within the same Run() call don't repeat them.
+	for _, pm := range e.pendingPinnedMessages {
+		messages = append(messages, ModelMessage{Role: "user", Content: pm})
+	}
+	e.pendingPinnedMessages = nil
+
 	modelName := e.config.ModelName
 	if e.router != nil {
 		rctx := RouteContext{
@@ -182,6 +190,51 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
+	}
+
+	// Edit plan guard: before executing any edit/write calls for the first time
+	// in this Run(), block and present the agent's understanding + proposed changes
+	// to the user for approval.
+	if e.pendingEditPlan == nil && !e.planConfirmed {
+		var editCalls []ToolCallRequest
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				editCalls = append(editCalls, call)
+			}
+		}
+		if len(editCalls) > 0 {
+			plan := &PendingEditPlan{
+				Reasoning: assistant.Content,
+				Calls:     calls, // store ALL calls (read, edit, write, bash, handoff, etc.)
+				State:     cloneTaskState(e.state),
+			}
+			for _, c := range editCalls {
+				action := buildEditAction(c)
+				plan.Edits = append(plan.Edits, action)
+			}
+			e.pendingEditPlan = plan
+
+			// Build a rich plan summary for the user
+			zh := msgIsChinese(e.history[0].Content) // check first user message language
+			planSummary := formatEditPlanSummary(plan, zh)
+
+			// Add assistant (with tool_calls) first, then tool messages to close IDs.
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: " + planSummary,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{
+				Blocked:    true,
+				BlockedBy:  GuardAskUser,
+				Questions:  []string{planSummary},
+				FinishReason: finish,
+			}, nil
+		}
 	}
 
 	for _, call := range calls {
@@ -346,6 +399,15 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		Depth:       0, // main engine starts at depth 0
 	}
 
+	// Inject matched skill content into sub-agent context
+	if e.matchedSkillsContent != "" {
+		if handoff.Context != "" {
+			handoff.Context = e.matchedSkillsContent + "\n\n" + handoff.Context
+		} else {
+			handoff.Context = e.matchedSkillsContent
+		}
+	}
+
 	result, err := agent.Run(ctx, handoff)
 	if err != nil {
 		return ToolResult{
@@ -433,11 +495,7 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 
 func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	if e.state != nil && e.state.Goal == "" {
-		goal := userMsg
-		if len(goal) > 200 {
-			goal = goal[:200]
-		}
-		e.state.Goal = goal
+		e.state.Goal = userMsg
 	}
 }
 
@@ -508,4 +566,106 @@ func addToWorkingSet(state *TaskState, path string, notes string) {
 		}
 	}
 	state.WorkingSet.Files = append(state.WorkingSet.Files, FileRef{Path: path, Notes: notes})
+}
+
+// buildEditAction extracts a human-readable description of a proposed edit from a tool call.
+func buildEditAction(call ToolCallRequest) PendingEditAction {
+	var m map[string]interface{}
+	if err := json.Unmarshal(call.Input, &m); err != nil {
+		return PendingEditAction{Tool: call.Name, Path: "?", Summary: "? (parse error)"}
+	}
+
+	path, _ := m["path"].(string)
+	if path == "" {
+		if p, ok := m["file_path"].(string); ok {
+			path = p
+		}
+	}
+
+	action := PendingEditAction{Tool: call.Name, Path: path}
+
+	if call.Name == "edit" {
+		oldStr, _ := m["old_string"].(string)
+		newStr, _ := m["new_string"].(string)
+		action.OldText = oldStr
+		action.NewText = newStr
+		if oldStr != "" && newStr != "" {
+			oldLen := len(oldStr)
+			action.Summary = fmt.Sprintf("替换 %d 个字符", oldLen)
+			if newStr != oldStr {
+				action.Summary = fmt.Sprintf("替换 %d 个字符 → %d 个字符", oldLen, len(newStr))
+			}
+		} else if pattern, ok := m["pattern"].(string); ok {
+			replacement, _ := m["replacement"].(string)
+			action.Summary = fmt.Sprintf("替换匹配 %q → %q", truncateStr(pattern, 50), truncateStr(replacement, 50))
+		} else {
+			action.Summary = "编辑文件"
+		}
+	} else {
+		// write tool
+		if content, ok := m["content"].(string); ok {
+			action.NewText = content
+			action.Summary = fmt.Sprintf("写入 %d 个字符", len(content))
+		} else {
+			action.Summary = "写入文件"
+		}
+	}
+	return action
+}
+
+// formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
+func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("## AI 理解了以下内容，并提出了修改方案\n\n")
+	} else {
+		sb.WriteString("## AI has analyzed the task and proposes the following changes\n\n")
+	}
+
+	// Agent's reasoning
+	reasoning := plan.Reasoning
+	if reasoning != "" {
+		if len(reasoning) > 500 {
+			reasoning = reasoning[:500] + "..."
+		}
+		if zh {
+			sb.WriteString("### AI 的理解\n")
+		} else {
+			sb.WriteString("### AI's Understanding\n")
+		}
+		sb.WriteString(reasoning)
+		sb.WriteString("\n\n")
+	}
+
+	// Proposed changes
+	if zh {
+		sb.WriteString("### 计划修改\n\n")
+	} else {
+		sb.WriteString("### Proposed Changes\n\n")
+	}
+	for i, edit := range plan.Edits {
+		sb.WriteString(fmt.Sprintf("%d. **%s** `%s`", i+1, edit.Tool, edit.Path))
+		if edit.Summary != "" {
+			sb.WriteString(fmt.Sprintf(" — %s", edit.Summary))
+		}
+		sb.WriteString("\n")
+	}
+
+	if zh {
+		sb.WriteString("\n是否同意这个方案？输入 **确认** 来执行，或输入其他内容让 AI 调整。\n")
+	} else {
+		sb.WriteString("\nDo you approve this plan? Type **yes** to proceed, or describe what needs to change.\n")
+	}
+	return sb.String()
+}
+
+// cloneTaskState creates a shallow-but-safe copy of TaskState for snapshotting.
+func cloneTaskState(s *TaskState) *TaskState {
+	if s == nil {
+		return nil
+	}
+	data, _ := json.Marshal(s)
+	var clone TaskState
+	json.Unmarshal(data, &clone)
+	return &clone
 }

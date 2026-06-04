@@ -64,6 +64,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	}
 
 	model := ui.NewModel(runner, pricing)
+	model.SetSkillSuggestions(externalSkillSuggestions)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
@@ -79,7 +80,38 @@ func buildRunner(apiKey string) (ui.EngineRunner, engine.PricingConfig, error) {
 	if err != nil {
 		return nil, engine.PricingConfig{}, err
 	}
+	// Cache external skill suggestions for the UI slash-completion popup.
+	// skillReg.All() returns ALL registered skills (built-in + external);
+	// we only expose non-builtin ones as /-prefixed suggestions.
+	buildSkillSuggestions(deps.Skills)
 	return &ui.ProgressEngineRunner{Config: config, Deps: deps}, config.Pricing, nil
+}
+
+// externalSkillSuggestions caches the list of external skill entries so the TUI
+// model can show them in the /-completion popup without importing the skill package.
+var externalSkillSuggestions []ui.Suggestion
+
+// buildSkillSuggestions extracts external skills from the registry and stores
+// them as Suggestion objects for the UI slash-completion popup.
+func buildSkillSuggestions(reg *skill.Registry) {
+	all := reg.All()
+	externalSkillSuggestions = make([]ui.Suggestion, 0, len(all))
+	seen := make(map[string]bool)
+	// Iterate in reverse so external skills (registered later) win over
+	// built-in skills (registered first) when names conflict.
+	for i := len(all) - 1; i >= 0; i-- {
+		s := all[i]
+		// Skip built-in skills that users shouldn't need to manually activate,
+		// since they auto-match from keywords in the default system prompt.
+		if seen[s.Name] || s.Name == "debugging" || s.Name == "verification" {
+			continue
+		}
+		seen[s.Name] = true
+		externalSkillSuggestions = append(externalSkillSuggestions, ui.Suggestion{
+			Command:     s.Name,
+			Description: s.Description,
+		})
+	}
 }
 
 func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
@@ -116,6 +148,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	contextAssembler := context.NewContextAssembler(workDir, estimator)
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
+	if config.FlashModelName != "" {
+		compressor.SetFlashModelName(config.FlashModelName)
+	}
 	runner.SetCompressor(compressor)
 
 	agentReg := engine.NewDefaultRegistry(runner)
@@ -134,6 +169,29 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillReg := skill.NewRegistry(0.45)
 	skill.RegisterBuiltinSkills(skillReg)
 
+	// Load external skills from .deepact/skills/ directories.
+	// Project-level skills loaded first, then user-level (user wins on conflict).
+	projectSkillsDir := filepath.Join(workDir, ".deepact", "skills")
+	if home, err := os.UserHomeDir(); err == nil {
+		userSkillsDir := filepath.Join(home, ".deepact", "skills")
+		externalSkills, err := skill.LoadExternalSkillsFromPaths(projectSkillsDir, userSkillsDir)
+		if err != nil {
+			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
+		}
+		for _, s := range externalSkills {
+			skillReg.Register(s)
+		}
+	} else {
+		// fallback: project-level only
+		externalSkills, err := skill.LoadExternalSkills(projectSkillsDir)
+		if err != nil {
+			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
+		}
+		for _, s := range externalSkills {
+			skillReg.Register(s)
+		}
+	}
+
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
@@ -141,10 +199,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Context:    contextAssembler,
 		Compressor: compressor,
 		Session:    store,
-		Router:     router.NewRouter(0.55),
 		Agents:     agentReg,
 		Skills:     skillReg,
+		Router:     router.NewRouter(0.55),
 	}
+	// Apply model names from config to router
+	deps.Router.(*router.DefaultRouter).ModelName = config.ModelName
+	deps.Router.(*router.DefaultRouter).FlashModelName = config.FlashModelName
 	return config, deps, nil
 }
 

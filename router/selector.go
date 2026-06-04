@@ -2,43 +2,52 @@ package router
 
 import "github.com/deepact/deepact/engine"
 
+// Risk scoring weights — configurable constants for router behavior.
 const (
-	ModelFlash = "deepseek-v4-flash"
-	ModelPro   = "deepseek-v4-pro"
+	toolFailureWeight      = 0.15  // per failure
+	toolFailureCap         = 0.30  // max contribution from tool failures
+	consecutiveFailScore   = 0.30  // add if consecutive fails >= threshold
+	consecutiveFailTrigger = 2     // trigger count for consecutive fail penalty
 )
 
 type DefaultRouter struct {
-	RiskThreshold float64
+	RiskThreshold  float64
+	ModelName      string // Pro model (for complex tasks)
+	FlashModelName string // Flash model (for simple/read-only tasks)
 }
 
 func NewRouter(threshold float64) *DefaultRouter {
-	return &DefaultRouter{RiskThreshold: threshold}
+	return &DefaultRouter{
+		RiskThreshold:  threshold,
+		ModelName:      "deepseek-v4-pro",
+		FlashModelName: "deepseek-v4-flash",
+	}
 }
 
 func (r *DefaultRouter) SelectModel(ctx engine.RouteContext) engine.RouteDecision {
 	if ctx.IsReadOnly {
-		return engine.RouteDecision{Model: ModelFlash, Reasoning: "read-only turn"}
+		return engine.RouteDecision{Model: r.FlashModelName, Reasoning: "read-only turn"}
 	}
 
 	score := r.computeRiskScore(ctx)
 	if score >= r.RiskThreshold {
-		return engine.RouteDecision{Model: ModelPro, Reasoning: "high complexity"}
+		return engine.RouteDecision{Model: r.ModelName, Reasoning: "high complexity"}
 	}
-	return engine.RouteDecision{Model: ModelFlash, Reasoning: "low complexity"}
+	return engine.RouteDecision{Model: r.FlashModelName, Reasoning: "low complexity"}
 }
 
 func (r *DefaultRouter) computeRiskScore(ctx engine.RouteContext) float64 {
 	score := 0.0
 
 	if ctx.ToolFailureCount > 0 {
-		score += float64(ctx.ToolFailureCount) * 0.15
-		if score > 0.30 {
-			score = 0.30
+		score += float64(ctx.ToolFailureCount) * toolFailureWeight
+		if score > toolFailureCap {
+			score = toolFailureCap
 		}
 	}
 
-	if ctx.ConsecutiveFails >= 2 {
-		score += 0.30
+	if ctx.ConsecutiveFails >= consecutiveFailTrigger {
+		score += consecutiveFailScore
 	}
 
 	return score

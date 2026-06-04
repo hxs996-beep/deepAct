@@ -43,12 +43,53 @@ type Engine struct {
 	guards     *GuardSystem
 	hall       *ConferenceHall
 	evalStore  EvalStore
+
+	// pendingPinnedMessages holds messages (e.g., skill activations) that should
+	// be appended at the END of the assembled messages array for the current
+	// Run() call, rather than mixed into e.history. This preserves the stable
+	// prefix cache across turns — history only grows with actual conversation.
+	pendingPinnedMessages []string
+
+	// matchedSkillsContent holds the content of matched skills for the current Run() call.
+	// It is injected into sub-agent context when a handoff occurs, so skill methodology
+	// instructions are carried through to sub-agents.
+	matchedSkillsContent string
+
+	// activatedSkills tracks skill names that have been explicitly activated
+	// via /skill command within the current session, to prevent duplicate
+	// injection from keyword-based auto-matching.
+	activatedSkills map[string]bool
+
+	// pendingEditPlan holds the agent's proposed edits for user confirmation.
+	// When non-nil, the agent has proposed file modifications and is awaiting
+	// user approval before execution.
+	pendingEditPlan *PendingEditPlan
+
+	planConfirmed bool
+}
+
+// PendingEditPlan captures the agent's proposed changes before execution.
+// The agent's reasoning and planned edits are presented to the user for approval.
+type PendingEditPlan struct {
+	Reasoning string               // agent's explanation of what it understands
+	Edits     []PendingEditAction  // individual file changes proposed
+	Calls     []ToolCallRequest    // stored tool calls to execute on confirmation
+	State     *TaskState           // snapshot of task state at proposal time
+}
+
+// PendingEditAction describes a single proposed file change.
+type PendingEditAction struct {
+	Tool     string `json:"tool"`     // "edit" or "write"
+	Path     string `json:"path"`     // target file
+	Summary  string `json:"summary"`  // human-readable description of the change
+	OldText  string `json:"old,omitempty"`  // for edit: what will be replaced
+	NewText  string `json:"new,omitempty"`  // what will be written
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopGuard(12), // block after 12 repeats of same (tool, path)
+		loop:  NewLoopGuard(6), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
 		model:      deps.Model,
@@ -61,9 +102,10 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		agents:     deps.Agents,
 		skills:     deps.Skills,
 		config:     cfg,
-		state:      &TaskState{TaskID: cfg.SessionID},
-		history:    make([]Message, 0),
-		guards:     guard,
+		state:           &TaskState{TaskID: cfg.SessionID},
+		history:         make([]Message, 0),
+		guards:          guard,
+		activatedSkills: make(map[string]bool),
 	}
 	e.hall = NewConferenceHall(e)
 
@@ -104,10 +146,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	e.history = append(e.history, Message{Role: "user", Content: userMsg, Timestamp: time.Now()})
 
-	// Reset loop guard at the start of each user message
+	// Reset per-Run state
 	if e.guards.loop != nil {
 		e.guards.loop.Reset()
 	}
+	e.matchedSkillsContent = ""
+	e.planConfirmed = false
 
 	// Conference command parsing — must run BEFORE conference init
 	// so slash commands take priority over automatic classification.
@@ -186,6 +230,77 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Skill command handling — /skills (list) and /skill <name> (activate)
+	if sc := parseSkillCommand(userMsg); sc != nil {
+		switch sc.action {
+		case "list":
+			skills := e.skills.All()
+			if len(skills) == 0 {
+				msg := "No skills available."
+				if zh {
+					msg = "当前没有可用技能。"
+				}
+				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+			}
+			var b strings.Builder
+			if zh {
+				b.WriteString("## 可用的 Skills\n\n")
+			} else {
+				b.WriteString("## Available Skills\n\n")
+			}
+			for _, s := range skills {
+				b.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
+			}
+			if zh {
+				b.WriteString("\n使用 `/skill <名称>` 激活指定技能。")
+			} else {
+				b.WriteString("\nUse `/skill <name>` to activate a specific skill.")
+			}
+			return &EngineResponse{Summary: b.String(), Stage: StageAct}, nil
+
+		case "activate":
+			s := e.skills.Get(sc.name)
+			if s == nil {
+				// Try case-insensitive match
+				for _, sk := range e.skills.All() {
+					if strings.EqualFold(sk.Name, sc.name) {
+						s = sk
+						break
+					}
+				}
+			}
+			if s == nil {
+				msg := fmt.Sprintf("Skill '%s' not found. Use `/skills` to list available skills.", sc.name)
+				if zh {
+					msg = fmt.Sprintf("技能 '%s' 不存在。使用 `/skills` 查看可用技能。", sc.name)
+				}
+				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+			}
+			// Mark as explicitly activated to prevent duplicate auto-match
+			e.activatedSkills[s.Name] = true
+
+			skillMsg := fmt.Sprintf(
+				"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
+				s.Name, s.Content,
+			)
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{
+					Type:   "skill_activated",
+					Name:   s.Name,
+					Detail: s.Description,
+				})
+			}
+			msg := fmt.Sprintf("✅ Skill `%s` activated: %s", s.Name, s.Description)
+			if zh {
+				msg = fmt.Sprintf("✅ 已激活 skill `%s`: %s", s.Name, s.Description)
+			}
+			return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+		}
+	}
+
 	// PhaseDone reset — completed conferences are cleaned up.
 	// New tasks start fresh; user uses /plan or /implement to re-enter.
 	if e.state.Conference != nil && e.state.Conference.Enabled {
@@ -203,6 +318,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	inConference := e.state.Conference != nil && e.state.Conference.Enabled
 	e.updateGoalFromFirstMessage(userMsg)
 
+	if e.pendingEditPlan != nil && !isDangerousConfirmation(userMsg) {
+		e.pendingEditPlan = nil
+	}
+
 	if inConference {
 		phase := e.state.Conference.Phase
 		if phase == PhasePlanning || phase == PhaseReview {
@@ -215,6 +334,60 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}
 		}
 		// PhaseExecute falls through to normal agent loop below
+	}
+
+	// Edit plan confirmation — user approved the agent's proposed changes
+	if e.pendingEditPlan != nil && isDangerousConfirmation(userMsg) {
+		zh := msgIsChinese(userMsg)
+		plan := e.pendingEditPlan
+		e.pendingEditPlan = nil // consume before execution
+
+		e.planConfirmed = true
+
+		// Restore task state from the plan snapshot
+		if plan.State != nil {
+			*e.state = *plan.State
+		}
+
+		msg := "✅ 修改方案已确认，开始执行..."
+		if !zh {
+			msg = "✅ Edit plan confirmed, executing..."
+		}
+		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+
+		// Execute the stored edit/write calls directly
+		regularCalls := make([]ToolCallRequest, 0, len(plan.Calls))
+		for _, c := range plan.Calls {
+			if c.Name == HandoffToolName {
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs(c.Input)})
+				}
+				result := e.executeHandoff(ctx, c)
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
+				}
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+			} else {
+				regularCalls = append(regularCalls, c)
+			}
+		}
+		if len(regularCalls) > 0 {
+			for _, call := range regularCalls {
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
+				}
+			}
+			toolResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, regularCalls)
+			for _, result := range toolResults {
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
+				}
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+			}
+			e.updateTaskStateFromTools(regularCalls, toolResults)
+		}
+		// Fall through to the agent loop below — the agent can see tool results
+		// and decide if further changes are needed.
 	}
 
 	// Dangerous command confirmation — simple exact match, safety feature only
@@ -253,8 +426,20 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Match skills against user message and inject matching skill content.
 	// Skills are methodology templates (debugging, brainstorming, verification)
 	// that shape the agent's approach to the current task.
+	// IMPORTANT: Skills are appended as pinned messages at the END of the messages
+	// array (not mixed into e.history) to preserve the stable prefix cache.
 	if e.skills != nil {
 		matched := e.skills.Match(userMsg)
+		if len(matched) > 0 {
+			// Skip skills already explicitly activated via /skill to avoid duplication
+			var deduped []*skill.Skill
+			for _, s := range matched {
+				if !e.activatedSkills[s.Name] {
+					deduped = append(deduped, s)
+				}
+			}
+			matched = deduped
+		}
 		if len(matched) > 0 {
 			var skillTexts []string
 			for _, s := range matched {
@@ -265,7 +450,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				joinSkillNames(matched),
 				strings.Join(skillTexts, "\n\n---\n\n"),
 			)
-			e.history = append(e.history, Message{Role: "user", Content: skillMsg, Timestamp: time.Now()})
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+
+			// Store skill content for sub-agent handoff injection
+			e.matchedSkillsContent = fmt.Sprintf(
+				"[SKILLS — %s]\n\n%s",
+				joinSkillNames(matched),
+				strings.Join(skillTexts, "\n\n---\n\n"),
+			)
+
 			if e.config.OnProgress != nil {
 				for _, s := range matched {
 					e.config.OnProgress(ProgressEvent{
@@ -444,4 +637,38 @@ func joinSkillNames(skills []*skill.Skill) string {
 		names[i] = s.Name
 	}
 	return strings.Join(names, ", ")
+}
+
+// skillCommand represents a parsed /skill or /skills command.
+type skillCommand struct {
+	action string // "list" or "activate"
+	name   string // skill name for "activate"
+}
+
+// parseSkillCommand checks if userMsg is a /skill or /skills command.
+func parseSkillCommand(userMsg string) *skillCommand {
+	trimmed := strings.TrimSpace(userMsg)
+	if !strings.HasPrefix(trimmed, "/") {
+		return nil
+	}
+	rest := trimmed[1:]
+	parts := strings.SplitN(rest, " ", 2)
+	if len(parts) == 0 {
+		return nil
+	}
+	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
+	switch cmd {
+	case "skills":
+		return &skillCommand{action: "list"}
+	case "skill":
+		args := ""
+		if len(parts) > 1 {
+			args = strings.TrimSpace(parts[1])
+		}
+		if args == "" {
+			return &skillCommand{action: "list"}
+		}
+		return &skillCommand{action: "activate", name: args}
+	}
+	return nil
 }
