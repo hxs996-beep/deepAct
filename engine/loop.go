@@ -24,6 +24,7 @@ type EngineDeps struct {
 	Session    SessionStore
 	Agents     *AgentRegistry
 	Skills     *skill.Registry
+	Router     ModelRouter
 }
 
 type Engine struct {
@@ -35,6 +36,7 @@ type Engine struct {
 	session    SessionStore
 	agents     *AgentRegistry
 	skills     *skill.Registry
+	router     ModelRouter
 	config     EngineConfig
 	state      *TaskState
 	history    []Message
@@ -96,6 +98,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		session:    deps.Session,
 		agents:     deps.Agents,
 		skills:    deps.Skills,
+		router:    deps.Router,
 		config:     cfg,
 		state:           &TaskState{TaskID: cfg.SessionID},
 		history:         make([]Message, 0),

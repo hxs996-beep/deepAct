@@ -316,6 +316,10 @@ type InputBuffer struct {
 	selStart int // -1 = no active selection
 	selEnd   int
 	dragging bool
+
+	// Pasting is set true while bracketed paste is active so that
+	// pasted newlines insert \n rather than triggering submit.
+	Pasting bool
 }
 
 func NewInputBuffer() *InputBuffer {
@@ -370,6 +374,12 @@ func (ib *InputBuffer) insertRunes(runes []rune) {
 func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	switch {
 	case msg.Type == tea.KeyEnter && !msg.Alt:
+		if ib.Pasting {
+			// During bracketed paste, newlines are literal content
+			ib.clearSelection()
+			ib.insertAtCursor('\n')
+			return ActionNewline
+		}
 		// Plain Enter -> submit
 		ib.clearSelection()
 		return ActionSubmit
@@ -429,9 +439,13 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		}
 		// Step 2: individual character filtering — remove control characters,
 		// DEL, C1 controls, and private-use/non-characters.
+		// Always preserve \n in KeyRunes — it never comes from keyboard input,
+		// only from bracketed paste (WithBracketedPaste). Likewise convert \r to \n.
 		filtered := make([]rune, 0, len(runes))
 		for _, r := range runes {
-			if !isLikelyControlOrphan(r) {
+			if r == '\n' || r == '\r' {
+				filtered = append(filtered, '\n')
+			} else if !isLikelyControlOrphan(r) {
 				filtered = append(filtered, r)
 			}
 		}

@@ -29,6 +29,8 @@ var (
 	SuggestionDesc     lipgloss.Style
 	SuggestionHotkey   lipgloss.Style
 	SuggestionSelected lipgloss.Style
+	ScrollbarTrackStyle  lipgloss.Style
+	ScrollbarThumbStyle  lipgloss.Style
 )
 
 func init() {
@@ -61,6 +63,8 @@ func initStyles() {
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		SuggestionHotkey = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
 		SuggestionSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("109"))
+		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
 	} else {
 		LogoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("27"))
@@ -79,6 +83,8 @@ func initStyles() {
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("249"))
 		SuggestionHotkey = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 		SuggestionSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("25"))
+		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 	}
 }
 
@@ -229,8 +235,7 @@ var CustomDarkStyle = ansi.StyleConfig{
 				Color: stringPtr("#E4E4E4"),
 			},
 			Error: ansi.StylePrimitive{
-				Color:           stringPtr("#F1F1F1"),
-				BackgroundColor: stringPtr("#FF5555"),
+				Color: stringPtr("#FF5555"),
 			},
 			Comment: ansi.StylePrimitive{
 				Color: stringPtr("#787878"),

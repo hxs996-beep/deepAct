@@ -174,7 +174,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Input box selection + scroll
 		if m.state == stateReady && m.inputBuf != nil {
-			innerW := m.width - 6
+			// Must match inner content width of InputBoxStyle:
+			// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
+			innerW := m.width - 8
 			if innerW < 20 {
 				innerW = 20
 			}
@@ -214,7 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.width > 0 && m.height > 0 {
 			cw := m.width
 			bodyLines := len(m.renderBody(cw))
-			bh := m.height - renderedHeight(renderStatusBar(m.status, m.scrollOffset, cw)) - renderedHeight(renderInputLine(m))
+			bh := m.height - renderedHeight(renderStatusBar(m.status, m.scrollOffset, 0, cw)) - renderedHeight(renderInputLine(m))
 			if s := renderSuggestions(m, cw); s != "" {
 				bh -= renderedHeight(s)
 			}
@@ -421,8 +423,9 @@ func (m Model) View() string {
 	suggestionPopup := renderSuggestions(m, contentWidth)
 	optionsPopup := renderOptionsPopup(m, contentWidth)
 
-	// Render footer first to measure actual heights
-	statusLine := renderStatusBar(m.status, m.scrollOffset, contentWidth)
+	// Render footer first to measure actual heights.
+	// First pass: compute status bar height (no scroll info yet).
+	statusLine := renderStatusBar(m.status, m.scrollOffset, 0, contentWidth)
 	inputLine := renderInputLine(m)
 	actualStatusHeight := renderedHeight(statusLine)
 	actualInputHeight := renderedHeight(inputLine)
@@ -441,11 +444,27 @@ func (m Model) View() string {
 		bodyHeight = 1
 	}
 
+	// First pass: render at full width to check overflow
+	needScrollbar := false
+	scrollContentWidth := contentWidth
+
 	lines := m.renderBody(contentWidth)
 	total := len(lines)
+	maxScroll := 0
+	scrollOff := m.scrollOffset
 	if total > bodyHeight {
-		scrollOff := m.scrollOffset
-		maxScroll := total - bodyHeight
+		needScrollbar = true
+		scrollContentWidth = contentWidth - 1
+		if scrollContentWidth < 20 {
+			scrollContentWidth = 20
+		}
+		// Re-render at 1-char-less width so the scrollbar fits without overflow
+		lines = m.renderBody(scrollContentWidth)
+		total = len(lines)
+		maxScroll = total - bodyHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
 		if scrollOff > maxScroll {
 			scrollOff = maxScroll
 		}
@@ -459,6 +478,34 @@ func (m Model) View() string {
 		}
 		lines = lines[start:end]
 	}
+	// Second pass: re-render status bar with actual scroll info
+	statusLine = renderStatusBar(m.status, scrollOff, maxScroll, contentWidth)
+	// Re-check: if scroll info changed the status bar height (e.g. scroll hint
+	// wrapping on narrow terminals), re-clip body to keep total = m.height.
+	if newStatusH := renderedHeight(statusLine); newStatusH != actualStatusHeight {
+		bodyHeight = m.height - newStatusH - actualInputHeight
+		if suggestionPopup != "" {
+			bodyHeight -= renderedHeight(suggestionPopup)
+		}
+		if optionsPopup != "" {
+			bodyHeight -= renderedHeight(optionsPopup)
+		}
+		if bodyHeight < 1 {
+			bodyHeight = 1
+		}
+		// Re-clip lines to new bodyHeight
+		if len(lines) > bodyHeight {
+			lines = lines[:bodyHeight]
+		} else {
+			for len(lines) < bodyHeight {
+				lines = append(lines, "")
+			}
+		}
+		// Also re-clamp maxScroll since bodyHeight changed
+		if maxScroll > 0 {
+			maxScroll = len(lines) // approximate: clipped lines = bodyHeight total
+		}
+	}
 	// Pad body to exactly bodyHeight lines manually. On Windows conhost,
 	// lipgloss.Height() can miscount ANSI-wrapped lines, producing off-by-one
 	// padding that causes the status bar to overflow and leave residual lines.
@@ -467,6 +514,23 @@ func (m Model) View() string {
 	}
 	if len(lines) > bodyHeight {
 		lines = lines[:bodyHeight]
+	}
+	// Visual scrollbar: draw │ (track) and ▐ (thumb) on the right edge
+	if needScrollbar && bodyHeight > 0 {
+		thumbLine := int(float64(scrollOff) / float64(maxScroll) * float64(bodyHeight-1))
+		sbTrack := ScrollbarTrackStyle.Render("│")
+		sbThumb := ScrollbarThumbStyle.Render("▐")
+		for i := range lines {
+			w := lipgloss.Width(lines[i])
+			if w < scrollContentWidth {
+				lines[i] += strings.Repeat(" ", scrollContentWidth-w)
+			}
+			if i == thumbLine {
+				lines[i] += sbThumb
+			} else {
+				lines[i] += sbTrack
+			}
+		}
 	}
 	// Join body lines with newlines. No lipgloss Width wrapping here —
 	// renderBody already produces lines within terminal width. Re-wrapping
@@ -477,13 +541,13 @@ func (m Model) View() string {
 	var full string
 	switch {
 	case suggestionPopup != "" && optionsPopup != "":
-		full = lipgloss.JoinVertical(lipgloss.Left, body, optionsPopup, suggestionPopup, inputLine, statusLine)
+		full = body + "\n" + optionsPopup + "\n" + suggestionPopup + "\n" + inputLine + "\n" + statusLine
 	case suggestionPopup != "":
-		full = lipgloss.JoinVertical(lipgloss.Left, body, suggestionPopup, inputLine, statusLine)
+		full = body + "\n" + suggestionPopup + "\n" + inputLine + "\n" + statusLine
 	case optionsPopup != "":
-		full = lipgloss.JoinVertical(lipgloss.Left, body, optionsPopup, inputLine, statusLine)
+		full = body + "\n" + optionsPopup + "\n" + inputLine + "\n" + statusLine
 	default:
-		full = lipgloss.JoinVertical(lipgloss.Left, body, inputLine, statusLine)
+		full = body + "\n" + inputLine + "\n" + statusLine
 	}
 	return full
 }
@@ -622,6 +686,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ---- Running: block input (Ctrl+C/Esc handled above) ----
 	if m.state == stateRunning {
 		return m, nil
+	}
+
+	// ---- Scroll history keyboard shortcuts (stateReady only) ----
+	if m.state == stateReady {
+		switch msg.Type {
+		case tea.KeyPgUp:
+			m.scrollOffset += m.height / 2
+			return m, nil
+		case tea.KeyPgDown:
+			m.scrollOffset -= m.height / 2
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			return m, nil
+		}
 	}
 
 	// ---- Alt+Enter sequence detection: pendingEsc + Enter = insert newline ----
@@ -1566,7 +1645,9 @@ func renderInputLine(m Model) string {
 
 	content := left + cursor + right
 
-	innerWidth := m.width - 6
+	// Inner content width must match what InputBoxStyle calculates:
+	// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
+	innerWidth := m.width - 8
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
@@ -1599,7 +1680,9 @@ func inputBoxHeight(m Model) int {
 	if m.width <= 0 {
 		return 3
 	}
-	innerWidth := m.width - 6
+	// Must match inner content width of InputBoxStyle:
+	// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
+	innerWidth := m.width - 8
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
@@ -1613,7 +1696,7 @@ func inputBoxHeight(m Model) int {
 	totalLines := 0
 	for _, line := range lines {
 		runes := []rune(line)
-		lineCount := (len(runes) / innerWidth) + 1
+		lineCount := (len(runes) + innerWidth - 1) / innerWidth
 		totalLines += lineCount
 	}
 	return totalLines + 2
@@ -1637,16 +1720,35 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 	return inputCost + outputCost
 }
 
-func renderStatusBar(status StatusInfo, scrollOffset int, width int) string {
+func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) string {
 	shortcutHint := "drag copy | Alt+Enter newline"
 	switch runtime.GOOS {
 	case "darwin":
 		shortcutHint = "drag copy | ⌥+Enter newline"
 	}
 
-	line := fmt.Sprintf(" ↑%.1fK ↓%.1fK | %s",
+	scrollHint := ""
+	if scrollMax > 0 {
+		if scrollOffset <= 0 {
+			// At bottom: show how many lines are hidden above
+			scrollHint = fmt.Sprintf(" ↑%d", scrollMax)
+		} else {
+			// Scrolled up: show position as percentage from bottom
+			pct := (scrollMax - scrollOffset) * 100 / scrollMax
+			if pct < 0 {
+				pct = 0
+			}
+			if pct > 100 {
+				pct = 100
+			}
+			scrollHint = fmt.Sprintf(" 📜%d%%", pct)
+		}
+	}
+
+	line := fmt.Sprintf(" ↑%.1fK ↓%.1fK%s | %s",
 		float64(status.TokensIn)/1000.0,
 		float64(status.TokensOut)/1000.0,
+		scrollHint,
 		shortcutHint,
 	)
 	if width > 0 {

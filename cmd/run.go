@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,6 +14,7 @@ import (
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/policy"
+	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
 	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
@@ -67,10 +67,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	model.SetSkillSuggestions(externalSkillSuggestions)
 	// On Windows, skip WithMouseCellMotion so native text selection works.
 	// Mouse tracking captures all mouse events, preventing terminal-level text selection.
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
-	if runtime.GOOS != "windows" {
-		opts = append(opts, tea.WithMouseCellMotion())
-	}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
@@ -198,6 +195,15 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		}
 	}
 
+	// Create model router for Pro/Flash routing decisions
+	routing := router.NewRouter(config.RiskThreshold)
+	if config.ModelName != "" {
+		routing.ModelName = config.ModelName
+	}
+	if config.FlashModelName != "" {
+		routing.FlashModelName = config.FlashModelName
+	}
+
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
@@ -207,6 +213,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Agents:     agentReg,
 		Skills:     skillReg,
+		Router:     routing,
 	}
 	return config, deps, nil
 }
@@ -242,17 +249,18 @@ func defaultEngineConfig() engine.EngineConfig {
 		PlanningThresholdChars: 120,
 		AutoConfirmScope:       false, // scope guard now actually prompts user before destructive edits
 		ConferenceEnabled:      true,
+		RiskThreshold:          0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{
 				"deepseek-v4-pro": {
-					InputPricePerToken:         0.000003,    // ¥3/百万
-					OutputPricePerToken:        0.000006,    // ¥6/百万
-					CacheHitInputPricePerToken: 0.000000025, // ¥0.025/百万
+					InputPricePerToken:         0.000003,
+					OutputPricePerToken:        0.000006,
+					CacheHitInputPricePerToken: 0.000000025,
 				},
 				"deepseek-v4-flash": {
-					InputPricePerToken:         0.000001,   // ¥1/百万
-					OutputPricePerToken:        0.000002,   // ¥2/百万
-					CacheHitInputPricePerToken: 0.00000002, // ¥0.02/百万
+					InputPricePerToken:         0.000001,
+					OutputPricePerToken:        0.000002,
+					CacheHitInputPricePerToken: 0.00000002,
 				},
 			},
 			Default: engine.ModelPricing{

@@ -61,6 +61,7 @@ type EngineConfig struct {
 	AutoConfirmScope       bool
 	ShowThinking           bool // stream model reasoning/thinking to UI
 	ConferenceEnabled      bool // enable multi-agent conference system
+	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
 	ToolAllowList          []string
 	WorkDir                string
 	OnProgress             ProgressFunc

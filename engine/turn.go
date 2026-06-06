@@ -53,8 +53,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 	e.pendingPinnedMessages = nil
 
-	// 主 agent 固定使用 Pro 模型（e.config.ModelName）。
-	modelName := e.config.ModelName
+	// Route model selection: use flash for low-risk / read-only turns.
+	modelName := e.selectModel()
 
 	req := ModelRequest{
 		Model:     modelName,
@@ -346,6 +346,29 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		break
 	}
 	return result, nil
+}
+
+// selectModel builds a RouteContext from the current TaskState and delegates
+// to the router. Falls back to Pro model if no router is configured.
+func (e *Engine) selectModel() string {
+	if e.router == nil || e.state == nil {
+		return e.config.ModelName
+	}
+
+	// IsReadOnly: true when no files have been modified and scope is not confirmed
+	// (i.e., we're still exploring/reading, not actively editing).
+	isReadOnly := e.state.EditScopeFiles == 0 && !e.state.ConfirmedScope
+
+	ctx := RouteContext{
+		IsReadOnly:       isReadOnly,
+		ToolFailureCount: e.state.ConsecutiveFailures,
+		EditScopeFiles:   e.state.EditScopeFiles,
+		ConsecutiveFails: e.state.ConsecutiveFailures,
+	}
+
+	decision := e.router.SelectModel(ctx)
+	turnLog.Printf("router: %s (reason: %s)", decision.Model, decision.Reasoning)
+	return decision.Model
 }
 
 // toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent tool appended.
@@ -708,11 +731,7 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 		action.OldText = oldStr
 		action.NewText = newStr
 		if oldStr != "" && newStr != "" {
-			oldLen := len(oldStr)
-			action.Summary = fmt.Sprintf("替换 %d 个字符", oldLen)
-			if newStr != oldStr {
-				action.Summary = fmt.Sprintf("替换 %d 个字符 → %d 个字符", oldLen, len(newStr))
-			}
+			action.Summary = "修改文件内容"
 		} else if pattern, ok := m["pattern"].(string); ok {
 			replacement, _ := m["replacement"].(string)
 			action.Summary = fmt.Sprintf("替换匹配 %q → %q", truncateStr(pattern, 50), truncateStr(replacement, 50))

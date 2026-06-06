@@ -25,8 +25,7 @@ type modelConfig struct {
 }
 
 type routingConfig struct {
-	// max_iterations removed — loop detection is now based on repeated operations,
-	// not total turn count.
+	RiskThreshold float64 `toml:"risk_threshold"`
 }
 
 type contextConfig struct {
@@ -93,6 +92,9 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens
+	}
+	if f.Routing.RiskThreshold > 0 {
+		cfg.RiskThreshold = f.Routing.RiskThreshold
 	}
 	// scope_guard=false means auto-confirm (invert the boolean)
 	cfg.AutoConfirmScope = !f.Guards.ScopeGuard
