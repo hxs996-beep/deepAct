@@ -113,9 +113,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	filteredTools := r.filterTools(input.Tools)
 
 	modelName := r.modelName
+	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
 	if len(modelOverride) > 0 && modelOverride[0] != "" {
 		if modelOverride[0] == "flash" && r.flashModelName != "" {
 			modelName = r.flashModelName
+			isFlashAgent = true
 		} else {
 			modelName = modelOverride[0]
 		}
@@ -244,6 +246,16 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				result := r.buildResult(msg.Content, input.Goal)
 				result.Usage = &totalUsage
 				return result, nil
+			}
+			// 失败回退升级：Flash agent 连续输出文本无 tool call → 升级到 Pro 重试
+			if consecutiveIntermediate >= 2 && isFlashAgent && r.modelName != "" && modelName != r.modelName {
+				modelName = r.modelName // 升级到 Pro
+				history = append(history, ModelMessage{
+					Role:    "user",
+					Content: "The Flash model is having difficulty producing structured output. Escalating to Pro model. Please complete the task now.",
+				})
+				consecutiveIntermediate = 0
+				continue
 			}
 			// Give one more chance with a nudge
 			history = append(history, ModelMessage{

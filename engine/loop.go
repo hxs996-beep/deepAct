@@ -22,7 +22,6 @@ type EngineDeps struct {
 	Context    ContextBuilder
 	Compressor Compressor
 	Session    SessionStore
-	Router     ModelRouter
 	Agents     *AgentRegistry
 	Skills     *skill.Registry
 }
@@ -34,7 +33,6 @@ type Engine struct {
 	context    ContextBuilder
 	compressor Compressor
 	session    SessionStore
-	router     ModelRouter
 	agents     *AgentRegistry
 	skills     *skill.Registry
 	config     EngineConfig
@@ -64,8 +62,6 @@ type Engine struct {
 	// When non-nil, the agent has proposed file modifications and is awaiting
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
-
-	planConfirmed bool
 }
 
 // PendingEditPlan captures the agent's proposed changes before execution.
@@ -98,9 +94,8 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		context:    deps.Context,
 		compressor: deps.Compressor,
 		session:    deps.Session,
-		router:     deps.Router,
 		agents:     deps.Agents,
-		skills:     deps.Skills,
+		skills:    deps.Skills,
 		config:     cfg,
 		state:           &TaskState{TaskID: cfg.SessionID},
 		history:         make([]Message, 0),
@@ -151,7 +146,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.guards.loop.Reset()
 	}
 	e.matchedSkillsContent = ""
-	e.planConfirmed = false
 
 	// Conference command parsing — must run BEFORE conference init
 	// so slash commands take priority over automatic classification.
@@ -163,6 +157,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				msg := "Please provide a goal. Usage: /plan <goal>"
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
+			e.state.PlanConfirmed = false
 			e.state.Conference = &ConferenceState{
 				Enabled: true,
 				Phase:   PhasePlanning,
@@ -182,6 +177,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				msg := "Please provide a goal. Usage: /implement <goal>"
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
+			e.state.PlanConfirmed = false
 			// Save parent context before overwriting — preserves the original multi-defect
 			// goal/plan so it can be restored when the sub-task completes.
 			if e.state.Conference != nil && e.state.Conference.Enabled && e.state.Conference.Board.Plan != "" {
@@ -252,9 +248,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				b.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
 			}
 			if zh {
-				b.WriteString("\n使用 `/skill <名称>` 激活指定技能。")
+				b.WriteString("\n使用 `/<名称>` 激活指定技能。")
 			} else {
-				b.WriteString("\nUse `/skill <name>` to activate a specific skill.")
+				b.WriteString("\nUse `/<name>` to activate a specific skill.")
 			}
 			return &EngineResponse{Summary: b.String(), Stage: StageAct}, nil
 
@@ -293,11 +289,18 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 					Detail: s.Description,
 				})
 			}
-			msg := fmt.Sprintf("✅ Skill `%s` activated: %s", s.Name, s.Description)
-			if zh {
-				msg = fmt.Sprintf("✅ 已激活 skill `%s`: %s", s.Name, s.Description)
+
+			taskText := extractTaskTextAfterSkillCmd(userMsg, sc.name)
+			if taskText == "" {
+				msg := fmt.Sprintf("✅ Skill `%s` activated: %s", s.Name, s.Description)
+				if zh {
+					msg = fmt.Sprintf("✅ 已激活 skill `%s`: %s", s.Name, s.Description)
+				}
+				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
-			return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+			if len(e.history) > 0 {
+				e.history[len(e.history)-1].Content = taskText
+			}
 		}
 	}
 
@@ -318,8 +321,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	inConference := e.state.Conference != nil && e.state.Conference.Enabled
 	e.updateGoalFromFirstMessage(userMsg)
 
-	if e.pendingEditPlan != nil && !isDangerousConfirmation(userMsg) {
-		e.pendingEditPlan = nil
+	if e.pendingEditPlan != nil {
+		if !isDangerousConfirmation(userMsg) {
+			e.pendingEditPlan = nil
+			e.state.PlanConfirmed = false
+		}
 	}
 
 	if inConference {
@@ -342,18 +348,38 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		plan := e.pendingEditPlan
 		e.pendingEditPlan = nil // consume before execution
 
-		e.planConfirmed = true
-
-		// Restore task state from the plan snapshot
+		// Restore task state from the plan snapshot, then mark confirmed.
+		// Order matters: restore first, then set PlanConfirmed/ConfirmedScope
+		// so they aren't overwritten by the restore.
 		if plan.State != nil {
 			*e.state = *plan.State
 		}
+		e.state.PlanConfirmed = true
+		e.state.ConfirmedScope = true // prevents guard re-blocking subsequent edits in this session
 
 		msg := "✅ 修改方案已确认，开始执行..."
 		if !zh {
 			msg = "✅ Edit plan confirmed, executing..."
 		}
 		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+
+		// Re-emit the assistant message with tool_calls so that subsequent tool
+		// result messages have a valid preceding assistant reference.
+		// The API requires: assistant(tool_calls) → tool(tool_call_id) ordering.
+		assistantMsg := Message{
+			Role:      "assistant",
+			Content:   plan.Reasoning,
+			Timestamp: time.Now(),
+		}
+		assistantMsg.ToolCalls = make([]MessageToolCall, 0, len(plan.Calls))
+		for _, c := range plan.Calls {
+			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, MessageToolCall{
+				ID:        c.ID,
+				Name:      c.Name,
+				Arguments: string(c.Input),
+			})
+		}
+		e.history = append(e.history, assistantMsg)
 
 		// Execute the stored edit/write calls directly
 		regularCalls := make([]ToolCallRequest, 0, len(plan.Calls))
@@ -476,7 +502,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.ConfirmedScope = true
 	}
 
-	turns := 0
+	// Continue from the session-level turn counter instead of resetting to 0.
+	// This prevents duplicate turn numbers in AccumulatedBlocks when Run() is
+	// called multiple times (e.g., across user messages in the same session).
+	turns := e.state.TurnNumber
 	maxTurns := e.config.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 50 // safe default to prevent infinite loops
@@ -538,6 +567,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		turns++
 	}
+	// Advance session turn counter past the last executed turn so the next
+	// Run() call continues from the correct position. +1 because 'turns' was
+	// not incremented after a Done break — it still points to the completed turn.
+	e.state.TurnNumber = turns + 1
 
 	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
 		return nil, err
@@ -579,12 +612,44 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 // isDangerousConfirmation is a narrow safety gate for dangerous command approval.
 // Only exact matches — this is a safety feature, not fuzzy intent detection.
 func isDangerousConfirmation(msg string) bool {
-	switch strings.ToLower(strings.TrimSpace(msg)) {
-	case "yes", "y", "ok", "okay", "confirm", "proceed", "同意", "确认", "是", "执行", "可以", "好的", "好", "行":
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	switch normalized {
+	case "yes", "y", "ok", "okay", "confirm", "proceed", "go", "do it", "sure", "yep",
+		"同意", "确认", "是", "执行", "可以", "好的", "好", "行",
+		"对", "对的", "没问题", "嗯", "开始", "改", "改吧", "做", "做吧", "来", "来吧", "干", "干吧", "去吧":
 		return true
-	default:
-		return false
 	}
+	// Handle compound confirmations like "对，改吧" or "好的，执行"
+	for _, sep := range []string{"，", ",", " ", "、"} {
+		if strings.Contains(normalized, sep) {
+			parts := strings.Split(normalized, sep)
+			allConfirm := true
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				if !isSingleConfirmWord(p) {
+					allConfirm = false
+					break
+				}
+			}
+			if allConfirm {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSingleConfirmWord(word string) bool {
+	switch word {
+	case "yes", "y", "ok", "okay", "confirm", "proceed", "go", "do", "it", "sure", "yep",
+		"同意", "确认", "是", "执行", "可以", "好的", "好", "行",
+		"对", "对的", "没问题", "嗯", "开始", "改", "改吧", "做", "做吧", "来", "来吧", "干", "干吧", "去吧", "吧":
+		return true
+	}
+	return false
 }
 
 func (e *Engine) emitEvent(eventType string, stage Stage, payload any) error {
@@ -645,30 +710,58 @@ type skillCommand struct {
 	name   string // skill name for "activate"
 }
 
-// parseSkillCommand checks if userMsg is a /skill or /skills command.
+// parseSkillCommand checks if userMsg is a /skill, /skills, or /<skillname> command.
 func parseSkillCommand(userMsg string) *skillCommand {
 	trimmed := strings.TrimSpace(userMsg)
 	if !strings.HasPrefix(trimmed, "/") {
 		return nil
 	}
+	if idx := strings.IndexByte(trimmed, '\n'); idx > 0 {
+		trimmed = trimmed[:idx]
+	}
 	rest := trimmed[1:]
-	parts := strings.SplitN(rest, " ", 2)
+	parts := strings.Fields(rest)
 	if len(parts) == 0 {
 		return nil
 	}
-	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
+	cmd := strings.ToLower(parts[0])
 	switch cmd {
 	case "skills":
 		return &skillCommand{action: "list"}
 	case "skill":
-		args := ""
-		if len(parts) > 1 {
-			args = strings.TrimSpace(parts[1])
-		}
-		if args == "" {
+		if len(parts) < 2 {
 			return &skillCommand{action: "list"}
 		}
-		return &skillCommand{action: "activate", name: args}
+		return &skillCommand{action: "activate", name: strings.ToLower(parts[1])}
+	default:
+		if isValidSkillName(cmd) {
+			return &skillCommand{action: "activate", name: cmd}
+		}
+		return nil
 	}
-	return nil
+}
+
+func isValidSkillName(name string) bool {
+	if len(name) == 0 || len(name) > 30 {
+		return false
+	}
+	for _, r := range name {
+		if r != '-' && r != '_' && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func extractTaskTextAfterSkillCmd(userMsg string, skillName string) string {
+	trimmed := strings.TrimSpace(userMsg)
+	prefix := "/" + skillName
+	if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+		prefix = "/skill " + skillName
+		if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+			return trimmed
+		}
+	}
+	rest := strings.TrimSpace(trimmed[len(prefix):])
+	return rest
 }

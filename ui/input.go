@@ -127,7 +127,24 @@ func isTerminalEscapeResidue(runes []rune) bool {
 
 // isColorHexValue checks if s looks like a terminal color hex value (e.g. "fae0/fae0/fae0").
 // This pattern is extremely specific and NEVER appears in legitimate keyboard input.
+//
+// When terminal OSC color query responses (e.g. \x1b]11;rgb:fae0/fae0/fae0\x07)
+// split across PTY buffer boundaries, partial "rgb:" prefix remnants like
+// "b:fae0/fae0/fae0" or "gb:fae0/fae0/fae0" can leak through. We strip these
+// known prefixes (and trailing ST terminator backslashes) before validating.
 func isColorHexValue(s string) bool {
+	// Strip trailing backslash from leaked ST terminator (ESC \)
+	s = strings.TrimSuffix(s, "\\")
+
+	// Strip known color prefixes (full and partial) that may survive PTY buffer splits.
+	// "rgb:" is the standard prefix; "b:", "gb:", "g:" are partial remnants.
+	for _, prefix := range []string{"rgba:", "rgb:", "gb:", "b:", "g:"} {
+		if strings.HasPrefix(s, prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+
 	parts := strings.Split(s, "/")
 	if len(parts) != 3 && len(parts) != 4 {
 		return false
@@ -181,6 +198,15 @@ func looksLikeSGRFragment(s string) bool {
 	return true
 }
 
+// isOSCContinuation checks if runes look like the body of an OSC sequence
+// that follows ESC ]. After Bubble Tea consumes ESC, ']' arrives as a lone
+// KeyRunes event, followed by the OSC number (digits) and parameters. If the
+// batch starts with a digit, it's almost certainly an OSC continuation and
+// should be discarded along with the held ']'.
+func isOSCContinuation(runes []rune) bool {
+	return len(runes) > 0 && runes[0] >= '0' && runes[0] <= '9'
+}
+
 // isAllBackslash returns true if all runes in the slice are backslash (\) characters.
 // Used to detect leaked escape sequence terminators (ST = ESC \) from DCS/OSC
 // sequences that split across PTY buffer boundaries.
@@ -200,6 +226,32 @@ func isAllDigits(s string) bool {
 	}
 	for _, c := range s {
 		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isSGRContinuation returns true if s consists only of digits and semicolons —
+// the exact characters found in SGR mouse sequence fragments that leak past
+// Bubble Tea's '[' tracker on Windows ConPTY. The SGR format is:
+//
+//	ESC [ < buttons ; col ; row M
+//
+// After ESC is consumed and the initial '[' + '<' are caught, the remaining
+// fragments ("65", ";25", ";31M", ";") arrive as separate KeyRunes batches.
+// This function catches the numeric-only fragments that don't end in M/m
+// (those are handled by looksLikeSGRFragment).
+//
+// Callers MUST only invoke this when afterResidue is true, ensuring the
+// window of false-positive risk is bounded to 1-3 batches after confirmed
+// escape residue.
+func isSGRContinuation(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != ';' {
 			return false
 		}
 	}

@@ -81,6 +81,7 @@ type Model struct {
 	streaming    string
 	apiKeyInput           string
 	pendingOpenBracket    bool   // Windows: lone '[' held to check if it's escape split
+	pendingCloseBracket   bool   // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
 	afterResidue          bool   // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
 	ready                 bool
 	progressChan chan ProgressMsg
@@ -156,12 +157,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Clear transient input flags on non-key events. This prevents stale
 	// pendingEsc from persisting across TickMsg or WindowSizeMsg events,
 	// which would cause the next Enter to insert a newline instead of submit.
+	//
+	// afterResidue is NOT cleared here — it must survive non-KeyMsg events
+	// (ProgressMsg, TickMsg) that frequently arrive between escape residue
+	// and its trailing ST backslash (ESC \), so the \ can still be caught.
 	switch msg.(type) {
 	case tea.KeyMsg:
 		// flags are managed in handleKey
 	default:
 		m.pendingEsc = false
-		m.afterResidue = false
 	}
 
 	switch msg := msg.(type) {
@@ -464,21 +468,11 @@ func (m Model) View() string {
 	if len(lines) > bodyHeight {
 		lines = lines[:bodyHeight]
 	}
-	body := lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
-
-	// On Windows conhost, lipgloss may produce extra visual lines due to
-	// ANSI wrapping miscount. Trim body content from the newest end until
-	// the rendered body fits within bodyHeight, so total output never
-	// exceeds terminal height. Trimming from the end preserves scroll
-	// position.
-	for len(lines) > 0 {
-		bodyVisual := strings.Split(body, "\n")
-		if len(bodyVisual) <= bodyHeight {
-			break
-		}
-		lines = lines[:len(lines)-1]
-		body = lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
-	}
+	// Join body lines with newlines. No lipgloss Width wrapping here —
+	// renderBody already produces lines within terminal width. Re-wrapping
+	// with lipgloss on ANSI-rich lines can silently create extra visual
+	// lines, pushing the input box below the visible terminal area.
+	body := strings.Join(lines, "\n")
 
 	var full string
 	switch {
@@ -505,6 +499,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyRunes {
 			allRunes := append([]rune{'['}, msg.Runes...)
 			if isTerminalEscapeResidue(allRunes) {
+				// Set afterResidue so subsequent SGR fragments (e.g. ";25",
+				// "65") from further PTY buffer splits are also discarded.
+				m.afterResidue = true
 				return m, nil // discard both ['['] + ['<65;25;31M']
 			}
 			// Not escape residue and msg is KeyRunes: reinject the held '['
@@ -524,6 +521,32 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingOpenBracket = true
 		return m, nil
 	}
+
+	// ---- OSC close bracket tracker ----
+	// Terminal OSC sequences start with ESC ]. Bubble Tea consumes ESC,
+	// leaving ']' as visible residue. A lone ']' may be followed by digits
+	// and ';' (OSC params). Hold the ']' and check the next batch.
+	if m.pendingCloseBracket {
+		m.pendingCloseBracket = false
+		if msg.Type == tea.KeyRunes {
+			if isOSCContinuation(msg.Runes) {
+				// Set afterResidue so the trailing ST backslash (ESC \)
+				// that closes the OSC sequence is also discarded.
+				m.afterResidue = true
+				return m, nil // discard both [']'] + ['11;rgb:...']
+			}
+			// Not OSC — reinject ']' and process the current runes.
+			m.inputBuf.insertRunes([]rune{']'})
+			m.inputBuf.HandleKey(msg)
+			return m, nil
+		}
+		// Non-Runes after ']': the ']' was escape residue, discard it.
+	}
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == ']' {
+		m.pendingCloseBracket = true
+		return m, nil
+	}
+
 	// ---- Global hotkeys ----
 
 	// Ctrl+Q: quit
@@ -570,6 +593,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// These backslashes are the ST (String Terminator) bytes
 				// from a DCS/OSC sequence whose ESC was consumed by BT.
 				m.afterResidue = false
+				return m, nil
+			}
+			if isSGRContinuation(string(msg.Runes)) {
+				// Still inside an SGR escape sequence that fragmented
+				// across PTY buffer boundaries. Keep afterResidue true
+				// and discard digits/semicolons (e.g. ";25", "65").
 				return m, nil
 			}
 			m.afterResidue = false
@@ -705,11 +734,10 @@ func (m *Model) updateSuggestions() {
 	}
 	// Also match external skill names as /-shortcuts
 	for _, skill := range m.skillSuggestions {
-		// Match against "/<skillname>" (e.g. /brainstorming)
 		short := "/" + skill.Command
 		if strings.HasPrefix(short, prefix) {
 			matches = append(matches, Suggestion{
-				Command:     "/skill " + skill.Command,
+				Command:     "/" + skill.Command,
 				Description: skill.Description,
 			})
 		}
@@ -971,7 +999,7 @@ func renderMessage(msg DisplayMessage, width int) []string {
 				styled[i] = ToolTreeStyle.Render(line)
 			}
 		}
-		return styled
+		return wrapLines(styled, width)
 	default:
 		rendered := renderMarkdown(content, width)
 		return strings.Split(rendered, "\n")
@@ -1126,6 +1154,19 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 				childConn = "│  ├─"
 			} else {
 				childConn = "   ├─"
+			}
+			// Diff hunk: show full colored content like renderToolSummary
+			if node.Done && (node.Name == "edit" || node.Name == "write") {
+				hunkContent := child.DetailFull
+				if hunkContent != "" {
+					rendered := renderDiffHunk(hunkContent, childConn, lastChild, i, len(toolTree))
+					for _, hl := range strings.Split(rendered, "\n") {
+						if hl != "" {
+							lines = append(lines, hl)
+						}
+					}
+					continue
+				}
 			}
 			childLine := fmt.Sprintf("  %s %s", childConn, child.Detail)
 			if len(child.Detail) > width-10 {
@@ -1377,18 +1418,54 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 	return wrapLines(lines, width)
 }
 
+const maxPopupItems = 8
+
+// visiblePopupWindow returns a slice of items centered on the selected index,
+// clamped to at most maxItems. Returns (start, end) indices.
+func visiblePopupWindow(total, selected, maxItems int) (start, end int) {
+	if total <= maxItems {
+		return 0, total
+	}
+	half := maxItems / 2
+	start = selected - half
+	if start < 0 {
+		start = 0
+	}
+	end = start + maxItems
+	if end > total {
+		end = total
+		start = end - maxItems
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
 func renderOptionsPopup(m Model, width int) string {
 	if len(m.activeOptions) == 0 || m.state != stateReady {
 		return ""
 	}
+	total := len(m.activeOptions)
+	start, end := visiblePopupWindow(total, m.selectedOption, maxPopupItems)
 	var lines []string
-	for i, opt := range m.activeOptions {
+	for i := start; i < end; i++ {
+		opt := m.activeOptions[i]
 		prefix := fmt.Sprintf("[%d]", i+1)
 		line := fmt.Sprintf("%s %s", SuggestionHotkey.Render(prefix), SuggestionItem.Render(opt))
 		if i == m.selectedOption {
 			line = SuggestionSelected.Render(" " + prefix + " " + opt + " ")
 		}
 		lines = append(lines, line)
+	}
+	// Show overflow indicator
+	if total > maxPopupItems {
+		remain := total - end
+		if remain > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" … and %d more (scroll ↑↓)", remain)))
+		} else if start > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" (↑ scroll for %d more)", start)))
+		}
 	}
 	lines = append(lines, DimStyle.Render("Enter/Tab: select  ↑↓: navigate  or type feedback"))
 	content := strings.Join(lines, "\n")
@@ -1436,13 +1513,27 @@ func renderSuggestions(m Model, width int) string {
 		return ""
 	}
 
+	total := len(m.suggestions)
+	start, end := visiblePopupWindow(total, m.selectedSuggestion, maxPopupItems)
+
 	var lines []string
-	for i, sug := range m.suggestions {
+	for i := start; i < end; i++ {
+		sug := m.suggestions[i]
 		line := fmt.Sprintf(" %s  %s", SuggestionHotkey.Render(sug.Command), SuggestionDesc.Render(sug.Description))
 		if i == m.selectedSuggestion {
 			line = SuggestionSelected.Render(" "+sug.Command+" ") + " " + SuggestionDesc.Render(sug.Description)
 		}
 		lines = append(lines, line)
+	}
+
+	// Show overflow indicator
+	if total > maxPopupItems {
+		remain := total - end
+		if remain > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" … and %d more (scroll ↑↓)", remain)))
+		} else if start > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" (↑ scroll for %d more)", start)))
+		}
 	}
 
 	// Add hint line
@@ -1481,7 +1572,7 @@ func renderInputLine(m Model) string {
 	}
 
 	wrapped := wrapInputText("> "+content, innerWidth)
-	return InputBoxStyle.Width(m.width - 2).Render(wrapped)
+	return InputBoxStyle.Width(m.width - 4).Render(wrapped)
 }
 
 func wrapInputText(text string, width int) string {

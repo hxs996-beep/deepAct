@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,7 +15,6 @@ import (
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/policy"
-	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
 	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
@@ -65,7 +65,13 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	model := ui.NewModel(runner, pricing)
 	model.SetSkillSuggestions(externalSkillSuggestions)
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// On Windows, skip WithMouseCellMotion so native text selection works.
+	// Mouse tracking captures all mouse events, preventing terminal-level text selection.
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if runtime.GOOS != "windows" {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
 	}
@@ -201,11 +207,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Agents:     agentReg,
 		Skills:     skillReg,
-		Router:     router.NewRouter(0.55),
 	}
-	// Apply model names from config to router
-	deps.Router.(*router.DefaultRouter).ModelName = config.ModelName
-	deps.Router.(*router.DefaultRouter).FlashModelName = config.FlashModelName
 	return config, deps, nil
 }
 

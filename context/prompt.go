@@ -130,20 +130,10 @@ type EnvironmentInfo struct {
 	Date  string
 }
 
-func BuildBlockB(env EnvironmentInfo, taskState string) string {
+func BuildBlockB(taskState string) string {
 	var builder strings.Builder
 	builder.WriteString("# Block B: Runtime Context\n\n")
-	builder.WriteString("## Environment\n")
-	builder.WriteString(fmt.Sprintf("- OS: %s\n", env.OS))
-	builder.WriteString(fmt.Sprintf("- Arch: %s\n", env.Arch))
-	builder.WriteString(fmt.Sprintf("- CWD: %s\n", env.CWD))
-	if env.Model != "" {
-		builder.WriteString(fmt.Sprintf("- Model: %s\n", env.Model))
-	}
-	if env.Date != "" {
-		builder.WriteString(fmt.Sprintf("- Date: %s\n", env.Date))
-	}
-	builder.WriteString("\n## Task State (verbatim)\n")
+	builder.WriteString("## Task State (verbatim)\n")
 	if strings.TrimSpace(taskState) == "" {
 		builder.WriteString("(empty)\n")
 	} else {
@@ -154,9 +144,9 @@ func BuildBlockB(env EnvironmentInfo, taskState string) string {
 }
 
 // BuildStableSessionContext returns a user message containing session-stable content
-// (AGENTS.md, language directive). This message is at the top of the messages array
-// (after system prompt) and stays identical across turns, enabling prefix cache hits.
-func BuildStableSessionContext(agentsMD string, userLang string) string {
+// (AGENTS.md, environment, language directive). This message is at the top of the messages
+// array (after system prompt) and stays identical across turns, enabling prefix cache hits.
+func BuildStableSessionContext(agentsMD string, envInfo EnvironmentInfo, userLang string) string {
 	var builder strings.Builder
 	builder.WriteString("# Block S: Session Context (Stable)\n\n")
 	if strings.TrimSpace(agentsMD) != "" {
@@ -167,6 +157,18 @@ func BuildStableSessionContext(agentsMD string, userLang string) string {
 		}
 		builder.WriteString("\n")
 	}
+	// Environment — session-stable, moved from Block B to prefix zone for cache hits.
+	builder.WriteString("## Environment\n")
+	builder.WriteString(fmt.Sprintf("- OS: %s\n", envInfo.OS))
+	builder.WriteString(fmt.Sprintf("- Arch: %s\n", envInfo.Arch))
+	builder.WriteString(fmt.Sprintf("- CWD: %s\n", envInfo.CWD))
+	if envInfo.Model != "" {
+		builder.WriteString(fmt.Sprintf("- Model: %s\n", envInfo.Model))
+	}
+	if envInfo.Date != "" {
+		builder.WriteString(fmt.Sprintf("- Date: %s\n", envInfo.Date))
+	}
+	builder.WriteString("\n")
 	if userLang != "" {
 		builder.WriteString(fmt.Sprintf("## ⚠️ Response Language: %s\nYou MUST respond in %s. Every word of your response must be in %s. This is non-negotiable.\n", userLang, userLang, userLang))
 	}

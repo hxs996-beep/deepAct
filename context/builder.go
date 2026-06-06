@@ -21,8 +21,9 @@ type ContextAssembler struct {
 	projectRoot        string
 	estimator          *llm.TokenEstimator
 	agentsMD           string // cached AGENTS.md content, read once at startup
-	userLang           string // detected once from first history, cached for cache stability
-	stableSessionBlock string // built once from agentsMD + userLang, cached for cache stability
+	envInfo            EnvironmentInfo // session-stable env info, built once at startup
+	userLang           string          // detected once from first history, cached for cache stability
+	stableSessionBlock string          // built once from agentsMD + envInfo + userLang, cached for cache stability
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
@@ -47,6 +48,7 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 		projectRoot:  projectRoot,
 		estimator:    estimator,
 		agentsMD:     readAgentsMD(),
+		envInfo:      buildEnvironmentInfo(),
 	}
 }
 
@@ -76,7 +78,7 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.userLang = detectUserLanguage(history)
 	}
 	if a.stableSessionBlock == "" {
-		a.stableSessionBlock = BuildStableSessionContext(a.agentsMD, a.userLang)
+		a.stableSessionBlock = BuildStableSessionContext(a.agentsMD, a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
@@ -91,41 +93,15 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		}
 	}
 
-	// === SEMI-STABLE ZONE (changes slowly — extends prefix cache) ===
-	// Message 4: TaskState stable fields only (goal, decisions, plan, etc.)
-	// These change infrequently so this message stays cached across many turns.
-	if state != nil {
-		stableTask := formatTaskStateStable(state)
-		if stableTask != "" {
-			messages = append(messages, engine.ModelMessage{
-				Role:    "user",
-				Content: "# Task Context (Stable)\n" + stableTask,
-			})
-		}
-	}
-
-	// === VARIABLE ZONE (changes each turn — cache miss acceptable) ===
-	// Block B: env info + volatile task state fields only
-	blockB := BuildBlockB(buildEnvironmentInfo(), formatTaskStateVolatile(state))
-	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
-
-	// History (older turns in middle, recent turns at bottom)
-	freshStart := len(history) - engine.FreshTurns*3
-	if freshStart < 0 {
-		freshStart = 0
-	}
-
-	for i, msg := range history {
-		if i < freshStart {
-			messages = append(messages, mapMessage(msg))
-		}
-	}
-
-	// === BOTTOM ZONE (highest recency attention) ===
-	for i, msg := range history {
-		if i >= freshStart {
-			messages = append(messages, mapMessage(msg))
-		}
+	// === HISTORY ZONE (append-only — cacheable prefix) ===
+	// History is placed BEFORE AccumulatedBlocks to maximize prefix cache hits.
+	// Since previous turns' messages never change, placing history here lets
+	// the cache cover all past conversation (assistant reasoning + tool results
+	// containing file contents from reads/greps) — thousands of tokens per turn.
+	// Only the growing AccumulatedBlocks + volatile tail shift each turn,
+	// keeping the cache-miss portion small (~500 tokens) regardless of turn count.
+	for _, msg := range history {
+		messages = append(messages, mapMessage(msg))
 	}
 
 	if len(toolResults) > 0 {
@@ -137,6 +113,26 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 			})
 		}
 	}
+
+	// === ACCUMULATED BLOCKS (small, in volatile tail zone) ===
+	// Turn summary blocks are only ~50-200 tokens each. They sit after history
+	// in the non-cached tail, which is acceptable since the history cache gains
+	// vastly outweigh the loss of blocks moving out of the prefix.
+	if state != nil && len(state.AccumulatedBlocks) > 0 {
+		for _, block := range state.AccumulatedBlocks {
+			if block != "" {
+				messages = append(messages, engine.ModelMessage{
+					Role:    "user",
+					Content: block,
+				})
+			}
+		}
+	}
+
+	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
+	// Block B: minimal task state fields only
+	blockB := BuildBlockB(formatTaskStateVolatile(state))
+	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
 	reminder := BuildTaskReminder(state)
 	if reminder != "" {
@@ -213,63 +209,64 @@ func formatTaskState(state *engine.TaskState) string {
 	return string(data)
 }
 
-// formatTaskStateStable returns JSON for slowly-changing TaskState fields.
-// These go into a separate stable message before the variable BlockB,
-// extending the prefix cache window across many turns.
-func formatTaskStateStable(state *engine.TaskState) string {
-	if state == nil {
-		return ""
+// FormatTurnBlock builds a concise structured block string for a completed turn.
+// The block is stored in TaskState.AccumulatedBlocks and rendered as a stable
+// prefix message in subsequent turns.
+func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, filesModified []string, markers []string, decisions []string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
+
+	hasContent := false
+
+	if len(filesRead) > 0 {
+		b.WriteString("Read: " + strings.Join(filesRead, ", ") + "\n")
+		hasContent = true
 	}
-	stable := struct {
-		TaskID        string              `json:"task_id,omitempty"`
-		Goal          string              `json:"goal,omitempty"`
-		Confirmed     bool                `json:"confirmed_scope"`
-		Constraints   []string            `json:"constraints,omitempty"`
-		Assumptions   []string            `json:"assumptions,omitempty"`
-		Decisions     []engine.Decision   `json:"decisions,omitempty"`
-		MemoryMarkers []string            `json:"memory_markers,omitempty"`
-		Plan          []engine.PlanStep   `json:"plan,omitempty"`
-		OpenQuestions []string            `json:"open_questions,omitempty"`
-	}{
-		TaskID:        state.TaskID,
-		Goal:          state.Goal,
-		Confirmed:     state.ConfirmedScope,
-		Constraints:   state.Constraints,
-		Assumptions:   state.Assumptions,
-		Decisions:     state.Decisions,
-		MemoryMarkers: state.MemoryMarkers,
-		Plan:          state.Plan,
-		OpenQuestions: state.OpenQuestions,
+	if len(filesSearched) > 0 {
+		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
+		hasContent = true
 	}
-	data, err := json.Marshal(stable)
-	if err != nil {
-		return ""
+	if len(filesModified) > 0 {
+		b.WriteString("Modified: " + strings.Join(filesModified, ", ") + "\n")
+		hasContent = true
 	}
-	return string(data)
+	if len(markers) > 0 {
+		b.WriteString("Findings:\n")
+		for _, m := range markers {
+			b.WriteString("  - " + m + "\n")
+		}
+		hasContent = true
+	}
+	if len(decisions) > 0 {
+		b.WriteString("Decisions:\n")
+		for _, d := range decisions {
+			b.WriteString("  - " + d + "\n")
+		}
+		hasContent = true
+	}
+
+	if !hasContent {
+		return "" // skip empty blocks
+	}
+	return b.String()
 }
 
-// formatTaskStateVolatile returns JSON for frequently-changing TaskState fields.
-// These stay in BlockB which changes every turn (cache miss expected).
+// formatTaskStateVolatile returns JSON for the minimal volatile TaskState fields
+// that the model needs for decision-making but aren't available elsewhere.
+// Redundant fields (covered by turn-blocks / reminder) are omitted to keep the
+// cache-missing tail as small as possible.
 func formatTaskStateVolatile(state *engine.TaskState) string {
 	if state == nil {
 		return ""
 	}
 	volatile := struct {
-		TurnNumber        int                       `json:"turn_number"`
-		WorkingSet        engine.WorkingSet         `json:"working_set,omitempty"`
-		ModifiedFiles     []string                  `json:"modified_files,omitempty"`
-		FileCollapse      []engine.FileCollapse     `json:"file_collapse,omitempty"`
-		CallChain         []engine.CallChainEntry   `json:"call_chain,omitempty"`
-		ConsecutiveFails  int                       `json:"consecutive_failures"`
-		EditScopeFiles    int                       `json:"edit_scope_files"`
-		Conference        *engine.ConferenceState   `json:"conference,omitempty"`
-		ParentContext     *engine.ParentBoard       `json:"parent_context,omitempty"`
+		TurnNumber       int                     `json:"turn_number"`
+		ConsecutiveFails int                     `json:"consecutive_failures"`
+		EditScopeFiles   int                     `json:"edit_scope_files"`
+		Conference       *engine.ConferenceState `json:"conference,omitempty"`
+		ParentContext    *engine.ParentBoard     `json:"parent_context,omitempty"`
 	}{
 		TurnNumber:       state.TurnNumber,
-		WorkingSet:       state.WorkingSet,
-		ModifiedFiles:    state.ModifiedFiles,
-		FileCollapse:     state.FileCollapse,
-		CallChain:        state.CallChain,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
 		Conference:       state.Conference,

@@ -207,7 +207,9 @@ type TaskState struct {
 	TurnNumber          int              `json:"turn_number"`
 	ConsecutiveFailures int              `json:"consecutive_failures"`
 	EditScopeFiles      int              `json:"edit_scope_files"`
+	PlanConfirmed       bool             `json:"plan_confirmed"`                       // user approved the edit plan, skip per-edit guard
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
+	AccumulatedBlocks   []string         `json:"accumulated_blocks,omitempty"` // per-turn findings, appended each turn, used by Build() as stable prefix blocks
 	Conference          *ConferenceState `json:"conference,omitempty"`
 	ParentContext       *ParentBoard     `json:"parent_context,omitempty"` // saved parent goal+plan before sub-task overwrites conference
 }

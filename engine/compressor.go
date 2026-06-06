@@ -396,28 +396,19 @@ func findSafeSplitPoint(history []Message, minFresh int) int {
 	return 0 // fallback: split at beginning
 }
 
-// Archive compression: Flash model generates structured summary
+// Archive compression: Flash model generates structured summary,
+// including accumulated blocks in the archive process.
 func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Message) ([]Message, error) {
 	if c.model == nil || len(history) <= FreshTurns*3 {
 		return c.compressAging(state, history), nil
 	}
 
-	// Find a safe split point that doesn't break a turn boundary.
-	// A turn ends at an assistant message WITHOUT tool_calls, or a user message.
-	// Splitting between an assistant-with-tool_calls and its tool messages would
-	// leave orphan tool messages in freshHistory, causing API 400 errors:
-	// "assistant message with 'tool_calls' must be followed by tool messages..."
 	freshStart := findSafeSplitPoint(history, FreshTurns*3)
 	if freshStart < 0 {
 		return c.compressAging(state, history), nil
 	}
 
-	// Protect the last pure-text assistant from being archived.
-	// Aging and CodeCollapse both skip compression for this message via
-	// findLastAssistantWithoutToolCalls; Archive must do the same by
-	// extending the fresh window to include its entire turn (user+assistant).
 	if lastIdx := findLastAssistantWithoutToolCalls(history); lastIdx >= 0 && lastIdx < freshStart {
-		// Walk backward from the assistant to find its paired user message.
 		pairedUser := lastIdx
 		for i := lastIdx; i >= 0; i-- {
 			if history[i].Role == "user" {
@@ -437,6 +428,7 @@ func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Me
 	}
 
 	// Backfill TaskState from parsed ArchiveSummary (memory回填)
+	// Also create a compressed block from the summary to replace accumulated blocks.
 	if parsed, err := ParseArchiveSummary(summary); err == nil {
 		for _, d := range parsed.Decisions {
 			if !containsDecisionText(state.Decisions, d) {
@@ -455,6 +447,14 @@ func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Me
 			if !containsString(state.OpenQuestions, oi) {
 				state.OpenQuestions = append(state.OpenQuestions, oi)
 			}
+		}
+
+		// Replace accumulated blocks with a single compressed block.
+		// This keeps the prefix stable after compression — the compressed
+		// block becomes the new base for further accumulation.
+		compressedBlock := buildCompressedBlock(parsed)
+		if compressedBlock != "" {
+			state.AccumulatedBlocks = []string{compressedBlock}
 		}
 	}
 
@@ -526,8 +526,17 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 		b.WriteString("Task goal: " + state.Goal + "\n\n")
 	}
 
+	// Include accumulated blocks as additional context for the archive.
+	// These contain per-turn findings that should be distilled into the summary.
+	if state != nil && len(state.AccumulatedBlocks) > 0 {
+		b.WriteString("Accumulated turn blocks (include these in the summary):\n")
+		for _, block := range state.AccumulatedBlocks {
+			b.WriteString(block + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	// Progressive summarization: extract previous archive from history and include it
-	// as context so the model can build incrementally rather than starting from scratch.
 	prevArchive := extractPreviousArchive(history)
 	if prevArchive != "" {
 		b.WriteString("Previous archive summary (extend this, do NOT repeat):\n")
@@ -536,14 +545,12 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 
 	b.WriteString("New conversation to compress:\n")
 	for _, msg := range history {
-		// Skip previous archive messages — they're already summarized above
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
 		}
 		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
 
-	// Include existing TaskState decisions as context
 	if state != nil && len(state.Decisions) > 0 {
 		b.WriteString("\nPreviously recorded decisions:\n")
 		for _, d := range state.Decisions {
@@ -557,6 +564,57 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 		}
 	}
 
+	return b.String()
+}
+
+// buildCompressedBlock creates a single compact block string from an ArchiveSummary.
+// This replaces accumulated blocks after compression, becoming the new stable prefix.
+func buildCompressedBlock(summary *ArchiveSummary) string {
+	if summary == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Compressed Context\n")
+
+	hasContent := false
+
+	if summary.Goal != "" {
+		b.WriteString("Goal: " + summary.Goal + "\n")
+		hasContent = true
+	}
+	if len(summary.Decisions) > 0 {
+		b.WriteString("Decisions:\n")
+		for _, d := range summary.Decisions {
+			b.WriteString("  - " + d + "\n")
+		}
+		hasContent = true
+	}
+	if len(summary.FilesRead) > 0 {
+		b.WriteString("Files read: " + strings.Join(summary.FilesRead, ", ") + "\n")
+		hasContent = true
+	}
+	if len(summary.FilesModified) > 0 {
+		b.WriteString("Files modified: " + strings.Join(summary.FilesModified, ", ") + "\n")
+		hasContent = true
+	}
+	if len(summary.KeyFindings) > 0 {
+		b.WriteString("Key findings:\n")
+		for _, kf := range summary.KeyFindings {
+			b.WriteString("  - " + kf + "\n")
+		}
+		hasContent = true
+	}
+	if len(summary.OpenIssues) > 0 {
+		b.WriteString("Open issues:\n")
+		for _, oi := range summary.OpenIssues {
+			b.WriteString("  - " + oi + "\n")
+		}
+		hasContent = true
+	}
+
+	if !hasContent {
+		return ""
+	}
 	return b.String()
 }
 

@@ -214,6 +214,23 @@ func (c *DeepSeekClient) validateReasoningEcho(msgs []Message) []Message {
 	return msgs
 }
 
+// validateAssistantContent ensures all assistant messages have at least content or tool_calls.
+// DeepSeek/OpenAI API rejects assistant messages with neither field set (400 error).
+// This handles cases where the model returned only reasoning_content with no visible output.
+func (c *DeepSeekClient) validateAssistantContent(msgs []Message) []Message {
+	for i := range msgs {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		if msgs[i].Content != "" || len(msgs[i].ToolCalls) > 0 {
+			continue
+		}
+		msgs[i].Content = ".."
+		debugLog.Printf("pre-flight fix: filling empty assistant content at msgs[%d]", i)
+	}
+	return msgs
+}
+
 func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// Pre-send validation: ensure assistant messages with tool_calls have reasoning_content.
 	// Uses ReasoningEchoManager for stateful echo instead of scanning the message list.
@@ -224,6 +241,10 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// Pre-flight check: after ApplyEcho, verify no assistant+tool_calls message is still
 	// missing reasoning_content. If found, auto-fix before sending to prevent 400.
 	req.Messages = c.validateReasoningEcho(req.Messages)
+
+	// Pre-flight check: ensure all assistant messages have at least content or tool_calls.
+	// The API requires one of these to be set; messages with only reasoning_content are invalid.
+	req.Messages = c.validateAssistantContent(req.Messages)
 
 	payload := requestBody{
 		Model:           req.Model,

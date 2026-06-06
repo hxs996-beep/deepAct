@@ -53,16 +53,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 	e.pendingPinnedMessages = nil
 
+	// 主 agent 固定使用 Pro 模型（e.config.ModelName）。
 	modelName := e.config.ModelName
-	if e.router != nil {
-		rctx := RouteContext{
-			ConsecutiveFails: e.state.ConsecutiveFailures,
-			EditScopeFiles:   e.state.EditScopeFiles,
-			IsReadOnly:       false,
-		}
-		decision := e.router.SelectModel(rctx)
-		modelName = decision.Model
-	}
 
 	req := ModelRequest{
 		Model:     modelName,
@@ -165,6 +157,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	if !hasValidToolCalls(toolCalls) {
+		if assistant.Content == "" && assistant.ReasoningContent == "" {
+			turnLog.Printf("skipping empty assistant message (no content, no reasoning, no tool_calls)")
+			return TurnResult{Done: true, FinishReason: finish}, nil
+		}
 		e.history = append(e.history, assistant)
 		if finish == "length" {
 			e.history = append(e.history, Message{Role: "user", Content: "继续", Timestamp: time.Now()})
@@ -195,7 +191,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Edit plan guard: before executing any edit/write calls for the first time
 	// in this Run(), block and present the agent's understanding + proposed changes
 	// to the user for approval.
-	if e.pendingEditPlan == nil && !e.planConfirmed {
+	if e.pendingEditPlan == nil && !e.state.PlanConfirmed {
 		var editCalls []ToolCallRequest
 		for _, call := range calls {
 			if call.Name == "edit" || call.Name == "write" {
@@ -203,8 +199,20 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			}
 		}
 		if len(editCalls) > 0 {
+			// Merge reasoning from both content and thinking (reasoning_content).
+			// When thinking mode is on, the actual analysis lives in ReasoningContent,
+			// and Content is stripped as intermediate text. We need BOTH to give
+			// the user a meaningful explanation of WHY changes are proposed.
+			mergedReasoning := assistant.Content
+			if assistant.ReasoningContent != "" {
+				if mergedReasoning != "" {
+					mergedReasoning = assistant.ReasoningContent + "\n" + mergedReasoning
+				} else {
+					mergedReasoning = assistant.ReasoningContent
+				}
+			}
 			plan := &PendingEditPlan{
-				Reasoning: assistant.Content,
+				Reasoning: mergedReasoning,
 				Calls:     calls, // store ALL calls (read, edit, write, bash, handoff, etc.)
 				State:     cloneTaskState(e.state),
 			}
@@ -317,6 +325,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.history = append(e.history, toolMessage)
 		}
 		e.updateTaskStateFromTools(regularCalls, toolResults)
+	}
+
+	// Per-turn accumulation: write this turn's findings to the prefix zone
+	// (AccumulatedBlocks) so they survive across turns in the cacheable prefix.
+	if e.state != nil && len(regularCalls) > 0 {
+		e.accumulateTurnBlock(regularCalls)
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
@@ -442,13 +456,42 @@ func summarizeArgs(input json.RawMessage) string {
 	if cmd, ok := m["command"].(string); ok {
 		return cmd
 	}
-	if path, ok := m["path"].(string); ok {
+
+	// Extract path first — all file-oriented tools have it.
+	path := ""
+	if p, ok := m["path"].(string); ok {
+		path = p
+	}
+	if path == "" {
+		if pattern, ok := m["pattern"].(string); ok {
+			return pattern
+		}
+		return ""
+	}
+
+	// Edit tool: show change preview from old_string/new_string.
+	if oldStr, ok := m["old_string"].(string); ok {
+		newStr, _ := m["new_string"].(string)
+		oldLen := len(oldStr)
+		newLen := len(newStr)
+		if oldLen > 0 && newLen > 0 && oldLen != newLen {
+			return fmt.Sprintf("%s — replace %d → %d chars", path, oldLen, newLen)
+		}
+		if oldLen > 0 {
+			return fmt.Sprintf("%s — replace %d chars", path, oldLen)
+		}
 		return path
 	}
-	if pattern, ok := m["pattern"].(string); ok {
-		return pattern
+
+	// Write tool: show content length preview.
+	if content, ok := m["content"].(string); ok {
+		if len(content) > 0 {
+			return fmt.Sprintf("%s — write %d chars", path, len(content))
+		}
+		return path
 	}
-	return ""
+
+	return path
 }
 
 func briefDigest(digest string) string {
@@ -497,6 +540,81 @@ func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	if e.state != nil && e.state.Goal == "" {
 		e.state.Goal = userMsg
 	}
+}
+
+// accumulateTurnBlock collects files read/searched this turn and appends a
+// turn-block to AccumulatedBlocks. This moves per-turn discoveries into the
+// cacheable prefix, reducing dependency on the volatile history tail.
+func (e *Engine) accumulateTurnBlock(regularCalls []ToolCallRequest) {
+	var filesRead []string
+	var filesSearched []string
+	for _, c := range regularCalls {
+		path := extractPathFromArgs(c.Input)
+		if path == "" {
+			continue
+		}
+		switch c.Name {
+		case "read":
+			if !containsString(filesRead, path) {
+				filesRead = append(filesRead, path)
+			}
+		case "grep", "glob":
+			if !containsString(filesSearched, path) {
+				filesSearched = append(filesSearched, path)
+			}
+		}
+	}
+
+	block := formatTurnBlock(
+		e.state.TurnNumber,
+		filesRead,
+		filesSearched,
+		e.state.ModifiedFiles,
+		e.state.MemoryMarkers,
+		nil,
+	)
+	if block != "" {
+		e.state.AccumulatedBlocks = append(e.state.AccumulatedBlocks, block)
+	}
+}
+
+// formatTurnBlock builds a concise structured block string for a completed turn.
+// Inlined to avoid import cycle with the context package.
+func formatTurnBlock(turnNum int, filesRead []string, filesSearched []string, filesModified []string, markers []string, decisions []string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
+
+	hasContent := false
+	if len(filesRead) > 0 {
+		b.WriteString("Read: " + strings.Join(filesRead, ", ") + "\n")
+		hasContent = true
+	}
+	if len(filesSearched) > 0 {
+		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
+		hasContent = true
+	}
+	if len(filesModified) > 0 {
+		b.WriteString("Modified: " + strings.Join(filesModified, ", ") + "\n")
+		hasContent = true
+	}
+	if len(markers) > 0 {
+		b.WriteString("Findings:\n")
+		for _, m := range markers {
+			b.WriteString("  - " + m + "\n")
+		}
+		hasContent = true
+	}
+	if len(decisions) > 0 {
+		b.WriteString("Decisions:\n")
+		for _, d := range decisions {
+			b.WriteString("  - " + d + "\n")
+		}
+		hasContent = true
+	}
+	if !hasContent {
+		return ""
+	}
+	return b.String()
 }
 
 func extractPathFromArgs(input json.RawMessage) string {
@@ -614,47 +732,40 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 }
 
 // formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
+// The summary always shows the reasoning (WHY) first, then a file list, then asks
+// the user to confirm. Reasoning is never truncated — the user needs the full
+// explanation to make an informed decision.
 func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 	var sb strings.Builder
-	if zh {
-		sb.WriteString("## AI 理解了以下内容，并提出了修改方案\n\n")
-	} else {
-		sb.WriteString("## AI has analyzed the task and proposes the following changes\n\n")
-	}
 
-	// Agent's reasoning
+	// Step 1: Show the reasoning — WHY these changes are proposed.
 	reasoning := plan.Reasoning
-	if reasoning != "" {
-		if len(reasoning) > 500 {
-			reasoning = reasoning[:500] + "..."
-		}
+	if reasoning == "" {
 		if zh {
-			sb.WriteString("### AI 的理解\n")
+			sb.WriteString("（AI 未提供修改原因）\n")
 		} else {
-			sb.WriteString("### AI's Understanding\n")
+			sb.WriteString("(No reasoning provided)\n")
 		}
-		sb.WriteString(reasoning)
-		sb.WriteString("\n\n")
-	}
-
-	// Proposed changes
-	if zh {
-		sb.WriteString("### 计划修改\n\n")
 	} else {
-		sb.WriteString("### Proposed Changes\n\n")
-	}
-	for i, edit := range plan.Edits {
-		sb.WriteString(fmt.Sprintf("%d. **%s** `%s`", i+1, edit.Tool, edit.Path))
-		if edit.Summary != "" {
-			sb.WriteString(fmt.Sprintf(" — %s", edit.Summary))
-		}
+		sb.WriteString(reasoning)
 		sb.WriteString("\n")
 	}
 
+	// Step 2: Show the file list — WHAT will be changed.
 	if zh {
-		sb.WriteString("\n是否同意这个方案？输入 **确认** 来执行，或输入其他内容让 AI 调整。\n")
+		sb.WriteString("\n📋 计划修改以下文件：\n")
 	} else {
-		sb.WriteString("\nDo you approve this plan? Type **yes** to proceed, or describe what needs to change.\n")
+		sb.WriteString("\n📋 Planned changes:\n")
+	}
+	for _, edit := range plan.Edits {
+		sb.WriteString(fmt.Sprintf("  • `%s` — %s\n", edit.Path, edit.Summary))
+	}
+
+	// Step 3: Ask for confirmation.
+	if zh {
+		sb.WriteString("\n确认执行以上修改？")
+	} else {
+		sb.WriteString("\nConfirm these changes?")
 	}
 	return sb.String()
 }
