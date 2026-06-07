@@ -33,10 +33,12 @@ func GenerateUnifiedDiff(oldContent, newContent, filePath string) string {
 }
 
 // splitContentLines splits text into lines, discarding content after the last \n.
+// Normalizes \r\n (Windows) to \n before splitting to prevent \r artifacts in diff output.
 func splitContentLines(text string) []string {
 	if text == "" {
 		return nil
 	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	// If the text ends with \n, the last element is an empty string
 	if len(lines) > 1 && lines[len(lines)-1] == "" {

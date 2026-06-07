@@ -62,9 +62,6 @@ type Suggestion struct {
 }
 
 var slashCommands = []Suggestion{
-	{Command: "/plan", Args: "<goal>", Description: "Explore codebase and propose implementation approaches"},
-	{Command: "/implement", Args: "<goal>", Description: "Enter implementation phase directly"},
-	{Command: "/review", Args: "", Description: "Review implementation against the plan"},
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 }
 
@@ -172,63 +169,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
-		// Input box selection + scroll
-		if m.state == stateReady && m.inputBuf != nil {
-			// Must match inner content width of InputBoxStyle:
-			// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
-			innerW := m.width - 8
-			if innerW < 20 {
-				innerW = 20
-			}
-			// Convert screen-absolute mouse coordinates to input-box-relative.
-			// mouseToTextPos expects (0,0) = top-left of the content area inside
-			// the input box, but Bubble Tea gives us absolute terminal coords.
-			// Input box layout: top border (1), content (N), bottom border (1).
-			inputBoxH := inputBoxHeight(m)
-			inputBoxY := m.height - inputBoxH - 1 // status bar is always 1 line
-			adjY := msg.Y - inputBoxY - 1         // -1 for top border => content line
-			contentH := inputBoxH - 2              // content area height (no borders)
-			if adjY >= 0 && adjY < contentH && inputBoxY >= 0 {
-				adjX := msg.X - 2 // subtract left border + left padding
-				msg.Y = adjY
-				msg.X = adjX
-				action, selText := m.inputBuf.HandleMouse(msg, innerW)
-				if action == ActionCopySelected && selText != "" {
-					return m, copyToClipboardCmd(selText)
-				}
-			}
-		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			m.scrollOffset += 3
+			if m.state == stateReady || m.state == stateRunning {
+				oldOff := m.scrollOffset
+				m.scrollOffset += m.height / 3
+				if m.scrollOffset < oldOff {
+					m.scrollOffset = oldOff // overflow guard
+				}
+			}
+			return m, nil
 		case tea.MouseButtonWheelDown:
-			m.scrollOffset -= 3
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
+			if m.state == stateReady || m.state == stateRunning {
+				m.scrollOffset -= m.height / 3
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
 			}
-		case tea.MouseButtonLeft:
-			// Click: select or activate input
-		case tea.MouseButtonRight:
-			// Right-click: nothing
-		}
-		// Clamp scroll offset after any wheel change to prevent overflow
-		// on Windows where rapid wheel events can accumulate before View() clamps.
-		if m.width > 0 && m.height > 0 {
-			cw := m.width
-			bodyLines := len(m.renderBody(cw))
-			bh := m.height - renderedHeight(renderStatusBar(m.status, m.scrollOffset, 0, cw)) - renderedHeight(renderInputLine(m))
-			if s := renderSuggestions(m, cw); s != "" {
-				bh -= renderedHeight(s)
-			}
-			if o := renderOptionsPopup(m, cw); o != "" {
-				bh -= renderedHeight(o)
-			}
-			if bh < 1 {
-				bh = 1
-			}
-			if maxS := bodyLines - bh; maxS > 0 && m.scrollOffset > maxS {
-				m.scrollOffset = maxS
-			}
+			return m, nil
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -283,8 +241,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 		}
 		m.finishStreaming(msg)
-		return m, nil
-	case copyToClipboardMsg:
 		return m, nil
 	case ProgressMsg:
 		// Auto-scroll to bottom while running so new tool/spinner content stays visible.
@@ -405,6 +361,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// scrollUp increases scroll offset by half the terminal height.
+func (m Model) scrollUp() Model {
+	m.scrollOffset += m.height / 2
+	return m
+}
+
+// scrollDown decreases scroll offset by half the terminal height, clamped at 0.
+func (m Model) scrollDown() Model {
+	m.scrollOffset -= m.height / 2
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+	return m
+}
+
 func (m Model) View() string {
 	if !m.ready {
 		return "loading..."
@@ -501,9 +472,12 @@ func (m Model) View() string {
 				lines = append(lines, "")
 			}
 		}
-		// Also re-clamp maxScroll since bodyHeight changed
-		if maxScroll > 0 {
-			maxScroll = len(lines) // approximate: clipped lines = bodyHeight total
+		// Recalculate maxScroll from original total (not clipped lines)
+		if total > 0 {
+			maxScroll = total - bodyHeight
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
 		}
 	}
 	// Pad body to exactly bodyHeight lines manually. On Windows conhost,
@@ -525,7 +499,9 @@ func (m Model) View() string {
 			if w < scrollContentWidth {
 				lines[i] += strings.Repeat(" ", scrollContentWidth-w)
 			}
-			if i == thumbLine {
+			if strings.TrimSpace(lines[i]) == "" {
+				lines[i] += " "
+			} else if i == thumbLine {
 				lines[i] += sbThumb
 			} else {
 				lines[i] += sbTrack
@@ -536,18 +512,25 @@ func (m Model) View() string {
 	// renderBody already produces lines within terminal width. Re-wrapping
 	// with lipgloss on ANSI-rich lines can silently create extra visual
 	// lines, pushing the input box below the visible terminal area.
+	//
+	// APPEND ANSI RESET before the input box to prevent ANSI escape codes
+	// from the last body line from leaking into the input box border rendering.
+	// The reset is placed at the START of the input line (not the END of body)
+	// because on Windows ConPTY, a trailing ANSI reset on the previous line
+	// may not take effect before the next line renders, letting colors bleed
+	// into border characters and making them invisible.
 	body := strings.Join(lines, "\n")
 
 	var full string
 	switch {
 	case suggestionPopup != "" && optionsPopup != "":
-		full = body + "\n" + optionsPopup + "\n" + suggestionPopup + "\n" + inputLine + "\n" + statusLine
+		full = body + "\n\033[0m" + optionsPopup + "\n\033[0m" + suggestionPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
 	case suggestionPopup != "":
-		full = body + "\n" + suggestionPopup + "\n" + inputLine + "\n" + statusLine
+		full = body + "\n\033[0m" + suggestionPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
 	case optionsPopup != "":
-		full = body + "\n" + optionsPopup + "\n" + inputLine + "\n" + statusLine
+		full = body + "\n\033[0m" + optionsPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
 	default:
-		full = body + "\n" + inputLine + "\n" + statusLine
+		full = body + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
 	}
 	return full
 }
@@ -683,23 +666,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ---- Running: block input (Ctrl+C/Esc handled above) ----
+	// ---- Running: only allow scroll keys (Ctrl+C/Esc handled above) ----
 	if m.state == stateRunning {
+		switch msg.Type {
+		case tea.KeyPgUp:
+			return m.scrollUp(), nil
+		case tea.KeyPgDown:
+			return m.scrollDown(), nil
+		}
 		return m, nil
 	}
 
-	// ---- Scroll history keyboard shortcuts (stateReady only) ----
+	// ---- Scroll history keyboard shortcuts (stateReady) ----
 	if m.state == stateReady {
 		switch msg.Type {
 		case tea.KeyPgUp:
-			m.scrollOffset += m.height / 2
-			return m, nil
+			return m.scrollUp(), nil
 		case tea.KeyPgDown:
-			m.scrollOffset -= m.height / 2
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-			return m, nil
+			return m.scrollDown(), nil
 		}
 	}
 
@@ -765,8 +749,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.submitInput()
 	case ActionQuit:
 		return m, tea.Quit
-	case ActionCopySelected:
-		return m, nil // handled in mouse handler
 	default:
 		// Update slash command suggestions after any input change
 		m.updateSuggestions()
@@ -1561,26 +1543,17 @@ func renderedHeight(s string) int {
 func buildHelpText(commands []Suggestion) string {
 	var b strings.Builder
 	b.WriteString("# DeepAct — CLI Coding Agent\n\n")
-	b.WriteString("## Available Commands\n\n")
-	b.WriteString("| Command | Description |\n")
-	b.WriteString("|---------|------------|\n")
-	for _, cmd := range commands {
-		display := cmd.Command
-		if cmd.Args != "" {
-			display += " " + cmd.Args
-		}
-		b.WriteString(fmt.Sprintf("| `%s` | %s |\n", display, cmd.Description))
-	}
-	b.WriteString("\n## Keyboard Shortcuts\n\n")
-	b.WriteString("- **Ctrl+Q**: Quit\n")
-	b.WriteString("- **Esc**: Cancel running task\n")
-	b.WriteString("- **Tab**: Autocomplete selected suggestion\n")
-	b.WriteString("- **↑/↓**: Navigate suggestion list / options\n")
-	b.WriteString("- **Alt+Enter**: Insert newline in input\n")
-	b.WriteString("\n## Tips\n\n")
-	b.WriteString("- Type a slash command (like `/plan`) to start a structured workflow\n")
-	b.WriteString("- Just type naturally to ask coding questions directly\n")
-	b.WriteString("- Use `/help` to see this screen at any time\n")
+	b.WriteString("## Keyboard Shortcuts\n\n")
+	b.WriteString("| Key | Function |\n")
+	b.WriteString("|-----|----------|\n")
+	b.WriteString("| `Ctrl+Q` | Quit |\n")
+	b.WriteString("| `Esc` | Cancel running task |\n")
+	b.WriteString("| `Enter` | Submit input |\n")
+	b.WriteString("| `Tab` | Autocomplete suggestion |\n")
+	b.WriteString("| `\u2191/\u2193` | Navigate suggestions |\n")
+	b.WriteString("| `Alt+Enter` | Insert newline |\n")
+	b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
+	b.WriteString("\nType a natural language request to start.\n")
 	return b.String()
 }
 
@@ -1721,34 +1694,30 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 }
 
 func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) string {
-	shortcutHint := "drag copy | Alt+Enter newline"
+	// Shortcut hint: Shift+drag for native selection (SGR mouse mode bypass)
+	shortcutHint := "Shift+drag select | Alt+Enter newline"
 	switch runtime.GOOS {
 	case "darwin":
-		shortcutHint = "drag copy | ⌥+Enter newline"
+		shortcutHint = "Shift+drag select | ⌥+Enter newline"
 	}
 
+	// Scroll position indicator
 	scrollHint := ""
 	if scrollMax > 0 {
-		if scrollOffset <= 0 {
-			// At bottom: show how many lines are hidden above
-			scrollHint = fmt.Sprintf(" ↑%d", scrollMax)
-		} else {
-			// Scrolled up: show position as percentage from bottom
-			pct := (scrollMax - scrollOffset) * 100 / scrollMax
-			if pct < 0 {
-				pct = 0
-			}
-			if pct > 100 {
-				pct = 100
-			}
-			scrollHint = fmt.Sprintf(" 📜%d%%", pct)
+		pct := int(float64(scrollOffset) / float64(scrollMax) * 100)
+		if pct < 0 {
+			pct = 0
 		}
+		if pct > 100 {
+			pct = 100
+		}
+		scrollHint = fmt.Sprintf(" ↑%d%% | ", pct)
 	}
 
-	line := fmt.Sprintf(" ↑%.1fK ↓%.1fK%s | %s",
+	line := fmt.Sprintf("%s↑%.1fK ↓%.1fK | %s",
+		scrollHint,
 		float64(status.TokensIn)/1000.0,
 		float64(status.TokensOut)/1000.0,
-		scrollHint,
 		shortcutHint,
 	)
 	if width > 0 {

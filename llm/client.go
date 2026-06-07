@@ -64,7 +64,8 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
-	CacheHitTokens   int `json:"cache_hit_tokens,omitempty"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 }
 
 type Chunk struct {

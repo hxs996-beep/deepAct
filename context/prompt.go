@@ -6,7 +6,7 @@ import (
 )
 
 const SystemPromptBlockA = "# Identity\n" +
-	"You are DeepAct, a CLI coding agent powered by DeepSeek V4. You help users modify codebases with precision, safety, and minimal disruption.\n\n" +
+	"You are DeepAct, a CLI coding agent powered by V4 Flash. You help users modify codebases with precision, safety, and minimal disruption.\n\n" +
 	"# Core Rules (MANDATORY)\n\n" +
 	"## Parsing user input:\n" +
 	"- Treat the entire input as a SINGLE unified request. Topics separated by commas are typically interrelated — later parts modify or drill into earlier parts. Do NOT split into independent tasks.\n" +
@@ -35,7 +35,8 @@ const SystemPromptBlockA = "# Identity\n" +
 	"- Follow existing code patterns in the project (naming, structure, style)\n" +
 	"- After editing a file: state what changed in 1 sentence. Stop. Don't explain.\n" +
 	"- Reference code as file_path:line_number (clickable format)\n" +
-	"- Batch independent tool calls in parallel when possible\n\n" +
+	"- Batch independent tool calls in parallel when possible\n" +
+		"- Reuse file contents already in history: if you already read a file in a previous turn, do NOT re-read it — the content is in the conversation history. Use <!-- REMEMBER: path --> to track what you've read.\n\n" +
 	"# Response Format\n" +
 	"- ALWAYS respond in the same language as the user's most recent message. If user writes Chinese, respond in Chinese. If English, respond in English. Never switch language unless user switches first.\n" +
 	"- Answer in ≤3 lines unless showing code or the task requires detail\n" +
@@ -119,15 +120,13 @@ const SystemPromptBlockA = "# Identity\n" +
 	"\n## ⚠️ Stop Conditions (MANDATORY)\n" +
 	"- If missing info: ask the user. Do not implement.\n" +
 	"- If multiple valid interpretations: ask before coding.\n" +
-	"- If an API is unverifiable: state uncertainty and ask.\n" +
-	"__CACHE_BOUNDARY__\n"
+	"- If an API is unverifiable: state uncertainty and ask.\n"
 
 type EnvironmentInfo struct {
-	OS    string
-	Arch  string
-	CWD   string
-	Model string
-	Date  string
+	OS   string
+	Arch string
+	CWD  string
+	Date string
 }
 
 func BuildBlockB(taskState string) string {
@@ -162,9 +161,6 @@ func BuildStableSessionContext(agentsMD string, envInfo EnvironmentInfo, userLan
 	builder.WriteString(fmt.Sprintf("- OS: %s\n", envInfo.OS))
 	builder.WriteString(fmt.Sprintf("- Arch: %s\n", envInfo.Arch))
 	builder.WriteString(fmt.Sprintf("- CWD: %s\n", envInfo.CWD))
-	if envInfo.Model != "" {
-		builder.WriteString(fmt.Sprintf("- Model: %s\n", envInfo.Model))
-	}
 	if envInfo.Date != "" {
 		builder.WriteString(fmt.Sprintf("- Date: %s\n", envInfo.Date))
 	}

@@ -1,6 +1,7 @@
 name = "verification-before-completion"
 description = "Use when about to claim any work is complete, fixed, or done - requires evidence before claims"
 keywords = ["完成", "验证", "确认", "完成验证", "done", "fixed", "completed", "pass"]
+next_skills = ["finishing-a-development-branch"]
 content = """
 ## 完成前验证 — 铁律
 

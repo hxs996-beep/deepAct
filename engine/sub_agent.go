@@ -102,12 +102,16 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	}
 
 	// Stable system message — identical across all sub-agent calls → prefix cache hit
-	// Variable content (goal/context/constraints/extra) goes in the first user message
+	// Stable agent-type instructions (extraPrompt) — identical per agent type → prefix cache hit
+	// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
 	history := []ModelMessage{
 		{Role: "system", Content: r.stableSystemPrompt()},
 	}
-	if userContent := r.buildVariablePrompt(input, extraPrompt); userContent != "" {
-		history = append(history, ModelMessage{Role: "user", Content: userContent})
+	if extraPrompt != "" {
+		history = append(history, ModelMessage{Role: "user", Content: extraPrompt})
+	}
+	if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
+		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 	}
 
 	filteredTools := r.filterTools(input.Tools)
@@ -407,6 +411,20 @@ func (r *SubAgentRunner) stableSystemPrompt() string {
 
 When you complete the task, provide a summary of what you did and list key findings/conclusions.
 You can delegate sub-tasks using the '` + HandoffToolName + `' tool.`
+}
+
+// buildVolatilePrompt assembles the per-call variable content (goal, context, constraints).
+// This is appended as the last user message, after stable system + agent-specific prompts.
+func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
+	if input.Context != "" {
+		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
+	}
+	if len(input.Constraints) > 0 {
+		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
+	}
+	return sb.String()
 }
 
 // buildVariablePrompt assembles the per-call variable content (goal, context, constraints, extra).

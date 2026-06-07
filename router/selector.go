@@ -19,7 +19,7 @@ type DefaultRouter struct {
 func NewRouter(threshold float64) *DefaultRouter {
 	return &DefaultRouter{
 		RiskThreshold:  threshold,
-		ModelName:      "deepseek-v4-pro",
+		ModelName:      "deepseek-v4-flash",
 		FlashModelName: "deepseek-v4-flash",
 	}
 }

@@ -60,10 +60,21 @@ type Engine struct {
 	// injection from keyword-based auto-matching.
 	activatedSkills map[string]bool
 
+	// lastActivatedSkill records the most recently activated skill name.
+	// The activate_skill tool checks NextSkills of this skill to determine
+	// if auto-activation (no user confirmation) is allowed.
+	lastActivatedSkill string
+
 	// pendingEditPlan holds the agent's proposed edits for user confirmation.
 	// When non-nil, the agent has proposed file modifications and is awaiting
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
+
+	// lastMarkerCount tracks how many MemoryMarkers have been written to
+	// AccumulatedBlocks. On each turn, accumulateTurnBlock only appends
+	// newly-added markers (state.MemoryMarkers[lastMarkerCount:]) to avoid
+	// the same finding being repeated 20+ times in AccumulatedBlocks.
+	lastMarkerCount int
 }
 
 // PendingEditPlan captures the agent's proposed changes before execution.
@@ -277,6 +288,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}
 			// Mark as explicitly activated to prevent duplicate auto-match
 			e.activatedSkills[s.Name] = true
+			e.lastActivatedSkill = s.Name
 
 			skillMsg := fmt.Sprintf(
 				"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
@@ -384,7 +396,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		e.history = append(e.history, assistantMsg)
 
-		// Execute the stored edit/write calls directly
+		// Execute the stored calls directly, skipping non-destructive
+		// read/grep/glob — their results were consumed by the model's
+		// reasoning before the plan was blocked. Re-executing them on
+		// confirmation would be redundant (user already agreed to the plan).
 		regularCalls := make([]ToolCallRequest, 0, len(plan.Calls))
 		for _, c := range plan.Calls {
 			if c.Name == HandoffToolName {
@@ -396,7 +411,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 					e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 				}
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-			} else {
+			} else if c.Name != "read" && c.Name != "grep" && c.Name != "glob" {
 				regularCalls = append(regularCalls, c)
 			}
 		}
@@ -430,14 +445,65 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 		// Tell the agent to re-issue the blocked command.
-		// The previous attempt was blocked with GuardAskUser; now the user confirmed.
-		// The agent must re-issue the exact same tool call since the blocked one
-		// was closed with a tool message containing "Blocked: ...".
 		reissueHint := fmt.Sprintf("用户已确认执行危险命令。请重新执行之前被阻断的命令: `%s`", confirmedCmd)
 		if !zh {
 			reissueHint = fmt.Sprintf("The user confirmed the dangerous command. Please re-issue the previously blocked command: `%s`", confirmedCmd)
 		}
 		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
+	}
+
+	// Skill activation confirmation — model called activate_skill, user responded
+	if e.state.PendingActivateSkill != "" {
+		skillName := e.state.PendingActivateSkill
+		e.state.PendingActivateSkill = ""
+		if isDangerousConfirmation(userMsg) {
+			// User confirmed — activate the skill
+			s := e.skills.Get(skillName)
+			if s == nil {
+				// Try case-insensitive match
+				for _, sk := range e.skills.All() {
+					if strings.EqualFold(sk.Name, skillName) {
+						s = sk
+						break
+					}
+				}
+			}
+			if s != nil {
+				e.activatedSkills[s.Name] = true
+				e.lastActivatedSkill = s.Name
+				skillMsg := fmt.Sprintf(
+					"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
+					s.Name, s.Content,
+				)
+				e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+				e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "skill_activated",
+						Name:   s.Name,
+						Detail: s.Description,
+					})
+				}
+				msg := fmt.Sprintf("✅ Skill `%s` activated.", s.Name)
+				if zh {
+					msg = fmt.Sprintf("✅ 已激活 skill `%s`。", s.Name)
+				}
+				e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			} else {
+				msg := fmt.Sprintf("Skill '%s' not found. Available skills: /skills", skillName)
+				if zh {
+					msg = fmt.Sprintf("技能 '%s' 不存在。可用技能: /skills", skillName)
+				}
+				e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			}
+		} else {
+			// User said something else — skill activation declined
+			msg := fmt.Sprintf("Skill activation '%s' declined by user.", skillName)
+			if zh {
+				msg = fmt.Sprintf("已取消激活 skill `%s`。", skillName)
+			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+		}
 	}
 
 	// Inject conference context for execute phase
@@ -450,54 +516,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		e.history = append(e.history, Message{Role: "user", Content: planMsg, Timestamp: time.Now()})
 		didExecute = true
-	}
-
-	// Match skills against user message and inject matching skill content.
-	// Skills are methodology templates (debugging, brainstorming, verification)
-	// that shape the agent's approach to the current task.
-	// IMPORTANT: Skills are appended as pinned messages at the END of the messages
-	// array (not mixed into e.history) to preserve the stable prefix cache.
-	if e.skills != nil {
-		matched := e.skills.Match(userMsg)
-		if len(matched) > 0 {
-			// Skip skills already explicitly activated via /skill to avoid duplication
-			var deduped []*skill.Skill
-			for _, s := range matched {
-				if !e.activatedSkills[s.Name] {
-					deduped = append(deduped, s)
-				}
-			}
-			matched = deduped
-		}
-		if len(matched) > 0 {
-			var skillTexts []string
-			for _, s := range matched {
-				skillTexts = append(skillTexts, s.Content)
-			}
-			skillMsg := fmt.Sprintf(
-				"[SKILLS — matched: %s]\n\nThe following methodology templates have been activated for this task. Follow them precisely.\n\n%s",
-				joinSkillNames(matched),
-				strings.Join(skillTexts, "\n\n---\n\n"),
-			)
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-
-			// Store skill content for sub-agent handoff injection
-			e.matchedSkillsContent = fmt.Sprintf(
-				"[SKILLS — %s]\n\n%s",
-				joinSkillNames(matched),
-				strings.Join(skillTexts, "\n\n---\n\n"),
-			)
-
-			if e.config.OnProgress != nil {
-				for _, s := range matched {
-					e.config.OnProgress(ProgressEvent{
-						Type:   "skill_activated",
-						Name:   s.Name,
-						Detail: s.Description,
-					})
-				}
-			}
-		}
 	}
 
 	// Scope is implicitly confirmed when user sends any message

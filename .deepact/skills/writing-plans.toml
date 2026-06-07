@@ -1,6 +1,7 @@
 name = "writing-plans"
 description = "Use when you have a spec or requirements for a multi-step task, before touching code"
 keywords = ["计划", "方案", "规划", "实现计划", "plan", "implementation plan", "任务分解"]
+next_skills = ["executing-plans", "subagent-driven-development"]
 content = """
 # Writing Plans
 

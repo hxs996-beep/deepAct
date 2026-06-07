@@ -24,6 +24,7 @@ type ContextAssembler struct {
 	envInfo            EnvironmentInfo // session-stable env info, built once at startup
 	userLang           string          // detected once from first history, cached for cache stability
 	stableSessionBlock string          // built once from agentsMD + envInfo + userLang, cached for cache stability
+	skillsBlock        string          // built once from skill registry, cached for cache stability
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
@@ -66,6 +67,13 @@ func (a *ContextAssembler) RepoMapContent() string {
 	return ""
 }
 
+// SetSkillsBlock sets the rendered skills list for inclusion in the stable zone.
+// Called once at startup from cmd/run.go after the skill registry is built.
+// The skills block is cached and included as a stable message after Block S.
+func (a *ContextAssembler) SetSkillsBlock(s string) {
+	a.skillsBlock = s
+}
+
 func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Message, toolResults []engine.ToolResult) []engine.ModelMessage {
 	messages := make([]engine.ModelMessage, 0, len(history)+6)
 
@@ -82,7 +90,12 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
-	// Message 3: Repo map — stable for the session → cached ✓
+	// Message 3: Available skills — stable across the session → cached ✓
+	if a.skillsBlock != "" {
+		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
+	}
+
+	// Message 4: Repo map — stable for the session → cached ✓
 	if a.repoMap != nil {
 		mapContent := a.repoMap.Render()
 		if mapContent != "" {
@@ -90,6 +103,27 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 				Role:    "user",
 				Content: "[REPO MAP — use this to locate code before reading files]\n" + mapContent,
 			})
+		}
+	}
+
+	// Message 4: Compressed summary — stable after compression → cached ✓
+	// After FullCompact compression, the compressor replaces all per-turn
+	// AccumulatedBlocks with a single "# Compressed Context" block from
+	// buildCompressedBlock(). We detect that here and place it in the stable
+	// zone (after RepoMap) instead of the volatile tail, preserving cache hits
+	// across compressed sessions. Between compressions, this slot is empty.
+	// History then re-accumulates in the HISTORY ZONE below.
+	var accumulatedTailBlocks []string
+	if state != nil && len(state.AccumulatedBlocks) > 0 {
+		// Check if the blocks are a single compressed summary (post-compression)
+		if len(state.AccumulatedBlocks) == 1 && strings.HasPrefix(state.AccumulatedBlocks[0], "# Compressed Context\n") {
+			messages = append(messages, engine.ModelMessage{
+				Role:    "user",
+				Content: state.AccumulatedBlocks[0],
+			})
+		} else {
+			// Normal per-turn blocks: render in volatile tail
+			accumulatedTailBlocks = state.AccumulatedBlocks
 		}
 	}
 
@@ -118,14 +152,14 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	// Turn summary blocks are only ~50-200 tokens each. They sit after history
 	// in the non-cached tail, which is acceptable since the history cache gains
 	// vastly outweigh the loss of blocks moving out of the prefix.
-	if state != nil && len(state.AccumulatedBlocks) > 0 {
-		for _, block := range state.AccumulatedBlocks {
-			if block != "" {
-				messages = append(messages, engine.ModelMessage{
-					Role:    "user",
-					Content: block,
-				})
-			}
+	// After compression, this section is empty (compressed summary moved to
+	// Message 4 in the stable zone above).
+	for _, block := range accumulatedTailBlocks {
+		if block != "" {
+			messages = append(messages, engine.ModelMessage{
+				Role:    "user",
+				Content: block,
+			})
 		}
 	}
 
@@ -164,11 +198,10 @@ func buildEnvironmentInfo() EnvironmentInfo {
 		wd = ""
 	}
 	return EnvironmentInfo{
-		OS:    runtime.GOOS,
-		Arch:  runtime.GOARCH,
-		CWD:   wd,
-		Model: "",
-		Date:  time.Now().Format("2006-01-02"),
+		OS:   runtime.GOOS,
+		Arch: runtime.GOARCH,
+		CWD:  wd,
+		Date: time.Now().Format("2006-01-02"),
 	}
 }
 
@@ -210,9 +243,11 @@ func formatTaskState(state *engine.TaskState) string {
 }
 
 // FormatTurnBlock builds a concise structured block string for a completed turn.
+// Contains only process-level info (files read/searched, findings) that isn't
+// duplicated in TaskReminder (which covers decisions, modified files, goal).
 // The block is stored in TaskState.AccumulatedBlocks and rendered as a stable
 // prefix message in subsequent turns.
-func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, filesModified []string, markers []string, decisions []string) string {
+func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, markers []string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
 
@@ -226,21 +261,10 @@ func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, fi
 		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
 		hasContent = true
 	}
-	if len(filesModified) > 0 {
-		b.WriteString("Modified: " + strings.Join(filesModified, ", ") + "\n")
-		hasContent = true
-	}
 	if len(markers) > 0 {
 		b.WriteString("Findings:\n")
 		for _, m := range markers {
 			b.WriteString("  - " + m + "\n")
-		}
-		hasContent = true
-	}
-	if len(decisions) > 0 {
-		b.WriteString("Decisions:\n")
-		for _, d := range decisions {
-			b.WriteString("  - " + d + "\n")
 		}
 		hasContent = true
 	}
@@ -253,6 +277,8 @@ func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, fi
 
 // formatTaskStateVolatile returns JSON for the minimal volatile TaskState fields
 // that the model needs for decision-making but aren't available elsewhere.
+// turn_number is omitted because it changes every turn and would break the
+// prefix cache — the model already sees turn context via AccumulatedBlocks.
 // Redundant fields (covered by turn-blocks / reminder) are omitted to keep the
 // cache-missing tail as small as possible.
 func formatTaskStateVolatile(state *engine.TaskState) string {
@@ -260,13 +286,11 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		return ""
 	}
 	volatile := struct {
-		TurnNumber       int                     `json:"turn_number"`
 		ConsecutiveFails int                     `json:"consecutive_failures"`
 		EditScopeFiles   int                     `json:"edit_scope_files"`
 		Conference       *engine.ConferenceState `json:"conference,omitempty"`
 		ParentContext    *engine.ParentBoard     `json:"parent_context,omitempty"`
 	}{
-		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
 		Conference:       state.Conference,

@@ -154,13 +154,22 @@ func parsePackageDir(dir, root string) (*PackageInfo, error) {
 		relDir = "."
 	}
 
-	for name, pkg := range pkgs {
-		if strings.HasSuffix(name, "_test") {
+	// Sort file keys for deterministic iteration — pkg.Files is map[string]*ast.File,
+	// and Go map iteration order is randomized. Without sorting, RepoMap rendering
+	// produces different output between turns, breaking DeepSeek's prefix cache.
+	for _, pk := range pkgs {
+		if strings.HasSuffix(pk.Name, "_test") {
 			continue
 		}
+		name := pk.Name
 		info := &PackageInfo{Name: name, Dir: relDir}
-		for _, file := range pkg.Files {
-			extractDecls(file, info)
+		sortedFiles := make([]string, 0, len(pk.Files))
+		for fname := range pk.Files {
+			sortedFiles = append(sortedFiles, fname)
+		}
+		sort.Strings(sortedFiles)
+		for _, fname := range sortedFiles {
+			extractDecls(pk.Files[fname], info)
 		}
 		return info, nil
 	}

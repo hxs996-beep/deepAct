@@ -11,18 +11,22 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
-	"github.com/deepact/deepact/artifact"
 	"github.com/deepact/deepact/tools"
 )
 
 const (
 	maxReadBytes    = 1 << 20 // 1MB safety cap — refuse to read larger files
-	maxDigestLines  = 500     // lines returned inline; beyond this goes to artifact
-	digestThreshold = 2000    // bytes: small files under this skip artifact entirely
+	maxReadTokens   = 25000   // max tokens to return inline; beyond this → truncate with offset/limit hint
+	charsPerToken   = 4       // rough estimate: 4 chars ≈ 1 token for code
+
+	fileUnchangedStub = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
 )
 
-type ReadTool struct{}
+type ReadTool struct {
+	mtimeCache sync.Map // absPath → mtimeMs (int64)
+}
 
 func NewReadTool() *ReadTool {
 	return &ReadTool{}
@@ -31,7 +35,7 @@ func NewReadTool() *ReadTool {
 func (t *ReadTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "read",
-		Description: "Read a text file with line numbers. Reads the ENTIRE file by default (up to 1MB). For large files, full content is stored in artifact and the first 500 lines are shown inline. Use 'symbol' to extract a named Go declaration.",
+		Description: "Read a file from the local filesystem. Returns up to ~25000 tokens inline; larger files are truncated with guidance to use offset/limit for specific sections. Use 'symbol' to extract a named Go declaration. If the file hasn't changed since the last read, a stub is returned and you should refer to the earlier content in conversation history.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"symbol":{"type":"string","description":"Name of Go symbol to read (function/type/struct/variable/constant). Works only for .go files. When set, offset/limit are ignored."},"offset":{"type":"integer","description":"Starting line number (1-based)"},"limit":{"type":"integer","description":"Max lines to read"}},"required":["path"]}`),
 	}
 }
@@ -59,32 +63,38 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
 	}
 
-	// Symbol mode: extract semantic code block via Go AST
+	// Symbol mode: extract semantic code block via Go AST (always small, no mtime check needed)
 	if payload.Symbol != "" && strings.HasSuffix(safePath, ".go") {
 		content, symErr := readSymbol(safePath, payload.Symbol)
 		if symErr != nil {
 			return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: symErr.Error()}, symErr
 		}
 		lineCount := strings.Count(content, "\n")
-		digest := fmt.Sprintf("symbol %s (%d lines)\n%s", payload.Symbol, lineCount, content)
-		return truncateOrStore(digest, ctx.ArtifactDir)
+		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: fmt.Sprintf("symbol %s (%d lines)\n%s", payload.Symbol, lineCount, content)}, nil
 	}
 
-	// Read the entire file (up to 1MB safety cap).
-	// Large files: full content → artifact, first 500 lines shown inline.
-	file, err := os.Open(safePath)
-	if err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("open file: %v", err)}, err
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
+	info, err := os.Stat(safePath)
 	if err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("stat file: %v", err)}, err
 	}
 	if info.Size() > maxReadBytes {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))}, nil
 	}
+
+	// Mtime cache: if file unchanged since last full read, return stub
+	if payload.Offset == 0 && payload.Limit == 0 {
+		if cachedMtime, ok := t.mtimeCache.Load(safePath); ok {
+			if cachedMtime == info.ModTime().UnixMilli() {
+				return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: fileUnchangedStub}, nil
+			}
+		}
+	}
+
+	file, err := os.Open(safePath)
+	if err != nil {
+		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("open file: %v", err)}, err
+	}
+	defer file.Close()
 
 	if err := detectBinary(file); err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
@@ -94,11 +104,12 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("seek file: %v", err)}, err
 	}
 
-	// Read all lines with numbering
+	// Read lines with numbering, respecting offset + limit
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var builder strings.Builder
 	lineNum := 0
+	readLimit := payload.Limit
 	offset := payload.Offset
 	if offset < 1 {
 		offset = 1
@@ -107,6 +118,9 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		lineNum++
 		if lineNum < offset {
 			continue
+		}
+		if readLimit > 0 && lineNum >= offset+readLimit {
+			break
 		}
 		builder.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
 	}
@@ -118,7 +132,37 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	if content == "" {
 		content = "(empty)"
 	}
-	return truncateOrStore(content, ctx.ArtifactDir)
+
+	// Update mtime cache only for full reads (no offset/limit)
+	if payload.Offset == 0 && payload.Limit == 0 {
+		t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
+	}
+
+	// Token-based truncation: if estimated tokens exceed limit, truncate at last complete line
+	estimatedTokens := len(content) / charsPerToken
+	if estimatedTokens <= maxReadTokens {
+		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content}, nil
+	}
+
+	truncated := truncateByChars(content, maxReadTokens*charsPerToken)
+	truncatedLines := strings.Count(truncated, "\n")
+	digest := fmt.Sprintf("%s\n[... truncated at %d lines (~%d tokens out of ~%d estimated). Use offset/limit to read specific sections.]",
+		truncated, truncatedLines, maxReadTokens, estimatedTokens)
+	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest}, nil
+}
+
+// truncateByChars returns content up to maxChars, stopping at the last complete line.
+func truncateByChars(content string, maxChars int) string {
+	if len(content) <= maxChars {
+		return content
+	}
+	// Find the last newline before maxChars
+	cut := strings.LastIndex(content[:maxChars], "\n")
+	if cut < 0 {
+		// No newline in the first maxChars chars — return empty with a hint
+		return ""
+	}
+	return content[:cut]
 }
 
 func detectBinary(file *os.File) error {
@@ -227,41 +271,4 @@ func readLineRange(path string, startLine, endLine int) (string, error) {
 		return "", fmt.Errorf("empty result for lines %d-%d in %s", startLine, endLine, path)
 	}
 	return result, nil
-}
-
-// truncateOrStore returns the content inline if small enough,
-// otherwise stores the full content in the artifact store and returns a truncated digest.
-func truncateOrStore(content, artifactDir string) (tools.ToolResultEnvelope, error) {
-	// Small content: return inline
-	if len(content) <= digestThreshold {
-		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content}, nil
-	}
-
-	lines := strings.Split(content, "\n")
-	if len(lines) <= maxDigestLines {
-		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content}, nil
-	}
-
-	// Large content: try artifact store first
-	if artifactDir != "" {
-		store, err := artifact.New(artifactDir)
-		if err == nil {
-			ref, _, storeErr := store.StoreWithRedaction([]byte(content))
-			if storeErr == nil {
-				// Return truncated digest with reference
-				truncated := strings.Join(lines[:maxDigestLines], "\n")
-				digest := fmt.Sprintf("%s\n[... truncated at %d lines, full content in artifact: %s]", truncated, maxDigestLines, ref)
-				return tools.ToolResultEnvelope{
-					Status:      tools.StatusOK,
-					Digest:      digest,
-					ArtifactRef: ref,
-				}, nil
-			}
-		}
-	}
-
-	// Fallback: truncate without artifact
-	truncated := strings.Join(lines[:maxDigestLines], "\n")
-	digest := fmt.Sprintf("%s\n[... truncated at %d lines, use offset/limit to read more]", truncated, maxDigestLines)
-	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest}, nil
 }

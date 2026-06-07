@@ -16,7 +16,10 @@ import (
 
 var debugLog = dlog.New("[llm] ")
 
-const deepSeekEndpoint = "https://api.deepseek.com/chat/completions"
+const (
+	DefaultDeepSeekEndpoint = "https://api.deepseek.com/chat/completions"
+	DefaultOpenRouterURL    = "https://openrouter.ai/api/v1"
+)
 
 var errSSEDone = errors.New("sse done")
 
@@ -31,6 +34,13 @@ type DeepSeekClient struct {
 }
 
 func NewDeepSeekClient(apiKey string, httpClient *http.Client, limiter *AdaptiveLimiter, retry RetryPolicy, estimator *TokenEstimator) *DeepSeekClient {
+	return NewDeepSeekClientWithEndpoint(DefaultDeepSeekEndpoint, apiKey, httpClient, limiter, retry, estimator)
+}
+
+// NewDeepSeekClientWithEndpoint creates a DeepSeekClient with a custom endpoint URL.
+// For OpenRouter, pass "https://openrouter.ai/api/v1" as baseURL — it replaces the
+// default DeepSeek endpoint and configures OpenRouter-specific headers.
+func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Client, limiter *AdaptiveLimiter, retry RetryPolicy, estimator *TokenEstimator) *DeepSeekClient {
 	if httpClient == nil {
 		// No hard timeout on the HTTP client — streaming LLM responses can take
 		// several minutes (thinking + generation). Context cancellation from the
@@ -46,15 +56,36 @@ func NewDeepSeekClient(apiKey string, httpClient *http.Client, limiter *Adaptive
 	if estimator == nil {
 		estimator = NewTokenEstimator()
 	}
+	endpoint := baseURL + "/chat/completions"
+	if strings.HasSuffix(baseURL, "/chat/completions") {
+		endpoint = baseURL
+	}
 	return &DeepSeekClient{
 		apiKey:       apiKey,
-		endpoint:     deepSeekEndpoint,
+		endpoint:     endpoint,
 		http:         httpClient,
 		limiter:      limiter,
 		retry:        retry,
 		estimator:    estimator,
 		reasoningMgr: NewReasoningEchoManager(),
 	}
+}
+
+// isOpenRouterKey returns true if the API key is an OpenRouter key (starts with "sk-or-v1-")
+func isOpenRouterKey(apiKey string) bool {
+	return strings.HasPrefix(apiKey, "sk-or-v1-")
+}
+
+// DetectBaseURL picks the API base URL based on the key prefix and configured BaseURL.
+// If a baseURL is explicitly configured, it takes priority over key-based detection.
+func DetectBaseURL(configuredBaseURL, apiKey string) string {
+	if configuredBaseURL != "" {
+		return configuredBaseURL
+	}
+	if isOpenRouterKey(apiKey) {
+		return DefaultOpenRouterURL
+	}
+	return DefaultDeepSeekEndpoint
 }
 
 func (c *DeepSeekClient) Stream(ctx context.Context, req ChatRequest) (<-chan Chunk, error) {
@@ -132,6 +163,11 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	// OpenRouter-specific headers (recommended for identification/tracking)
+	if strings.Contains(c.endpoint, "openrouter.ai") {
+		httpReq.Header.Set("HTTP-Referer", "https://github.com/deepact/deepact")
+		httpReq.Header.Set("X-Title", "DeepAct")
+	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return 0, fmt.Errorf("send request: %w", classifyContextError(err))
@@ -185,27 +221,32 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 }
 
 // validateReasoningEcho is a pre-flight check that runs after ApplyEcho.
-// It scans all assistant messages with tool_calls to ensure every one has
-// non-empty ReasoningContent. If any are missing, it attempts recovery using
-// the manager's lastReasoning or a fallback placeholder "..".
-// This prevents sending messages that would trigger a 400 from DeepSeek API.
+// It only scans the LAST assistant message with tool_calls for missing
+// ReasoningContent — never modifies history messages, preserving their
+// stable JSON serialization for prefix cache hits.
+// If missing, it attempts recovery using the manager's lastReasoning
+// or a fallback placeholder ".." to prevent a 400 from DeepSeek API.
 func (c *DeepSeekClient) validateReasoningEcho(msgs []Message) []Message {
 	var fixed bool
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) > 0 && msgs[i].ReasoningContent == "" {
+		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) > 0 {
+			if msgs[i].ReasoningContent != "" {
+				break // found last assistant with tool_calls AND reasoning OK
+			}
 			// Try manager's lastReasoning first
 			if c.reasoningMgr != nil {
 				if pending, ok := c.reasoningMgr.PendingEcho(); ok {
 					debugLog.Printf("pre-flight fix: filling reasoning_content (from manager) at msgs[%d]", i)
 					msgs[i].ReasoningContent = pending
 					fixed = true
-					continue
+					break
 				}
 			}
 			// Fallback: use ".." placeholder to prevent 400
 			debugLog.Printf("pre-flight fix: filling reasoning_content (placeholder) at msgs[%d]", i)
 			msgs[i].ReasoningContent = ".."
 			fixed = true
+			break
 		}
 	}
 	if fixed {

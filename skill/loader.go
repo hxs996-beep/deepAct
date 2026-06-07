@@ -15,6 +15,7 @@ type SkillFile struct {
 	Description string   `toml:"description"`
 	Keywords    []string `toml:"keywords"`
 	Content     string   `toml:"content"`
+	NextSkills  []string `toml:"next_skills"`
 }
 
 // LoadExternalSkills loads skill definitions from TOML files in the given
@@ -51,6 +52,7 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 			Description: sf.Description,
 			Keywords:    sf.Keywords,
 			Content:     sf.Content,
+			NextSkills:  sf.NextSkills,
 		})
 	}
 	return skills, nil

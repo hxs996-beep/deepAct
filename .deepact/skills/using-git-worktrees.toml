@@ -1,6 +1,7 @@
 name = "using-git-worktrees"
 description = "Use when starting feature work that needs isolation from current workspace or before executing implementation plans"
 keywords = ["worktree", "工作树", "隔离", "分支开发", "git", "分支"]
+next_skills = ["subagent-driven-development", "executing-plans"]
 content = """
 # Using Git Worktrees
 

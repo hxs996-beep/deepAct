@@ -1,6 +1,7 @@
 name = "brainstorming"
 description = "Use when before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
 keywords = ["设计", "实现", "开发", "创建", "添加", "增加", "搭建", "重构", "改造", "方案", "build", "create", "add", "implement", "design"]
+next_skills = ["writing-plans"]
 content = """
 # Brainstorming Ideas Into Designs
 
@@ -131,7 +132,8 @@ Wait for the user's response. If they request changes, make them and re-run the 
 
 **Implementation:**
 
-- Invoke the writing-plans skill to create a detailed implementation plan
+- Use the `activate_skill` tool to suggest activating the writing-plans skill for creating a detailed implementation plan
+- The engine will ask the user for confirmation before activating
 - Do NOT invoke any other skill. writing-plans is the next step.
 
 ## Key Principles

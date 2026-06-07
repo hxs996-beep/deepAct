@@ -149,11 +149,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		Timestamp:        time.Now(),
 	}
 	// Extract explicit memory markers from model output (both content and reasoning)
+	// Dedup: skip markers already in MemoryMarkers to prevent the same finding
+	// being repeated 20+ times across turns (which bloats AccumulatedBlocks).
 	if markers := extractRememberMarkers(content); len(markers) > 0 {
-		e.state.MemoryMarkers = append(e.state.MemoryMarkers, markers...)
+		e.state.MemoryMarkers = appendUniqMarkers(e.state.MemoryMarkers, markers...)
 	}
 	if markers := extractRememberMarkers(reasoning); len(markers) > 0 {
-		e.state.MemoryMarkers = append(e.state.MemoryMarkers, markers...)
+		e.state.MemoryMarkers = appendUniqMarkers(e.state.MemoryMarkers, markers...)
 	}
 
 	if !hasValidToolCalls(toolCalls) {
@@ -283,6 +285,89 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			return TurnResult{Blocked: true, BlockedBy: scopeAction.Type, Questions: []string{scopeAction.Message}}, nil
 		}
 	}
+
+	// Check for activate_skill tool call — intercept and auto-activate if in skill chain
+	for _, call := range calls {
+		if call.Name == ActivateSkillToolName {
+			var params ActivateSkillParams
+			if err := json.Unmarshal(call.Input, &params); err != nil {
+				continue
+			}
+			if params.SkillName == "" {
+				continue
+			}
+
+			// Check if this skill is in the auto-activation chain (NextSkills of lastActivatedSkill)
+			isChainTransition := false
+			if e.lastActivatedSkill != "" {
+				if lastSkill := e.skills.Get(e.lastActivatedSkill); lastSkill != nil {
+					for _, ns := range lastSkill.NextSkills {
+						if strings.EqualFold(ns, params.SkillName) {
+							isChainTransition = true
+							break
+						}
+					}
+				}
+			}
+
+			if isChainTransition {
+				// Auto-activate: skill chain transition, no user confirmation needed
+				s := e.skills.Get(params.SkillName)
+				if s != nil {
+					prevSkill := e.lastActivatedSkill
+					e.activatedSkills[s.Name] = true
+					e.lastActivatedSkill = s.Name
+					skillMsg := fmt.Sprintf(
+						"[SKILL ACTIVATED: %s] (auto, chain: %s → %s)\n\n%s",
+						s.Name, prevSkill, s.Name, s.Content,
+					)
+					// Store as pending pinned message to inject at end of this turn
+					e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+					e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+					if e.config.OnProgress != nil {
+						e.config.OnProgress(ProgressEvent{
+							Type:   "skill_activated",
+							Name:   s.Name,
+							Detail: s.Description + " (auto chain)",
+						})
+					}
+					// Record in history so the chain transition is visible
+					e.history = append(e.history, Message{
+						Role:      "tool",
+						ToolCallID: call.ID,
+						Content:   fmt.Sprintf("✅ Auto-activated skill `%s` (chain: %s → %s)", s.Name, e.lastActivatedSkill, s.Name),
+						Timestamp: time.Now(),
+					})
+				}
+				continue
+			}
+
+			// Not in chain — require user confirmation
+			e.state.PendingActivateSkill = params.SkillName
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				reasoning := params.Reasoning
+				if reasoning == "" {
+					reasoning = fmt.Sprintf("建议激活 skill `%s`", params.SkillName)
+				}
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Suggestion: " + reasoning,
+					Timestamp:  time.Now(),
+				})
+			}
+			zh := msgIsChinese(e.history[0].Content)
+			var question string
+			if zh {
+				question = fmt.Sprintf("💡 模型建议激活 skill **`%s`**。%s\n\n是否确认？", params.SkillName, params.Reasoning)
+			} else {
+				question = fmt.Sprintf("💡 The model suggests activating skill **`%s`**. %s\n\nConfirm?", params.SkillName, params.Reasoning)
+			}
+			return TurnResult{Blocked: true, BlockedBy: "activate_skill", Questions: []string{question}}, nil
+		}
+	}
+
 	e.history = append(e.history, assistant)
 
 	// Separate handoff calls from regular tool calls
@@ -348,33 +433,18 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	return result, nil
 }
 
-// selectModel builds a RouteContext from the current TaskState and delegates
-// to the router. Falls back to Pro model if no router is configured.
+// selectModel always returns the configured primary model.
+// Model routing is disabled to ensure a stable model field across turns,
+// which is required for DeepSeek's per-model prefix cache to work.
 func (e *Engine) selectModel() string {
-	if e.router == nil || e.state == nil {
-		return e.config.ModelName
-	}
-
-	// IsReadOnly: true when no files have been modified and scope is not confirmed
-	// (i.e., we're still exploring/reading, not actively editing).
-	isReadOnly := e.state.EditScopeFiles == 0 && !e.state.ConfirmedScope
-
-	ctx := RouteContext{
-		IsReadOnly:       isReadOnly,
-		ToolFailureCount: e.state.ConsecutiveFailures,
-		EditScopeFiles:   e.state.EditScopeFiles,
-		ConsecutiveFails: e.state.ConsecutiveFailures,
-	}
-
-	decision := e.router.SelectModel(ctx)
-	turnLog.Printf("router: %s (reason: %s)", decision.Model, decision.Reasoning)
-	return decision.Model
+	return e.config.ModelName
 }
 
-// toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent tool appended.
+// toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and activate_skill tools appended.
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
 	specs = append(specs, handoffToolSpec())
+	specs = append(specs, activateSkillToolSpec())
 	return specs
 }
 
@@ -568,6 +638,7 @@ func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 // accumulateTurnBlock collects files read/searched this turn and appends a
 // turn-block to AccumulatedBlocks. This moves per-turn discoveries into the
 // cacheable prefix, reducing dependency on the volatile history tail.
+// MemoryMarkers dedup: only writes markers added since the last accumulation.
 func (e *Engine) accumulateTurnBlock(regularCalls []ToolCallRequest) {
 	var filesRead []string
 	var filesSearched []string
@@ -588,54 +659,50 @@ func (e *Engine) accumulateTurnBlock(regularCalls []ToolCallRequest) {
 		}
 	}
 
+	// Only write newly-added markers since last accumulation.
+	var newMarkers []string
+	if e.state != nil && len(e.state.MemoryMarkers) > e.lastMarkerCount {
+		newMarkers = e.state.MemoryMarkers[e.lastMarkerCount:]
+		e.lastMarkerCount = len(e.state.MemoryMarkers)
+	}
+
 	block := formatTurnBlock(
 		e.state.TurnNumber,
 		filesRead,
 		filesSearched,
-		e.state.ModifiedFiles,
-		e.state.MemoryMarkers,
-		nil,
+		newMarkers,
 	)
 	if block != "" {
 		e.state.AccumulatedBlocks = append(e.state.AccumulatedBlocks, block)
+		// Keep only the last 3 blocks to prevent the cache-miss tail
+		// from growing unboundedly. Older blocks are subsumed by history.
+		if len(e.state.AccumulatedBlocks) > 3 {
+			e.state.AccumulatedBlocks = e.state.AccumulatedBlocks[len(e.state.AccumulatedBlocks)-3:]
+		}
 	}
 }
 
 // formatTurnBlock builds a concise structured block string for a completed turn.
 // Inlined to avoid import cycle with the context package.
-func formatTurnBlock(turnNum int, filesRead []string, filesSearched []string, filesModified []string, markers []string, decisions []string) string {
+// Includes filesRead so the model can see what files it already studied
+// in previous turns and avoid re-reading them from scratch.
+func formatTurnBlock(turnNum int, filesRead []string, filesSearched []string, markers []string) string {
+	if len(markers) == 0 && len(filesRead) == 0 && len(filesSearched) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
-
-	hasContent := false
 	if len(filesRead) > 0 {
 		b.WriteString("Read: " + strings.Join(filesRead, ", ") + "\n")
-		hasContent = true
 	}
 	if len(filesSearched) > 0 {
 		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
-		hasContent = true
-	}
-	if len(filesModified) > 0 {
-		b.WriteString("Modified: " + strings.Join(filesModified, ", ") + "\n")
-		hasContent = true
 	}
 	if len(markers) > 0 {
 		b.WriteString("Findings:\n")
 		for _, m := range markers {
 			b.WriteString("  - " + m + "\n")
 		}
-		hasContent = true
-	}
-	if len(decisions) > 0 {
-		b.WriteString("Decisions:\n")
-		for _, d := range decisions {
-			b.WriteString("  - " + d + "\n")
-		}
-		hasContent = true
-	}
-	if !hasContent {
-		return ""
 	}
 	return b.String()
 }
@@ -688,6 +755,24 @@ func contentSignature(input json.RawMessage) string {
 	combined := strings.Join(parts, "&")
 	h := sha256.Sum256([]byte(combined))
 	return fmt.Sprintf("%x", h[:4])
+}
+
+// appendUniqMarkers appends markers that aren't already in the list,
+// preventing the same finding from being accumulated 20+ times.
+func appendUniqMarkers(existing []string, markers ...string) []string {
+	for _, m := range markers {
+		found := false
+		for _, e := range existing {
+			if e == m {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, m)
+		}
+	}
+	return existing
 }
 
 func containsString(slice []string, s string) bool {

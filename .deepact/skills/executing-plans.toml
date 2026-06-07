@@ -1,6 +1,7 @@
 name = "executing-plans"
 description = "Use when you have a written implementation plan to execute in a separate session with review checkpoints"
 keywords = ["执行计划", "实现计划", "实施方案", "按计划", "plan", "execute", "implementation"]
+next_skills = ["finishing-a-development-branch"]
 content = """
 # Executing Plans
 

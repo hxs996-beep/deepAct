@@ -1,6 +1,7 @@
 name = "subagent-driven-development"
 description = "Use when executing implementation plans with independent tasks in the current session"
 keywords = ["子代理", "Subagent", "分任务", "代理开发", "subagent", "并行开发"]
+next_skills = ["finishing-a-development-branch"]
 content = """
 # Subagent-Driven Development
 

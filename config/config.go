@@ -22,6 +22,8 @@ type File struct {
 type modelConfig struct {
 	Default    string `toml:"default"`
 	Escalation string `toml:"escalation"`
+	Provider   string `toml:"provider"`   // "deepseek" or "openrouter"
+	BaseURL    string `toml:"base_url"`   // overrides provider if set
 }
 
 type routingConfig struct {
@@ -90,6 +92,12 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	if f.Model.Escalation != "" {
 		cfg.ModelName = f.Model.Escalation
 	}
+	if f.Model.Provider != "" && f.Model.BaseURL == "" {
+		cfg.BaseURL = resolveProviderURL(f.Model.Provider)
+	}
+	if f.Model.BaseURL != "" {
+		cfg.BaseURL = f.Model.BaseURL
+	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens
 	}
@@ -103,4 +111,15 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 
 type uiConfig struct {
 	// Placeholder for future UI configuration (e.g., theme, font size).
+}
+
+func resolveProviderURL(provider string) string {
+	switch provider {
+	case "openrouter":
+		return "https://openrouter.ai/api/v1"
+	case "deepseek":
+		return "https://api.deepseek.com/chat/completions"
+	default:
+		return ""
+	}
 }

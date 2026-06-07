@@ -6,9 +6,11 @@
 # Default model for routine tasks (cheaper, faster)
 default = "deepseek-v4-flash"
 # Escalation model for complex/risky tasks
-escalation = "deepseek-v4-pro"
-# API endpoint (OpenAI-compatible)
-api_base = "https://api.deepseek.com"
+escalation = "deepseek-v4-flash"
+# API provider: "deepseek" | "openrouter"
+provider = "deepseek"
+# API base URL (overrides provider if set)
+base_url = ""
 # API key loaded from env: DEEPSEEK_API_KEY
 
 [routing]

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,7 +32,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	var runner ui.EngineRunner
 	var pricing engine.PricingConfig
 	if apiKey != "" {
-		engineRunner, p, buildErr := buildRunner(apiKey)
+		engineRunner, p, buildErr := buildRunner()
 		if buildErr != nil {
 			return buildErr
 		}
@@ -40,7 +41,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	}
 
 	ui.SetEngineFactory(func(key string) (ui.EngineRunner, error) {
-		r, _, err := buildRunner(key)
+		r, _, err := buildRunner()
 		return r, err
 	})
 
@@ -65,8 +66,8 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	model := ui.NewModel(runner, pricing)
 	model.SetSkillSuggestions(externalSkillSuggestions)
-	// On Windows, skip WithMouseCellMotion so native text selection works.
-	// Mouse tracking captures all mouse events, preventing terminal-level text selection.
+	// Mouse wheel scrolling via WithMouseCellMotion.
+	// Hold Shift while dragging for native terminal text selection (SGR mouse protocol).
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
@@ -75,10 +76,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func buildRunner(apiKey string) (ui.EngineRunner, engine.PricingConfig, error) {
-	if err := storeAPIKey(apiKey); err != nil {
-		return nil, engine.PricingConfig{}, fmt.Errorf("store api key: %w", err)
-	}
+func buildRunner() (ui.EngineRunner, engine.PricingConfig, error) {
 	config, deps, err := buildEngineDeps()
 	if err != nil {
 		return nil, engine.PricingConfig{}, err
@@ -94,7 +92,7 @@ func buildRunner(apiKey string) (ui.EngineRunner, engine.PricingConfig, error) {
 // model can show them in the /-completion popup without importing the skill package.
 var externalSkillSuggestions []ui.Suggestion
 
-// buildSkillSuggestions extracts external skills from the registry and stores
+// buildSkillSuggestions extracts skills from the registry and stores
 // them as Suggestion objects for the UI slash-completion popup.
 func buildSkillSuggestions(reg *skill.Registry) {
 	all := reg.All()
@@ -104,9 +102,7 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	// built-in skills (registered first) when names conflict.
 	for i := len(all) - 1; i >= 0; i-- {
 		s := all[i]
-		// Skip built-in skills that users shouldn't need to manually activate,
-		// since they auto-match from keywords in the default system prompt.
-		if seen[s.Name] || s.Name == "debugging" || s.Name == "verification" {
+		if seen[s.Name] {
 			continue
 		}
 		seen[s.Name] = true
@@ -115,6 +111,53 @@ func buildSkillSuggestions(reg *skill.Registry) {
 			Description: s.Description,
 		})
 	}
+}
+
+// buildSkillsBlock renders all registered skills as a stable system prompt block.
+// Format includes skill chains via next_skills for auto-activation.
+func buildSkillsBlock(all []*skill.Skill) string {
+	if len(all) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Available Skills\n")
+	b.WriteString("Type /<skillname> (e.g., /tdd) to activate a skill's full methodology. Otherwise, use these as guidance for how to approach the task.\n\n")
+
+	// First, render skill chains
+	b.WriteString("### Skill Chains\n")
+	b.WriteString("When one skill completes, the next skill in its chain auto-activates:\n")
+	seen := make(map[string]bool)
+	for i := len(all) - 1; i >= 0; i-- {
+		s := all[i]
+		if seen[s.Name] {
+			continue
+		}
+		seen[s.Name] = true
+		if len(s.NextSkills) > 0 {
+			nextList := make([]string, len(s.NextSkills))
+			for j, ns := range s.NextSkills {
+				nextList[j] = "`" + ns + "`"
+			}
+			b.WriteString(fmt.Sprintf("- **`/%s`** → %s\n", s.Name, strings.Join(nextList, " or ")))
+		}
+	}
+
+	// Then, render full list with descriptions
+	b.WriteString("\n### Skill Reference\n")
+	seen = make(map[string]bool)
+	for i := len(all) - 1; i >= 0; i-- {
+		s := all[i]
+		if seen[s.Name] {
+			continue
+		}
+		seen[s.Name] = true
+		chain := ""
+		if len(s.NextSkills) > 0 {
+			chain = " → " + strings.Join(s.NextSkills, ", ")
+		}
+		b.WriteString(fmt.Sprintf("- `/%s`: %s%s\n", s.Name, s.Description, chain))
+	}
+	return b.String()
 }
 
 func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
@@ -132,7 +175,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	config.SessionID = fmt.Sprintf("session-%d", time.Now().UnixNano())
 
 	estimator := llm.NewTokenEstimator()
-	client, err := buildModelClient(estimator)
+	client, err := buildModelClient(estimator, config.BaseURL)
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
@@ -169,7 +212,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 
 	// Initialize skill registry with built-in methodology skills
-	skillReg := skill.NewRegistry(0.45)
+	skillReg := skill.NewRegistry()
 	skill.RegisterBuiltinSkills(skillReg)
 
 	// Load external skills from .deepact/skills/ directories.
@@ -195,6 +238,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		}
 	}
 
+	// Build rendered skills list for stable system prompt block
+	skillsBlock := buildSkillsBlock(skillReg.All())
+	contextAssembler.SetSkillsBlock(skillsBlock)
+
 	// Create model router for Pro/Flash routing decisions
 	routing := router.NewRouter(config.RiskThreshold)
 	if config.ModelName != "" {
@@ -218,14 +265,16 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	return config, deps, nil
 }
 
-func buildModelClient(estimator *llm.TokenEstimator) (*llm.EngineClient, error) {
+func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.EngineClient, error) {
 	apiKey, err := loadAPIKey()
 	if err != nil {
 		return nil, fmt.Errorf("API key: %w", err)
 	}
-	client := llm.NewDeepSeekClient(apiKey, nil, nil, llm.DefaultRetryPolicy(), estimator)
+	endpoint := llm.DetectBaseURL(baseURL, apiKey)
+	client := llm.NewDeepSeekClientWithEndpoint(endpoint, apiKey, nil, nil, llm.DefaultRetryPolicy(), estimator)
 	return llm.NewEngineClient(client), nil
 }
+
 
 func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewReadTool())
@@ -239,24 +288,53 @@ func registerBuiltinTools(registry *tools.Registry) {
 }
 
 func defaultEngineConfig() engine.EngineConfig {
+	env := os.Getenv("DEEPACT_ENV")
+	devMode := env == "dev" || env == "development"
+
+	if devMode {
+		return engine.EngineConfig{
+			ModelName:              "deepseek/deepseek-chat",
+			FlashModelName:         "deepseek/deepseek-chat",
+			BaseURL:                llm.DefaultOpenRouterURL,
+			MaxTurns:               999,
+			MaxIterationsPerTurn:   15,
+			MaxContextTokens:       1048576,
+			PlanningEnabled:        true,
+			PlanningThresholdChars: 120,
+			AutoConfirmScope:       false,
+			ConferenceEnabled:      false,
+			RiskThreshold:          0.55,
+			Pricing: engine.PricingConfig{
+				Models: map[string]engine.ModelPricing{
+					"deepseek/deepseek-chat": {
+						InputPricePerToken:         0.000001,
+						OutputPricePerToken:        0.000002,
+						CacheHitInputPricePerToken: 0.0000005,
+					},
+				},
+				Default: engine.ModelPricing{
+					InputPricePerToken:         0.000001,
+					OutputPricePerToken:        0.000002,
+					CacheHitInputPricePerToken: 0.0000005,
+				},
+			},
+		}
+	}
+
 	return engine.EngineConfig{
-		ModelName:              "deepseek-v4-pro",
+		ModelName:              "deepseek-v4-flash",
 		FlashModelName:         "deepseek-v4-flash",
+		BaseURL:                llm.DefaultDeepSeekEndpoint,
 		MaxTurns:               999,
 		MaxIterationsPerTurn:   15,
 		MaxContextTokens:       1048576,
 		PlanningEnabled:        true,
 		PlanningThresholdChars: 120,
-		AutoConfirmScope:       false, // scope guard now actually prompts user before destructive edits
-		ConferenceEnabled:      true,
+		AutoConfirmScope:       false,
+		ConferenceEnabled:      false,
 		RiskThreshold:          0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{
-				"deepseek-v4-pro": {
-					InputPricePerToken:         0.000003,
-					OutputPricePerToken:        0.000006,
-					CacheHitInputPricePerToken: 0.000000025,
-				},
 				"deepseek-v4-flash": {
 					InputPricePerToken:         0.000001,
 					OutputPricePerToken:        0.000002,
@@ -264,9 +342,9 @@ func defaultEngineConfig() engine.EngineConfig {
 				},
 			},
 			Default: engine.ModelPricing{
-				InputPricePerToken:         0.000003,
-				OutputPricePerToken:        0.000006,
-				CacheHitInputPricePerToken: 0.000000025,
+				InputPricePerToken:         0.000001,
+				OutputPricePerToken:        0.000002,
+				CacheHitInputPricePerToken: 0.00000002,
 			},
 		},
 	}

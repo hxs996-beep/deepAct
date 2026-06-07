@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"os/exec"
-	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -304,7 +302,6 @@ const (
 	ActionCursorRight
 	ActionCursorHome
 	ActionCursorEnd
-	ActionCopySelected
 )
 
 // InputBuffer manages the text input state: text buffer, cursor, and selection.
@@ -312,18 +309,13 @@ type InputBuffer struct {
 	text   []rune
 	cursor int
 
-	// Selection / drag state
-	selStart int // -1 = no active selection
-	selEnd   int
-	dragging bool
-
 	// Pasting is set true while bracketed paste is active so that
 	// pasted newlines insert \n rather than triggering submit.
 	Pasting bool
 }
 
 func NewInputBuffer() *InputBuffer {
-	return &InputBuffer{selStart: -1}
+	return &InputBuffer{}
 }
 
 func (ib *InputBuffer) Value() string {
@@ -333,7 +325,6 @@ func (ib *InputBuffer) Value() string {
 func (ib *InputBuffer) SetValue(s string) {
 	ib.text = []rune(s)
 	ib.cursor = len(ib.text)
-	ib.clearSelection()
 }
 
 func (ib *InputBuffer) Cursor() int {
@@ -344,10 +335,7 @@ func (ib *InputBuffer) Len() int {
 	return len(ib.text)
 }
 
-func (ib *InputBuffer) clearSelection() {
-	ib.selStart = -1
-	ib.selEnd = -1
-}
+
 
 func (ib *InputBuffer) clampCursor() {
 	if ib.cursor < 0 {
@@ -376,22 +364,18 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	case msg.Type == tea.KeyEnter && !msg.Alt:
 		if ib.Pasting {
 			// During bracketed paste, newlines are literal content
-			ib.clearSelection()
 			ib.insertAtCursor('\n')
 			return ActionNewline
 		}
 		// Plain Enter -> submit
-		ib.clearSelection()
 		return ActionSubmit
 
 	case msg.Type == tea.KeyEnter && msg.Alt:
 		// Option/Alt+Enter -> newline (Mac Option key = Alt in terminals)
-		ib.clearSelection()
 		ib.insertAtCursor('\n')
 		return ActionNewline
 
 	case msg.Type == tea.KeyBackspace:
-		ib.clearSelection()
 		if ib.cursor > 0 {
 			ib.text = append(ib.text[:ib.cursor-1], ib.text[ib.cursor:]...)
 			ib.cursor--
@@ -399,7 +383,6 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		return ActionBackspace
 
 	case msg.Type == tea.KeyDelete:
-		ib.clearSelection()
 		if ib.cursor < len(ib.text) {
 			ib.text = append(ib.text[:ib.cursor], ib.text[ib.cursor+1:]...)
 		}
@@ -426,7 +409,6 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		return ActionCursorEnd
 
 	case msg.Type == tea.KeyRunes:
-		ib.clearSelection()
 		// Filter out control characters and escape sequences that leak from
 		// terminal responses (e.g., OSC 11 color query, SGR mouse events) that
 		// Bubble Tea doesn't fully intercept as typed messages.
@@ -456,7 +438,6 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		return ActionNone
 
 	case msg.Type == tea.KeySpace:
-		ib.clearSelection()
 		ib.insertAtCursor(' ')
 		return ActionRuneInserted
 	}
@@ -464,186 +445,3 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	return ActionNone
 }
 
-// HandleMouse handles mouse events for text selection.
-// Any left-click drag or right-click drag selects text and copies on release.
-// Simple click (press + release without motion) clears selection without copying.
-//
-// A Release-position fallback handles terminals where MouseActionMotion events
-// are not generated during drag (e.g., Windows ConPTY). In that case the final
-// selection range is inferred from the Release event's cursor position.
-//
-// Returns ActionCopySelected + the selected text, or ActionNone + "".
-func (ib *InputBuffer) HandleMouse(msg tea.MouseMsg, innerWidth int) (InputAction, string) {
-	if msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight {
-		return ActionNone, ""
-	}
-
-	switch msg.Action {
-	case tea.MouseActionPress:
-		pos := mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
-		ib.selStart = pos
-		ib.selEnd = pos
-		ib.dragging = true
-		return ActionNone, ""
-
-	case tea.MouseActionMotion:
-		if ib.dragging {
-			pos := mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
-			ib.selEnd = pos
-		}
-		return ActionNone, ""
-
-	case tea.MouseActionRelease:
-		if ib.dragging && ib.selStart >= 0 {
-			ib.dragging = false
-			// On Windows ConPTY, MouseActionMotion may not fire during drag.
-			// Use the Release position as a fallback to determine selection end.
-			if ib.selEnd == ib.selStart {
-				ib.selEnd = mouseToTextPos(msg.X, msg.Y, ib.text, innerWidth)
-			}
-			start, end := selectionRange(ib.selStart, ib.selEnd)
-			if start < end {
-				text := string(ib.text[start:end])
-				ib.clearSelection()
-				return ActionCopySelected, text
-			}
-			ib.clearSelection()
-		}
-		return ActionNone, ""
-	}
-
-	return ActionNone, ""
-}
-
-// selectionRange returns (start, end) where start <= end.
-func selectionRange(a, b int) (int, int) {
-	if a < 0 {
-		return 0, 0
-	}
-	if a <= b {
-		return a, b
-	}
-	return b, a
-}
-
-// mouseToTextPos converts mouse coordinates (relative to the input box area)
-// to a position in the text buffer.
-//
-// It simulates the same wrapping used by renderInputLine + wrapInputText:
-//   - "> " prefix on the first line
-//   - Each rendered cell maps to one text character
-//   - Hard newlines (\n) break the line immediately
-func mouseToTextPos(mx, my int, text []rune, innerWidth int) int {
-	if len(text) == 0 {
-		return 0
-	}
-
-	fullLen := len(text) + 2 // "> " prefix
-
-	// Build line-start positions in fullText space ("> " + text)
-	var lineStarts []int
-	lineStarts = append(lineStarts, 0)
-
-	pos := 0
-	for pos < fullLen {
-		// Scan ahead up to innerWidth for a \n
-		hasNL := false
-		end := pos + innerWidth
-		if end > fullLen {
-			end = fullLen
-		}
-		for i := pos; i < end; i++ {
-			var ch rune
-			if i < 2 {
-				ch = rune("> "[i])
-			} else {
-				ch = text[i-2]
-			}
-			if ch == '\n' {
-				lineStarts = append(lineStarts, i+1)
-				pos = i + 1
-				hasNL = true
-				break
-			}
-		}
-		if hasNL {
-			continue
-		}
-		// No \n in this segment, wrap at innerWidth
-		pos += innerWidth
-		if pos < fullLen {
-			lineStarts = append(lineStarts, pos)
-		}
-	}
-
-	if my < 0 {
-		my = 0
-	}
-	if my >= len(lineStarts) {
-		my = len(lineStarts) - 1
-	}
-	if mx < 0 {
-		mx = 0
-	}
-
-	// Clamp to line length
-	lineStart := lineStarts[my]
-	nextStart := fullLen
-	if my+1 < len(lineStarts) {
-		nextStart = lineStarts[my+1]
-	}
-	lineLen := nextStart - lineStart
-	if mx >= lineLen {
-		mx = lineLen
-	}
-
-	fullPos := lineStart + mx
-	if fullPos > fullLen {
-		fullPos = fullLen
-	}
-
-	// Convert from fullText position to text buffer position
-	bufPos := fullPos - 2 // subtract "> "
-	if bufPos < 0 {
-		bufPos = 0
-	}
-	if bufPos > len(text) {
-		bufPos = len(text)
-	}
-	return bufPos
-}
-
-// ---------------------------------------------------------------------------
-// Platform-specific clipboard copy
-// ---------------------------------------------------------------------------
-
-// copyToClipboardMsg is sent when clipboard copy completes.
-type copyToClipboardMsg struct{ err error }
-
-// copyToClipboardCmd returns a tea.Cmd that copies text to the system clipboard
-// using the platform's native clipboard tool (pbcopy/clip/xclip).
-func copyToClipboardCmd(text string) tea.Cmd {
-	return func() tea.Msg {
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("pbcopy")
-		case "windows":
-			cmd = exec.Command("clip")
-		default:
-			// Linux: try xclip first, then wl-copy
-			if _, err := exec.LookPath("xclip"); err == nil {
-				cmd = exec.Command("xclip", "-selection", "clipboard")
-			} else if _, err := exec.LookPath("wl-copy"); err == nil {
-				cmd = exec.Command("wl-copy")
-			} else {
-				return copyToClipboardMsg{err: nil} // silently skip
-			}
-		}
-		cmd.Stdin = strings.NewReader(text)
-		if err := cmd.Run(); err != nil {
-			return copyToClipboardMsg{err: err}
-		}
-		return copyToClipboardMsg{err: nil}
-	}
-}

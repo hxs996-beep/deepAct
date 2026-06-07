@@ -53,6 +53,7 @@ type EngineConfig struct {
 	SessionID              string
 	ModelName              string // default (Pro) model name
 	FlashModelName         string // Flash model name for cheaper agents
+	BaseURL                string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
 	MaxTurns               int
 	MaxIterationsPerTurn   int
 	MaxContextTokens       int
@@ -210,6 +211,7 @@ type TaskState struct {
 	EditScopeFiles      int              `json:"edit_scope_files"`
 	PlanConfirmed       bool             `json:"plan_confirmed"`                       // user approved the edit plan, skip per-edit guard
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
+	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	AccumulatedBlocks   []string         `json:"accumulated_blocks,omitempty"` // per-turn findings, appended each turn, used by Build() as stable prefix blocks
 	Conference          *ConferenceState `json:"conference,omitempty"`
 	ParentContext       *ParentBoard     `json:"parent_context,omitempty"` // saved parent goal+plan before sub-task overwrites conference

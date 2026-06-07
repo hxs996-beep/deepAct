@@ -21,7 +21,8 @@ const (
 	AgentChallenger   AgentID = "challenger"
 	AgentTester       AgentID = "tester"
 
-	HandoffToolName = "handoff_to_agent"
+	HandoffToolName    = "handoff_to_agent"
+	ActivateSkillToolName = "activate_skill"
 )
 
 // Handoff carries delegation parameters from parent to sub-agent.
@@ -60,6 +61,12 @@ type Agent interface {
 	Run(ctx context.Context, input Handoff) (*HandoffResult, error)
 }
 
+// ActivateSkillParams is the JSON schema for the activate_skill tool call.
+type ActivateSkillParams struct {
+	SkillName string `json:"skill_name"`
+	Reasoning string `json:"reasoning,omitempty"`
+}
+
 // HandoffToAgentParams is the JSON schema for the handoff_to_agent tool call.
 type HandoffToAgentParams struct {
 	Agent       string   `json:"agent"`
@@ -70,6 +77,31 @@ type HandoffToAgentParams struct {
 }
 
 const maxSubAgentDepth = 2
+
+// activateSkillToolSpec returns the tool definition exposed to LLMs for suggesting skill activation.
+func activateSkillToolSpec() ModelTool {
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        ActivateSkillToolName,
+			Description: "Suggest activating a skill (e.g., writing-plans after brainstorming). The engine will ask the user for confirmation before activating.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"skill_name": {
+						"type": "string",
+						"description": "Name of the skill to activate, e.g. 'writing-plans'"
+					},
+					"reasoning": {
+						"type": "string",
+						"description": "Explain to the user why this skill should be activated next"
+					}
+				},
+				"required": ["skill_name"]
+			}`),
+		},
+	}
+}
 
 // handoffToolSpec returns the tool definition exposed to LLMs for delegating to sub-agents.
 func handoffToolSpec() ModelTool {

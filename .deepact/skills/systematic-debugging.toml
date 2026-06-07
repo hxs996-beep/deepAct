@@ -1,6 +1,7 @@
 name = "systematic-debugging"
 description = "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes"
 keywords = ["调试", "debug", "bug", "错误", "异常", "崩溃", "失败", "不通过", "报错", "出问题", "修复"]
+next_skills = ["verification-before-completion"]
 content = """
 # Systematic Debugging
 

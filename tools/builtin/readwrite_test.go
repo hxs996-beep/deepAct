@@ -49,10 +49,9 @@ func TestReadTool_OffsetAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	// offset=10 skips first 9 lines; limit is no longer enforced (reads to EOF)
 	outputLines := strings.Split(strings.TrimSpace(result.Digest), "\n")
-	if len(outputLines) != 91 {
-		t.Errorf("got %d lines, want 91 (offset=10, no limit → 100-9=91)", len(outputLines))
+	if len(outputLines) != 5 {
+		t.Errorf("got %d lines, want 5 (offset=10, limit=5)", len(outputLines))
 	}
 	if !strings.HasPrefix(outputLines[0], "10: ") {
 		t.Errorf("first line = %q, want prefix '10: '", outputLines[0])

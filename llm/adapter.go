@@ -52,7 +52,7 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 					PromptTokens:     chunk.Usage.PromptTokens,
 					CompletionTokens: chunk.Usage.CompletionTokens,
 					TotalTokens:      chunk.Usage.TotalTokens,
-					CacheHitTokens:   chunk.Usage.CacheHitTokens,
+					CacheHitTokens:   chunk.Usage.PromptCacheHitTokens,
 				}
 			}
 			engineStream <- engineChunk
@@ -154,7 +154,7 @@ func mapToModelResponse(resp *ChatResponse) *engine.ModelResponse {
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
-			CacheHitTokens:   resp.Usage.CacheHitTokens,
+			CacheHitTokens:   resp.Usage.PromptCacheHitTokens,
 		},
 	}
 }

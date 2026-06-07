@@ -1,6 +1,7 @@
 name = "test-driven-development"
 description = "Use when implementing any feature or bugfix, before writing implementation code"
 keywords = ["TDD", "测试驱动", "测试", "单元测试", "test", "实现", "开发"]
+next_skills = ["verification-before-completion"]
 content = """
 # Test-Driven Development (TDD)
 
