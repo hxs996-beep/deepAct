@@ -38,6 +38,9 @@ func BuildTaskReminder(state *engine.TaskState) string {
 			b.WriteString(fmt.Sprintf("  - %s\n", q))
 		}
 	}
+	if state.ActiveSkillName != "" {
+		b.WriteString(fmt.Sprintf("Active skill: %s — Follow its methodology precisely.\n", state.ActiveSkillName))
+	}
 	if len(state.Plan) > 0 {
 		current := ""
 		for _, step := range state.Plan {

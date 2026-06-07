@@ -317,6 +317,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					prevSkill := e.lastActivatedSkill
 					e.activatedSkills[s.Name] = true
 					e.lastActivatedSkill = s.Name
+					e.state.ActiveSkillName = s.Name
+					e.state.ActiveSkillContent = s.Content
 					skillMsg := fmt.Sprintf(
 						"[SKILL ACTIVATED: %s] (auto, chain: %s → %s)\n\n%s",
 						s.Name, prevSkill, s.Name, s.Content,

@@ -286,11 +286,13 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		return ""
 	}
 	volatile := struct {
+		ActiveSkillName  string                   `json:"active_skill_name,omitempty"`
 		ConsecutiveFails int                     `json:"consecutive_failures"`
 		EditScopeFiles   int                     `json:"edit_scope_files"`
 		Conference       *engine.ConferenceState `json:"conference,omitempty"`
 		ParentContext    *engine.ParentBoard     `json:"parent_context,omitempty"`
 	}{
+		ActiveSkillName:  state.ActiveSkillName,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
 		Conference:       state.Conference,

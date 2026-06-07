@@ -289,6 +289,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			// Mark as explicitly activated to prevent duplicate auto-match
 			e.activatedSkills[s.Name] = true
 			e.lastActivatedSkill = s.Name
+			e.state.ActiveSkillName = s.Name
+			e.state.ActiveSkillContent = s.Content
 
 			skillMsg := fmt.Sprintf(
 				"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
@@ -471,6 +473,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if s != nil {
 				e.activatedSkills[s.Name] = true
 				e.lastActivatedSkill = s.Name
+				e.state.ActiveSkillName = s.Name
+				e.state.ActiveSkillContent = s.Content
 				skillMsg := fmt.Sprintf(
 					"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
 					s.Name, s.Content,

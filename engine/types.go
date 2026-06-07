@@ -213,6 +213,8 @@ type TaskState struct {
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	AccumulatedBlocks   []string         `json:"accumulated_blocks,omitempty"` // per-turn findings, appended each turn, used by Build() as stable prefix blocks
+	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
+	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
 	Conference          *ConferenceState `json:"conference,omitempty"`
 	ParentContext       *ParentBoard     `json:"parent_context,omitempty"` // saved parent goal+plan before sub-task overwrites conference
 }
