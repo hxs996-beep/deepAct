@@ -97,6 +97,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		if chunk.ReasoningDelta != "" {
 			reasoningBuilder.WriteString(chunk.ReasoningDelta)
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "reasoning_delta", Detail: chunk.ReasoningDelta})
+			}
 		}
 		if len(chunk.ToolCalls) > 0 {
 			toolCalls = chunk.ToolCalls
@@ -111,6 +114,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	if lastUsage != nil && e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "usage", Usage: lastUsage, ModelName: modelName})
+	}
+	// Accumulate usage across turns for efficiency eval
+	if lastUsage != nil {
+		e.runUsageAccum.PromptTokens += lastUsage.PromptTokens
+		e.runUsageAccum.CompletionTokens += lastUsage.CompletionTokens
+		e.runUsageAccum.TotalTokens += lastUsage.TotalTokens
+		e.runUsageAccum.CacheHitTokens += lastUsage.CacheHitTokens
+		e.runUsageAccum.CacheMissTokens += lastUsage.CacheMissTokens
 	}
 
 	content := contentBuilder.String()
@@ -150,7 +161,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 	// Extract explicit memory markers from model output (both content and reasoning)
 	// Dedup: skip markers already in MemoryMarkers to prevent the same finding
-	// being repeated 20+ times across turns (which bloats AccumulatedBlocks).
+	// being repeated 20+ times across turns.
 	if markers := extractRememberMarkers(content); len(markers) > 0 {
 		e.state.MemoryMarkers = appendUniqMarkers(e.state.MemoryMarkers, markers...)
 	}
@@ -412,12 +423,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.history = append(e.history, toolMessage)
 		}
 		e.updateTaskStateFromTools(regularCalls, toolResults)
-	}
-
-	// Per-turn accumulation: write this turn's findings to the prefix zone
-	// (AccumulatedBlocks) so they survive across turns in the cacheable prefix.
-	if e.state != nil && len(regularCalls) > 0 {
-		e.accumulateTurnBlock(regularCalls)
+		e.runToolCallCount += len(regularCalls)
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
@@ -637,78 +643,7 @@ func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	}
 }
 
-// accumulateTurnBlock collects files read/searched this turn and appends a
-// turn-block to AccumulatedBlocks. This moves per-turn discoveries into the
-// cacheable prefix, reducing dependency on the volatile history tail.
-// MemoryMarkers dedup: only writes markers added since the last accumulation.
-func (e *Engine) accumulateTurnBlock(regularCalls []ToolCallRequest) {
-	var filesRead []string
-	var filesSearched []string
-	for _, c := range regularCalls {
-		path := extractPathFromArgs(c.Input)
-		if path == "" {
-			continue
-		}
-		switch c.Name {
-		case "read":
-			if !containsString(filesRead, path) {
-				filesRead = append(filesRead, path)
-			}
-		case "grep", "glob":
-			if !containsString(filesSearched, path) {
-				filesSearched = append(filesSearched, path)
-			}
-		}
-	}
-
-	// Only write newly-added markers since last accumulation.
-	var newMarkers []string
-	if e.state != nil && len(e.state.MemoryMarkers) > e.lastMarkerCount {
-		newMarkers = e.state.MemoryMarkers[e.lastMarkerCount:]
-		e.lastMarkerCount = len(e.state.MemoryMarkers)
-	}
-
-	block := formatTurnBlock(
-		e.state.TurnNumber,
-		filesRead,
-		filesSearched,
-		newMarkers,
-	)
-	if block != "" {
-		e.state.AccumulatedBlocks = append(e.state.AccumulatedBlocks, block)
-		// Keep only the last 3 blocks to prevent the cache-miss tail
-		// from growing unboundedly. Older blocks are subsumed by history.
-		if len(e.state.AccumulatedBlocks) > 3 {
-			e.state.AccumulatedBlocks = e.state.AccumulatedBlocks[len(e.state.AccumulatedBlocks)-3:]
-		}
-	}
-}
-
-// formatTurnBlock builds a concise structured block string for a completed turn.
-// Inlined to avoid import cycle with the context package.
-// Includes filesRead so the model can see what files it already studied
-// in previous turns and avoid re-reading them from scratch.
-func formatTurnBlock(turnNum int, filesRead []string, filesSearched []string, markers []string) string {
-	if len(markers) == 0 && len(filesRead) == 0 && len(filesSearched) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
-	if len(filesRead) > 0 {
-		b.WriteString("Read: " + strings.Join(filesRead, ", ") + "\n")
-	}
-	if len(filesSearched) > 0 {
-		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
-	}
-	if len(markers) > 0 {
-		b.WriteString("Findings:\n")
-		for _, m := range markers {
-			b.WriteString("  - " + m + "\n")
-		}
-	}
-	return b.String()
-}
-
+// extractPathFromArgs extracts a file path from tool call arguments.
 func extractPathFromArgs(input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""

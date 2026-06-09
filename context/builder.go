@@ -59,6 +59,11 @@ func (a *ContextAssembler) RefreshRepoMap() {
 	}
 }
 
+// RepoMap returns the parsed RepoMap, or nil if none.
+func (a *ContextAssembler) RepoMap() *RepoMap {
+	return a.repoMap
+}
+
 // RepoMapContent returns the rendered RepoMap string, or "" if none.
 func (a *ContextAssembler) RepoMapContent() string {
 	if a.repoMap != nil {
@@ -106,34 +111,10 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		}
 	}
 
-	// Message 4: Compressed summary — stable after compression → cached ✓
-	// After FullCompact compression, the compressor replaces all per-turn
-	// AccumulatedBlocks with a single "# Compressed Context" block from
-	// buildCompressedBlock(). We detect that here and place it in the stable
-	// zone (after RepoMap) instead of the volatile tail, preserving cache hits
-	// across compressed sessions. Between compressions, this slot is empty.
-	// History then re-accumulates in the HISTORY ZONE below.
-	var accumulatedTailBlocks []string
-	if state != nil && len(state.AccumulatedBlocks) > 0 {
-		// Check if the blocks are a single compressed summary (post-compression)
-		if len(state.AccumulatedBlocks) == 1 && strings.HasPrefix(state.AccumulatedBlocks[0], "# Compressed Context\n") {
-			messages = append(messages, engine.ModelMessage{
-				Role:    "user",
-				Content: state.AccumulatedBlocks[0],
-			})
-		} else {
-			// Normal per-turn blocks: render in volatile tail
-			accumulatedTailBlocks = state.AccumulatedBlocks
-		}
-	}
-
 	// === HISTORY ZONE (append-only — cacheable prefix) ===
-	// History is placed BEFORE AccumulatedBlocks to maximize prefix cache hits.
-	// Since previous turns' messages never change, placing history here lets
-	// the cache cover all past conversation (assistant reasoning + tool results
-	// containing file contents from reads/greps) — thousands of tokens per turn.
-	// Only the growing AccumulatedBlocks + volatile tail shift each turn,
-	// keeping the cache-miss portion small (~500 tokens) regardless of turn count.
+	// History sits after the stable zone. Since previous turns' messages
+	// never change, the entire history is a strict prefix extension and
+	// benefits from DeepSeek's prefix cache — thousands of tokens per turn.
 	for _, msg := range history {
 		messages = append(messages, mapMessage(msg))
 	}
@@ -144,21 +125,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 				Role:       "tool",
 				Content:    result.Digest,
 				ToolCallID: result.ToolCallID,
-			})
-		}
-	}
-
-	// === ACCUMULATED BLOCKS (small, in volatile tail zone) ===
-	// Turn summary blocks are only ~50-200 tokens each. They sit after history
-	// in the non-cached tail, which is acceptable since the history cache gains
-	// vastly outweigh the loss of blocks moving out of the prefix.
-	// After compression, this section is empty (compressed summary moved to
-	// Message 4 in the stable zone above).
-	for _, block := range accumulatedTailBlocks {
-		if block != "" {
-			messages = append(messages, engine.ModelMessage{
-				Role:    "user",
-				Content: block,
 			})
 		}
 	}
@@ -247,40 +213,6 @@ func formatTaskState(state *engine.TaskState) string {
 // duplicated in TaskReminder (which covers decisions, modified files, goal).
 // The block is stored in TaskState.AccumulatedBlocks and rendered as a stable
 // prefix message in subsequent turns.
-func FormatTurnBlock(turnNum int, filesRead []string, filesSearched []string, markers []string) string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("# Turn %d\n", turnNum))
-
-	hasContent := false
-
-	if len(filesRead) > 0 {
-		b.WriteString("Read: " + strings.Join(filesRead, ", ") + "\n")
-		hasContent = true
-	}
-	if len(filesSearched) > 0 {
-		b.WriteString("Searched: " + strings.Join(filesSearched, ", ") + "\n")
-		hasContent = true
-	}
-	if len(markers) > 0 {
-		b.WriteString("Findings:\n")
-		for _, m := range markers {
-			b.WriteString("  - " + m + "\n")
-		}
-		hasContent = true
-	}
-
-	if !hasContent {
-		return "" // skip empty blocks
-	}
-	return b.String()
-}
-
-// formatTaskStateVolatile returns JSON for the minimal volatile TaskState fields
-// that the model needs for decision-making but aren't available elsewhere.
-// turn_number is omitted because it changes every turn and would break the
-// prefix cache — the model already sees turn context via AccumulatedBlocks.
-// Redundant fields (covered by turn-blocks / reminder) are omitted to keep the
-// cache-missing tail as small as possible.
 func formatTaskStateVolatile(state *engine.TaskState) string {
 	if state == nil {
 		return ""

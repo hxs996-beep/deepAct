@@ -150,55 +150,155 @@ func runEvalStats(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("Total evaluations: %d\n", stats.TotalRecords)
-	fmt.Printf("Date range:        %s — %s\n",
-		stats.EarliestRecord.Format("2006-01-02"),
-		stats.LatestRecord.Format("2006-01-02"))
-	fmt.Printf("Average score:     %.1f/100\n", stats.AverageScore)
-	fmt.Printf("Pass rate:         %d/%d (%.1f%%)\n",
-		stats.PassCount, stats.TotalRecords, stats.PassRate)
-	fmt.Printf("Avg tokens/eval:   %d\n\n", stats.AverageTokens)
-
-	// Per-phase breakdown
-	if len(stats.ByPhase) > 0 {
-		fmt.Println("By Phase:")
-		fmt.Printf("  %-24s %5s %8s %8s\n", "Phase", "Count", "AvgScore", "PassRate")
-		for phase, ps := range stats.ByPhase {
-			passRate := float64(ps.PassCount) / float64(ps.Count) * 100
-			fmt.Printf("  %-24s %5d %8.1f %7.1f%%\n", phase, ps.Count, ps.AverageScore, passRate)
+	// Separate "main_agent" efficiency records from conference scorecard records
+	all, _ := store.Query(engine.EvalFilter{Limit: 10000})
+	var agentRecs, scoreRecs []engine.EvalRecord
+	for _, r := range all {
+		if r.Phase == "main_agent" {
+			agentRecs = append(agentRecs, r)
+		} else {
+			scoreRecs = append(scoreRecs, r)
 		}
-		fmt.Println()
 	}
 
-	// Per-version breakdown
-	if len(stats.ByPromptVer) > 0 {
-		fmt.Println("By Prompt Version:")
-		fmt.Printf("  %-16s %5s %8s %8s\n", "Version", "Count", "AvgScore", "PassRate")
-		for ver, pv := range stats.ByPromptVer {
-			fmt.Printf("  %-16s %5d %8.1f %7.1f%%\n", ver, pv.Count, pv.AverageScore, pv.PassRate)
-		}
-		fmt.Println()
-	}
+	// --- ScoreCard stats (conference mode) ---
+	if len(scoreRecs) > 0 {
+		fmt.Println("## 评审结果 (Conference ScoreCards)")
+		fmt.Printf("   %d records\n\n", len(scoreRecs))
+		fmt.Printf("Average score:     %.1f/100\n", stats.AverageScore)
+		fmt.Printf("Pass rate:         %d/%d (%.1f%%)\n",
+			stats.PassCount, stats.TotalRecords, stats.PassRate)
+		fmt.Printf("Avg tokens/eval:   %d\n\n", stats.AverageTokens)
 
-	// ASCII trend: last 10 records by time bucket
-	if stats.TotalRecords >= 3 {
-		fmt.Println("Score Trend (recent records):")
-		all, _ := store.Query(engine.EvalFilter{Limit: 20})
-		// Show a simple sparkline
-		var bars []string
-		for i := len(all) - 1; i >= 0; i-- {
-			score := all[i].TotalScore
-			barLen := int(score / 10)
-			bar := strings.Repeat("█", barLen)
-			passSym := "✓"
-			if !all[i].Passed {
-				passSym = "✗"
+		if len(stats.ByPhase) > 0 {
+			fmt.Println("By Phase:")
+			fmt.Printf("  %-24s %5s %8s %8s\n", "Phase", "Count", "AvgScore", "PassRate")
+			for phase, ps := range stats.ByPhase {
+				passRate := float64(ps.PassCount) / float64(ps.Count) * 100
+				fmt.Printf("  %-24s %5d %8.1f %7.1f%%\n", phase, ps.Count, ps.AverageScore, passRate)
 			}
-			ts := all[i].Timestamp.Format("01-02 15:04")
-			bars = append(bars, fmt.Sprintf("  %s %s %5.1f %s", ts, passSym, score, bar))
+			fmt.Println()
 		}
-		for _, b := range bars {
-			fmt.Println(b)
+	}
+
+	// --- Main Agent efficiency stats ---
+	if len(agentRecs) > 0 {
+		fmt.Println("## 主 Agent 效率 (main_agent)")
+		fmt.Printf("   %d records\n\n", len(agentRecs))
+
+		var totalPrompt, totalComplete, totalHit, totalMiss int64
+		var totalDur, totalTurns, totalCalls, totalFiles, totalErrors int64
+		var totalCost float64
+		for _, r := range agentRecs {
+			totalPrompt += int64(r.PromptTokens)
+			totalComplete += int64(r.CompletionTokens)
+			totalHit += int64(r.CacheHitTokens)
+			totalMiss += int64(r.CacheMissTokens)
+			totalDur += r.DurationMs
+			totalTurns += int64(r.IterationCount)
+			totalCalls += int64(r.ToolCallCount)
+			totalFiles += int64(r.ModifiedFileCount)
+			totalErrors += int64(r.ErrorCount)
+			totalCost += r.CostEstimate
+		}
+		n := int64(len(agentRecs))
+
+		hitRate := 0.0
+		if totalHit+totalMiss > 0 {
+			hitRate = float64(totalHit) / float64(totalHit+totalMiss) * 100
+		}
+
+		fmt.Printf("平均轮次:       %5.1f 轮/任务\n", float64(totalTurns)/float64(n))
+		fmt.Printf("平均耗时:       %5.1f 秒\n", float64(totalDur)/1000/float64(n))
+		fmt.Printf("平均 prompt:    %5d tokens\n", totalPrompt/n)
+		fmt.Printf("平均 completion:%5d tokens\n", totalComplete/n)
+		fmt.Printf("缓存命中率:     %5.1f%% (%d hit / %d total)\n", hitRate, totalHit, totalHit+totalMiss)
+		fmt.Printf("平均工具调用:   %5.1f 次\n", float64(totalCalls)/float64(n))
+		fmt.Printf("平均修改文件:   %5.1f 个\n", float64(totalFiles)/float64(n))
+		fmt.Printf("错误次数:       %5d (共 %d 次)\n", totalErrors, n)
+		fmt.Printf("总预估费用:     $%.4f\n", totalCost)
+		fmt.Printf("平均每任务费用: $%.4f\n\n", totalCost/float64(n))
+
+		// Per-prompt-version efficiency breakdown
+		if len(stats.ByPromptVer) > 0 {
+			fmt.Println("按 Prompt 版本:")
+			fmt.Printf("  %-16s %5s %8s %8s %8s\n", "Version", "Count", "Turns", "Duration", "Cache%")
+			for ver, pv := range stats.ByPromptVer {
+				_ = pv
+				var vTurns, vDur, vHit, vMiss int64
+				var vCount int
+				for _, r := range agentRecs {
+					if r.PromptVersion == ver {
+						vTurns += int64(r.IterationCount)
+						vDur += r.DurationMs
+						vHit += int64(r.CacheHitTokens)
+						vMiss += int64(r.CacheMissTokens)
+						vCount++
+					}
+				}
+				if vCount == 0 {
+					continue
+				}
+				vHitRate := 0.0
+				if vHit+vMiss > 0 {
+					vHitRate = float64(vHit) / float64(vHit+vMiss) * 100
+				}
+				fmt.Printf("  %-16s %5d %8.1f %8.1fs %7.1f%%\n",
+					ver, vCount, float64(vTurns)/float64(vCount), float64(vDur)/1000/float64(vCount), vHitRate)
+			}
+			fmt.Println()
+		}
+	}
+
+	// --- History table (efficiency-focused for main_agent records) ---
+	if len(agentRecs) > 0 {
+		fmt.Println("最近记录:")
+		fmt.Printf("%-20s | %-7s | %5s | %6s | %6s | %4s | %s\n",
+			"Timestamp", "Turns", "Dur(s)", "Tokens", "Hit%", "Calls", "Goal")
+		fmt.Println(strings.Repeat("-", 100))
+
+		show := agentRecs
+		if len(show) > 20 {
+			show = show[:20]
+		}
+		for _, r := range show {
+			ts := r.Timestamp.Format("01-02 15:04")
+			dur := float64(r.DurationMs) / 1000
+			total := r.PromptTokens + r.CompletionTokens
+			hitRate := 0.0
+			if r.CacheHitTokens+r.CacheMissTokens > 0 {
+				hitRate = float64(r.CacheHitTokens) / float64(r.CacheHitTokens+r.CacheMissTokens) * 100
+			}
+			goal := r.GoalSnippet
+			if len(goal) > 24 {
+				goal = goal[:24]
+			}
+			errMark := ""
+			if r.ErrorCount > 0 {
+				errMark = "⚠️"
+			}
+			fmt.Printf("%-20s | %7d | %5.1f | %6d | %5.1f%% | %4d | %s %s\n",
+				ts, r.IterationCount, dur, total, hitRate, r.ToolCallCount, goal, errMark)
+		}
+		fmt.Println()
+	}
+
+	// ASCII trend: last 10 agent records
+	if len(agentRecs) >= 3 {
+		fmt.Println("轮次趋势 (最近记录):")
+		for i := len(agentRecs) - 1; i >= 0 && i >= len(agentRecs)-10; i-- {
+			r := agentRecs[i]
+			turns := r.IterationCount
+			if turns > 20 {
+				turns = 20
+			}
+			bar := strings.Repeat("▓", turns) + strings.Repeat("░", 20-turns)
+			errSym := " "
+			if r.ErrorCount > 0 {
+				errSym = "⚠"
+			}
+			ts := r.Timestamp.Format("01-02 15:04")
+			fmt.Printf("  %s %s %3d turns  %s\n", ts, errSym, r.IterationCount, bar)
 		}
 	}
 

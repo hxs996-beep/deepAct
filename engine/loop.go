@@ -70,11 +70,11 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
-	// lastMarkerCount tracks how many MemoryMarkers have been written to
-	// AccumulatedBlocks. On each turn, accumulateTurnBlock only appends
-	// newly-added markers (state.MemoryMarkers[lastMarkerCount:]) to avoid
-	// the same finding being repeated 20+ times in AccumulatedBlocks.
-	lastMarkerCount int
+	// Per-Run efficiency tracking
+	runStartAt       time.Time
+	runUsageAccum    ModelUsage
+	runToolCallCount int
+	runErrorCount    int
 }
 
 // PendingEditPlan captures the agent's proposed changes before execution.
@@ -160,6 +160,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.guards.loop.Reset()
 	}
 	e.matchedSkillsContent = ""
+	e.runStartAt = time.Now()
+	e.runUsageAccum = ModelUsage{}
+	e.runToolCallCount = 0
+	e.runErrorCount = 0
 
 	// Conference command parsing — must run BEFORE conference init
 	// so slash commands take priority over automatic classification.
@@ -562,9 +566,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		turnResult, err := e.executeTurn(ctx)
 		if err != nil {
 			loopLog.Printf("executeTurn failed (turn=%d): %v", turns, err)
+			e.runErrorCount++
 			return nil, err
 		}
 		if turnResult.Blocked {
+			e.runErrorCount++
 			return &EngineResponse{Questions: turnResult.Questions, Stage: StageAct, Blocked: true, BlockedBy: turnResult.BlockedBy, FinishReason: turnResult.FinishReason}, nil
 		}
 		if turnResult.Done {
@@ -616,6 +622,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if err := e.verifyAndCompact(); err != nil {
 		return nil, err
 	}
+
+	// Record efficiency eval at end of Run()
+	e.recordRunEval(zh)
 
 	summary := ""
 	for i := len(e.history) - 1; i >= 0; i-- {
@@ -710,6 +719,59 @@ func (e *Engine) verifyAndCompact() error {
 		return err
 	}
 	return nil
+}
+
+// recordRunEval writes an efficiency EvalRecord for the current Run().
+// Phase is "main_agent" to distinguish from conference-phase scorecard records.
+func (e *Engine) recordRunEval(_ bool) {
+	if e.evalStore == nil {
+		return
+	}
+	usage := e.runUsageAccum
+	if usage.TotalTokens == 0 {
+		return // nothing to record
+	}
+
+	goal := e.state.Goal
+	if len(goal) > 100 {
+		goal = goal[:100]
+	}
+
+	// Estimate cost from pricing config
+	var cost float64
+	if p, ok := e.config.Pricing.Models[e.config.ModelName]; ok {
+		cost = float64(usage.PromptTokens)*p.InputPricePerToken +
+			float64(usage.CompletionTokens)*p.OutputPricePerToken
+		cost -= float64(usage.CacheHitTokens) * (p.InputPricePerToken - p.CacheHitInputPricePerToken)
+	} else {
+		def := e.config.Pricing.Default
+		cost = float64(usage.PromptTokens)*def.InputPricePerToken +
+			float64(usage.CompletionTokens)*def.OutputPricePerToken
+	}
+	if cost < 0 {
+		cost = 0
+	}
+
+	rec := EvalRecord{
+		Timestamp:         time.Now(),
+		SessionID:         e.config.SessionID,
+		PromptVersion:     e.config.PromptVersion,
+		Phase:             "main_agent",
+		IterationCount:    e.state.TurnNumber,
+		GoalSnippet:       goal,
+		PromptTokens:      usage.PromptTokens,
+		CompletionTokens:  usage.CompletionTokens,
+		CacheHitTokens:    usage.CacheHitTokens,
+		CacheMissTokens:   usage.CacheMissTokens,
+		DurationMs:        time.Since(e.runStartAt).Milliseconds(),
+		ToolCallCount:     e.runToolCallCount,
+		ModifiedFileCount: len(e.state.ModifiedFiles),
+		ErrorCount:        e.runErrorCount,
+		CostEstimate:      cost,
+	}
+	if err := e.evalStore.Insert(rec); err != nil {
+		loopLog.Printf("record eval: %v", err)
+	}
 }
 
 func msgIsChinese(msg string) bool {

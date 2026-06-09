@@ -31,13 +31,18 @@ func isTerminalEscapeResidue(runes []rune) bool {
 	// Format: ESC ] N ; params ST
 	// When ESC (0x1B) is consumed by Bubble Tea, what remains is "]N;params".
 	// e.g. "]11;rgb:fae0/fae0/fae0" — OSC 11 color query response.
-	if runes[0] == ']' && len(runes) > 2 {
+	// Also catch "]N" or "]NN" (digits-only after ]) which occurs when the PTY
+	// splits between the OSC number and the semicolon.
+	if runes[0] == ']' && len(runes) >= 2 {
 		idx := 1
 		for idx < len(runes) && runes[idx] >= '0' && runes[idx] <= '9' {
 			idx++
 		}
-		if idx > 1 && idx < len(runes) && runes[idx] == ';' {
-			return true
+		if idx > 1 {
+			// All chars after ']' are digits (split before ';'), or ';' found
+			if idx == len(runes) || runes[idx] == ';' {
+				return true
+			}
 		}
 	}
 
@@ -135,24 +140,39 @@ func isColorHexValue(s string) bool {
 	s = strings.TrimSuffix(s, "\\")
 
 	// Strip known color prefixes (full and partial) that may survive PTY buffer splits.
-	// "rgb:" is the standard prefix; "b:", "gb:", "g:" are partial remnants.
-	for _, prefix := range []string{"rgba:", "rgb:", "gb:", "b:", "g:"} {
+	// "rgb:" is the standard prefix; "b:", "gb:", "g:", ":" are partial remnants
+	// when the PTY splits at different points within "rgb:".
+	for _, prefix := range []string{"rgba:", "rgb:", "gb:", "b:", "g:", ":"} {
 		if strings.HasPrefix(s, prefix) {
 			s = s[len(prefix):]
 			break
 		}
 	}
 
+	// Strip leading "/" from buffer splits at hex group boundaries.
+	// e.g. the response "rgb:fae0/fae0/fae0" splitting as "rgb:fae0" + "/fae0/fae0"
+	s = strings.TrimPrefix(s, "/")
+
 	parts := strings.Split(s, "/")
-	if len(parts) != 3 && len(parts) != 4 {
+	if len(parts) < 2 || len(parts) > 4 {
 		return false
 	}
 	for _, p := range parts {
-		if len(p) < 2 || len(p) > 4 {
+		if len(p) < 1 || len(p) > 4 {
 			return false
 		}
 		for _, c := range p {
 			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	// For 2-group fragments, require each group to be exactly 4 hex digits
+	// to avoid false positives with short path-like input (e.g. "ab/cd").
+	// Terminal color responses always use 4-digit hex (e.g. "fae0/fae0").
+	if len(parts) == 2 {
+		for _, p := range parts {
+			if len(p) != 4 {
 				return false
 			}
 		}
@@ -250,6 +270,43 @@ func isSGRContinuation(s string) bool {
 	}
 	for _, c := range s {
 		if (c < '0' || c > '9') && c != ';' {
+			return false
+		}
+	}
+	return true
+}
+
+// isOSCColorContinuation returns true if s consists only of characters found
+// in OSC color response bodies: hex digits (0-9, a-f, A-F), '/', ':', '\',
+// ';', and the literal letters 'r', 'g', 'b' (case-insensitive) from the
+// "rgb:" or "rgba:" color format prefix.
+//
+// This is used when afterResidue is true to catch fragments of split OSC color
+// responses (e.g. "/fae0/fae0\", "0/fae0/fae0", ":fae0/fae0/fae0\",
+// ";rgb:fae0/fae0/fae0") that don't match isSGRContinuation (which only
+// allows digits and semicolons).
+//
+// On macOS, terminal color query responses like \x1b]11;rgb:fae0/fae0/fae0\x1b\
+// can split across PTY buffer boundaries into many small KeyRunes batches.
+// After the initial OSC prefix is caught (] + digits), these continuation
+// fragments must also be discarded. The "rgb:" prefix contains 'r' and 'g'
+// which are OUTSIDE the hex range (a-f), so they must be explicitly allowed.
+//
+// Callers MUST only invoke this when afterResidue is true, ensuring the
+// window of false-positive risk is bounded to batches immediately following
+// confirmed escape residue.
+func isOSCColorContinuation(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		case c == '/' || c == ':' || c == '\\' || c == ';':
+		case c == 'r' || c == 'g' || c == 'R' || c == 'G':
+		default:
 			return false
 		}
 	}

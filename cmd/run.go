@@ -193,6 +193,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetSessionID(config.SessionID)
 
 	contextAssembler := context.NewContextAssembler(workDir, estimator)
+
+	// Wire up RepoMap-based path resolution for ReadTool
+	if rm := contextAssembler.RepoMap(); rm != nil {
+		toolExecutor.SetResolvePath(rm.ResolveFile)
+	}
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
 	if config.FlashModelName != "" {
 		compressor.SetFlashModelName(config.FlashModelName)

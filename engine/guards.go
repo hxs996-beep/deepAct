@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,12 +21,15 @@ const (
 	GuardAskUser  = "ask_user"
 )
 
-// LoopGuard detects when the agent repeats the same operation on the same file
-// without making progress. It tracks (toolName, path) pairs and blocks when
-// the same pair appears too many times in a session.
+// LoopGuard detects when the agent repeats the same operation on the same
+// content without making progress. It tracks (toolName, path, contentHash)
+// tuples and blocks when the same tuple appears too many times in a session.
+// Content hash distinguishes different edits on the same file (e.g., different
+// old_string→new_string pairs for the edit tool, or different file content for
+// write), avoiding false positives when modifying multiple locations.
 type LoopGuard struct {
 	mu         sync.Mutex
-	entries    map[string]*loopEntry // key: "toolName:path"
+	entries    map[string]*loopEntry // key: "toolName:path:contentHash"
 	maxRepeats int
 }
 
@@ -42,47 +47,63 @@ func NewLoopGuard(maxRepeats int) *LoopGuard {
 	}
 }
 
-// key builds a lookup key from a tool name and file path.
-func loopKey(toolName, path string) string {
-	return toolName + ":" + path
+// extractToolKey extracts a unique key from a tool call for loop detection.
+// Returns "toolName:path:contentHash" for destructive tools, or "" for
+// exploratory tools. Content hash ensures that different edits on the same
+// file (different old_string→new_string) are treated as distinct operations,
+// preventing false loop detection when modifying multiple locations.
+func extractToolKey(call ToolCallRequest) string {
+	path := extractPathField(call.Input)
+	if path == "" {
+		return ""
+	}
+
+	var contentHash string
+	switch call.Name {
+	case "edit":
+		contentHash = extractEditContentHash(call.Input)
+	case "write":
+		contentHash = extractWriteContentHash(call.Input)
+	default:
+		// read/grep/glob/bash etc. — not tracked for loops
+		return ""
+	}
+
+	if contentHash == "" {
+		return ""
+	}
+
+	return call.Name + ":" + path + ":" + contentHash
+}
+
+// extractEditContentHash computes sha256("old_string→new_string") from edit input.
+func extractEditContentHash(input json.RawMessage) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	oldStr, _ := m["old_string"].(string)
+	newStr, _ := m["new_string"].(string)
+	h := sha256.Sum256([]byte(oldStr + "\x00" + newStr))
+	return hex.EncodeToString(h[:])
+}
+
+// extractWriteContentHash computes sha256(content) from write input.
+func extractWriteContentHash(input json.RawMessage) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	content, _ := m["content"].(string)
+	if content == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(h[:])
 }
 
 // Check inspects a tool call for loop behavior. Returns GuardBlock if the
-// same (tool, path) pair has been repeated too many times.
-func (g *LoopGuard) Check(call ToolCallRequest) GuardAction {
-	if g == nil {
-		return GuardAction{Type: GuardAllow}
-	}
-
-	path := extractToolPath(call)
-	if path == "" {
-		return GuardAction{Type: GuardAllow}
-	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	k := loopKey(call.Name, path)
-	entry, exists := g.entries[k]
-	if !exists {
-		entry = &loopEntry{}
-		g.entries[k] = entry
-	}
-
-	entry.count++
-	if entry.count >= g.maxRepeats {
-		return GuardAction{
-			Type: GuardBlock,
-			Message: fmt.Sprintf(
-				"Loop detected: %s %q repeated %d times. The agent appears to be repeating the same operation without making progress.",
-				call.Name, path, entry.count,
-			),
-		}
-	}
-
-	return GuardAction{Type: GuardAllow}
-}
-
+// same (tool, path, contentHash) tuple has been repeated too many times.
 // Reset clears all loop tracking state (e.g., on new user message).
 func (g *LoopGuard) Reset() {
 	if g == nil {
@@ -91,20 +112,6 @@ func (g *LoopGuard) Reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.entries = make(map[string]*loopEntry)
-}
-
-// extractToolPath extracts the file path from a tool call's input arguments.
-func extractToolPath(call ToolCallRequest) string {
-	switch call.Name {
-	case "edit", "write":
-		return extractPathField(call.Input)
-	case "read", "grep", "glob":
-		// read/grep/glob are exploratory — reading the same file repeatedly
-		// is normal behavior, not a loop. Only track destructive ops.
-		return ""
-	default:
-		return ""
-	}
 }
 
 func extractPathField(input json.RawMessage) string {
@@ -122,6 +129,39 @@ func extractPathField(input json.RawMessage) string {
 		return p
 	}
 	return ""
+}
+
+func (g *LoopGuard) Check(call ToolCallRequest) GuardAction {
+	if g == nil {
+		return GuardAction{Type: GuardAllow}
+	}
+
+	k := extractToolKey(call)
+	if k == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	entry, exists := g.entries[k]
+	if !exists {
+		entry = &loopEntry{}
+		g.entries[k] = entry
+	}
+
+	entry.count++
+	if entry.count >= g.maxRepeats {
+		return GuardAction{
+			Type: GuardBlock,
+			Message: fmt.Sprintf(
+				"Loop detected: %s %q repeated %d times. The agent appears to be repeating the same operation without making progress.",
+				call.Name, k, entry.count,
+			),
+		}
+	}
+
+	return GuardAction{Type: GuardAllow}
 }
 
 type GuardSystem struct {

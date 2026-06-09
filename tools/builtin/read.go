@@ -75,6 +75,15 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 
 	info, err := os.Stat(safePath)
 	if err != nil {
+		// Stat failed — try RepoMap-based path resolution if available
+		if ctx.ResolvePath != nil {
+			if resolved, alts := ctx.ResolvePath(payload.Path); resolved != "" {
+				// Exact match found under a different path — redirect
+				return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("File not found at %q. Did you mean %q? Use that path instead.", payload.Path, resolved)}, nil
+			} else if len(alts) > 0 {
+				return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("File not found at %q. Available files in this package: %s", payload.Path, strings.Join(alts, ", "))}, nil
+			}
+		}
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("stat file: %v", err)}, err
 	}
 	if info.Size() > maxReadBytes {

@@ -19,8 +19,6 @@ type CompressionLayer int
 
 const (
 	LayerToolGovernance CompressionLayer = iota
-	LayerStaleEviction
-	LayerCodeCollapse
 	LayerFullCompact
 )
 
@@ -137,6 +135,7 @@ type ModelUsage struct {
 	CompletionTokens int
 	TotalTokens      int
 	CacheHitTokens   int
+	CacheMissTokens  int
 }
 
 type ModelChunk struct {
@@ -212,7 +211,6 @@ type TaskState struct {
 	PlanConfirmed       bool             `json:"plan_confirmed"`                       // user approved the edit plan, skip per-edit guard
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
-	AccumulatedBlocks   []string         `json:"accumulated_blocks,omitempty"` // per-turn findings, appended each turn, used by Build() as stable prefix blocks
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
 	Conference          *ConferenceState `json:"conference,omitempty"`

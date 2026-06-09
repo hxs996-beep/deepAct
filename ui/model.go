@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/deepact/deepact/engine"
 )
@@ -76,6 +77,7 @@ type Model struct {
 	height       int
 	engine       EngineRunner
 	streaming    string
+	thinkingContent string
 	apiKeyInput           string
 	pendingOpenBracket    bool   // Windows: lone '[' held to check if it's escape split
 	pendingCloseBracket   bool   // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
@@ -86,6 +88,7 @@ type Model struct {
 	cancelled    bool
 	pendingEsc   bool // tracks ESC prefix for Alt+Enter sequence detection
 	pricing      engine.PricingConfig
+	needsRepaint bool // forces full Bubble Tea repaint on next frame
 
 	// Slash command suggestions
 	showSuggestions    bool
@@ -98,6 +101,19 @@ type Model struct {
 	// Active options (plan selection / review actions)
 	activeOptions  []string
 	selectedOption int
+
+	// Body render cache — avoids re-rendering markdown on every View() frame
+	cachedBodyLines []string
+	cachedBodyWidth int
+	bodyDirty       bool
+	// Per-message render cache (messages are immutable once added)
+	msgCache *messageRenderCache
+}
+
+type messageRenderCache struct {
+	lines        [][]string
+	width        int
+	lastMaxScroll int
 }
 
 type ProgressMsg struct {
@@ -137,6 +153,7 @@ func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
 		engine:       runner,
 		progressChan: progressChan,
 		pricing:      pricing,
+		msgCache:     &messageRenderCache{},
 	}
 }
 
@@ -172,10 +189,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			if m.state == stateReady || m.state == stateRunning {
-				oldOff := m.scrollOffset
 				m.scrollOffset += m.height / 3
-				if m.scrollOffset < oldOff {
-					m.scrollOffset = oldOff // overflow guard
+				if ms := m.msgCache.lastMaxScroll; ms > 0 && m.scrollOffset > ms {
+					m.scrollOffset = ms
 				}
 			}
 			return m, nil
@@ -240,7 +256,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.scrollOffset <= 0 {
 			m.scrollOffset = 0
 		}
+		m.thinkingContent = ""
 		m.finishStreaming(msg)
+		m.needsRepaint = true
 		return m, nil
 	case ProgressMsg:
 		// Auto-scroll to bottom while running so new tool/spinner content stays visible.
@@ -252,6 +270,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "thinking":
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Detail
+			}
+		case "reasoning_delta":
+			m.thinkingContent += msg.Detail
+			if len(m.spinners) > 0 {
+				m.spinners[0].Goal = "thinking..."
 			}
 		case "conference_enter":
 			// Show a prominent header when entering multi-agent conference mode
@@ -358,12 +381,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.apiKeyInput = ""
 		return m, nil
 	}
+	// Repaint guard: if the viewport content changed (scroll, new messages,
+	// streaming finished), send a WindowSizeMsg to force Bubble Tea's internal
+	// full repaint. This is the same mechanism that "resize terminal" uses to
+	// fix rendering artifacts — we trigger it programmatically.
+	if m.needsRepaint {
+		m.needsRepaint = false
+		return m, func() tea.Msg {
+			return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+		}
+	}
 	return m, nil
 }
 
 // scrollUp increases scroll offset by half the terminal height.
 func (m Model) scrollUp() Model {
 	m.scrollOffset += m.height / 2
+	if ms := m.msgCache.lastMaxScroll; ms > 0 && m.scrollOffset > ms {
+		m.scrollOffset = ms
+	}
 	return m
 }
 
@@ -415,23 +451,20 @@ func (m Model) View() string {
 		bodyHeight = 1
 	}
 
-	// First pass: render at full width to check overflow
+	// Render body once at scrollbar-ready width to avoid expensive double-render.
+	// The 1-char difference is negligible visually but eliminates a full re-render.
 	needScrollbar := false
-	scrollContentWidth := contentWidth
+	scrollContentWidth := contentWidth - 1
+	if scrollContentWidth < 20 {
+		scrollContentWidth = 20
+	}
 
-	lines := m.renderBody(contentWidth)
+	lines := m.renderBody(scrollContentWidth)
 	total := len(lines)
 	maxScroll := 0
 	scrollOff := m.scrollOffset
 	if total > bodyHeight {
 		needScrollbar = true
-		scrollContentWidth = contentWidth - 1
-		if scrollContentWidth < 20 {
-			scrollContentWidth = 20
-		}
-		// Re-render at 1-char-less width so the scrollbar fits without overflow
-		lines = m.renderBody(scrollContentWidth)
-		total = len(lines)
 		maxScroll = total - bodyHeight
 		if maxScroll < 0 {
 			maxScroll = 0
@@ -449,6 +482,7 @@ func (m Model) View() string {
 		}
 		lines = lines[start:end]
 	}
+	m.msgCache.lastMaxScroll = maxScroll
 	// Second pass: re-render status bar with actual scroll info
 	statusLine = renderStatusBar(m.status, scrollOff, maxScroll, contentWidth)
 	// Re-check: if scroll info changed the status bar height (e.g. scroll hint
@@ -489,6 +523,15 @@ func (m Model) View() string {
 	if len(lines) > bodyHeight {
 		lines = lines[:bodyHeight]
 	}
+	// Truncate all body lines to terminal width to prevent visual wrapping.
+	// During stateRunning, tool tree, spinner, and streaming content can exceed
+	// terminal width (long file paths, emoji, styled ANSI content). The terminal
+	// wraps these visually, adding extra rows that push input/status off-screen.
+	for i := range lines {
+		if lipgloss.Width(lines[i]) > contentWidth {
+			lines[i] = ansi.Truncate(lines[i], contentWidth, "")
+		}
+	}
 	// Visual scrollbar: draw │ (track) and ▐ (thumb) on the right edge
 	if needScrollbar && bodyHeight > 0 {
 		thumbLine := int(float64(scrollOff) / float64(maxScroll) * float64(bodyHeight-1))
@@ -496,6 +539,12 @@ func (m Model) View() string {
 		sbThumb := ScrollbarThumbStyle.Render("▐")
 		for i := range lines {
 			w := lipgloss.Width(lines[i])
+			if w > scrollContentWidth {
+				// Truncate lines wider than scrollContentWidth to prevent
+				// visual overflow when scrollbar char is appended.
+				lines[i] = ansi.Truncate(lines[i], scrollContentWidth, "")
+				w = scrollContentWidth
+			}
 			if w < scrollContentWidth {
 				lines[i] += strings.Repeat(" ", scrollContentWidth-w)
 			}
@@ -532,6 +581,32 @@ func (m Model) View() string {
 	default:
 		full = body + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
 	}
+
+	// Final safety: ensure output is exactly m.height lines to prevent the
+	// input box from being pushed off-screen by visual overflow.
+	finalLines := strings.Split(full, "\n")
+	if len(finalLines) > m.height {
+		excess := len(finalLines) - m.height
+		finalLines = finalLines[excess:]
+	} else if len(finalLines) < m.height {
+		deficit := m.height - len(finalLines)
+		padding := make([]string, deficit)
+		blankLine := strings.Repeat(" ", contentWidth)
+		for i := range padding {
+			padding[i] = blankLine
+		}
+		finalLines = append(padding, finalLines...)
+	}
+	// Truncate every line to terminal width to prevent visual wrapping.
+	// Even 1 extra visual column causes the terminal to wrap, adding an
+	// extra row that pushes subsequent content off-screen.
+	for i, ln := range finalLines {
+		if lipgloss.Width(ln) > m.width {
+			finalLines[i] = ansi.Truncate(ln, m.width, "")
+		}
+	}
+	full = strings.Join(finalLines, "\n")
+
 	return full
 }
 
@@ -646,6 +721,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Still inside an SGR escape sequence that fragmented
 				// across PTY buffer boundaries. Keep afterResidue true
 				// and discard digits/semicolons (e.g. ";25", "65").
+				return m, nil
+			}
+			if isOSCColorContinuation(string(msg.Runes)) {
+				// Still inside an OSC color response that fragmented
+				// across PTY buffer boundaries. Keep afterResidue true
+				// and discard hex/slash/colon fragments (e.g. "/fae0/fae0",
+				// "0/fae0/fae0\", ":fae0/fae0/fae0\").
 				return m, nil
 			}
 			m.afterResidue = false
@@ -973,10 +1055,25 @@ func (m Model) renderBody(width int) []string {
 
 	lines = append(lines, strings.Split(renderLogoBox(width), "\n")...)
 	lines = append(lines, "")
-	for _, msg := range m.messages {
-		lines = append(lines, renderMessage(msg, width)...)
-		lines = append(lines, "")
+
+	// Use per-message render cache: messages are immutable once added,
+	// so only render new messages or on width change.
+	cache := m.msgCache
+	if cache.width != width {
+		cache.lines = nil
+		cache.width = width
 	}
+	for i, msg := range m.messages {
+		if i < len(cache.lines) {
+			lines = append(lines, cache.lines[i]...)
+		} else {
+			rendered := renderMessage(msg, width)
+			rendered = append(rendered, "")
+			cache.lines = append(cache.lines, rendered)
+			lines = append(lines, rendered...)
+		}
+	}
+
 	if m.state == stateApiKeyPrompt {
 		lines = append(lines, "┌──────────────────────────────────────────────┐")
 		lines = append(lines, "│  Welcome to DeepAct!                        │")
@@ -992,7 +1089,9 @@ func (m Model) renderBody(width int) []string {
 	if len(m.toolTree) > 0 {
 		lines = append(lines, renderToolTree(m.toolTree, width)...)
 	}
-	if m.streaming != "" {
+	if m.thinkingContent != "" {
+		lines = append(lines, renderThinkingBox(m.thinkingContent, width)...)
+	} else if m.streaming != "" {
 		lines = append(lines, renderStreaming(m.streaming, width)...)
 	}
 	if len(m.spinners) > 0 {
@@ -1002,25 +1101,101 @@ func (m Model) renderBody(width int) []string {
 }
 
 func renderLogoBox(width int) string {
-	logoLines := []string{
-		"   ____                  _        _             ",
-		"  |  _ \\  ___  ___ _ __ / \\   ___| |_          ",
-		"  | | | |/ _ \\/ _ \\ '_ / _ \\ / __| __|         ",
-		"  | |_| |  __/  __/ |_/ ___ \\ (__| |_          ",
-		"  |____/ \\___|\\___| .__/_/  \\_\\___|\\__|         ",
-		"                  |_|       v0.1.0              ",
-		"                                                  ",
-		"  Model: deepseek-v4-flash | Type /help          ",
+	// Mascot whale art (user-chosen design) — left side
+	mascotLines := []string{
+		"           .           ",
+		"          \":\"         ",
+		"        ___:____     |\"\\/\"|",
+		"      ,'        `.    \\  /",
+		"      |  O        \\___/  |",
+		"    ~^~^~^~^~^~^~^~^~^~^~^~^~",
 	}
-	boxed := boxWithBorder(logoLines, width)
+
+	// ASCII art logo — right side
+	bigLogo := []string{
+		"  ██████╗ ███████╗███████╗██████╗  █████╗  ██████╗████████╗",
+		"  ██╔══██╗██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝╚══██╔══╝",
+		"  ██║  ██║█████╗  █████╗  ██████╔╝███████║██║        ██║   ",
+		"  ██║  ██║██╔══╝  ██╔══╝  ██╔═══╝ ██╔══██║██║        ██║   ",
+		"  ██████╔╝███████╗███████╗██║     ██║  ██║╚██████╗   ██║   ",
+		"  ╚═════╝ ╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═╝   ",
+	}
+
+	// Model name line
+	flashLine := FlashModelStyle.Render("  deepseek V4 flash")
+
+	// Style each mascot line: whale body in cyan, blowhole dot in yellow, waves in blue
+	styledMascot := make([]string, len(mascotLines))
+	for i, line := range mascotLines {
+		switch i {
+		case 0:
+			styledMascot[i] = MascotAccentStyle.Render(line)
+		case 5:
+			styledMascot[i] = MascotWaveStyle.Render(line)
+		default:
+			styledMascot[i] = MascotStyle.Render(line)
+		}
+	}
+
+	// Style big logo lines with gradient
+	styledLogo := make([]string, len(bigLogo))
+	for i, line := range bigLogo {
+		switch {
+		case i < 3:
+			styledLogo[i] = LogoGradient1.Render(line)
+		default:
+			styledLogo[i] = LogoGradient2.Render(line)
+		}
+	}
+
+	// Compute visual widths for alignment
+	mascotW := 0
+	for _, l := range styledMascot {
+		if w := lipgloss.Width(l); w > mascotW {
+			mascotW = w
+		}
+	}
+	logoW := 0
+	for _, l := range styledLogo {
+		if w := lipgloss.Width(l); w > logoW {
+			logoW = w
+		}
+	}
+
+	// Build the right column: 6 lines of big ASCII art
+	rightCol := make([]string, 6)
+	for i := 0; i < 6; i++ {
+		l := styledLogo[i]
+		if w := lipgloss.Width(l); w < logoW {
+			l += strings.Repeat(" ", logoW-w)
+		}
+		rightCol[i] = l
+	}
+
+	// Join left + right side by side
+	combined := make([]string, 6)
+	for i := 0; i < 6; i++ {
+		left := styledMascot[i]
+		if w := lipgloss.Width(left); w < mascotW {
+			left += strings.Repeat(" ", mascotW-w)
+		}
+		combined[i] = left + "  " + rightCol[i]
+	}
+
+	// Slogan below the left-right layout
+	slogan := SloganStyle.Render("Your AI-powered coding companion")
+
+	allLines := append(combined, "", flashLine, "", slogan)
+	boxed := boxWithBorder(allLines, width)
 	return LogoStyle.Render(boxed)
 }
 
 func boxWithBorder(lines []string, width int) string {
 	maxLine := 0
 	for _, line := range lines {
-		if len(line) > maxLine {
-			maxLine = len(line)
+		w := lipgloss.Width(line)
+		if w > maxLine {
+			maxLine = w
 		}
 	}
 	innerWidth := maxLine
@@ -1031,11 +1206,13 @@ func boxWithBorder(lines []string, width int) string {
 	bottom := "╚" + strings.Repeat("═", innerWidth+2) + "╝"
 	rows := []string{border}
 	for _, line := range lines {
+		w := lipgloss.Width(line)
 		trimmed := line
-		if len(trimmed) > innerWidth {
-			trimmed = trimmed[:innerWidth]
+		if w > innerWidth {
+			trimmed = ansi.Truncate(line, innerWidth, "")
+			w = innerWidth
 		}
-		padded := trimmed + strings.Repeat(" ", innerWidth-len(trimmed))
+		padded := trimmed + strings.Repeat(" ", innerWidth-w)
 		rows = append(rows, "║ "+padded+" ║")
 	}
 	rows = append(rows, bottom)
@@ -1079,8 +1256,17 @@ func getMarkdownRenderer(width int) *glamour.TermRenderer {
 	if mdRenderer != nil && mdRendererWidth == width {
 		return mdRenderer
 	}
+	// Use pre-computed isDark from styles.go:init() instead of glamour.WithAutoStyle().
+	// WithAutoStyle() calls termenv.HasDarkBackground() which sends an OSC 11 terminal
+	// query. When called while Bubble Tea is running, this query races with BT's stdin
+	// reader — the terminal response leaks into the input stream as garbled text
+	// (e.g. "fae0/fae0/fae0") on macOS.
+	style := "light"
+	if isDark {
+		style = "dark"
+	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStandardStyle(style),
 		glamour.WithWordWrap(width-2),
 	)
 	if err == nil {
@@ -1334,9 +1520,9 @@ func renderDiffHunk(hunkContent, conn string, lastChild bool, nodeIdx, totalNode
 			if lastChild && nodeIdx == totalNodes-1 {
 				hunkConn = "      "
 			} else if lastChild {
-				hunkConn = "│    "
+				hunkConn = "│     "
 			} else {
-				hunkConn = "│  │ "
+				hunkConn = "│     "
 			}
 		}
 
@@ -1375,20 +1561,20 @@ func renderDiffHunk(hunkContent, conn string, lastChild bool, nodeIdx, totalNode
 			oldStr := fmt.Sprintf("%d", oldNum)
 			newStr := ""
 			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + "│" + diffDeleteStyle.Render(prefix+content) + "\n")
+			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + " " + diffDeleteStyle.Render(prefix+content) + "\n")
 			oldNum++
 		case "+":
 			oldStr := ""
 			newStr := fmt.Sprintf("%d", newNum)
 			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + "│" + diffInsertStyle.Render(prefix+content) + "\n")
+			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + " " + diffInsertStyle.Render(prefix+content) + "\n")
 			newNum++
 		default:
 			// context line (space prefix)
 			oldStr := fmt.Sprintf("%d", oldNum)
 			newStr := fmt.Sprintf("%d", newNum)
 			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + "│ " + content + "\n")
+			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + "  " + content + "\n")
 			oldNum++
 			newNum++
 		}
@@ -1479,6 +1665,57 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 	return wrapLines(lines, width)
 }
 
+const thinkingBoxHeight = 6
+
+func renderThinkingBox(content string, width int) []string {
+	if content == "" {
+		return nil
+	}
+	innerWidth := width - 6
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+
+	raw := strings.Split(content, "\n")
+	var wrapped []string
+	for _, line := range raw {
+		if len([]rune(line)) <= innerWidth {
+			wrapped = append(wrapped, line)
+		} else {
+			runes := []rune(line)
+			for len(runes) > innerWidth {
+				wrapped = append(wrapped, string(runes[:innerWidth]))
+				runes = runes[innerWidth:]
+			}
+			if len(runes) > 0 {
+				wrapped = append(wrapped, string(runes))
+			}
+		}
+	}
+
+	visible := wrapped
+	if len(visible) > thinkingBoxHeight {
+		visible = visible[len(visible)-thinkingBoxHeight:]
+	}
+
+	header := DimStyle.Render("╭─ 💭 Thinking ") + DimStyle.Render(strings.Repeat("─", innerWidth-13)) + DimStyle.Render("╮")
+	footer := DimStyle.Render("╰" + strings.Repeat("─", innerWidth+2) + "╯")
+
+	lines := []string{header}
+	for _, vl := range visible {
+		padded := vl
+		if len([]rune(padded)) < innerWidth {
+			padded += strings.Repeat(" ", innerWidth-len([]rune(padded)))
+		}
+		lines = append(lines, DimStyle.Render("│ ")+padded+DimStyle.Render(" │"))
+	}
+	for len(lines) < thinkingBoxHeight+1 {
+		lines = append(lines, DimStyle.Render("│ "+strings.Repeat(" ", innerWidth)+" │"))
+	}
+	lines = append(lines, footer)
+	return lines
+}
+
 const maxPopupItems = 8
 
 // visiblePopupWindow returns a slice of items centered on the selected index,
@@ -1552,7 +1789,12 @@ func buildHelpText(commands []Suggestion) string {
 	b.WriteString("| `Tab` | Autocomplete suggestion |\n")
 	b.WriteString("| `\u2191/\u2193` | Navigate suggestions |\n")
 	b.WriteString("| `Alt+Enter` | Insert newline |\n")
-	b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
+	switch runtime.GOOS {
+	case "darwin":
+		b.WriteString("| `⌥+drag` | Select text (bypasses mouse scroll) |\n")
+	default:
+		b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
+	}
 	b.WriteString("\nType a natural language request to start.\n")
 	return b.String()
 }
@@ -1694,11 +1936,16 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 }
 
 func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) string {
-	// Shortcut hint: Shift+drag for native selection (SGR mouse mode bypass)
-	shortcutHint := "Shift+drag select | Alt+Enter newline"
+	// Shortcut hint: native terminal text selection (SGR mouse mode bypass)
+	dragHint := "Shift+drag select"
 	switch runtime.GOOS {
 	case "darwin":
-		shortcutHint = "Shift+drag select | ⌥+Enter newline"
+		dragHint = "⌥+drag select"
+	}
+	shortcutHint := dragHint + " | Alt+Enter newline"
+	switch runtime.GOOS {
+	case "darwin":
+		shortcutHint = dragHint + " | ⌥+Enter newline"
 	}
 
 	// Scroll position indicator
@@ -1776,11 +2023,17 @@ func wrapLines(lines []string, width int) []string {
 	}
 	result := []string{}
 	for _, line := range lines {
-		if len(line) <= width {
+		if lipgloss.Width(line) <= width {
 			result = append(result, line)
 			continue
 		}
-		result = append(result, wrapText(line, width)...)
+		// Lines with ANSI codes cannot be safely word-wrapped (would corrupt
+		// escape sequences). Pass them through — View() handles width enforcement.
+		if strings.Contains(line, "\033[") {
+			result = append(result, line)
+		} else {
+			result = append(result, wrapText(line, width)...)
+		}
 	}
 	return result
 }

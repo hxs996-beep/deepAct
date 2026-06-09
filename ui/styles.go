@@ -13,6 +13,14 @@ import (
 var (
 	isDark             bool
 	LogoStyle          lipgloss.Style
+	LogoGradient1      lipgloss.Style // deep blue
+	LogoGradient2      lipgloss.Style // cyan
+	LogoGradient3      lipgloss.Style // bright cyan/white
+	MascotStyle        lipgloss.Style
+	MascotAccentStyle  lipgloss.Style
+	MascotWaveStyle    lipgloss.Style
+	VersionStyle       lipgloss.Style
+	FlashModelStyle    lipgloss.Style
 	UserMsgStyle       lipgloss.Style
 	AssistantMsgStyle  lipgloss.Style
 	ToolTreeStyle      lipgloss.Style
@@ -31,16 +39,26 @@ var (
 	SuggestionSelected lipgloss.Style
 	ScrollbarTrackStyle  lipgloss.Style
 	ScrollbarThumbStyle  lipgloss.Style
+	SloganStyle          lipgloss.Style
 )
 
 func init() {
 	isDark = termenv.HasDarkBackground()
+	lipgloss.SetHasDarkBackground(isDark)
 	initStyles()
 }
 
 func initStyles() {
 	if isDark {
 		LogoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Bold(true)
+		LogoGradient1 = lipgloss.NewStyle().Foreground(lipgloss.Color("68")).Bold(true)
+		LogoGradient2 = lipgloss.NewStyle().Foreground(lipgloss.Color("87")).Bold(true)
+		LogoGradient3 = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("87"))     // bright cyan
+		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("228")) // warm yellow
+		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))    // blue wave
+		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("227")).Bold(true) // bright yellow
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
@@ -65,8 +83,17 @@ func initStyles() {
 		SuggestionSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("109"))
 		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
+		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
 	} else {
 		LogoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
+		LogoGradient1 = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
+		LogoGradient2 = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+		LogoGradient3 = lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Bold(true)
+		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))     // bright blue
+		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("166")) // orange accent
+		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("37"))    // teal wave
+		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130")).Bold(true) // bold brown
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("27"))
 		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130"))
@@ -85,6 +112,7 @@ func initStyles() {
 		SuggestionSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("25"))
 		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
+		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
 	}
 }
 

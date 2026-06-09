@@ -19,6 +19,7 @@ type RepoMap struct {
 type PackageInfo struct {
 	Name       string
 	Dir        string
+	Files      []string // .go filenames in this package (excluding _test.go)
 	Types      []TypeInfo
 	Functions  []FuncInfo
 	Interfaces []InterfaceInfo
@@ -67,6 +68,9 @@ func (rm *RepoMap) Render() string {
 	var b strings.Builder
 	for _, pkg := range rm.Packages {
 		b.WriteString(fmt.Sprintf("pkg %s (%s/)\n", pkg.Name, pkg.Dir))
+		if len(pkg.Files) > 0 {
+			b.WriteString("  files: " + strings.Join(pkg.Files, ", ") + "\n")
+		}
 		for _, iface := range pkg.Interfaces {
 			b.WriteString(fmt.Sprintf("  interface %s\n", iface.Name))
 			for _, m := range iface.Methods {
@@ -111,6 +115,30 @@ func (rm *RepoMap) FindFile(symbol string) string {
 		}
 	}
 	return ""
+}
+
+// ResolveFile resolves a model-provided path guess to actual file path.
+// Returns the exact match and, for failed guesses, a list of alternative files.
+// The guess is matched by basename (case-insensitive) across all packages;
+// if no exact match, alternatives from the same package directory are returned.
+func (rm *RepoMap) ResolveFile(guess string) (resolved string, alternatives []string) {
+	base := strings.ToLower(filepath.Base(guess))
+	guessDir := strings.ToLower(filepath.Dir(guess))
+	for _, pkg := range rm.Packages {
+		pkgDirLower := strings.ToLower(pkg.Dir)
+		for _, f := range pkg.Files {
+			if strings.ToLower(f) == base {
+				return filepath.ToSlash(filepath.Join(pkg.Dir, f)), nil
+			}
+		}
+		// Collect alternatives from the same directory
+		if guessDir == pkgDirLower || strings.Contains(base, pkgDirLower) || strings.Contains(pkgDirLower, guessDir) {
+			for _, f := range pkg.Files {
+				alternatives = append(alternatives, filepath.ToSlash(filepath.Join(pkg.Dir, f)))
+			}
+		}
+	}
+	return "", alternatives
 }
 
 func findGoPackages(root string) []string {
@@ -168,7 +196,9 @@ func parsePackageDir(dir, root string) (*PackageInfo, error) {
 			sortedFiles = append(sortedFiles, fname)
 		}
 		sort.Strings(sortedFiles)
+		info.Files = make([]string, 0, len(sortedFiles))
 		for _, fname := range sortedFiles {
+			info.Files = append(info.Files, filepath.Base(fname))
 			extractDecls(pk.Files[fname], info)
 		}
 		return info, nil

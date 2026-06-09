@@ -30,6 +30,16 @@ type EvalRecord struct {
 	IterationCount   int         `json:"iteration_count"`
 	TaskComplexity   string      `json:"task_complexity,omitempty"`
 	GoalSnippet      string      `json:"goal_snippet,omitempty"`
+
+	// Efficiency metrics (auto-recorded per-Run)
+	CacheHitTokens    int     `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens   int     `json:"cache_miss_tokens,omitempty"`
+	DurationMs        int64   `json:"duration_ms,omitempty"`
+	ToolCallCount     int     `json:"tool_call_count,omitempty"`
+	ModifiedFileCount int     `json:"modified_file_count,omitempty"`
+	ErrorCount        int     `json:"error_count,omitempty"`
+	FinishReason      string  `json:"finish_reason,omitempty"`
+	CostEstimate      float64 `json:"cost_estimate,omitempty"`
 }
 
 // EvalMetadata carries non-ScoreCard context for an evaluation.
