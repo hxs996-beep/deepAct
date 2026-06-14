@@ -40,6 +40,15 @@ var (
 	ScrollbarTrackStyle  lipgloss.Style
 	ScrollbarThumbStyle  lipgloss.Style
 	SloganStyle          lipgloss.Style
+	InputBarStyle        lipgloss.Style // blue vertical bar matching logo gradient
+
+	// Block styles — background-color differentiated sections (no borders)
+	SearchBlockStyle   lipgloss.Style // file search / grep results
+	ExecBlockStyle     lipgloss.Style // command execution output
+	DiffBlockStyle     lipgloss.Style // code diff display (used for full-block rendering)
+	DiffBlockLineStyle lipgloss.Style // per-line diff rendering (no vertical padding)
+	ThinkingBlockStyle lipgloss.Style // LLM thinking/reasoning
+	InputBlockStyle    lipgloss.Style // user input area (replaces bordered InputBoxStyle)
 )
 
 func init() {
@@ -54,29 +63,27 @@ func initStyles() {
 		LogoGradient1 = lipgloss.NewStyle().Foreground(lipgloss.Color("68")).Bold(true)
 		LogoGradient2 = lipgloss.NewStyle().Foreground(lipgloss.Color("87")).Bold(true)
 		LogoGradient3 = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
-		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("87"))     // bright cyan
-		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("228")) // warm yellow
-		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))    // blue wave
+		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("87"))
+		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("228"))
+		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("227")).Bold(true) // bright yellow
+		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("227")).Bold(true)
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
-		// Windows conhost.exe has issues with background color ANSI reset causing
-		// status-bar background to leak into subsequent lines on rapid scroll renders.
 		if runtime.GOOS == "windows" {
 			StatusBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 		} else {
 			StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
 		}
 		InputPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
-		InputBoxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("243")).Padding(0, 1)
+		InputBoxStyle = lipgloss.NewStyle().Background(lipgloss.Color("235")).Padding(0, 1)
 		ErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 		DimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		SystemMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Italic(true)
-		SuggestionBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("109")).Padding(0, 1).BorderBackground(lipgloss.Color("234")).Background(lipgloss.Color("234"))
+		SuggestionBox = lipgloss.NewStyle().Background(lipgloss.Color("234")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		SuggestionItem = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		SuggestionHotkey = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
@@ -84,28 +91,36 @@ func initStyles() {
 		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
 		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+		InputBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("68"))
+
+		SearchBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("234")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		ExecBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("235")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		DiffBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("233")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		DiffBlockLineStyle = lipgloss.NewStyle().Background(lipgloss.Color("233")).PaddingLeft(2).PaddingRight(1)
+		ThinkingBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("234")).Foreground(lipgloss.Color("245")).PaddingLeft(2).PaddingRight(1)
+		InputBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
 	} else {
 		LogoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
 		LogoGradient1 = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
 		LogoGradient2 = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
 		LogoGradient3 = lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Bold(true)
-		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))     // bright blue
-		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("166")) // orange accent
-		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("37"))    // teal wave
+		MascotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))
+		MascotAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("166"))
+		MascotWaveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("37"))
 		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
-		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130")).Bold(true) // bold brown
+		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130")).Bold(true)
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("27"))
 		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130"))
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("136"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
-		StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).Foreground(lipgloss.Color("236"))
+		StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).Foreground(lipgloss.Color("236"))
 		InputPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
-		InputBoxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("249")).Padding(0, 1)
+		InputBoxStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).Padding(0, 1)
 		ErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 		DimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		SystemMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
-		SuggestionBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("25")).Padding(0, 1).BorderBackground(lipgloss.Color("255")).Background(lipgloss.Color("255"))
+		SuggestionBox = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		SuggestionItem = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("249"))
 		SuggestionHotkey = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
@@ -113,13 +128,20 @@ func initStyles() {
 		ScrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+		InputBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).Foreground(lipgloss.Color("25"))
+
+		SearchBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		ExecBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		DiffBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
+		DiffBlockLineStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1)
+		ThinkingBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).Foreground(lipgloss.Color("243")).PaddingLeft(2).PaddingRight(1)
+		InputBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).Foreground(lipgloss.Color("236"))
 	}
 }
 
 // ---- Custom Glamour Style ----
-// We use glamour.WithAutoStyle() which picks DarkStyleConfig or LightStyleConfig
-// automatically. This file only provides the custom style if users want to override.
-// For now, the built-in dark/light configs from glamour are good enough.
+// These custom styles remove the │ prefix that glamour's built-in styles add
+// to code blocks, which interferes with diff display and looks noisy.
 
 func boolPtr(b bool) *bool       { return &b }
 func stringPtr(s string) *string { return &s }
@@ -341,6 +363,238 @@ var CustomDarkStyle = ansi.StyleConfig{
 			},
 			Background: ansi.StylePrimitive{
 				BackgroundColor: stringPtr("#303030"),
+			},
+		},
+	},
+	Table: ansi.StyleTable{
+		StyleBlock: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{},
+		},
+		CenterSeparator: stringPtr("┼"),
+		ColumnSeparator: stringPtr("│"),
+		RowSeparator:    stringPtr("─"),
+	},
+	DefinitionDescription: ansi.StylePrimitive{
+		BlockPrefix: "\n  ",
+	},
+}
+
+// CustomLightStyle is a clean light-mode style without │ prefix on code blocks.
+// Mirrors CustomDarkStyle but with light-appropriate colors.
+var CustomLightStyle = ansi.StyleConfig{
+	Document: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			BlockPrefix: "\n",
+			BlockSuffix: "\n",
+			Color:       stringPtr("236"),
+		},
+		Margin: uintPtr(2),
+	},
+	BlockQuote: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Color:  stringPtr("243"),
+			Italic: boolPtr(true),
+		},
+		Indent:      uintPtr(1),
+		IndentToken: stringPtr("▎ "),
+	},
+	Paragraph: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{},
+	},
+	List: ansi.StyleList{
+		StyleBlock: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{},
+		},
+		LevelIndent: 4,
+	},
+	Heading: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			BlockSuffix: "\n",
+			Color:       stringPtr("27"),
+			Bold:        boolPtr(true),
+		},
+	},
+	H1: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix:          " ",
+			Suffix:          " ",
+			Color:           stringPtr("166"),
+			BackgroundColor: stringPtr("255"),
+			Bold:            boolPtr(true),
+		},
+	},
+	H2: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix: "## ",
+			Color:  stringPtr("130"),
+			Bold:   boolPtr(true),
+		},
+	},
+	H3: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix: "### ",
+			Color:  stringPtr("136"),
+			Bold:   boolPtr(true),
+		},
+	},
+	H4: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix: "#### ",
+			Color:  stringPtr("94"),
+		},
+	},
+	H5: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix: "##### ",
+		},
+	},
+	H6: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix: "###### ",
+			Color:  stringPtr("246"),
+			Bold:   boolPtr(false),
+		},
+	},
+	Strikethrough: ansi.StylePrimitive{
+		CrossedOut: boolPtr(true),
+	},
+	Emph: ansi.StylePrimitive{
+		Italic: boolPtr(true),
+		Color:  stringPtr("236"),
+	},
+	Strong: ansi.StylePrimitive{
+		Bold: boolPtr(true),
+	},
+	HorizontalRule: ansi.StylePrimitive{
+		Color:  stringPtr("250"),
+		Format: "\n──────────────\n",
+	},
+	Item: ansi.StylePrimitive{
+		BlockPrefix: "• ",
+	},
+	Enumeration: ansi.StylePrimitive{
+		BlockPrefix: ". ",
+	},
+	Task: ansi.StyleTask{
+		StylePrimitive: ansi.StylePrimitive{},
+		Ticked:         "[✓] ",
+		Unticked:       "[ ] ",
+	},
+	Link: ansi.StylePrimitive{
+		Color:     stringPtr("27"),
+		Underline: boolPtr(true),
+	},
+	LinkText: ansi.StylePrimitive{
+		Color: stringPtr("27"),
+		Bold:  boolPtr(true),
+	},
+	Image: ansi.StylePrimitive{
+		Color:     stringPtr("198"),
+		Underline: boolPtr(true),
+	},
+	ImageText: ansi.StylePrimitive{
+		Color:  stringPtr("243"),
+		Format: "📷 {{.text}}",
+	},
+	Code: ansi.StyleBlock{
+		StylePrimitive: ansi.StylePrimitive{
+			Prefix:          " ",
+			Suffix:          " ",
+			Color:           stringPtr("130"),
+			BackgroundColor: stringPtr("254"),
+		},
+	},
+	CodeBlock: ansi.StyleCodeBlock{
+		StyleBlock: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Color:           stringPtr("236"),
+				BackgroundColor: stringPtr("254"),
+			},
+			Margin: uintPtr(2),
+		},
+		Chroma: &ansi.Chroma{
+			Text: ansi.StylePrimitive{
+				Color: stringPtr("#1A1A1A"),
+			},
+			Error: ansi.StylePrimitive{
+				Color: stringPtr("#CC0000"),
+			},
+			Comment: ansi.StylePrimitive{
+				Color: stringPtr("#A0A0A0"),
+			},
+			CommentPreproc: ansi.StylePrimitive{
+				Color: stringPtr("#E67E22"),
+			},
+			Keyword: ansi.StylePrimitive{
+				Color: stringPtr("#2980B9"),
+			},
+			KeywordReserved: ansi.StylePrimitive{
+				Color: stringPtr("#D35400"),
+			},
+			KeywordNamespace: ansi.StylePrimitive{
+				Color: stringPtr("#C0392B"),
+			},
+			KeywordType: ansi.StylePrimitive{
+				Color: stringPtr("#6C3483"),
+			},
+			Operator: ansi.StylePrimitive{
+				Color: stringPtr("#C0392B"),
+			},
+			Punctuation: ansi.StylePrimitive{
+				Color: stringPtr("#7F8C8D"),
+			},
+			Name: ansi.StylePrimitive{
+				Color: stringPtr("#1A1A1A"),
+			},
+			NameBuiltin: ansi.StylePrimitive{
+				Color: stringPtr("#D35400"),
+			},
+			NameTag: ansi.StylePrimitive{
+				Color: stringPtr("#8E44AD"),
+			},
+			NameAttribute: ansi.StylePrimitive{
+				Color: stringPtr("#2980B9"),
+			},
+			NameClass: ansi.StylePrimitive{
+				Color:     stringPtr("#D4AC0D"),
+				Underline: boolPtr(true),
+				Bold:      boolPtr(true),
+			},
+			NameConstant: ansi.StylePrimitive{
+				Color: stringPtr("#D35400"),
+			},
+			NameDecorator: ansi.StylePrimitive{
+				Color: stringPtr("#D68910"),
+			},
+			NameFunction: ansi.StylePrimitive{
+				Color: stringPtr("#27AE60"),
+			},
+			LiteralNumber: ansi.StylePrimitive{
+				Color: stringPtr("#1ABC9C"),
+			},
+			LiteralString: ansi.StylePrimitive{
+				Color: stringPtr("#D4AC0D"),
+			},
+			LiteralStringEscape: ansi.StylePrimitive{
+				Color: stringPtr("#1ABC9C"),
+			},
+			GenericDeleted: ansi.StylePrimitive{
+				Color: stringPtr("#C0392B"),
+			},
+			GenericEmph: ansi.StylePrimitive{
+				Italic: boolPtr(true),
+			},
+			GenericInserted: ansi.StylePrimitive{
+				Color: stringPtr("#27AE60"),
+			},
+			GenericStrong: ansi.StylePrimitive{
+				Bold: boolPtr(true),
+			},
+			GenericSubheading: ansi.StylePrimitive{
+				Color: stringPtr("#A0A0A0"),
+			},
+			Background: ansi.StylePrimitive{
+				BackgroundColor: stringPtr("#F5F5F5"),
 			},
 		},
 	},

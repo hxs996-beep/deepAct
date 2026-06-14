@@ -41,7 +41,6 @@ type Engine struct {
 	state      *TaskState
 	history    []Message
 	guards     *GuardSystem
-	hall       *ConferenceHall
 	evalStore  EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
@@ -69,6 +68,9 @@ type Engine struct {
 	// When non-nil, the agent has proposed file modifications and is awaiting
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
+
+	// roundtableHall orchestrates multi-stance roundtable discussions.
+	roundtableHall *RoundtableHall
 
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
@@ -116,7 +118,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		guards:          guard,
 		activatedSkills: make(map[string]bool),
 	}
-	e.hall = NewConferenceHall(e)
+	e.roundtableHall = NewRoundtableHall(e)
 
 	// Initialize eval store
 	evalPath := cfg.EvalStoreDir
@@ -165,82 +167,22 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runToolCallCount = 0
 	e.runErrorCount = 0
 
-	// Conference command parsing — must run BEFORE conference init
-	// so slash commands take priority over automatic classification.
-	cmd := parseConferenceCommand(userMsg)
-	if cmd != nil {
-		switch cmd.Phase {
-		case PhasePlanning:
-			if cmd.Goal == "" {
-				msg := "Please provide a goal. Usage: /plan <goal>"
-				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+	// Roundtable command handling — /round <goal>
+	// Must be checked BEFORE parseSkillCommand, which would otherwise
+	// treat "/round" as an unknown skill name.
+	if rc := parseRoundtableCommand(userMsg); rc != nil {
+		if e.state.Roundtable == nil {
+			e.state.Roundtable = &RoundtableState{
+				Goal:  rc.Goal,
+				Phase: RoundtableExplore,
 			}
-			e.state.PlanConfirmed = false
-			e.state.Conference = &ConferenceState{
-				Enabled: true,
-				Phase:   PhasePlanning,
-				Board:   ConferenceBoard{Goal: cmd.Goal, Phase: PhasePlanning},
-			}
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "conference_enter",
-					Name:   "planning",
-					Detail: "进入多智能体会议 — 规划阶段",
-				})
-			}
-			// Fall through to Advance() below
-
-		case PhaseExecute:
-			if cmd.Goal == "" {
-				msg := "Please provide a goal. Usage: /implement <goal>"
-				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
-			}
-			e.state.PlanConfirmed = false
-			// Save parent context before overwriting — preserves the original multi-defect
-			// goal/plan so it can be restored when the sub-task completes.
-			if e.state.Conference != nil && e.state.Conference.Enabled && e.state.Conference.Board.Plan != "" {
-				e.state.ParentContext = &ParentBoard{
-					Goal: e.state.Conference.Board.Goal,
-					Plan: e.state.Conference.Board.Plan,
-				}
-			}
-			e.state.Conference = &ConferenceState{
-				Enabled: true,
-				Phase:   PhaseExecute,
-				Board:   ConferenceBoard{Goal: cmd.Goal, Phase: PhaseExecute},
-			}
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "conference_enter",
-					Name:   "implementation",
-					Detail: "Starting implementation...",
-				})
-			}
-			e.state.ConfirmedScope = true
-			// Fall through to normal agent loop below
-
-		case PhaseReview:
-			// /审查 — force a fresh review against the current plan
-			if e.state.Conference != nil && e.state.Conference.Enabled {
-				e.state.Conference.Phase = PhaseReview
-				e.state.Conference.Board.PendingReview = false // force fresh review
-				// Fall through to Advance()
-			} else {
-				// No conference — run standalone
-				resp, err := e.hall.runStandalonePhase(ctx, cmd)
-				if err != nil {
-					return nil, fmt.Errorf("standalone review: %w", err)
-				}
-				return resp, nil
-			}
-
-		default:
-			// Unknown phase — run standalone
-			resp, err := e.hall.runStandalonePhase(ctx, cmd)
-			if err != nil {
-				return nil, fmt.Errorf("standalone phase: %w", err)
-			}
-			return resp, nil
+		}
+		response, err := e.roundtableHall.Advance(ctx, userMsg)
+		if err != nil {
+			return nil, fmt.Errorf("roundtable: %w", err)
+		}
+		if response != nil {
+			return response, nil
 		}
 	}
 
@@ -325,21 +267,34 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// PhaseDone reset — completed conferences are cleaned up.
-	// New tasks start fresh; user uses /plan or /implement to re-enter.
-	if e.state.Conference != nil && e.state.Conference.Enabled {
-		if e.state.Conference.Phase == PhaseDone {
-			// Save parent context before clearing
-			if board := e.state.Conference.Board; board.Goal != "" && e.state.ParentContext == nil {
-				e.state.ParentContext = &ParentBoard{Goal: board.Goal, Plan: board.Plan}
+	// Roundtable command handling — /round <goal>
+	if rc := parseRoundtableCommand(userMsg); rc != nil {
+		if e.state.Roundtable == nil {
+			e.state.Roundtable = &RoundtableState{
+				Goal:  rc.Goal,
+				Phase: RoundtableExplore,
 			}
-			e.state.Conference = nil
+		}
+		response, err := e.roundtableHall.Advance(ctx, userMsg)
+		if err != nil {
+			return nil, fmt.Errorf("roundtable: %w", err)
+		}
+		if response != nil {
+			return response, nil
 		}
 	}
 
-	// Conference is only entered via explicit slash commands (/plan, /implement, /review).
-	// No automatic intent classification — the user chooses the mode.
-	inConference := e.state.Conference != nil && e.state.Conference.Enabled
+	// Roundtable active from a previous turn — advance one phase
+	if e.state.Roundtable != nil && e.state.Roundtable.Phase != RoundtableDone {
+		response, err := e.roundtableHall.Advance(ctx, userMsg)
+		if err != nil {
+			return nil, fmt.Errorf("roundtable advance: %w", err)
+		}
+		if response != nil {
+			return response, nil
+		}
+	}
+
 	e.updateGoalFromFirstMessage(userMsg)
 
 	if e.pendingEditPlan != nil {
@@ -347,20 +302,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			e.pendingEditPlan = nil
 			e.state.PlanConfirmed = false
 		}
-	}
-
-	if inConference {
-		phase := e.state.Conference.Phase
-		if phase == PhasePlanning || phase == PhaseReview {
-			confResp, err := e.hall.Advance(ctx, userMsg)
-			if err != nil {
-				return nil, fmt.Errorf("conference: %w", err)
-			}
-			if confResp != nil {
-				return confResp, nil
-			}
-		}
-		// PhaseExecute falls through to normal agent loop below
 	}
 
 	// Edit plan confirmation — user approved the agent's proposed changes
@@ -514,18 +455,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Inject conference context for execute phase
-	var didExecute bool
-	if e.state.Conference != nil && e.state.Conference.Enabled && e.state.Conference.Phase == PhaseExecute && !e.state.Conference.Board.PendingReview {
-		board := e.state.Conference.Board
-		planMsg := fmt.Sprintf("## Implementation Plan\n\n%s\n\nPlease implement this according to the plan.", board.Plan)
-		if board.Goal != "" {
-			planMsg += "\n\n## Goal\n" + board.Goal
-		}
-		e.history = append(e.history, Message{Role: "user", Content: planMsg, Timestamp: time.Now()})
-		didExecute = true
-	}
-
 	// Scope is implicitly confirmed when user sends any message
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
@@ -603,20 +532,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// not incremented after a Done break — it still points to the completed turn.
 	e.state.TurnNumber = turns + 1
 
-	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
-		return nil, err
+	// Clean up completed roundtable state. It was available in Block B for this
+	// Run() call's context; subsequent turns don't need stale roundtable data.
+	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableDone {
+		e.state.Roundtable = nil
 	}
 
-	// After implementation phase in conference mode, run challenger review
-	if didExecute {
-		e.state.Conference.Phase = PhaseReview
-		confResp, err := e.hall.Advance(ctx, "")
-		if err != nil {
-			return nil, fmt.Errorf("conference review: %w", err)
-		}
-		if confResp != nil {
-			return confResp, nil
-		}
+	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
+		return nil, err
 	}
 
 	if err := e.verifyAndCompact(); err != nil {

@@ -15,7 +15,8 @@ type File struct {
 	Routing    routingConfig    `toml:"routing"`
 	Context    contextConfig    `toml:"context"`
 	Guards     guardsConfig     `toml:"guards"`
-	Conference conferenceConfig `toml:"conference"`
+	// Conference field removed — ConferenceEnabled was dead code (never read by engine).
+	// Conference state is managed via TaskState.Conference in the engine package.
 	UI         uiConfig         `toml:"ui"`
 }
 
@@ -38,9 +39,7 @@ type guardsConfig struct {
 	ScopeGuard bool `toml:"scope_guard"`
 }
 
-type conferenceConfig struct {
-	Enabled bool `toml:"enabled"`
-}
+// conferenceConfig struct removed — ConferenceEnabled was dead code (never read by engine).
 
 // Load reads the TOML file at the given path. Returns nil if the file
 // doesn't exist — callers should use Apply with their defaults.
@@ -106,7 +105,8 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	// scope_guard=false means auto-confirm (invert the boolean)
 	cfg.AutoConfirmScope = !f.Guards.ScopeGuard
-	cfg.ConferenceEnabled = f.Conference.Enabled
+	// ConferenceEnabled was removed (dead code - Conference state is managed
+	// via TaskState.Conference field in the engine, not via EngineConfig).
 }
 
 type uiConfig struct {

@@ -50,8 +50,17 @@ func TestReadTool_OffsetAndLimit(t *testing.T) {
 		t.Fatalf("Run error: %v", err)
 	}
 	outputLines := strings.Split(strings.TrimSpace(result.Digest), "\n")
-	if len(outputLines) != 5 {
-		t.Errorf("got %d lines, want 5 (offset=10, limit=5)", len(outputLines))
+	// The digest includes a trailing lspHint (---\nNeed to find...),
+	// so we check the content portion separately.
+	contentLines := 0
+	for _, l := range outputLines {
+		if l == "" || l == "---" || strings.HasPrefix(l, "Need to find") {
+			break
+		}
+		contentLines++
+	}
+	if contentLines != 5 {
+		t.Errorf("got %d content lines, want 5 (offset=10, limit=5)", contentLines)
 	}
 	if !strings.HasPrefix(outputLines[0], "10: ") {
 		t.Errorf("first line = %q, want prefix '10: '", outputLines[0])

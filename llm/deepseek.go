@@ -33,6 +33,22 @@ type DeepSeekClient struct {
 	reasoningMgr *ReasoningEchoManager
 }
 
+// Fork creates a new DeepSeekClient sharing the same HTTP client, limiter, retry policy,
+// and token estimator, but with an independent ReasoningEchoManager.
+// This prevents reasoning_content cross-contamination between nested agent calls
+// (e.g. main agent → sub-agent reasoning leaking into the wrong context).
+func (c *DeepSeekClient) Fork() *DeepSeekClient {
+	return &DeepSeekClient{
+		apiKey:       c.apiKey,
+		endpoint:     c.endpoint,
+		http:         c.http,
+		limiter:      c.limiter,
+		retry:        c.retry,
+		estimator:    c.estimator,
+		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
+	}
+}
+
 func NewDeepSeekClient(apiKey string, httpClient *http.Client, limiter *AdaptiveLimiter, retry RetryPolicy, estimator *TokenEstimator) *DeepSeekClient {
 	return NewDeepSeekClientWithEndpoint(DefaultDeepSeekEndpoint, apiKey, httpClient, limiter, retry, estimator)
 }

@@ -8,12 +8,12 @@ import (
 
 // ScoreCard is used by Challenger and Tester to evaluate proposals, plans, and code.
 type ScoreCard struct {
-	Phase      ConferencePhase `json:"phase"`
-	Dimensions []Dimension     `json:"dimensions"`
-	TotalScore float64         `json:"total_score"` // 0–100
-	Passed     bool            `json:"passed"`      // TotalScore >= 80
-	Verdict    string          `json:"verdict"`     // "pass" | "fail" | "needs_review"
-	Summary    string          `json:"summary"`
+	Phase      string      `json:"phase"`
+	Dimensions []Dimension `json:"dimensions"`
+	TotalScore float64     `json:"total_score"` // 0–100
+	Passed     bool        `json:"passed"`      // TotalScore >= 80
+	Verdict    string      `json:"verdict"`     // "pass" | "fail" | "needs_review"
+	Summary    string      `json:"summary"`
 }
 
 // Dimension is a single scoring criterion.
@@ -48,59 +48,6 @@ func (s *ScoreCard) ComputeTotal() {
 	}
 }
 
-// newAnalysisScoreCard creates a ScoreCard for Phase 1 (analysis) review.
-func newAnalysisScoreCard() *ScoreCard {
-	return &ScoreCard{
-		Phase: PhaseAnalysisReview,
-		Dimensions: []Dimension{
-			{Name: "Code Relevance", Weight: 0.35},
-			{Name: "Completeness", Weight: 0.25},
-			{Name: "Requirement Alignment", Weight: 0.25},
-			{Name: "Missing Gaps Identified", Weight: 0.15},
-		},
-	}
-}
-
-// newPlanScoreCard creates a ScoreCard for Phase 2 (planning) review.
-func newPlanScoreCard() *ScoreCard {
-	return &ScoreCard{
-		Phase: PhaseBrainstormReview,
-		Dimensions: []Dimension{
-			{Name: "Plan Completeness", Weight: 0.30},
-			{Name: "Goal Alignment", Weight: 0.30},
-			{Name: "Risk Awareness", Weight: 0.20},
-			{Name: "Implementation Feasibility", Weight: 0.20},
-		},
-	}
-}
-
-// newVerificationScoreCard creates a ScoreCard for Phase 4 (verification) review.
-func newVerificationScoreCard() *ScoreCard {
-	return &ScoreCard{
-		Phase: PhaseVerificationReview,
-		Dimensions: []Dimension{
-			{Name: "Goal Fulfillment", Weight: 0.35},
-			{Name: "Code Correctness", Weight: 0.30},
-			{Name: "Edge Case Coverage", Weight: 0.20},
-			{Name: "Consistency with Requirements", Weight: 0.15},
-		},
-	}
-}
-
-// newPartialReviewScoreCard creates a ScoreCard for L2 (partial context) review.
-// With no formal plan to compare against, Functionality Match carries more weight.
-func newPartialReviewScoreCard() *ScoreCard {
-	return &ScoreCard{
-		Phase: PhaseVerificationReview,
-		Dimensions: []Dimension{
-			{Name: "Functionality Match", Weight: 0.40},
-			{Name: "Code Correctness", Weight: 0.25},
-			{Name: "Edge Case Coverage", Weight: 0.20},
-			{Name: "Code Maintainability", Weight: 0.15},
-		},
-	}
-}
-
 // ToJSON serializes the ScoreCard to JSON bytes.
 func (s *ScoreCard) ToJSON() ([]byte, error) {
 	data, err := json.Marshal(s)
@@ -116,7 +63,7 @@ func (s *ScoreCard) ToEvalRecord(meta EvalMetadata) EvalRecord {
 		Timestamp:        time.Now(),
 		SessionID:        meta.SessionID,
 		PromptVersion:    meta.PromptVersion,
-		Phase:            s.Phase.String(),
+		Phase:            s.Phase,
 		TotalScore:       s.TotalScore,
 		Passed:           s.Passed,
 		Verdict:          s.Verdict,
@@ -139,7 +86,7 @@ func (s *ScoreCard) PersistTo(store EvalStore, meta EvalMetadata) error {
 
 // FormatScoreCard produces a human-readable summary of the score card.
 func FormatScoreCard(card *ScoreCard) string {
-	s := fmt.Sprintf("## Score Card — %s\n\n", card.Phase.String())
+	s := fmt.Sprintf("## Score Card — %s\n\n", card.Phase)
 	s += fmt.Sprintf("**Total Score:** %.1f / 100\n", card.TotalScore)
 	s += fmt.Sprintf("**Verdict:** %s\n\n", card.Verdict)
 	s += "| Dimension | Score | Weight | Evidence | Issue |\n"

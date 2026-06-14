@@ -12,7 +12,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Code searcher — read-only code exploration
 	reg.Register(&specialistAgent{
 		id:     AgentCodeSearcher,
-		spec:   AgentSpec{ID: AgentCodeSearcher, Description: "Search and read code to find patterns, definitions, and implementations", ToolNames: []string{"read", "grep", "glob"}},
+		spec:   AgentSpec{ID: AgentCodeSearcher, Description: "Search and read code to find patterns, definitions, and implementations", ToolNames: []string{"read", "grep", "glob"}, MaxIterations: 8},
 		prompt: codeSearcherPrompt,
 		runner: runner,
 	})
@@ -20,7 +20,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Brainstorm — generate creative solutions and alternatives (read-only)
 	reg.Register(&specialistAgent{
 		id:     AgentBrainstorm,
-		spec:   AgentSpec{ID: AgentBrainstorm, Description: "Generate creative solutions, alternatives, and design options", ToolNames: []string{"read", "grep", "glob"}},
+		spec:   AgentSpec{ID: AgentBrainstorm, Description: "Generate creative solutions, alternatives, and design options", ToolNames: []string{"read", "grep", "glob"}, MaxIterations: 10},
 		prompt: brainstormPrompt,
 		runner: runner,
 	})
@@ -28,7 +28,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Critic — critically review analysis and find flaws
 	reg.Register(&specialistAgent{
 		id:     AgentCritic,
-		spec:   AgentSpec{ID: AgentCritic, Description: "Critically review decisions, plans, and analysis to find flaws", ToolNames: []string{"read", "grep", "glob"}},
+		spec:   AgentSpec{ID: AgentCritic, Description: "Critically review decisions, plans, and analysis to find flaws", ToolNames: []string{"read", "grep", "glob"}, MaxIterations: 8},
 		prompt: criticPrompt,
 		runner: runner,
 	})
@@ -36,7 +36,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Proposer (Flash) — analyze goal and articulate requirements
 	reg.Register(&specialistAgent{
 		id:     AgentProposer,
-		spec:   AgentSpec{ID: AgentProposer, Description: "Analyze requirements and propose what needs to be done", ToolNames: []string{"read"}, ModelName: "flash"},
+		spec:   AgentSpec{ID: AgentProposer, Description: "Analyze requirements and propose what needs to be done", ToolNames: []string{"read"}, ModelName: "flash", MaxIterations: 5},
 		prompt: proposerPrompt,
 		runner: runner,
 	})
@@ -44,7 +44,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Searcher (Flash) — find relevant code
 	reg.Register(&specialistAgent{
 		id:     AgentSearcher,
-		spec:   AgentSpec{ID: AgentSearcher, Description: "Search the codebase for code related to a task", ToolNames: []string{"read", "grep", "glob", "fetch"}, ModelName: "flash"},
+		spec:   AgentSpec{ID: AgentSearcher, Description: "Search the codebase for code related to a task", ToolNames: []string{"read", "grep", "glob", "fetch"}, ModelName: "flash", MaxIterations: 8},
 		prompt: searcherPrompt,
 		runner: runner,
 	})
@@ -52,7 +52,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Planner (Pro) — create implementation plans
 	reg.Register(&specialistAgent{
 		id:     AgentPlanner,
-		spec:   AgentSpec{ID: AgentPlanner, Description: "Create detailed implementation plans from requirements", ToolNames: []string{"read"}},
+		spec:   AgentSpec{ID: AgentPlanner, Description: "Create detailed implementation plans from requirements", ToolNames: []string{"read"}, MaxIterations: 8},
 		prompt: plannerPrompt,
 		runner: runner,
 	})
@@ -60,7 +60,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Challenger (Pro) — validate analysis/plans with ScoreCard
 	reg.Register(&specialistAgent{
 		id:     AgentChallenger,
-		spec:   AgentSpec{ID: AgentChallenger, Description: "Validate analysis and plans using ScoreCard evaluation", ToolNames: []string{"read", "grep", "glob"}},
+		spec:   AgentSpec{ID: AgentChallenger, Description: "Validate analysis and plans using ScoreCard evaluation", ToolNames: []string{"read", "grep", "glob"}, MaxIterations: 8},
 		prompt: challengerPrompt,
 		runner: runner,
 	})
@@ -68,7 +68,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Tester (Flash) — review implementations against original goal
 	reg.Register(&specialistAgent{
 		id:     AgentTester,
-		spec:   AgentSpec{ID: AgentTester, Description: "Review implementations against original requirements", ToolNames: []string{"read", "grep", "glob", "bash"}, ModelName: "flash"},
+		spec:   AgentSpec{ID: AgentTester, Description: "Review implementations against original requirements", ToolNames: []string{"read", "grep", "glob", "bash"}, ModelName: "flash", MaxIterations: 8},
 		prompt: testerPrompt,
 		runner: runner,
 	})

@@ -58,8 +58,7 @@ type EngineConfig struct {
 	PlanningEnabled        bool
 	PlanningThresholdChars int
 	AutoConfirmScope       bool
-	ShowThinking           bool // stream model reasoning/thinking to UI
-	ConferenceEnabled      bool // enable multi-agent conference system
+	ShowThinking           bool   // stream model reasoning/thinking to UI
 	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
 	ToolAllowList          []string
 	WorkDir                string
@@ -213,15 +212,7 @@ type TaskState struct {
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
-	Conference          *ConferenceState `json:"conference,omitempty"`
-	ParentContext       *ParentBoard     `json:"parent_context,omitempty"` // saved parent goal+plan before sub-task overwrites conference
-}
-
-// ParentBoard preserves the parent conference context before a sub-task (/implement)
-// overwrites it, so the original multi-defect goal/plan can be restored later.
-type ParentBoard struct {
-	Goal string `json:"goal"`
-	Plan string `json:"plan"`
+	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
 }
 
 type FileCollapse struct {

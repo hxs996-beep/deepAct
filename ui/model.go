@@ -42,7 +42,7 @@ type ToolNode struct {
 	Detail     string // bash command / file path / pattern
 	DetailFull string // full diff / output content
 	Done       bool
-	Icon       string     // 📝 💻 🔍 📖
+	Icon       string     // [~] [>_] [?] [<>]
 	Children   []ToolNode // diff hunks for edit/write, output for bash
 }
 
@@ -62,33 +62,45 @@ type Suggestion struct {
 	Description string // e.g. "分析需求，探索代码并制定方案"
 }
 
+// MemberStatus tracks a roundtable member's review progress for UI display.
+type MemberStatus struct {
+	ID      string // member ID e.g. "architect"
+	Name    string // display name e.g. "架构师"
+	Avatar  string // emoji e.g. "🏗️"
+	Status  string // "running", "done", "error"
+	Score   int    // 0-100 (valid when done)
+	Verdict string // "approve", "conditional", "reject" (valid when done)
+}
+
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
+	{Command: "/round", Args: "<需求>", Description: "开启多角色圆桌讨论，探索方案并进行多方评审"},
 }
 
 type Model struct {
-	state        AppState
-	messages     []DisplayMessage
-	inputBuf     *InputBuffer
-	status       StatusInfo
-	spinners     []AgentSpinner
-	toolTree     []ToolNode
-	width        int
-	height       int
-	engine       EngineRunner
-	streaming    string
-	thinkingContent string
-	apiKeyInput           string
-	pendingOpenBracket    bool   // Windows: lone '[' held to check if it's escape split
-	pendingCloseBracket   bool   // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
-	afterResidue          bool   // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
-	ready                 bool
-	progressChan chan ProgressMsg
-	scrollOffset int
-	cancelled    bool
-	pendingEsc   bool // tracks ESC prefix for Alt+Enter sequence detection
-	pricing      engine.PricingConfig
-	needsRepaint bool // forces full Bubble Tea repaint on next frame
+	state               AppState
+	messages            []DisplayMessage
+	inputBuf            *InputBuffer
+	status              StatusInfo
+	spinners            []AgentSpinner
+	toolTree            []ToolNode
+	width               int
+	height              int
+	engine              EngineRunner
+	streaming           string
+	thinkingContent     string // deprecated: kept for legacy, no longer fed by reasoning_delta
+	thinkingActivity    string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
+	apiKeyInput         string
+	pendingOpenBracket  bool // Windows: lone '[' held to check if it's escape split
+	pendingCloseBracket bool // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
+	afterResidue        bool // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
+	ready               bool
+	progressChan        chan ProgressMsg
+	scrollOffset        int
+	cancelled           bool
+	pendingEsc          bool // tracks ESC prefix for Alt+Enter sequence detection
+	pricing             engine.PricingConfig
+	needsRepaint        bool // forces full Bubble Tea repaint on next frame
 
 	// Slash command suggestions
 	showSuggestions    bool
@@ -108,11 +120,14 @@ type Model struct {
 	bodyDirty       bool
 	// Per-message render cache (messages are immutable once added)
 	msgCache *messageRenderCache
+
+	// Roundtable member progress tracking
+	memberStatuses []MemberStatus
 }
 
 type messageRenderCache struct {
-	lines        [][]string
-	width        int
+	lines         [][]string
+	width         int
 	lastMaxScroll int
 }
 
@@ -173,13 +188,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// which would cause the next Enter to insert a newline instead of submit.
 	//
 	// afterResidue is NOT cleared here — it must survive non-KeyMsg events
-	// (ProgressMsg, TickMsg) that frequently arrive between escape residue
-	// and its trailing ST backslash (ESC \), so the \ can still be caught.
+	// pendingEsc and afterResidue must survive non-KeyMsg events (TickMsg,
+	// ProgressMsg) that frequently arrive between split key sequences.
+	// ESC + Enter for Alt+Enter on macOS can be separated by timer ticks.
 	switch msg.(type) {
 	case tea.KeyMsg:
 		// flags are managed in handleKey
 	default:
-		m.pendingEsc = false
+		// Don't clear pendingEsc or afterResidue here
 	}
 
 	switch msg := msg.(type) {
@@ -194,7 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollOffset = ms
 				}
 			}
-			return m, nil
+			return m, m.repaintCmd()
 		case tea.MouseButtonWheelDown:
 			if m.state == stateReady || m.state == stateRunning {
 				m.scrollOffset -= m.height / 3
@@ -202,7 +218,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollOffset = 0
 				}
 			}
-			return m, nil
+			return m, m.repaintCmd()
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -257,9 +273,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 		}
 		m.thinkingContent = ""
+		m.thinkingActivity = ""
+		m.memberStatuses = nil // roundtable phase done, clear member cards
 		m.finishStreaming(msg)
-		m.needsRepaint = true
-		return m, nil
+		return m, m.repaintCmd()
 	case ProgressMsg:
 		// Auto-scroll to bottom while running so new tool/spinner content stays visible.
 		// But only if user hasn't manually scrolled up to read history.
@@ -271,31 +288,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Detail
 			}
+			m.thinkingActivity = msg.Detail
 		case "reasoning_delta":
-			m.thinkingContent += msg.Detail
+			// No longer fed into thinkingContent — raw LLM reasoning is not useful
+			// to display. Agent activity is shown via "thinking" events instead.
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = "thinking..."
 			}
-		case "conference_enter":
-			// Show a prominent header when entering multi-agent conference mode
-			// msg.Detail contains localized text like "进入多智能体会议模式"
-			detail := msg.Detail
-			if detail == "" {
-				detail = fmt.Sprintf("🧠 Multi-Agent Conference — %s Phase", msg.Name)
+		case "member_start":
+			m.memberStatuses = append(m.memberStatuses, MemberStatus{
+				ID:     msg.Name,
+				Name:   msg.Detail,
+				Avatar: memberAvatar(msg.Name),
+				Status: "running",
+			})
+		case "member_done":
+			for i := range m.memberStatuses {
+				if m.memberStatuses[i].ID == msg.Name {
+					m.memberStatuses[i].Status = "done"
+					if score := extractScore(msg.Detail); score >= 0 {
+						m.memberStatuses[i].Score = score
+					}
+					if strings.Contains(msg.Detail, "✅") {
+						m.memberStatuses[i].Verdict = "approve"
+					} else if strings.Contains(msg.Detail, "⚠️") {
+						m.memberStatuses[i].Verdict = "conditional"
+					} else if strings.Contains(msg.Detail, "❌") {
+						m.memberStatuses[i].Verdict = "reject"
+					}
+					break
+				}
 			}
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: detail})
+		case "roundtable_enter":
+			m.memberStatuses = nil
 			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = "🧠 " + msg.Name
+				m.spinners[0].Goal = "🔄 " + msg.Detail
 			}
-		case "conference_phase":
-			// Update phase label during conference execution
-			phaseLabel := msg.Name
-			detail := msg.Detail
-			if detail == "" {
-				detail = phaseLabel
+		case "roundtable_phase":
+			if msg.Name == "review" {
+				m.memberStatuses = nil
 			}
 			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = "🧠 " + detail
+				m.spinners[0].Goal = "🔄 " + msg.Detail
+			}
+			if msg.Name == "explore_done" || msg.Name == "review_done" {
+				m.memberStatuses = nil
 			}
 		case "agent_start":
 			displayName := "🧠 " + msg.Name
@@ -394,6 +431,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// repaintCmd returns a Cmd that fires a WindowSizeMsg with the current
+// dimensions, forcing Bubble Tea to do a full frame repaint. This prevents
+// visual artifacts (duplicated/ghost content) that occur when scrolling
+// or after engine responses, where incremental diff rendering leaves stale
+// terminal output.
+func (m Model) repaintCmd() tea.Cmd {
+	return func() tea.Msg {
+		return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+	}
+}
+
 // scrollUp increases scroll offset by half the terminal height.
 func (m Model) scrollUp() Model {
 	m.scrollOffset += m.height / 2
@@ -430,29 +478,26 @@ func (m Model) View() string {
 	suggestionPopup := renderSuggestions(m, contentWidth)
 	optionsPopup := renderOptionsPopup(m, contentWidth)
 
-	// Render footer first to measure actual heights.
-	// First pass: compute status bar height (no scroll info yet).
-	statusLine := renderStatusBar(m.status, m.scrollOffset, 0, contentWidth)
+	// ---- Step 1: Render footer components (bottom-fixed area) ----
 	inputLine := renderInputLine(m)
-	actualStatusHeight := renderedHeight(statusLine)
-	actualInputHeight := renderedHeight(inputLine)
 
-	// Only count popup lines for popups that are actually shown
-	bodyHeight := m.height - actualStatusHeight - actualInputHeight
+	// ---- Step 2: Compute footer height — this area is FIXED and NEVER scrolls ----
+	// Status bar is always 3 lines (top padding, content line, bottom padding)
+	footerHeight := 3 + renderedHeight(inputLine)
 	if suggestionPopup != "" {
-		suggestionHeight := renderedHeight(suggestionPopup)
-		bodyHeight -= suggestionHeight
+		footerHeight += renderedHeight(suggestionPopup)
 	}
 	if optionsPopup != "" {
-		optionsHeight := renderedHeight(optionsPopup)
-		bodyHeight -= optionsHeight
+		footerHeight += renderedHeight(optionsPopup)
 	}
+
+	// ---- Step 3: Body area = remaining space above footer ----
+	bodyHeight := m.height - footerHeight
 	if bodyHeight < 1 {
 		bodyHeight = 1
 	}
 
-	// Render body once at scrollbar-ready width to avoid expensive double-render.
-	// The 1-char difference is negligible visually but eliminates a full re-render.
+	// ---- Step 4: Render body with scroll offset ----
 	needScrollbar := false
 	scrollContentWidth := contentWidth - 1
 	if scrollContentWidth < 20 {
@@ -466,9 +511,6 @@ func (m Model) View() string {
 	if total > bodyHeight {
 		needScrollbar = true
 		maxScroll = total - bodyHeight
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
 		if scrollOff > maxScroll {
 			scrollOff = maxScroll
 		}
@@ -483,131 +525,76 @@ func (m Model) View() string {
 		lines = lines[start:end]
 	}
 	m.msgCache.lastMaxScroll = maxScroll
-	// Second pass: re-render status bar with actual scroll info
-	statusLine = renderStatusBar(m.status, scrollOff, maxScroll, contentWidth)
-	// Re-check: if scroll info changed the status bar height (e.g. scroll hint
-	// wrapping on narrow terminals), re-clip body to keep total = m.height.
-	if newStatusH := renderedHeight(statusLine); newStatusH != actualStatusHeight {
-		bodyHeight = m.height - newStatusH - actualInputHeight
-		if suggestionPopup != "" {
-			bodyHeight -= renderedHeight(suggestionPopup)
+
+	// ---- Step 5: Render status bar with actual scroll info (single pass) ----
+	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth)
+
+	// ---- Step 6: Pad/trim body to exactly bodyHeight ----
+	if m.state == stateInit || (len(m.messages) == 0 && m.streaming == "" && len(m.spinners) == 0) {
+		// Init state or no messages yet: logo is the only content — pad from BOTTOM so logo stays at top
+		for len(lines) < bodyHeight {
+			lines = append(lines, "")
 		}
-		if optionsPopup != "" {
-			bodyHeight -= renderedHeight(optionsPopup)
-		}
-		if bodyHeight < 1 {
-			bodyHeight = 1
-		}
-		// Re-clip lines to new bodyHeight
-		if len(lines) > bodyHeight {
-			lines = lines[:bodyHeight]
-		} else {
-			for len(lines) < bodyHeight {
-				lines = append(lines, "")
-			}
-		}
-		// Recalculate maxScroll from original total (not clipped lines)
-		if total > 0 {
-			maxScroll = total - bodyHeight
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
+	} else {
+		// Messages exist: pad from BOTTOM so content stays at the top, not pushed
+		// to the bottom by blank lines (which looks terrible with short responses).
+		for len(lines) < bodyHeight {
+			lines = append(lines, "")
 		}
 	}
-	// Pad body to exactly bodyHeight lines manually. On Windows conhost,
-	// lipgloss.Height() can miscount ANSI-wrapped lines, producing off-by-one
-	// padding that causes the status bar to overflow and leave residual lines.
-	for len(lines) < bodyHeight {
-		lines = append(lines, "")
-	}
+	// Trim from TOP if body exceeds allocated height
 	if len(lines) > bodyHeight {
-		lines = lines[:bodyHeight]
+		excess := len(lines) - bodyHeight
+		lines = lines[excess:]
 	}
-	// Truncate all body lines to terminal width to prevent visual wrapping.
-	// During stateRunning, tool tree, spinner, and streaming content can exceed
-	// terminal width (long file paths, emoji, styled ANSI content). The terminal
-	// wraps these visually, adding extra rows that push input/status off-screen.
+
+	// ---- Step 7: Truncate all body lines to terminal width ----
 	for i := range lines {
-		if lipgloss.Width(lines[i]) > contentWidth {
-			lines[i] = ansi.Truncate(lines[i], contentWidth, "")
-		}
+		lines[i] = ansi.Truncate(lines[i], contentWidth, "")
 	}
-	// Visual scrollbar: draw │ (track) and ▐ (thumb) on the right edge
-	if needScrollbar && bodyHeight > 0 {
-		thumbLine := int(float64(scrollOff) / float64(maxScroll) * float64(bodyHeight-1))
-		sbTrack := ScrollbarTrackStyle.Render("│")
-		sbThumb := ScrollbarThumbStyle.Render("▐")
-		for i := range lines {
-			w := lipgloss.Width(lines[i])
-			if w > scrollContentWidth {
-				// Truncate lines wider than scrollContentWidth to prevent
-				// visual overflow when scrollbar char is appended.
-				lines[i] = ansi.Truncate(lines[i], scrollContentWidth, "")
-				w = scrollContentWidth
-			}
-			if w < scrollContentWidth {
-				lines[i] += strings.Repeat(" ", scrollContentWidth-w)
-			}
-			if strings.TrimSpace(lines[i]) == "" {
-				lines[i] += " "
-			} else if i == thumbLine {
-				lines[i] += sbThumb
-			} else {
-				lines[i] += sbTrack
-			}
-		}
+
+	// ---- Step 8: Visual scrollbar (removed per user request — was adding │/▐ to right side) ----
+	if needScrollbar && bodyHeight > 0 && maxScroll > 0 {
+		// Keep scrollbar calculation for maxScroll used in status bar
+		// but don't add any characters that pollute copy-paste.
 	}
-	// Join body lines with newlines. No lipgloss Width wrapping here —
-	// renderBody already produces lines within terminal width. Re-wrapping
-	// with lipgloss on ANSI-rich lines can silently create extra visual
-	// lines, pushing the input box below the visible terminal area.
-	//
-	// APPEND ANSI RESET before the input box to prevent ANSI escape codes
-	// from the last body line from leaking into the input box border rendering.
-	// The reset is placed at the START of the input line (not the END of body)
-	// because on Windows ConPTY, a trailing ANSI reset on the previous line
-	// may not take effect before the next line renders, letting colors bleed
-	// into border characters and making them invisible.
+
+	// ---- Step 9: Assemble final output — BOTTOM-UP, footer pinned ----
+	// ANSI reset before footer prevents color bleed from last body line.
+	// Order (top to bottom): body → popups → input → status
 	body := strings.Join(lines, "\n")
 
-	var full string
-	switch {
-	case suggestionPopup != "" && optionsPopup != "":
-		full = body + "\n\033[0m" + optionsPopup + "\n\033[0m" + suggestionPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
-	case suggestionPopup != "":
-		full = body + "\n\033[0m" + suggestionPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
-	case optionsPopup != "":
-		full = body + "\n\033[0m" + optionsPopup + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
-	default:
-		full = body + "\n\033[0m" + inputLine + "\n\033[0m" + statusLine
+	footerParts := []string{inputLine, statusLine}
+	if suggestionPopup != "" {
+		footerParts = append([]string{suggestionPopup}, footerParts...)
 	}
+	if optionsPopup != "" {
+		footerParts = append([]string{optionsPopup}, footerParts...)
+	}
+	footer := "\033[0m" + strings.Join(footerParts, "\n\033[0m")
 
-	// Final safety: ensure output is exactly m.height lines to prevent the
-	// input box from being pushed off-screen by visual overflow.
+	full := body + "\n" + footer
+
+	// ---- Step 10: Ensure total = m.height by adding/removing top padding ----
 	finalLines := strings.Split(full, "\n")
 	if len(finalLines) > m.height {
+		// Trim from TOP only (preserve footer at bottom)
 		excess := len(finalLines) - m.height
 		finalLines = finalLines[excess:]
 	} else if len(finalLines) < m.height {
 		deficit := m.height - len(finalLines)
-		padding := make([]string, deficit)
 		blankLine := strings.Repeat(" ", contentWidth)
-		for i := range padding {
-			padding[i] = blankLine
-		}
-		finalLines = append(padding, finalLines...)
-	}
-	// Truncate every line to terminal width to prevent visual wrapping.
-	// Even 1 extra visual column causes the terminal to wrap, adding an
-	// extra row that pushes subsequent content off-screen.
-	for i, ln := range finalLines {
-		if lipgloss.Width(ln) > m.width {
-			finalLines[i] = ansi.Truncate(ln, m.width, "")
+		for i := 0; i < deficit; i++ {
+			finalLines = append([]string{blankLine}, finalLines...)
 		}
 	}
-	full = strings.Join(finalLines, "\n")
 
-	return full
+	// ---- Step 11: Final width truncation ----
+	for i := range finalLines {
+		finalLines[i] = ansi.Truncate(finalLines[i], m.width, "")
+	}
+
+	return strings.Join(finalLines, "\n")
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -694,9 +681,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.state == stateReady {
 			if m.showSuggestions {
 				// Dismiss suggestions first, then set pendingEsc as fallback
+				// so the Enter that follows Option+Enter inserts a newline
+				// instead of submitting.
 				m.showSuggestions = false
 				m.suggestions = nil
-				return m, nil
+				m.pendingEsc = true
 			}
 			// ESC byte may be the first half of Option+Enter on macOS terminals.
 			// Set a flag so that a subsequent KeyEnter is treated as Alt+Enter.
@@ -752,9 +741,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.state == stateRunning {
 		switch msg.Type {
 		case tea.KeyPgUp:
-			return m.scrollUp(), nil
+			return m.scrollUp(), m.repaintCmd()
 		case tea.KeyPgDown:
-			return m.scrollDown(), nil
+			return m.scrollDown(), m.repaintCmd()
 		}
 		return m, nil
 	}
@@ -763,9 +752,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.state == stateReady {
 		switch msg.Type {
 		case tea.KeyPgUp:
-			return m.scrollUp(), nil
+			return m.scrollUp(), m.repaintCmd()
 		case tea.KeyPgDown:
-			return m.scrollDown(), nil
+			return m.scrollDown(), m.repaintCmd()
 		}
 	}
 
@@ -779,14 +768,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Not Enter — clear flag and fall through to normal handling
 	}
 
+	// ---- Alt+Enter (single event, e.g. Kitty protocol \x1b[13;3u): insert newline ----
+	// This must be checked BEFORE options/suggestions handlers, which would
+	// intercept KeyEnter without checking msg.Alt.
+	// Clear suggestions since the user explicitly chose to insert a newline
+	// rather than autocomplete.
+	if msg.Type == tea.KeyEnter && msg.Alt {
+		m.showSuggestions = false
+		m.suggestions = nil
+		m.inputBuf.insertAtCursor('\n')
+		return m, nil
+	}
+
+	// ---- macOS Option key detection (iTerm2 Normal mode): insert newline ----
+	// On iTerm2 default config, Option+Enter sends \r without ESC prefix, so
+	// msg.Alt is false. We use the macOS HID API (CGEventSourceFlagsState) to
+	// detect the physical Option key — zero terminal state modification.
+	if runtime.GOOS == "darwin" && msg.Type == tea.KeyEnter && !msg.Alt && optionKeyPressed() {
+		m.showSuggestions = false
+		m.suggestions = nil
+		m.inputBuf.insertAtCursor('\n')
+		return m, nil
+	}
+
 	// ---- Options keyboard handling (Enter/Tab/Up/Down when visible) ----
 	if len(m.activeOptions) > 0 {
 		switch msg.Type {
-		case tea.KeyTab, tea.KeyEnter:
+		case tea.KeyTab:
 			// Select the highlighted option: type its number into the input
 			m.inputBuf.SetValue(fmt.Sprintf("%d", m.selectedOption+1))
 			m.activeOptions = nil
 			return m, nil
+		case tea.KeyEnter:
+			if !msg.Alt {
+				// Select option on plain Enter
+				m.inputBuf.SetValue(fmt.Sprintf("%d", m.selectedOption+1))
+				m.activeOptions = nil
+				return m, nil
+			}
+			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
 			m.selectedOption--
 			if m.selectedOption < 0 {
@@ -802,13 +822,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ---- Suggestion keyboard handling (Tab/Up/Down when visible) ----
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		switch msg.Type {
-		case tea.KeyTab, tea.KeyEnter:
+		case tea.KeyTab:
 			// Autocomplete the selected suggestion
 			sel := m.suggestions[m.selectedSuggestion]
 			m.inputBuf.SetValue(sel.Command + " ")
 			m.showSuggestions = false
 			m.suggestions = nil
 			return m, nil
+		case tea.KeyEnter:
+			if !msg.Alt {
+				// Autocomplete on plain Enter
+				sel := m.suggestions[m.selectedSuggestion]
+				m.inputBuf.SetValue(sel.Command + " ")
+				m.showSuggestions = false
+				m.suggestions = nil
+				return m, nil
+			}
+			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
 			m.selectedSuggestion--
 			if m.selectedSuggestion < 0 {
@@ -965,6 +995,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.messages = append(m.messages, DisplayMessage{Role: "user", Content: content})
 	m.toolTree = nil
 	m.spinners = nil
+	m.memberStatuses = nil
 	m.streaming = ""
 
 	// Handle local slash commands without invoking the engine
@@ -1053,8 +1084,13 @@ func (m Model) renderBody(width int) []string {
 		return strings.Split(lines[0], "\n")
 	}
 
-	lines = append(lines, strings.Split(renderLogoBox(width), "\n")...)
-	lines = append(lines, "")
+	// Only show logo box on the initial welcome screen (before any conversation).
+	// Once messages exist, the logo wastes vertical space and leaves a blank area
+	// above the actual content (especially during stateRunning padding from TOP).
+	if len(m.messages) == 0 {
+		lines = append(lines, strings.Split(renderLogoBox(width), "\n")...)
+		lines = append(lines, "")
+	}
 
 	// Use per-message render cache: messages are immutable once added,
 	// so only render new messages or on width change.
@@ -1089,8 +1125,9 @@ func (m Model) renderBody(width int) []string {
 	if len(m.toolTree) > 0 {
 		lines = append(lines, renderToolTree(m.toolTree, width)...)
 	}
-	if m.thinkingContent != "" {
-		lines = append(lines, renderThinkingBox(m.thinkingContent, width)...)
+	if len(m.memberStatuses) > 0 {
+		// Roundtable member progress replaces thinking box and streaming
+		lines = append(lines, renderMemberProgress(m.memberStatuses, width)...)
 	} else if m.streaming != "" {
 		lines = append(lines, renderStreaming(m.streaming, width)...)
 	}
@@ -1256,17 +1293,18 @@ func getMarkdownRenderer(width int) *glamour.TermRenderer {
 	if mdRenderer != nil && mdRendererWidth == width {
 		return mdRenderer
 	}
-	// Use pre-computed isDark from styles.go:init() instead of glamour.WithAutoStyle().
-	// WithAutoStyle() calls termenv.HasDarkBackground() which sends an OSC 11 terminal
-	// query. When called while Bubble Tea is running, this query races with BT's stdin
-	// reader — the terminal response leaks into the input stream as garbled text
-	// (e.g. "fae0/fae0/fae0") on macOS.
-	style := "light"
+	// Use custom style configs instead of glamour.WithStandardStyle() to avoid
+	// the │ prefix that glamour's built-in styles add to code blocks, which
+	// interferes with diff display and looks noisy.
+	// Also avoids WithAutoStyle() because it calls termenv.HasDarkBackground()
+	// which sends an OSC 11 terminal query that races with BT's stdin reader
+	// (causes garbled "fae0/fae0/fae0" on macOS).
+	styleConfig := CustomLightStyle
 	if isDark {
-		style = "dark"
+		styleConfig = CustomDarkStyle
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(style),
+		glamour.WithStyles(styleConfig),
 		glamour.WithWordWrap(width-2),
 	)
 	if err == nil {
@@ -1288,22 +1326,64 @@ func renderMarkdown(content string, width int) string {
 	if err != nil {
 		return content
 	}
-	return strings.TrimRight(out, "\n")
+	// Trim both leading and trailing newlines: the glamour Document style has
+	// Margin(2) + BlockPrefix("\n") which produces 3 leading newlines. These
+	// create a large blank alternating area between toolsummary and assistant
+	// content (especially visible in the blocked/"确认执行代码" state).
+	return strings.Trim(strings.TrimRight(out, "\n"), "\n")
 }
 
 func toolIcon(name string) string {
 	switch name {
 	case "edit", "write":
-		return "📝"
+		return "[~]"
 	case "bash":
-		return "💻"
+		return "[>_]"
 	case "read":
-		return "📖"
+		return "[<>]"
 	case "grep", "glob":
-		return "🔍"
+		return "[?]"
+	case "lsp":
+		return "[@]"
 	default:
-		return "⚙"
+		return "[*]"
 	}
+}
+
+// memberAvatar returns a default emoji for known member IDs.
+func memberAvatar(id string) string {
+	switch id {
+	case "architect":
+		return "🏗️"
+	case "security":
+		return "🔒"
+	case "quality":
+		return "📐"
+	case "maintainer":
+		return "🔧"
+	default:
+		return "🧑"
+	}
+}
+
+// extractScore parses a score value from a progress detail string.
+// Expected format: "(评分: 85)" or "(score: 85)"
+func extractScore(detail string) int {
+	if idx := strings.Index(detail, "评分: "); idx >= 0 {
+		rest := detail[idx+len("评分: "):]
+		var score int
+		if _, err := fmt.Sscanf(rest, "%d", &score); err == nil {
+			return score
+		}
+	}
+	if idx := strings.Index(detail, "score: "); idx >= 0 {
+		rest := detail[idx+len("score: "):]
+		var score int
+		if _, err := fmt.Sscanf(rest, "%d", &score); err == nil {
+			return score
+		}
+	}
+	return -1
 }
 
 // parseDiffHunks parses a unified diff into hunk-level children.
@@ -1371,105 +1451,167 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 	if len(toolTree) == 0 {
 		return lines
 	}
-	lines = append(lines, ToolTreeStyle.Render("● Executing..."))
-	for i, node := range toolTree {
-		conn := "├─"
-		if i == len(toolTree)-1 {
-			conn = "└─"
+
+	blockWidth := width - 2
+	if blockWidth < 40 {
+		blockWidth = 40
+	}
+
+	var searchItems []ToolNode
+	var execItems []ToolNode
+	var diffItems []ToolNode
+	var otherItems []ToolNode
+
+	for _, node := range toolTree {
+		switch node.Name {
+		case "grep", "glob", "read":
+			searchItems = append(searchItems, node)
+		case "bash":
+			execItems = append(execItems, node)
+		case "edit", "write":
+			diffItems = append(diffItems, node)
+		default:
+			otherItems = append(otherItems, node)
 		}
+	}
+
+	if len(searchItems) > 0 {
+		lines = append(lines, renderSearchBlock(searchItems, blockWidth)...)
+		lines = append(lines, "")
+	}
+	if len(otherItems) > 0 {
+		lines = append(lines, renderExecBlock(otherItems, blockWidth)...)
+		lines = append(lines, "")
+	}
+	if len(execItems) > 0 {
+		lines = append(lines, renderExecBlock(execItems, blockWidth)...)
+		lines = append(lines, "")
+	}
+	// Only render diff block for completed edit/write tools that have content.
+	// Pending tools (not yet Done) would render as an empty styled block.
+	var doneDiffItems []ToolNode
+	for _, node := range diffItems {
+		if node.Done {
+			doneDiffItems = append(doneDiffItems, node)
+		}
+	}
+	if len(doneDiffItems) > 0 {
+		lines = append(lines, renderDiffBlock(doneDiffItems, blockWidth)...)
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
+func renderSearchBlock(nodes []ToolNode, width int) []string {
+	var content []string
+	header := SpinnerStyle.Render("▍") + " [?] " + SpinnerStyle.Render("Search")
+	content = append(content, header)
+	content = append(content, "")
+	for _, node := range nodes {
 		icon := node.Icon
 		if icon == "" {
 			icon = toolIcon(node.Name)
 		}
 		status := ""
 		if node.Done {
-			status = " ✓"
+			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		line := fmt.Sprintf("  %s %s %s%s", conn, icon, node.Detail, status)
-		lines = append(lines, ToolTreeStyle.Render(line))
-		// Render children (only visible after tool_done)
-		for j, child := range node.Children {
-			childConn := "│  ├─"
-			lastChild := j == len(node.Children)-1
-			if lastChild {
-				if i == len(toolTree)-1 {
-					childConn = "   └─"
-				} else {
-					childConn = "│  └─"
-				}
-			} else if i != len(toolTree)-1 {
-				childConn = "│  ├─"
-			} else {
-				childConn = "   ├─"
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		for _, child := range node.Children {
+			detail := child.Detail
+			if len(detail) > width-8 {
+				detail = detail[:width-11] + "..."
 			}
-			// Diff hunk: show full colored content like renderToolSummary
-			if node.Done && (node.Name == "edit" || node.Name == "write") {
-				hunkContent := child.DetailFull
-				if hunkContent != "" {
-					rendered := renderDiffHunk(hunkContent, childConn, lastChild, i, len(toolTree))
-					for _, hl := range strings.Split(rendered, "\n") {
-						if hl != "" {
-							lines = append(lines, hl)
-						}
-					}
-					continue
-				}
-			}
-			childLine := fmt.Sprintf("  %s %s", childConn, child.Detail)
-			if len(child.Detail) > width-10 {
-				childLine = fmt.Sprintf("  %s %s", childConn, child.Detail[:width-13]+"...")
-			}
-			lines = append(lines, ToolTreeStyle.Render(childLine))
+			content = append(content, DimStyle.Render("      "+detail))
 		}
 	}
-	return wrapLines(lines, width)
+	return strings.Split(SearchBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
+}
+
+func renderExecBlock(nodes []ToolNode, width int) []string {
+	var content []string
+	header := SpinnerStyle.Render("▍") + " [>_] " + SpinnerStyle.Render("Execute")
+	content = append(content, header)
+	content = append(content, "")
+	for _, node := range nodes {
+		icon := node.Icon
+		if icon == "" {
+			icon = toolIcon(node.Name)
+		}
+		status := ""
+		if node.Done {
+			status = " " + SpinnerDoneStyle.Render("✓")
+		}
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		for _, child := range node.Children {
+			detail := child.Detail
+			if len(detail) > width-8 {
+				detail = detail[:width-11] + "..."
+			}
+			content = append(content, DimStyle.Render("      "+detail))
+		}
+	}
+	return strings.Split(ExecBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
+}
+
+func renderDiffBlock(nodes []ToolNode, width int) []string {
+	var content []string
+	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
+	content = append(content, header)
+	content = append(content, "")
+	for _, node := range nodes {
+		status := ""
+		if node.Done {
+			status = " " + SpinnerDoneStyle.Render("✓")
+		}
+		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
+		if node.Done && len(node.Children) > 0 {
+			for _, child := range node.Children {
+				if child.DetailFull != "" {
+					diffLines := renderDiffHunkBlock(child.DetailFull, width-6)
+					content = append(content, diffLines...)
+				}
+			}
+		}
+	}
+	// Render each line independently to prevent \033[0m from inner styles (diffDeleteStyle etc.)
+	// from cancelling DiffBlockStyle's background on subsequent lines.
+	// Use DiffBlockLineStyle (no vertical padding) to avoid multi-line entries that break
+	// the height calculation in View(). Add padding rows manually at top/bottom.
+	var result []string
+	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	for _, line := range content {
+		result = append(result, DiffBlockLineStyle.Width(width).Render(line))
+	}
+	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	return result
 }
 
 func renderToolSummary(toolTree []ToolNode) string {
 	var b strings.Builder
-	// Count modified files
 	modified := 0
 	for _, n := range toolTree {
 		if n.Done && (n.Name == "edit" || n.Name == "write") && len(n.Children) > 0 {
 			modified++
 		}
 	}
-	b.WriteString(fmt.Sprintf("● 执行完成 (%d tools, %d files modified):\n", len(toolTree), modified))
-	for i, node := range toolTree {
-		conn := "├─"
-		if i == len(toolTree)-1 {
-			conn = "└─"
-		}
+	b.WriteString(fmt.Sprintf("● Done (%d tools, %d files modified)\n", len(toolTree), modified))
+
+	for _, node := range toolTree {
 		icon := node.Icon
 		if icon == "" {
 			icon = toolIcon(node.Name)
 		}
-		b.WriteString(fmt.Sprintf("  %s %s %s\n", conn, icon, node.Detail))
-		// Render children
-		for j, child := range node.Children {
-			childConn := "│  ├─"
-			lastChild := j == len(node.Children)-1
-			if lastChild {
-				if i == len(toolTree)-1 {
-					childConn = "   └─"
-				} else {
-					childConn = "│  └─"
-				}
-			} else if i != len(toolTree)-1 {
-				childConn = "│  ├─"
-			} else {
-				childConn = "   ├─"
-			}
-			// Diff hunk: show header line then GitHub-style colored content
+		b.WriteString(fmt.Sprintf("  %s %s\n", icon, node.Detail))
+		for _, child := range node.Children {
 			if node.Name == "edit" || node.Name == "write" {
-				// Parse the full hunk to render with color
 				hunkContent := child.DetailFull
 				if hunkContent != "" {
-					b.WriteString(renderDiffHunk(hunkContent, childConn, lastChild, i, len(toolTree)))
+					b.WriteString(renderDiffHunkFlat(hunkContent))
 				}
 			} else {
-				// Plain output line
-				b.WriteString(fmt.Sprintf("  %s %s\n", childConn, child.Detail))
+				b.WriteString(fmt.Sprintf("    %s\n", child.Detail))
 			}
 		}
 	}
@@ -1498,37 +1640,23 @@ func initDiffStyles() {
 		Foreground(lipgloss.Color("240")) // dim gray
 }
 
-// renderDiffHunk renders a unified diff hunk with GitHub-style line numbers and background colors.
-func renderDiffHunk(hunkContent, conn string, lastChild bool, nodeIdx, totalNodes int) string {
+// renderDiffHunkBlock renders a unified diff hunk as flat colored lines for block display.
+func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 	diffStylesOnce.Do(initDiffStyles)
 
 	lines := strings.Split(hunkContent, "\n")
 	if len(lines) == 0 {
-		return ""
+		return nil
 	}
 
-	var buf strings.Builder
-	// Track old/new line numbers from @@ header
+	var result []string
 	oldNum, newNum := 1, 1
 
-	for k, hl := range lines {
+	for _, hl := range lines {
 		if hl == "" {
 			continue
 		}
-		hunkConn := conn
-		if k > 0 {
-			if lastChild && nodeIdx == totalNodes-1 {
-				hunkConn = "      "
-			} else if lastChild {
-				hunkConn = "│     "
-			} else {
-				hunkConn = "│     "
-			}
-		}
-
-		// Parse @@ header to get starting line numbers
 		if strings.HasPrefix(hl, "@@") {
-			// Format: @@ -oldStart,oldCount +newStart,newCount @@
 			if parts := strings.Split(hl, " "); len(parts) >= 4 {
 				oldPart := strings.TrimPrefix(parts[1], "-")
 				newPart := strings.TrimPrefix(parts[2], "+")
@@ -1540,80 +1668,96 @@ func renderDiffHunk(hunkContent, conn string, lastChild bool, nodeIdx, totalNode
 				if idx := strings.Index(newPart, ","); idx > 0 {
 					newStartStr = newPart[:idx]
 				}
-				if o, err := fmt.Sscanf(oldStartStr, "%d", &oldNum); err == nil && o == 1 {
-					// parsed oldNum
-				}
-				if n, err := fmt.Sscanf(newStartStr, "%d", &newNum); err == nil && n == 1 {
-					// parsed newNum
-				}
+				fmt.Sscanf(oldStartStr, "%d", &oldNum)
+				fmt.Sscanf(newStartStr, "%d", &newNum)
 			}
-			// Render @@ header
-			buf.WriteString("  " + hunkConn + " " + diffHunkHeaderStyle.Render(hl) + "\n")
+			result = append(result, "    "+diffHunkHeaderStyle.Render(hl))
 			continue
 		}
 
-		// Determine line type and render with line numbers
+		if len(hl) == 0 {
+			continue
+		}
 		prefix := hl[0:1]
-		content := hl[1:] // rest after +/-/space
+		content := hl[1:]
 
 		switch prefix {
 		case "-":
-			oldStr := fmt.Sprintf("%d", oldNum)
-			newStr := ""
-			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + " " + diffDeleteStyle.Render(prefix+content) + "\n")
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
+			result = append(result, "    "+lineNum+diffDeleteStyle.Render(prefix+content))
 			oldNum++
 		case "+":
-			oldStr := ""
-			newStr := fmt.Sprintf("%d", newNum)
-			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + " " + diffInsertStyle.Render(prefix+content) + "\n")
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
+			result = append(result, "    "+lineNum+diffInsertStyle.Render(prefix+content))
 			newNum++
 		default:
-			// context line (space prefix)
-			oldStr := fmt.Sprintf("%d", oldNum)
-			newStr := fmt.Sprintf("%d", newNum)
-			lineNumStr := fmt.Sprintf("%s%s", leftPad(oldStr, 4), leftPad(newStr, 5))
-			buf.WriteString("  " + hunkConn + diffLineNumStyle.Render(lineNumStr) + "  " + content + "\n")
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
+			result = append(result, "    "+lineNum+content)
+			oldNum++
+			newNum++
+		}
+	}
+	return result
+}
+
+// renderDiffHunkFlat renders a diff hunk as a flat string for tool summary messages.
+func renderDiffHunkFlat(hunkContent string) string {
+	diffStylesOnce.Do(initDiffStyles)
+
+	lines := strings.Split(hunkContent, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+	oldNum, newNum := 1, 1
+
+	for _, hl := range lines {
+		if hl == "" {
+			continue
+		}
+		if strings.HasPrefix(hl, "@@") {
+			if parts := strings.Split(hl, " "); len(parts) >= 4 {
+				oldPart := strings.TrimPrefix(parts[1], "-")
+				newPart := strings.TrimPrefix(parts[2], "+")
+				oldStartStr := oldPart
+				newStartStr := newPart
+				if idx := strings.Index(oldPart, ","); idx > 0 {
+					oldStartStr = oldPart[:idx]
+				}
+				if idx := strings.Index(newPart, ","); idx > 0 {
+					newStartStr = newPart[:idx]
+				}
+				fmt.Sscanf(oldStartStr, "%d", &oldNum)
+				fmt.Sscanf(newStartStr, "%d", &newNum)
+			}
+			buf.WriteString("    " + diffHunkHeaderStyle.Render(hl) + "\n")
+			continue
+		}
+
+		if len(hl) == 0 {
+			continue
+		}
+		prefix := hl[0:1]
+		content := hl[1:]
+
+		switch prefix {
+		case "-":
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
+			buf.WriteString("    " + lineNum + diffDeleteStyle.Render(prefix+content) + "\n")
+			oldNum++
+		case "+":
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
+			buf.WriteString("    " + lineNum + diffInsertStyle.Render(prefix+content) + "\n")
+			newNum++
+		default:
+			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
+			buf.WriteString("    " + lineNum + content + "\n")
 			oldNum++
 			newNum++
 		}
 	}
 	return buf.String()
-}
-
-// leftPad pads s to width characters by adding spaces on the left.
-func leftPad(s string, width int) string {
-	if len(s) >= width {
-		return s
-	}
-	return strings.Repeat(" ", width-len(s)) + s
-}
-
-// extractDiffBody extracts the unified diff portion from a tool digest string.
-func extractDiffBody(digest string) string {
-	if !isDiffContent(digest) {
-		return ""
-	}
-	_, diff, _ := splitDiff(digest)
-	return diff
-}
-
-// formatDiffLine applies terminal color styling to a single diff line.
-func formatDiffLine(line string) string {
-	if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
-		return "\033[90m" + line + "\033[0m" // dim/gray
-	}
-	if strings.HasPrefix(line, "@@") && strings.HasSuffix(line, "@@") {
-		return "\033[38;5;178m" + line + "\033[0m" // yellow
-	}
-	if strings.HasPrefix(line, "-") {
-		return "\033[31m" + line + "\033[0m" // red
-	}
-	if strings.HasPrefix(line, "+") {
-		return "\033[32m" + line + "\033[0m" // green
-	}
-	return line
 }
 
 // isDiffContent checks if a string contains unified diff content.
@@ -1655,65 +1799,106 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 	for _, spinner := range spinners {
 		if spinner.Active {
 			frame := spinnerFrames[spinner.FrameIdx%len(spinnerFrames)]
-			line := fmt.Sprintf("%s %s: %s", frame, spinner.Role, spinner.Goal)
+			line := fmt.Sprintf("  %s  %s: %s", frame, spinner.Role, spinner.Goal)
 			lines = append(lines, SpinnerStyle.Render(line))
 		} else {
-			line := fmt.Sprintf("✓ %s: %s", spinner.Role, spinner.Summary)
+			line := fmt.Sprintf("  ✓  %s: %s", spinner.Role, spinner.Summary)
 			lines = append(lines, SpinnerDoneStyle.Render(line))
 		}
 	}
 	return wrapLines(lines, width)
 }
 
-const thinkingBoxHeight = 6
-
-func renderThinkingBox(content string, width int) []string {
-	if content == "" {
+// renderMemberProgress renders roundtable member status cards above the input.
+// Each member shows as a compact card: avatar + name + status (running spinner
+// or done checkmark with score). This replaces the thinking box during review.
+func renderMemberProgress(members []MemberStatus, width int) []string {
+	if len(members) == 0 {
 		return nil
 	}
-	innerWidth := width - 6
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-
-	raw := strings.Split(content, "\n")
-	var wrapped []string
-	for _, line := range raw {
-		if len([]rune(line)) <= innerWidth {
-			wrapped = append(wrapped, line)
-		} else {
-			runes := []rune(line)
-			for len(runes) > innerWidth {
-				wrapped = append(wrapped, string(runes[:innerWidth]))
-				runes = runes[innerWidth:]
+	var content []string
+	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Multi-Agent Review"))
+	content = append(content, "")
+	for _, m := range members {
+		switch m.Status {
+		case "running":
+			frame := spinnerFrames[0]
+			line := fmt.Sprintf("  %s %s %s  %s", frame, m.Avatar, m.Name, SpinnerStyle.Render("reviewing..."))
+			content = append(content, line)
+		case "done":
+			verdictIcon := "✅"
+			switch m.Verdict {
+			case "conditional":
+				verdictIcon = "⚠️"
+			case "reject":
+				verdictIcon = "❌"
 			}
-			if len(runes) > 0 {
-				wrapped = append(wrapped, string(runes))
-			}
+			line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
+			content = append(content, SpinnerDoneStyle.Render(line))
+		case "error":
+			line := fmt.Sprintf("  ✗ %s %s  ❌ error", m.Avatar, m.Name)
+			content = append(content, ErrorStyle.Render(line))
 		}
 	}
+	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
+	return strings.Split(rendered, "\n")
+}
 
-	visible := wrapped
-	if len(visible) > thinkingBoxHeight {
-		visible = visible[len(visible)-thinkingBoxHeight:]
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+const thinkingBoxHeight = 3
+
+func renderThinkingBox(activity string, width int) []string {
+	if activity == "" {
+		return nil
+	}
+	blockWidth := width - 6
+	if blockWidth < 20 {
+		blockWidth = 20
 	}
 
-	header := DimStyle.Render("╭─ 💭 Thinking ") + DimStyle.Render(strings.Repeat("─", innerWidth-13)) + DimStyle.Render("╮")
-	footer := DimStyle.Render("╰" + strings.Repeat("─", innerWidth+2) + "╯")
-
-	lines := []string{header}
-	for _, vl := range visible {
-		padded := vl
-		if len([]rune(padded)) < innerWidth {
-			padded += strings.Repeat(" ", innerWidth-len([]rune(padded)))
+	// Trim agent name prefix if present in format "agentName: activity"
+	display := activity
+	if idx := strings.Index(activity, ": "); idx > 0 {
+		name := activity[:idx]
+		task := activity[idx+2:]
+		icon := "⚙️"
+		switch name {
+		case "deepact":
+			icon = "🧠"
+		case "sub", "code_searcher", "searcher":
+			icon = "🔍"
+		case "brainstorm":
+			icon = "💡"
+		case "critic", "challenger":
+			icon = "🔎"
+		case "planner":
+			icon = "📋"
+		case "tester":
+			icon = "🧪"
 		}
-		lines = append(lines, DimStyle.Render("│ ")+padded+DimStyle.Render(" │"))
+		display = icon + " " + name + ": " + task
+	} else {
+		display = "⚙️ " + activity
 	}
-	for len(lines) < thinkingBoxHeight+1 {
-		lines = append(lines, DimStyle.Render("│ "+strings.Repeat(" ", innerWidth)+" │"))
+
+	// Truncate if too wide
+	if len(display) > blockWidth {
+		display = ansi.Truncate(display, blockWidth, "…")
 	}
-	lines = append(lines, footer)
-	return lines
+
+	var lines []string
+	lines = append(lines, "  "+DimStyle.Render(display))
+	for len(lines) < thinkingBoxHeight {
+		lines = append(lines, "")
+	}
+	rendered := ThinkingBlockStyle.Width(width).Render(strings.Join(lines, "\n"))
+	return strings.Split(rendered, "\n")
 }
 
 const maxPopupItems = 8
@@ -1767,7 +1952,7 @@ func renderOptionsPopup(m Model, width int) string {
 	}
 	lines = append(lines, DimStyle.Render("Enter/Tab: select  ↑↓: navigate  or type feedback"))
 	content := strings.Join(lines, "\n")
-	return SuggestionBox.Width(width - 4).Render(content)
+	return SuggestionBox.Width(width - 2).Render(content)
 }
 
 func renderedHeight(s string) int {
@@ -1835,12 +2020,17 @@ func renderSuggestions(m Model, width int) string {
 	lines = append(lines, hint)
 
 	content := strings.Join(lines, "\n")
-	return SuggestionBox.Width(width - 4).Render(content)
+	return SuggestionBox.Width(width - 2).Render(content)
 }
 
 func renderInputLine(m Model) string {
 	if m.state == stateApiKeyPrompt {
-		return InputBoxStyle.Render(InputPromptStyle.Render("Key> ") + strings.Repeat("*", len(m.apiKeyInput)))
+		content := "  Key> " + strings.Repeat("*", len(m.apiKeyInput)) + "█"
+		padW := m.width - lipgloss.Width(content)
+		if padW > 0 {
+			content += strings.Repeat(" ", padW)
+		}
+		return StatusBarStyle.Render(content)
 	}
 
 	runes := []rune(m.inputBuf.Value())
@@ -1858,34 +2048,71 @@ func renderInputLine(m Model) string {
 		left = m.inputBuf.Value()
 	}
 
-	content := left + cursor + right
-
-	// Inner content width must match what InputBoxStyle calculates:
-	// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
-	innerWidth := m.width - 8
+	innerWidth := m.width - 6
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
 
-	wrapped := wrapInputText("> "+content, innerWidth)
-	return InputBoxStyle.Width(m.width - 4).Render(wrapped)
+	text := left + cursor + right
+	wrapped := wrapInputText(text, innerWidth)
+	wLines := strings.Split(wrapped, "\n")
+
+	var rows []string
+
+	// Blue bar on the left — rendered separately to avoid ANSI nesting
+	// (InputBarStyle.Render emits \033[0m which would kill InputBlockStyle's background)
+	bar := "▍"
+
+	// Separator row: blue bar + blank area
+	rows = append(rows,
+		InputBarStyle.Render(bar)+
+			InputBlockStyle.Render(strings.Repeat(" ", m.width-1)))
+
+	for i, line := range wLines {
+		var prefix string
+		if i == 0 {
+			prefix = "  " + "> "
+		} else {
+			prefix = "    "
+		}
+		content := prefix + line
+		padW := m.width - 1 - lipgloss.Width(content)
+		if padW > 0 {
+			content += strings.Repeat(" ", padW)
+		}
+		rows = append(rows,
+			InputBarStyle.Render(bar)+
+				InputBlockStyle.Render(content))
+	}
+
+	return strings.Join(rows, "\n")
 }
 
 func wrapInputText(text string, width int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for _, line := range lines {
-		runes := []rune(line)
-		if len(runes) <= width {
+		if lipgloss.Width(line) <= width {
 			result = append(result, line)
 			continue
 		}
-		for len(runes) > width {
-			result = append(result, string(runes[:width]))
-			runes = runes[width:]
+		// Hard-wrap by visual width, not rune count.
+		// This correctly handles CJK characters (visual width 2) and emoji.
+		runes := []rune(line)
+		var chunk strings.Builder
+		chunkWidth := 0
+		for _, r := range runes {
+			rw := lipgloss.Width(string(r))
+			if chunkWidth+rw > width && chunkWidth > 0 {
+				result = append(result, chunk.String())
+				chunk.Reset()
+				chunkWidth = 0
+			}
+			chunk.WriteRune(r)
+			chunkWidth += rw
 		}
-		if len(runes) > 0 {
-			result = append(result, string(runes))
+		if chunkWidth > 0 {
+			result = append(result, chunk.String())
 		}
 	}
 	return strings.Join(result, "\n")
@@ -1893,28 +2120,28 @@ func wrapInputText(text string, width int) string {
 
 func inputBoxHeight(m Model) int {
 	if m.width <= 0 {
-		return 3
+		return 1
 	}
-	// Must match inner content width of InputBoxStyle:
-	// Width(m.width-4) minus border (2) minus padding (2) = m.width-8
-	innerWidth := m.width - 8
+	innerWidth := m.width - 6
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
-	// Must match what renderInputLine produces: "> " + content + cursor "█"
 	cursor := "█"
 	if m.state == stateRunning {
 		cursor = ""
 	}
-	content := "> " + m.inputBuf.Value() + cursor
+	content := m.inputBuf.Value() + cursor
 	lines := strings.Split(content, "\n")
 	totalLines := 0
 	for _, line := range lines {
 		runes := []rune(line)
 		lineCount := (len(runes) + innerWidth - 1) / innerWidth
+		if lineCount == 0 {
+			lineCount = 1
+		}
 		totalLines += lineCount
 	}
-	return totalLines + 2
+	return totalLines
 }
 
 func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *engine.PricingConfig) float64 {
@@ -1936,20 +2163,18 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 }
 
 func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) string {
-	// Shortcut hint: native terminal text selection (SGR mouse mode bypass)
-	dragHint := "Shift+drag select"
+	dragHint := "Shift+drag"
 	switch runtime.GOOS {
 	case "darwin":
-		dragHint = "⌥+drag select"
+		dragHint = "⌥+drag"
 	}
-	shortcutHint := dragHint + " | Alt+Enter newline"
+	newlineHint := "Alt+↩"
 	switch runtime.GOOS {
 	case "darwin":
-		shortcutHint = dragHint + " | ⌥+Enter newline"
+		newlineHint = "⌥+↩"
 	}
 
-	// Scroll position indicator
-	scrollHint := ""
+	leftPart := fmt.Sprintf(" ↑%.1fK ↓%.1fK", float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
 	if scrollMax > 0 {
 		pct := int(float64(scrollOffset) / float64(scrollMax) * 100)
 		if pct < 0 {
@@ -1958,19 +2183,38 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) 
 		if pct > 100 {
 			pct = 100
 		}
-		scrollHint = fmt.Sprintf(" ↑%d%% | ", pct)
+		leftPart = fmt.Sprintf(" ↑%d%% │ ↑%.1fK ↓%.1fK", pct, float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
+	}
+	rightPart := fmt.Sprintf("%s │ %s │ Esc │ ^Q", dragHint, newlineHint)
+
+	// Reserve 1 column for the blue bar on the left
+	contentWidth := width - 1
+	if contentWidth < 1 {
+		contentWidth = 1
 	}
 
-	line := fmt.Sprintf("%s↑%.1fK ↓%.1fK | %s",
-		scrollHint,
-		float64(status.TokensIn)/1000.0,
-		float64(status.TokensOut)/1000.0,
-		shortcutHint,
-	)
-	if width > 0 {
-		line = lipgloss.NewStyle().Width(width).Render(line)
+	leftW := lipgloss.Width(leftPart)
+	rightW := lipgloss.Width(rightPart)
+	gap := contentWidth - leftW - rightW
+	if gap < 1 {
+		gap = 1
 	}
-	return StatusBarStyle.Render(line)
+	line := leftPart + strings.Repeat(" ", gap) + rightPart
+	// Use ansi.Truncate to guarantee the line fits within contentWidth.
+	// Characters like ↑ ↓ ⌥ ↩ │ have ambiguous East Asian Width on macOS —
+	// lipgloss.Width may underestimate their rendered width, causing terminal
+	// line wrapping that pushes the input area off-screen.
+	line = ansi.Truncate(line, contentWidth, "")
+	// Defense-in-depth: ensure rendered width exactly fills contentWidth.
+	// Ambiguous-width characters (↑↓│⌥↩) may cause the terminal to render
+	// narrower than ansi.Truncate expects, leaving old characters visible.
+	if w := lipgloss.Width(line); w < contentWidth {
+		line += strings.Repeat(" ", contentWidth-w)
+	}
+	bar := InputBarStyle.Render("▍")
+	bottomPad := strings.Repeat(" ", contentWidth)
+	topPad := strings.Repeat(" ", contentWidth)
+	return bar + StatusBarStyle.Render(topPad) + "\n" + bar + StatusBarStyle.Render(line) + "\n" + bar + StatusBarStyle.Render(bottomPad)
 }
 
 func wrapText(text string, width int) []string {
@@ -1991,25 +2235,42 @@ func wrapText(text string, width int) []string {
 }
 
 func wrapLine(line string, width int) []string {
-	if len([]rune(line)) <= width {
+	if lipgloss.Width(line) <= width {
 		return []string{line}
 	}
 	runes := []rune(line)
 	var lines []string
 	for len(runes) > 0 {
-		if len(runes) <= width {
+		// Measure visual width of remaining text
+		if lipgloss.Width(string(runes)) <= width {
 			lines = append(lines, string(runes))
 			break
 		}
-		cut := width
-		for cut > 0 && runes[cut] != ' ' && runes[cut] != '　' {
-			cut--
+		// Scan forward by visual width to find break point
+		var visWidth int
+		var lastSpaceIdx = -1
+		var cutIdx = len(runes)
+		for i, r := range runes {
+			rw := lipgloss.Width(string(r))
+			if visWidth+rw > width {
+				cutIdx = i
+				break
+			}
+			if r == ' ' || r == '　' {
+				lastSpaceIdx = i
+			}
+			visWidth += rw
 		}
-		if cut == 0 {
-			cut = width
+		// Word-wrap: prefer breaking at last space within width
+		if lastSpaceIdx >= 0 {
+			cutIdx = lastSpaceIdx
 		}
-		lines = append(lines, string(runes[:cut]))
-		runes = runes[cut:]
+		// Ensure at least one character is taken
+		if cutIdx == 0 {
+			cutIdx = 1
+		}
+		lines = append(lines, string(runes[:cutIdx]))
+		runes = runes[cutIdx:]
 		if len(runes) > 0 && (runes[0] == ' ' || runes[0] == '　') {
 			runes = runes[1:]
 		}

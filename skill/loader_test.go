@@ -1,11 +1,22 @@
 package skill
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestLoadExternalSkills(t *testing.T) {
-	skills, err := LoadExternalSkills("D:\\java_project\\deepAct\\.deepact\\skills")
+	// Create a temp directory with a sample skill file
+	dir := t.TempDir()
+	skillContent := `name = "test_skill"
+description = "A test skill for unit testing"
+keywords = ["test", "demo"]
+content = "You are a test agent."
+`
+	os.WriteFile(filepath.Join(dir, "test.toml"), []byte(skillContent), 0o644)
+
+	skills, err := LoadExternalSkills(dir)
 	if err != nil {
 		t.Fatalf("LoadExternalSkills failed: %v", err)
 	}

@@ -29,7 +29,7 @@ func NewGrepTool() *GrepTool {
 func (t *GrepTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "grep",
-		Description: "Search file contents for a pattern. Supports regex (default) or exact substring matching. Can include context lines around each match for better understanding.",
+		Description: "Search file contents for a pattern. Supports regex (default) or exact substring matching. Can include context lines around each match for better understanding. For finding symbol definitions, type info, or usages, prefer `lsp workspaceSymbol`/`lsp hover`/`lsp findReferences` instead — they are more precise and cheaper.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Pattern to search for (regex by default, literal substring if exact_match=true)"},"path":{"type":"string","description":"Directory or file to search (default: current dir)"},"include":{"type":"string","description":"Glob to filter files, e.g. '*.go'"},"max_results":{"type":"integer","description":"Maximum results (default 100)"},"context_lines":{"type":"integer","description":"Number of context lines before and after each match (default 0)"},"exact_match":{"type":"boolean","description":"If true, treat pattern as literal substring instead of regex"}},"required":["pattern"]}`),
 	}
 }

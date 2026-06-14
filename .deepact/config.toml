@@ -38,8 +38,9 @@ compact_every_n_turns = 5
 scope_guard = true
 
 [conference]
-# Enable multi-agent conference pipeline (plan → execute → review)
-enabled = true
+# NOTE: Conference.Enabled is no longer read by the engine (was dead code).
+# Conference state is managed internally via TaskState.Conference field.
+# This section is kept for backward compatibility with existing config files.
 
 [permissions]
 # Permission mode: "auto" | "ask" | "deny"

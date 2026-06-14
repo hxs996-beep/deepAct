@@ -6,18 +6,10 @@ type EngineExecutor struct {
 	exec        *Executor
 	registry    *Registry
 	ArtifactDir string // base directory for artifact store
-	resolvePath func(guess string) (resolved string, alternatives []string) // RepoMap-based path resolver
 }
 
 func NewEngineExecutor(registry *Registry) *EngineExecutor {
 	return &EngineExecutor{exec: NewExecutor(registry), registry: registry}
-}
-
-// SetResolvePath sets the RepoMap-based path resolver for the ReadTool.
-// The resolver takes a model-provided path guess and returns the resolved
-// path or alternative suggestions from the project's RepoMap.
-func (e *EngineExecutor) SetResolvePath(fn func(guess string) (resolved string, alternatives []string)) {
-	e.resolvePath = fn
 }
 
 func (e *EngineExecutor) Specs() []engine.ModelTool {
@@ -43,7 +35,7 @@ func (e *EngineExecutor) Execute(ctx engine.ToolExecContext, calls []engine.Tool
 	if e == nil || e.exec == nil {
 		return nil
 	}
-	toolCtx := ToolContext{WorkDir: ctx.WorkDir, SessionID: ctx.SessionID, TurnNumber: ctx.TurnNumber, ArtifactDir: e.ArtifactDir, ResolvePath: e.resolvePath}
+	toolCtx := ToolContext{WorkDir: ctx.WorkDir, SessionID: ctx.SessionID, TurnNumber: ctx.TurnNumber, ArtifactDir: e.ArtifactDir}
 	toolCalls := make([]ToolCall, 0, len(calls))
 	for _, call := range calls {
 		toolCalls = append(toolCalls, ToolCall{ID: call.ID, Name: call.Name, Input: call.Input})

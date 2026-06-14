@@ -42,7 +42,7 @@ Checklist:
 ## 4) API Usage — Verified vs Hallucinated
 
 WRONG:
-You used a method you remember from another project (e.g., cfg.LoadFromEnv), but it doesn't exist here. You didn’t verify it with grep or LSP. The code fails to compile and wastes time.
+You used a method you remember from another project (e.g., cfg.LoadFromEnv), but it doesn't exist here. You didn.t verify it with LSP (hover/goToDefinition). The code fails to compile and wastes time.
 
 RIGHT:
 You searched for the method, saw it didn’t exist, and used the actual available API. If still unclear, you asked the user instead of guessing. You explicitly stated when an API could not be verified.

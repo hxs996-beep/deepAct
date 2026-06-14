@@ -64,8 +64,16 @@ func extractToolKey(call ToolCallRequest) string {
 		contentHash = extractEditContentHash(call.Input)
 	case "write":
 		contentHash = extractWriteContentHash(call.Input)
+	case "read":
+		// Track read by path + scope (symbol/offset/limit) — different sections
+		// of the same file are distinct operations; only truly repeated reads block.
+		scopeHash := extractReadScopeHash(call.Input)
+		if scopeHash == "" {
+			return "read:" + path
+		}
+		return "read:" + path + ":" + scopeHash
 	default:
-		// read/grep/glob/bash etc. — not tracked for loops
+		// grep/glob/bash etc. — not tracked for loops
 		return ""
 	}
 
@@ -99,6 +107,26 @@ func extractWriteContentHash(input json.RawMessage) string {
 		return ""
 	}
 	h := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(h[:])
+}
+
+// extractReadScopeHash computes a hash of (symbol, offset, limit) from read input.
+// Different reads on the same file (different sections) produce different hashes,
+// preventing false loop detection when exploring code. Returns "" if no scope params.
+func extractReadScopeHash(input json.RawMessage) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	symbol, _ := m["symbol"].(string)
+	offset, _ := m["offset"].(float64)
+	limit, _ := m["limit"].(float64)
+
+	if symbol == "" && offset == 0 && limit == 0 {
+		return "" // bare read with just path, fall back to path-only tracking
+	}
+
+	h := sha256.Sum256([]byte(fmt.Sprintf("symbol=%s|offset=%d|limit=%d", symbol, int(offset), int(limit))))
 	return hex.EncodeToString(h[:])
 }
 

@@ -2,7 +2,6 @@ package context
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +16,6 @@ type ContextAssembler struct {
 	langPack           string
 	examples           string
 	systemPrompt       string
-	repoMap            *RepoMap
 	projectRoot        string
 	estimator          *llm.TokenEstimator
 	agentsMD           string // cached AGENTS.md content, read once at startup
@@ -32,11 +30,6 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 	langPack := GetLangPack(lang)
 	systemPrompt := SystemPromptBlockA + "\n\n# Language Pack\n" + langPack + "\n\n" + ExamplesBlock
 
-	var rm *RepoMap
-	if projectRoot != "" {
-		rm, _ = GenerateRepoMap(projectRoot)
-	}
-
 	if estimator == nil {
 		estimator = llm.NewTokenEstimator()
 	}
@@ -45,31 +38,11 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 		langPack:     langPack,
 		examples:     ExamplesBlock,
 		systemPrompt: systemPrompt,
-		repoMap:      rm,
 		projectRoot:  projectRoot,
 		estimator:    estimator,
 		agentsMD:     readAgentsMD(),
 		envInfo:      buildEnvironmentInfo(),
 	}
-}
-
-func (a *ContextAssembler) RefreshRepoMap() {
-	if a.projectRoot != "" {
-		a.repoMap, _ = GenerateRepoMap(a.projectRoot)
-	}
-}
-
-// RepoMap returns the parsed RepoMap, or nil if none.
-func (a *ContextAssembler) RepoMap() *RepoMap {
-	return a.repoMap
-}
-
-// RepoMapContent returns the rendered RepoMap string, or "" if none.
-func (a *ContextAssembler) RepoMapContent() string {
-	if a.repoMap != nil {
-		return a.repoMap.Render()
-	}
-	return ""
 }
 
 // SetSkillsBlock sets the rendered skills list for inclusion in the stable zone.
@@ -100,16 +73,7 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
-	// Message 4: Repo map — stable for the session → cached ✓
-	if a.repoMap != nil {
-		mapContent := a.repoMap.Render()
-		if mapContent != "" {
-			messages = append(messages, engine.ModelMessage{
-				Role:    "user",
-				Content: "[REPO MAP — use this to locate code before reading files]\n" + mapContent,
-			})
-		}
-	}
+	// Message 4: (reserved for future use — was RepoMap)
 
 	// === HISTORY ZONE (append-only — cacheable prefix) ===
 	// History sits after the stable zone. Since previous turns' messages
@@ -197,44 +161,76 @@ func readAgentsMD() string {
 	return strings.Join(parts, "\n\n---\n\n")
 }
 
-func formatTaskState(state *engine.TaskState) string {
-	if state == nil {
-		return ""
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		return fmt.Sprintf("TaskState marshal error: %v", err)
-	}
-	return string(data)
-}
-
-// FormatTurnBlock builds a concise structured block string for a completed turn.
-// Contains only process-level info (files read/searched, findings) that isn't
-// duplicated in TaskReminder (which covers decisions, modified files, goal).
-// The block is stored in TaskState.AccumulatedBlocks and rendered as a stable
-// prefix message in subsequent turns.
 func formatTaskStateVolatile(state *engine.TaskState) string {
 	if state == nil {
 		return ""
 	}
 	volatile := struct {
-		ActiveSkillName  string                   `json:"active_skill_name,omitempty"`
-		ConsecutiveFails int                     `json:"consecutive_failures"`
-		EditScopeFiles   int                     `json:"edit_scope_files"`
-		Conference       *engine.ConferenceState `json:"conference,omitempty"`
-		ParentContext    *engine.ParentBoard     `json:"parent_context,omitempty"`
+		ActiveSkillName  string                    `json:"active_skill_name,omitempty"`
+		TurnNumber       int                       `json:"turn_number"`
+		ConsecutiveFails int                       `json:"consecutive_failures"`
+		EditScopeFiles   int                       `json:"edit_scope_files"`
+		Roundtable       *roundtableVolatile       `json:"roundtable,omitempty"`
 	}{
 		ActiveSkillName:  state.ActiveSkillName,
+		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
-		Conference:       state.Conference,
-		ParentContext:    state.ParentContext,
+		Roundtable:       flattenRoundtable(state.Roundtable),
 	}
 	data, err := json.Marshal(volatile)
 	if err != nil {
 		return ""
 	}
 	return string(data)
+}
+
+// roundtableVolatile is a compact representation of roundtable results
+// injected into Block B for the main agent to make informed decisions.
+type roundtableVolatile struct {
+	Phase      string              `json:"phase"`
+	Goal       string              `json:"goal,omitempty"`
+	ChosenPlan string              `json:"chosen_plan,omitempty"`
+	Reviews    []reviewSummary     `json:"reviews,omitempty"`
+}
+
+type reviewSummary struct {
+	Member  string `json:"member"`
+	Score   int    `json:"score"`
+	Verdict string `json:"verdict"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// flattenRoundtable converts engine.RoundtableState to the compact volatile form.
+// Only includes Reviews when the roundtable is done and reviews exist.
+func flattenRoundtable(rt *engine.RoundtableState) *roundtableVolatile {
+	if rt == nil {
+		return nil
+	}
+	v := &roundtableVolatile{
+		Phase:      rt.Phase.String(),
+		Goal:       truncString(rt.Goal, 120),
+		ChosenPlan: truncString(rt.ChosenPlan, 120),
+	}
+	if len(rt.Reviews) > 0 {
+		v.Reviews = make([]reviewSummary, 0, len(rt.Reviews))
+		for _, r := range rt.Reviews {
+			v.Reviews = append(v.Reviews, reviewSummary{
+				Member:  r.MemberID,
+				Score:   r.Score,
+				Verdict: string(r.Verdict),
+				Summary: truncString(r.Summary, 150),
+			})
+		}
+	}
+	return v
+}
+
+func truncString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func mapMessage(msg engine.Message) engine.ModelMessage {

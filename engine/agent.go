@@ -27,12 +27,14 @@ const (
 
 // Handoff carries delegation parameters from parent to sub-agent.
 type Handoff struct {
-	Agent       AgentID  `json:"agent"`
-	Goal        string   `json:"goal"`
-	Context     string   `json:"context"`
-	Tools       []string `json:"tools,omitempty"`
-	Constraints []string `json:"constraints,omitempty"`
-	Depth       int      `json:"depth"`
+	Agent         AgentID  `json:"agent"`
+	Goal          string   `json:"goal"`
+	Context       string   `json:"context"`
+	Tools         []string `json:"tools,omitempty"`
+	Constraints   []string `json:"constraints,omitempty"`
+	Depth         int      `json:"depth"`
+	NoNudge       bool     `json:"no_nudge,omitempty"`
+	MaxIterations int      `json:"max_iterations,omitempty"`
 }
 
 // HandoffResult is returned by a sub-agent after execution.

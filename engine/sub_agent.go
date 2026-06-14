@@ -85,7 +85,23 @@ func (r *SubAgentRunner) contextLimit() int {
 
 // Run executes a generic sub-agent with the given handoff.
 func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
-	return r.runLoop(ctx, input, "", maxSubAgentIterations)
+	iters := maxSubAgentIterations
+	if input.MaxIterations > 0 {
+		iters = input.MaxIterations
+	}
+	return r.runLoop(ctx, input, "", iters)
+}
+
+// RunWithPrompt runs a sub-agent with an extra system-level instruction prompt
+// prepended to the volatile content. This is used by roundtable member agents
+// that need a role-specific instruction (e.g. "你是一位安全工程师...") injected
+// as a high-priority user message after the stable system prompt.
+func (r *SubAgentRunner) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
+	iters := maxSubAgentIterations
+	if input.MaxIterations > 0 {
+		iters = input.MaxIterations
+	}
+	return r.runLoop(ctx, input, extraPrompt, iters)
 }
 
 // runLoop is the core sub-agent execution loop.
@@ -99,6 +115,14 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Blocked:   true,
 			BlockedBy: "max_depth",
 		}, nil
+	}
+
+	// Fork model client to get an independent ReasoningEchoManager.
+	// Prevents the sub-agent's reasoning_content from leaking into the main agent's
+	// next request via the shared mux-protected manager on DeepSeekClient.
+	model := r.model
+	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
+		model = f.Fork()
 	}
 
 	// Stable system message — identical across all sub-agent calls → prefix cache hit
@@ -197,7 +221,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		// Derive a per-call deadline to prevent sub-agent from hanging indefinitely.
 		// 120s is generous for a single LLM call (including thinking).
 		callCtx, callCancel := context.WithTimeout(ctx, 120*time.Second)
-		resp, err := r.model.Complete(callCtx, req)
+		resp, err := model.Complete(callCtx, req)
 		callCancel()
 		close(heartbeatDone)
 		if err != nil {
@@ -244,6 +268,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		// No tool calls → agent may be done
 		if len(msg.ToolCalls) == 0 {
+			if input.NoNudge {
+				result := r.buildResult(msg.Content, input.Goal)
+				result.Usage = &totalUsage
+				return result, nil
+			}
 			consecutiveIntermediate++
 			if consecutiveIntermediate >= 3 {
 				// Break — model keeps producing text without acting

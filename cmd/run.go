@@ -194,10 +194,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	contextAssembler := context.NewContextAssembler(workDir, estimator)
 
-	// Wire up RepoMap-based path resolution for ReadTool
-	if rm := contextAssembler.RepoMap(); rm != nil {
-		toolExecutor.SetResolvePath(rm.ResolveFile)
-	}
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
 	if config.FlashModelName != "" {
 		compressor.SetFlashModelName(config.FlashModelName)
@@ -290,6 +286,7 @@ func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewBashTool())
 	registry.Register(builtin.NewRevertTool())
 	registry.Register(builtin.NewFetchTool())
+	registry.Register(builtin.NewLSPTool())
 }
 
 func defaultEngineConfig() engine.EngineConfig {
@@ -307,7 +304,7 @@ func defaultEngineConfig() engine.EngineConfig {
 			PlanningEnabled:        true,
 			PlanningThresholdChars: 120,
 			AutoConfirmScope:       false,
-			ConferenceEnabled:      false,
+			// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
 			RiskThreshold:          0.55,
 			Pricing: engine.PricingConfig{
 				Models: map[string]engine.ModelPricing{
@@ -336,7 +333,7 @@ func defaultEngineConfig() engine.EngineConfig {
 		PlanningEnabled:        true,
 		PlanningThresholdChars: 120,
 		AutoConfirmScope:       false,
-		ConferenceEnabled:      false,
+		// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
 		RiskThreshold:          0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{

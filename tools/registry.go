@@ -17,7 +17,6 @@ type ToolContext struct {
 	SessionID   string
 	TurnNumber  int
 	ArtifactDir string // base directory for artifact store (e.g., ~/.deepact/artifacts)
-	ResolvePath func(guess string) (resolved string, alternatives []string) // resolves model path guesses via RepoMap
 }
 
 type ToolResultEnvelope struct {

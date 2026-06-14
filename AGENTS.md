@@ -244,7 +244,7 @@ refactor/<module>-<what>
 ### Context Budget
 
 - Default limit: 1M tokens (configurable via `max_budget_tokens` in config.toml)
-- Layered compression: 45% StaleEviction → 65% CodeCollapse → 85% FullCompact (Flash archive)
+- Unified compression: single 80% threshold triggers full compact (Flash archive)
 
 ### Streaming
 
@@ -257,6 +257,34 @@ refactor/<module>-<what>
 - Target: <500ms to first interactive prompt
 - Lazy-load: LSP connections, MCP discovery, heavy configs
 - Pre-warm: API client connection, session load
+
+---
+
+## Code Reading Protocol (MANDATORY)
+
+**`read` 工具对同一文件有 4 次上限**（LoopGuard: `guards.go:68`，按路径去重计数）。超过即阻塞，每次读取必须精打细算。
+
+### 优先级顺序（严格从左到右）
+
+```
+lsp workspaceSymbol → lsp hover/goToDefinition → read symbol=X → read offset/limit
+```
+
+| 你要做什么 | 用这个 | 为什么 |
+|-----------|--------|--------|
+| 找函数/类型定义在哪个文件 | `lsp workspaceSymbol <name>` | 精确定位，不读文件 |
+| 查变量/函数返回值的类型 | `lsp hover file=<path> line=<n> char=<n>` | 返回类型签名，不读上下文 |
+| 跳到定义处看实现 | `lsp goToDefinition file=<path> line=<n> char=<n>` | 直接跳到定义位置 |
+| 读某个函数/类型的完整定义 | `read symbol=<name>` | AST 提取，只返回到该声明块 |
+| 查所有调用者 | `lsp findReferences file=<path> line=<n> char=<n>` | 不读文件就找到所有引用 |
+| 查看文件结构和符号列表 | `lsp documentSymbol file=<path>` | 一页看到所有导出符号 |
+
+### 红线规则
+
+- **同一文件 `read` 不超过 2 次**。如果需要更多，说明前面没用 LSP。
+- **禁止 `read offset/limit` 分段读同一文件**。这是最常见的 LoopGuard 触发原因。改为先 `lsp workspaceSymbol` 找到目标符号，再用一次 `read symbol=X`。
+- **先 LSP 后 read**。在任何 `read` 调用之前，先问自己："我用 LSP 能找吗？"
+- **Batch 原则**。如果确实需要看多个不连续区域，先全部用 `lsp workspaceSymbol` 定位，再一次性批量 `read`。
 
 ---
 

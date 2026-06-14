@@ -62,6 +62,20 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 	return engineStream, nil
 }
 
+// Fork creates a new EngineClient with an independent ReasoningEchoManager
+// for safe nested agent use. The underlying HTTP connection pool, rate limiter,
+// retry policy, and token estimator are shared with the parent.
+func (c *EngineClient) Fork() *EngineClient {
+	if c == nil || c.client == nil {
+		return c
+	}
+	dsClient, ok := c.client.(*DeepSeekClient)
+	if !ok {
+		return c // not a DeepSeekClient — can't fork, return as-is
+	}
+	return &EngineClient{client: dsClient.Fork()}
+}
+
 func (c *EngineClient) Complete(ctx context.Context, req engine.ModelRequest) (*engine.ModelResponse, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("llm client is nil")

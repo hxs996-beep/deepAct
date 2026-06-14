@@ -407,35 +407,77 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, toolMessage)
 	}
 
-	// Execute regular tool calls
+	// Execute regular tool calls.
+	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
 	if len(regularCalls) > 0 {
+		var readOnlyCalls, destructiveCalls []ToolCallRequest
 		for _, call := range regularCalls {
+			if call.Name == "edit" || call.Name == "write" {
+				destructiveCalls = append(destructiveCalls, call)
+			} else {
+				readOnlyCalls = append(readOnlyCalls, call)
+			}
+		}
+
+		// Batch execute read-only tools (grep, glob, read, lsp, bash — no diffs, fast)
+		if len(readOnlyCalls) > 0 {
+			for _, call := range readOnlyCalls {
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
+				}
+			}
+			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
+			for _, result := range roResults {
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
+				}
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+			}
+		}
+
+		// Sequential execute destructive tools (edit/write — show each diff progressively)
+		for _, call := range destructiveCalls {
 			if e.config.OnProgress != nil {
 				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
 			}
-		}
-		toolResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, regularCalls)
-		for _, result := range toolResults {
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
+			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
+			if len(results) > 0 {
+				result := results[0]
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
+				}
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
-			toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
-			e.history = append(e.history, toolMessage)
 		}
-		e.updateTaskStateFromTools(regularCalls, toolResults)
+
+		allCalls := append(readOnlyCalls, destructiveCalls...)
+		allResults := make([]ToolResult, 0)
+		for i := len(e.history) - len(regularCalls); i < len(e.history); i++ {
+			if i >= 0 && e.history[i].Role == "tool" {
+				allResults = append(allResults, ToolResult{ToolCallID: e.history[i].ToolCallID, Digest: e.history[i].Content})
+			}
+		}
+		e.updateTaskStateFromTools(allCalls, allResults)
 		e.runToolCallCount += len(regularCalls)
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
 	// Record the first operation for loop detection.
-	// lastOp includes a content-based hash so different edits on the same file,
-	// or different reads of the same file, are recognized as distinct operations.
+	// For destructive tools (edit/write), include content hash so different edits
+	// on the same file are recognized as distinct operations.
+	// For read operations, use only tool:path — content hash is unreliable (read
+	// may lack content-bearing fields or vary in offset/limit/symbol), and repeatedly
+	// reading the same file is itself a sign of a stuck agent.
 	for _, c := range regularCalls {
 		path := extractPathFromArgs(c.Input)
 		if path == "" {
 			continue
 		}
-		result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
+		if c.Name == "read" {
+			result.LastOp = c.Name + ":" + path
+		} else {
+			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
+		}
 		break
 	}
 	return result, nil
@@ -484,24 +526,6 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 			ToolName:   HandoffToolName,
 			Status:     "error",
 			Digest:     fmt.Sprintf("agent not found: %s - %v", params.Agent, err),
-		}
-	}
-
-	// Auto-inject unified codebase context for search-type agents,
-	// matching the three-layer context used in conference planning.
-	searchAgents := map[string]bool{"code_searcher": true, "searcher": true, "brainstorm": true}
-	if searchAgents[params.Agent] {
-		var repoMapSymbols string
-		if r, ok := e.context.(repoMapProvider); ok {
-			repoMapSymbols = r.RepoMapContent()
-		}
-		codebaseCtx := buildCodebaseContext(e.config.WorkDir, params.Goal, repoMapSymbols)
-		if codebaseCtx != "" {
-			if params.Context != "" {
-				params.Context = codebaseCtx + "\n\n" + params.Context
-			} else {
-				params.Context = codebaseCtx
-			}
 		}
 	}
 
@@ -719,6 +743,14 @@ func containsString(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// truncateStr truncates a string to the given max length, appending "..." if truncated.
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func addToWorkingSet(state *TaskState, path string, notes string) {

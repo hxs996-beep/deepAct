@@ -35,7 +35,7 @@ func NewReadTool() *ReadTool {
 func (t *ReadTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "read",
-		Description: "Read a file from the local filesystem. Returns up to ~25000 tokens inline; larger files are truncated with guidance to use offset/limit for specific sections. Use 'symbol' to extract a named Go declaration. If the file hasn't changed since the last read, a stub is returned and you should refer to the earlier content in conversation history.",
+		Description: "Read a file from the local filesystem. Returns up to ~25000 tokens inline; larger files are truncated with guidance to use offset/limit for specific sections. Use 'symbol' to extract a named Go declaration. If the file hasn't changed since the last read, a stub is returned and you should refer to the earlier content in conversation history. For looking up type info, symbol definitions, or searching symbols by name, prefer `lsp hover`/`lsp goToDefinition`/`lsp workspaceSymbol` — they return targeted results without reading the full file.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"symbol":{"type":"string","description":"Name of Go symbol to read (function/type/struct/variable/constant). Works only for .go files. When set, offset/limit are ignored."},"offset":{"type":"integer","description":"Starting line number (1-based)"},"limit":{"type":"integer","description":"Max lines to read"}},"required":["path"]}`),
 	}
 }
@@ -75,29 +75,16 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 
 	info, err := os.Stat(safePath)
 	if err != nil {
-		// Stat failed — try RepoMap-based path resolution if available
-		if ctx.ResolvePath != nil {
-			if resolved, alts := ctx.ResolvePath(payload.Path); resolved != "" {
-				// Exact match found under a different path — redirect
-				return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("File not found at %q. Did you mean %q? Use that path instead.", payload.Path, resolved)}, nil
-			} else if len(alts) > 0 {
-				return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("File not found at %q. Available files in this package: %s", payload.Path, strings.Join(alts, ", "))}, nil
-			}
-		}
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("stat file: %v", err)}, err
 	}
 	if info.Size() > maxReadBytes {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))}, nil
 	}
 
-	// Mtime cache: if file unchanged since last full read, return stub
-	if payload.Offset == 0 && payload.Limit == 0 {
-		if cachedMtime, ok := t.mtimeCache.Load(safePath); ok {
-			if cachedMtime == info.ModTime().UnixMilli() {
-				return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: fileUnchangedStub}, nil
-			}
-		}
-	}
+	// Mtime cache: skip stub return on cache hit — returning a stub instead of content
+	// creates a loop where the agent reads the same file, gets a stub, doesn't know
+	// what to do, and reads again. LoopGuard at the engine level handles read loops.
+	// Update cache now so repeated reads within the same mtime are not penalized.
 
 	file, err := os.Open(safePath)
 	if err != nil {
@@ -147,17 +134,19 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
 	}
 
+	const lspHint = "\n\n---\nNeed to find a symbol definition, type info, or references? Use the `lsp` tool instead of reading the whole file (e.g., `lsp operation=hover file_path=<path> line=<line> character=<char>`)."
+
 	// Token-based truncation: if estimated tokens exceed limit, truncate at last complete line
 	estimatedTokens := len(content) / charsPerToken
 	if estimatedTokens <= maxReadTokens {
-		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content}, nil
+		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 	}
 
 	truncated := truncateByChars(content, maxReadTokens*charsPerToken)
 	truncatedLines := strings.Count(truncated, "\n")
 	digest := fmt.Sprintf("%s\n[... truncated at %d lines (~%d tokens out of ~%d estimated). Use offset/limit to read specific sections.]",
 		truncated, truncatedLines, maxReadTokens, estimatedTokens)
-	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest}, nil
+	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest + lspHint}, nil
 }
 
 // truncateByChars returns content up to maxChars, stopping at the last complete line.

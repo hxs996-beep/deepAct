@@ -79,6 +79,10 @@ func detectUserLanguage(history []engine.Message) string {
 }
 
 func classifyTextLanguage(text string) string {
+	// Strip markdown code fences (```...```) and inline code (`...`) before
+	// counting, so that pasted code snippets don't skew language detection.
+	text = stripMarkdownCode(text)
+
 	var cjk, latin int
 	for _, r := range text {
 		if unicode.Is(unicode.Han, r) {
@@ -97,4 +101,48 @@ func classifyTextLanguage(text string) string {
 		}
 	}
 	return ""
+}
+
+// stripMarkdownCode removes markdown fenced code blocks (```...```) and inline
+// code spans (`...`) from s, returning only the natural-language content.
+func stripMarkdownCode(s string) string {
+	// Phase 1: strip fenced code blocks (```...```), including language tag.
+	var buf strings.Builder
+	i := 0
+	for i < len(s) {
+		if i+2 < len(s) && s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
+			// Skip opening fence
+			i += 3
+			// Skip until end of line (language tag)
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			// Skip until closing fence
+			for i+2 < len(s) {
+				if s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
+					i += 3
+					break
+				}
+				i++
+			}
+			continue
+		}
+		buf.WriteByte(s[i])
+		i++
+	}
+	s = buf.String()
+
+	// Phase 2: strip inline code spans (`...`).
+	var buf2 strings.Builder
+	inInline := false
+	for _, r := range s {
+		if r == '`' {
+			inInline = !inInline
+			continue
+		}
+		if !inInline {
+			buf2.WriteRune(r)
+		}
+	}
+	return buf2.String()
 }

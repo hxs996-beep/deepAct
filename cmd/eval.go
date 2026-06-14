@@ -161,9 +161,9 @@ func runEvalStats(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// --- ScoreCard stats (conference mode) ---
+	// --- ScoreCard stats ---
 	if len(scoreRecs) > 0 {
-		fmt.Println("## 评审结果 (Conference ScoreCards)")
+		fmt.Printf("## ScoreCard Records\n")
 		fmt.Printf("   %d records\n\n", len(scoreRecs))
 		fmt.Printf("Average score:     %.1f/100\n", stats.AverageScore)
 		fmt.Printf("Pass rate:         %d/%d (%.1f%%)\n",
