@@ -74,7 +74,7 @@ func initStyles() {
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 		if runtime.GOOS == "windows" {
-			StatusBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+			StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
 		} else {
 			StatusBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
 		}

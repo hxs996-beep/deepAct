@@ -33,12 +33,11 @@ func (p RoundtablePhase) String() string {
 
 // RoundtableState tracks the current roundtable session within TaskState.
 type RoundtableState struct {
-	Goal       string             `json:"goal"`
-	Proposals  []string           `json:"proposals"`
-	ChosenPlan string             `json:"chosen_plan,omitempty"`
-	Phase      RoundtablePhase    `json:"phase"`
-	Members    []RoundtableMember `json:"members,omitempty"`
-	Reviews    []MemberReview     `json:"reviews,omitempty"`
+	Goal      string             `json:"goal"`
+	Proposals []string           `json:"proposals"`
+	Phase     RoundtablePhase    `json:"phase"`
+	Members   []RoundtableMember `json:"members,omitempty"`
+	Reviews   []MemberReview     `json:"reviews,omitempty"`
 }
 
 // RoundtableMember defines a single reviewer's identity and stance.
@@ -52,13 +51,14 @@ type RoundtableMember struct {
 
 // MemberReview is the result from one roundtable member's review.
 type MemberReview struct {
-	MemberID string        `json:"member_id"`
-	Verdict  ReviewVerdict `json:"verdict"`
-	Score    int           `json:"score"` // 0-100
-	Findings []Finding     `json:"findings,omitempty"`
-	Summary  string        `json:"summary"`
-	Elapsed  string        `json:"elapsed,omitempty"` // human-readable duration
-	Error    string        `json:"error,omitempty"`   // non-empty if agent failed
+	MemberID      string        `json:"member_id"`
+	ProposalIndex int           `json:"proposal_index"` // which proposal this review targets
+	Verdict       ReviewVerdict `json:"verdict"`
+	Score         int           `json:"score"` // 0-100
+	Findings      []Finding     `json:"findings,omitempty"`
+	Summary       string        `json:"summary"`
+	Elapsed       string        `json:"elapsed,omitempty"` // human-readable duration
+	Error         string        `json:"error,omitempty"`   // non-empty if agent failed
 }
 
 // ReviewVerdict is the member's overall assessment.
@@ -132,223 +132,159 @@ func (h *RoundtableHall) Advance(ctx context.Context, userMsg string) (*EngineRe
 	}
 
 	switch state.Roundtable.Phase {
-	case RoundtableExplore:
-		return h.handleExplore(ctx, userMsg, zh)
 	case RoundtableReview:
 		return h.handleReview(ctx, userMsg, zh)
 	case RoundtableDone:
 		// Don't clear state here — Engine.Run() handles cleanup AFTER the
 		// normal agent loop runs, so Block B can include roundtable results.
 		return nil, nil
+	default:
+		return nil, nil
 	}
 	return nil, nil
 }
 
-// handleExplore runs the brainstorm phase: generates 2-3 proposals via
-// a sub-agent and presents them to the user for selection.
-func (h *RoundtableHall) handleExplore(ctx context.Context, userMsg string, zh bool) (*EngineResponse, error) {
-	state := h.engine.state
-	goal := state.Roundtable.Goal
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "explore",
-			Detail: "探索方案中...",
-		})
-	}
-
-	// Use the brainstorm sub-agent to generate proposals.
-	agent, err := h.engine.agents.Get(AgentBrainstorm)
-	if err != nil {
-		// Fallback: use generic sub-agent if brainstorm not found
-		agent, err = h.engine.agents.Get(AgentSub)
-		if err != nil {
-			return nil, fmt.Errorf("no agent available for explore: %w", err)
-		}
-	}
-
-	explorePrompt := fmt.Sprintf(`分析以下需求，提出 2-3 个不同的实现方案。
-
-需求：%s
-
-对每个方案：
-1. 简要描述方案思路
-2. 列出涉及的主要文件和改动
-3. 指出方案的优缺点
-
-格式要求：
-- 每个方案用 "## 方案 N: 标题" 开头
-- 保持简洁，每个方案 3-5 句话`, goal)
-
-	handoff := Handoff{
-		Agent: AgentBrainstorm,
-		Goal:  explorePrompt,
-		Tools: []string{"read", "grep", "glob", "lsp"},
-		Depth: 0,
-	}
-
-	result, err := agent.Run(ctx, handoff)
-	if err != nil {
-		return nil, fmt.Errorf("explore agent: %w", err)
-	}
-
-	proposals := extractProposals(result.Summary)
-	if len(proposals) == 0 {
-		// If no structured proposals found, use the entire summary as one proposal
-		proposals = []string{result.Summary}
-	}
-	state.Roundtable.Proposals = proposals
-	state.Roundtable.Phase = RoundtableReview
-
-	// Build user-facing response
-	var sb strings.Builder
-	if zh {
-		sb.WriteString(fmt.Sprintf("## 🎯 需求分析：%s\n\n", goal))
-		sb.WriteString("以下是几种可行的方案，请选择你倾向的方向：\n\n")
-		for i, p := range proposals {
-			sb.WriteString(fmt.Sprintf("---\n**方案 %d**\n\n%s\n\n", i+1, p))
-		}
-		sb.WriteString("\n💡 请选择你倾向的方案（例如：\"方案2\"），或者提出你的想法。")
-	} else {
-		sb.WriteString(fmt.Sprintf("## 🎯 Goal: %s\n\n", goal))
-		sb.WriteString("Here are a few approaches. Pick the direction you prefer:\n\n")
-		for i, p := range proposals {
-			sb.WriteString(fmt.Sprintf("---\n**Approach %d**\n\n%s\n\n", i+1, p))
-		}
-		sb.WriteString("\n💡 Pick an approach (e.g. \"Approach 2\") or share your thoughts.")
-	}
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "explore_done",
-			Detail: fmt.Sprintf("已提出 %d 个方案", len(proposals)),
-		})
-	}
-
-	return &EngineResponse{Summary: sb.String(), Stage: StageAct}, nil
-}
-
-// handleReview runs all member agents in parallel to review the chosen plan,
-// then presents a structured summary.
+// handleReview runs all member agents in parallel to review one or all proposals,
+// then presents a structured proposal×member matrix.
 func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bool) (*EngineResponse, error) {
 	state := h.engine.state
+	proposals := state.Roundtable.Proposals
+	if len(proposals) == 0 {
+		return nil, fmt.Errorf("no proposals to review")
+	}
 
-	// Use default members if none configured (e.g., via skill)
 	members := state.Roundtable.Members
 	if len(members) == 0 {
 		members = DefaultRoundtableMembers
 	}
 
-	// The user's message is treated as their chosen direction / context
-	chosenPlan := userMsg
-	if chosenPlan == "" {
-		chosenPlan = state.Roundtable.Goal
+	// Determine which proposals to review
+	indices := parseReviewTarget(userMsg, len(proposals))
+	if len(indices) == 0 {
+		// User didn't ask for a review — let the normal agent handle this message
+		return nil, nil
 	}
-	state.Roundtable.ChosenPlan = chosenPlan
 
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "review",
-			Detail: fmt.Sprintf("发起 %d 位成员并行评审...", len(members)),
+			Detail: fmt.Sprintf("评审 %d 个方案 × %d 位角色...", len(indices), len(members)),
 		})
 	}
 
-	// Run all member reviews in parallel using goroutines + WaitGroup
+	// Build review tasks: proposal × member
+	type reviewTask struct {
+		ProposalIdx int
+		Member      RoundtableMember
+	}
+	var tasks []reviewTask
+	for _, pi := range indices {
+		for _, m := range members {
+			tasks = append(tasks, reviewTask{ProposalIdx: pi, Member: m})
+		}
+	}
+
+	// Run all in parallel
 	var mu sync.Mutex
-	reviews := make([]MemberReview, len(members))
+	reviews := make([]MemberReview, len(tasks))
 	var wg sync.WaitGroup
 
-	for i, member := range members {
+	for i, task := range tasks {
 		wg.Add(1)
-		go func(idx int, m RoundtableMember) {
+		go func(idx int, t reviewTask) {
 			defer wg.Done()
-			review := h.runMemberReview(ctx, m, state.Roundtable.Goal, chosenPlan)
+			review := h.runMemberReview(ctx, t.Member, state.Roundtable.Goal, proposals[t.ProposalIdx], t.ProposalIdx)
 			mu.Lock()
 			reviews[idx] = review
 			mu.Unlock()
-		}(i, member)
+		}(i, task)
 	}
 	wg.Wait()
 
 	state.Roundtable.Reviews = reviews
+	state.Roundtable.Phase = RoundtableDone
 
-	// Present summary
+	// Build output: organized by proposal
 	var sb strings.Builder
 	if zh {
-		sb.WriteString("## 📋 多立场评审汇总\n\n")
+		sb.WriteString("## 📋 多角色评审汇总\n\n")
 		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", state.Roundtable.Goal))
-		if chosenPlan != state.Roundtable.Goal {
-			sb.WriteString(fmt.Sprintf("**选定的方向**: %s\n\n", chosenPlan))
-		}
 	} else {
 		sb.WriteString("## 📋 Multi-Stance Review Summary\n\n")
 		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", state.Roundtable.Goal))
-		if chosenPlan != state.Roundtable.Goal {
-			sb.WriteString(fmt.Sprintf("**Chosen direction**: %s\n\n", chosenPlan))
-		}
 	}
 
-	// Conflict detection: find disagreements between members
-	conflicts := detectConflicts(reviews, members, zh)
-
-	for _, review := range reviews {
-		member := findMember(members, review.MemberID)
-		avatar := ""
-		name := review.MemberID
-		if member != nil {
-			avatar = member.Avatar + " "
-			name = member.Name
-		}
-
-		verdictIcon := "✅"
-		switch review.Verdict {
-		case VerdictConditional:
-			verdictIcon = "⚠️"
-		case VerdictReject:
-			verdictIcon = "❌"
-		}
-
-		sb.WriteString(fmt.Sprintf("### %s%s  %s (评分: %d/100)\n", avatar, name, verdictIcon, review.Score))
-		if review.Elapsed != "" {
-			sb.WriteString(fmt.Sprintf("⏱ %s\n", review.Elapsed))
-		}
-		if review.Error != "" {
-			sb.WriteString(fmt.Sprintf("⚠️ 评审出错: %s\n", review.Error))
+	for _, pi := range indices {
+		proposalText := proposals[pi]
+		firstLine := strings.SplitN(proposalText, "\n", 2)[0]
+		if zh {
+			sb.WriteString(fmt.Sprintf("### 方案%d: %s\n\n", pi+1, firstLine))
 		} else {
-			sb.WriteString(fmt.Sprintf("**结论**: %s\n\n", review.Summary))
-			if len(review.Findings) > 0 {
-				for _, f := range review.Findings {
-					sevIcon := "🔴"
-					switch f.Severity {
-					case "high":
-						sevIcon = "🟠"
-					case "medium":
-						sevIcon = "🟡"
-					case "low":
-						sevIcon = "🔵"
+			sb.WriteString(fmt.Sprintf("### Approach %d: %s\n\n", pi+1, firstLine))
+		}
+		sb.WriteString(proposalText)
+		sb.WriteString("\n\n")
+
+		for _, r := range reviews {
+			if r.ProposalIndex != pi {
+				continue
+			}
+			member := findMember(members, r.MemberID)
+			avatar := ""
+			name := r.MemberID
+			if member != nil {
+				avatar = member.Avatar + " "
+				name = member.Name
+			}
+
+			verdictIcon := "✅"
+			switch r.Verdict {
+			case VerdictConditional:
+				verdictIcon = "⚠️"
+			case VerdictReject:
+				verdictIcon = "❌"
+			}
+
+			sb.WriteString(fmt.Sprintf("%s%s  %s (评分: %d/100)\n", avatar, name, verdictIcon, r.Score))
+			if r.Elapsed != "" {
+				sb.WriteString(fmt.Sprintf("⏱ %s\n", r.Elapsed))
+			}
+			if r.Error != "" {
+				sb.WriteString(fmt.Sprintf("⚠️ 评审出错: %s\n", r.Error))
+			} else {
+				sb.WriteString(fmt.Sprintf("**结论**: %s\n\n", r.Summary))
+				if len(r.Findings) > 0 {
+					for _, f := range r.Findings {
+						sevIcon := "🔴"
+						switch f.Severity {
+						case "high":
+							sevIcon = "🟠"
+						case "medium":
+							sevIcon = "🟡"
+						case "low":
+							sevIcon = "🔵"
+						}
+						sb.WriteString(fmt.Sprintf("- %s [%s/%s] %s", sevIcon, f.Severity, f.Category, f.Content))
+						if f.Suggestion != "" {
+							sb.WriteString(fmt.Sprintf("\n  → 建议: %s", f.Suggestion))
+						}
+						sb.WriteString("\n")
 					}
-					sb.WriteString(fmt.Sprintf("- %s [%s/%s] %s", sevIcon, f.Severity, f.Category, f.Content))
-					if f.Suggestion != "" {
-						sb.WriteString(fmt.Sprintf("\n  → 建议: %s", f.Suggestion))
-					}
-					sb.WriteString("\n")
 				}
 			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
+		sb.WriteString("---\n\n")
 	}
 
-	// Conflicts section — prominently highlighted
+	// Conflict detection
+	conflicts := detectConflicts(reviews, members, zh)
 	if len(conflicts) > 0 {
 		if zh {
-			sb.WriteString("---\n## ⚡⚡⚡ 立场冲突\n\n")
-			sb.WriteString("以下成员之间存在意见分歧，需要你决策：\n\n")
+			sb.WriteString("## ⚡ 需要关注的问题\n\n")
 		} else {
-			sb.WriteString("---\n## ⚡⚡⚡ Stance Conflicts\n\n")
-			sb.WriteString("The following disagreements require your decision:\n\n")
+			sb.WriteString("## ⚡ Items to Note\n\n")
 		}
 		for _, c := range conflicts {
 			sb.WriteString(c)
@@ -356,20 +292,17 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 		}
 	}
 
-	// Mark roundtable as done
-	state.Roundtable.Phase = RoundtableDone
-
 	if zh {
-		sb.WriteString("\n💡 评审完成。你可以根据以上意见继续讨论，或者直接提出实现需求。")
+		sb.WriteString("\n💡 评审完成。你可以根据以上意见选择方案，或继续讨论。")
 	} else {
-		sb.WriteString("\n💡 Review complete. You can discuss the feedback or request implementation.")
+		sb.WriteString("\n💡 Review complete. You can choose a proposal based on feedback or continue discussion.")
 	}
 
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "review_done",
-			Detail: fmt.Sprintf("%d 位成员评审完成", len(reviews)),
+			Detail: fmt.Sprintf("%d 个方案 × %d 位角色评审完成", len(indices), len(members)),
 		})
 	}
 
@@ -379,7 +312,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 // runMemberReview executes a single roundtable member's review as a sub-agent.
 // It emits member_start / member_done progress events so the UI can show
 // each member's status without displaying the LLM's raw thinking.
-func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableMember, goal, chosenPlan string) MemberReview {
+func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableMember, goal, proposalText string, proposalIndex int) MemberReview {
 	start := time.Now()
 
 	// Emit member start progress
@@ -391,7 +324,7 @@ func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableM
 		})
 	}
 
-	// Build the review goal: the plan to review + what stance to take
+	// Build the review goal: target a specific proposal
 	reviewGoal := fmt.Sprintf(`请以「%s」的立场评审以下方案。
 
 ## 你的立场
@@ -400,7 +333,7 @@ func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableM
 ## 待评审的需求
 %s
 
-## 选定的方向
+## 待评审的方案
 %s
 
 ## 评审要求
@@ -415,7 +348,7 @@ func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableM
 VERDICT: <approve|conditional|reject>
 SCORE: <0-100>
 SUMMARY: <一句话总结>`,
-		member.Name, member.Stance, goal, chosenPlan)
+		member.Name, member.Stance, goal, proposalText)
 
 	// Use the generic sub-agent with the member's role prompt injected
 	// via RunWithPrompt. The member's Prompt serves as the system-level
@@ -426,12 +359,12 @@ SUMMARY: <一句话总结>`,
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: 5,
+		MaxIterations: 3,
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
-		return h.memberError(member.ID, fmt.Sprintf("评审失败: %v", err), err, start)
+		return h.memberError(member.ID, proposalIndex, fmt.Sprintf("评审失败: %v", err), err, start)
 	}
 
 	// Type-assert to get the SubAgentRunner for RunWithPrompt
@@ -442,26 +375,27 @@ SUMMARY: <一句话总结>`,
 	if !ok {
 		// Fallback: use regular Run without prompt injection
 		result, err := agent.Run(ctx, handoff)
-		review := parseMemberReview(member.ID, result, err, start)
+		review := parseMemberReview(member.ID, proposalIndex, result, err, start)
 		h.emitMemberDone(member, review)
 		return review
 	}
 
 	result, err := pr.RunWithPrompt(ctx, handoff, member.Prompt)
-	review := parseMemberReview(member.ID, result, err, start)
+	review := parseMemberReview(member.ID, proposalIndex, result, err, start)
 	h.emitMemberDone(member, review)
 	return review
 }
 
 // memberError creates a MemberReview for a failed review and emits completion.
-func (h *RoundtableHall) memberError(memberID string, summary string, err error, start time.Time) MemberReview {
+func (h *RoundtableHall) memberError(memberID string, proposalIndex int, summary string, err error, start time.Time) MemberReview {
 	review := MemberReview{
-		MemberID: memberID,
-		Verdict:  VerdictConditional,
-		Score:    0,
-		Summary:  summary,
-		Error:    err.Error(),
-		Elapsed:  time.Since(start).Round(time.Millisecond).String(),
+		MemberID:      memberID,
+		ProposalIndex: proposalIndex,
+		Verdict:       VerdictConditional,
+		Score:         0,
+		Summary:       summary,
+		Error:         err.Error(),
+		Elapsed:       time.Since(start).Round(time.Millisecond).String(),
 	}
 	// Emit member done so UI knows this member finished (even if failed)
 	if h.engine.config.OnProgress != nil {
@@ -494,25 +428,27 @@ func (h *RoundtableHall) emitMemberDone(member RoundtableMember, review MemberRe
 }
 
 // parseMemberReview extracts structured review data from a sub-agent result.
-func parseMemberReview(memberID string, result *HandoffResult, err error, start time.Time) MemberReview {
+func parseMemberReview(memberID string, proposalIndex int, result *HandoffResult, err error, start time.Time) MemberReview {
 	elapsed := time.Since(start).Round(time.Millisecond).String()
 	if err != nil {
 		return MemberReview{
-			MemberID: memberID,
-			Verdict:  VerdictConditional,
-			Score:    0,
-			Summary:  fmt.Sprintf("评审出错: %v", err),
-			Error:    err.Error(),
-			Elapsed:  elapsed,
+			MemberID:      memberID,
+			ProposalIndex: proposalIndex,
+			Verdict:       VerdictConditional,
+			Score:         0,
+			Summary:       fmt.Sprintf("评审出错: %v", err),
+			Error:         err.Error(),
+			Elapsed:       elapsed,
 		}
 	}
 	if result == nil {
 		return MemberReview{
-			MemberID: memberID,
-			Verdict:  VerdictConditional,
-			Score:    0,
-			Summary:  "评审未返回结果",
-			Elapsed:  elapsed,
+			MemberID:      memberID,
+			ProposalIndex: proposalIndex,
+			Verdict:       VerdictConditional,
+			Score:         0,
+			Summary:       "评审未返回结果",
+			Elapsed:       elapsed,
 		}
 	}
 
@@ -520,10 +456,11 @@ func parseMemberReview(memberID string, result *HandoffResult, err error, start 
 
 	// Extract structured fields from the result
 	review := MemberReview{
-		MemberID: memberID,
-		Verdict:  parseVerdict(content),
-		Score:    parseScore(content),
-		Summary:  parseSummaryLine(content),
+		MemberID:      memberID,
+		ProposalIndex: proposalIndex,
+		Verdict:       parseVerdict(content),
+		Score:         parseScore(content),
+		Summary:       parseSummaryLine(content),
 		Elapsed:  elapsed,
 		Findings: parseFindings(content),
 	}
@@ -818,4 +755,47 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// parseReviewTarget determines which proposal indices to review
+// based on the user's message. Returns nil if no review was requested.
+func parseReviewTarget(userMsg string, numProposals int) []int {
+	trimmed := strings.TrimSpace(userMsg)
+	lower := strings.ToLower(trimmed)
+
+	// "都评一下" / "全部" / "review all" → all proposals
+	if strings.Contains(lower, "都评") || strings.Contains(lower, "全部") ||
+		strings.Contains(lower, "review all") || lower == "all" {
+		indices := make([]int, numProposals)
+		for i := 0; i < numProposals; i++ {
+			indices[i] = i
+		}
+		return indices
+	}
+
+	// "评方案2" / "方案2" / "review approach 2" / "approach 2"
+	var num int
+	if _, err := fmt.Sscanf(trimmed, "评方案%d", &num); err == nil {
+		if num >= 1 && num <= numProposals {
+			return []int{num - 1}
+		}
+	}
+	if _, err := fmt.Sscanf(trimmed, "方案%d", &num); err == nil {
+		if num >= 1 && num <= numProposals {
+			return []int{num - 1}
+		}
+	}
+	if _, err := fmt.Sscanf(lower, "review approach %d", &num); err == nil {
+		if num >= 1 && num <= numProposals {
+			return []int{num - 1}
+		}
+	}
+	if _, err := fmt.Sscanf(lower, "approach %d", &num); err == nil {
+		if num >= 1 && num <= numProposals {
+			return []int{num - 1}
+		}
+	}
+
+	// Not a review command
+	return nil
 }

@@ -188,10 +188,9 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 // roundtableVolatile is a compact representation of roundtable results
 // injected into Block B for the main agent to make informed decisions.
 type roundtableVolatile struct {
-	Phase      string              `json:"phase"`
-	Goal       string              `json:"goal,omitempty"`
-	ChosenPlan string              `json:"chosen_plan,omitempty"`
-	Reviews    []reviewSummary     `json:"reviews,omitempty"`
+	Phase   string          `json:"phase"`
+	Goal    string          `json:"goal,omitempty"`
+	Reviews []reviewSummary `json:"reviews,omitempty"`
 }
 
 type reviewSummary struct {
@@ -208,9 +207,8 @@ func flattenRoundtable(rt *engine.RoundtableState) *roundtableVolatile {
 		return nil
 	}
 	v := &roundtableVolatile{
-		Phase:      rt.Phase.String(),
-		Goal:       truncString(rt.Goal, 120),
-		ChosenPlan: truncString(rt.ChosenPlan, 120),
+		Phase: rt.Phase.String(),
+		Goal:  truncString(rt.Goal, 120),
 	}
 	if len(rt.Reviews) > 0 {
 		v.Reviews = make([]reviewSummary, 0, len(rt.Reviews))

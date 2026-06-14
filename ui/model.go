@@ -1871,14 +1871,12 @@ func renderThinkingBox(activity string, width int) []string {
 		switch name {
 		case "deepact":
 			icon = "🧠"
-		case "sub", "code_searcher", "searcher":
+		case "sub", "searcher":
 			icon = "🔍"
-		case "brainstorm":
-			icon = "💡"
-		case "critic", "challenger":
-			icon = "🔎"
 		case "planner":
 			icon = "📋"
+		case "critic":
+			icon = "🔎"
 		case "tester":
 			icon = "🧪"
 		}
@@ -2211,10 +2209,19 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) 
 	if w := lipgloss.Width(line); w < contentWidth {
 		line += strings.Repeat(" ", contentWidth-w)
 	}
-	bar := InputBarStyle.Render("▍")
-	bottomPad := strings.Repeat(" ", contentWidth)
-	topPad := strings.Repeat(" ", contentWidth)
-	return bar + StatusBarStyle.Render(topPad) + "\n" + bar + StatusBarStyle.Render(line) + "\n" + bar + StatusBarStyle.Render(bottomPad)
+	// Render ALL THREE rows as a SINGLE lipgloss block: bg set once, fg
+	// inlined via ANSI codes, single \033[0m at the end. This avoids the
+	// intermediate resets between bar+content per-line and between lines,
+	// both of which cause background loss on Windows terminals.
+	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	fgBar := "\033[38;5;68m"
+	fgContent := "\033[38;5;250m"
+	rows := strings.Join([]string{
+		fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
+		fgBar + "▍" + fgContent + line,
+		fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
+	}, "\n")
+	return bgStyle.Render(rows)
 }
 
 func wrapText(text string, width int) []string {

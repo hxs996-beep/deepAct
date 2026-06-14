@@ -12,14 +12,11 @@ type AgentID string
 
 const (
 	AgentSub          AgentID = "sub"
-	AgentBrainstorm   AgentID = "brainstorm"
 	AgentCritic       AgentID = "critic"
-	AgentCodeSearcher AgentID = "code_searcher"
-	AgentProposer     AgentID = "proposer"
 	AgentSearcher     AgentID = "searcher"
 	AgentPlanner      AgentID = "planner"
-	AgentChallenger   AgentID = "challenger"
 	AgentTester       AgentID = "tester"
+	AgentTeamLead     AgentID = "team-lead"
 
 	HandoffToolName    = "handoff_to_agent"
 	ActivateSkillToolName = "activate_skill"
@@ -117,8 +114,8 @@ func handoffToolSpec() ModelTool {
 				"properties": {
 					"agent": {
 						"type": "string",
-						"enum": ["sub", "brainstorm", "critic", "code_searcher", "proposer", "searcher", "planner", "challenger", "tester"],
-						"description": "Target agent: sub (generic), brainstorm (ideas), critic (review), code_searcher (find code), proposer (propose), searcher (code search), planner (plan), challenger (review with scorecard), tester (verify code)"
+						"enum": ["sub", "searcher", "planner", "critic", "tester"],
+						"description": "Target agent: sub (generic), searcher (find code), planner (plan), critic (review), tester (verify code)"
 					},
 					"goal": {
 						"type": "string",

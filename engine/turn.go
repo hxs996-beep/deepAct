@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -582,6 +583,22 @@ func summarizeArgs(input json.RawMessage) string {
 		return cmd
 	}
 
+	// LSP tool: show operation + query or file position.
+	if op, ok := m["operation"].(string); ok {
+		if query, ok := m["query"].(string); ok {
+			return fmt.Sprintf("%s %q", op, query)
+		}
+		if fp, ok := m["file_path"].(string); ok {
+			line, _ := m["line"].(float64)
+			chr, _ := m["character"].(float64)
+			if line > 0 {
+				return fmt.Sprintf("%s %s:%d:%d", op, shortPath(fp), int(line), int(chr))
+			}
+			return fmt.Sprintf("%s %s", op, shortPath(fp))
+		}
+		return op
+	}
+
 	// Extract path first — all file-oriented tools have it.
 	path := ""
 	if p, ok := m["path"].(string); ok {
@@ -617,6 +634,20 @@ func summarizeArgs(input json.RawMessage) string {
 	}
 
 	return path
+}
+
+// shortPath shortens a file path for display — shows last two components.
+func shortPath(p string) string {
+	if p == "" {
+		return p
+	}
+	base := filepath.Base(p)
+	dir := filepath.Dir(p)
+	parent := filepath.Base(dir)
+	if parent != "" && parent != "." {
+		return parent + "/" + base
+	}
+	return base
 }
 
 func briefDigest(digest string) string {

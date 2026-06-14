@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -369,6 +370,11 @@ type InputBuffer struct {
 	// Pasting is set true while bracketed paste is active so that
 	// pasted newlines insert \n rather than triggering submit.
 	Pasting bool
+
+	// lastRuneTime records when the last KeyRunes event was processed.
+	// Used to detect paste: if KeyEnter arrives within a short window
+	// after KeyRunes, it's likely a paste newline, not submit.
+	lastRuneTime time.Time
 }
 
 func NewInputBuffer() *InputBuffer {
@@ -421,6 +427,12 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	case msg.Type == tea.KeyEnter && !msg.Alt:
 		if ib.Pasting {
 			// During bracketed paste, newlines are literal content
+			ib.insertAtCursor('\n')
+			return ActionNewline
+		}
+		// Paste detection: if Enter arrives within 100ms of a KeyRunes event,
+		// it's likely a paste newline, not manual submission.
+		if !ib.lastRuneTime.IsZero() && time.Since(ib.lastRuneTime) < 100*time.Millisecond {
 			ib.insertAtCursor('\n')
 			return ActionNewline
 		}
@@ -489,6 +501,7 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			}
 		}
 		if len(filtered) > 0 {
+			ib.lastRuneTime = time.Now()
 			ib.insertRunes(filtered)
 			return ActionRuneInserted
 		}
