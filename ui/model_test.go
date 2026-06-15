@@ -137,3 +137,78 @@ func TestRunningStatePgScroll(t *testing.T) {
 		t.Fatal("model returned non-Model after blocked key")
 	}
 }
+
+
+// TestMouseDragSelection_StartDrag verifies mouse left-down starts selection.
+func TestMouseDragSelection_StartDrag(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.height = 40
+	m.cachedTotalLines = 100
+	m.msgCache = &messageRenderCache{lastMaxScroll: 60}
+
+	downMsg := tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      10,
+		X:      5,
+	}
+	result, _ := m.Update(downMsg)
+	m2 := result.(Model)
+	if !m2.selection.Active {
+		t.Error("selection should be active after mouse down")
+	}
+	if m2.selection.Done {
+		t.Error("selection should not be done during drag")
+	}
+}
+
+// TestSelectionClearedOnKeyPress verifies key press clears selection.
+func TestSelectionClearedOnKeyPress(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.selection = SelectionState{
+		Done:  true,
+		Start: selPoint{Line: 2, Col: 0},
+		End:   selPoint{Line: 5, Col: 10},
+	}
+
+	keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
+	result, _ := m.Update(keyMsg)
+	m2 := result.(Model)
+	if m2.selection.Done || m2.selection.Active {
+		t.Error("key press should clear selection")
+	}
+}
+
+// TestMouseClickNoDragClearsSelection verifies single click clears existing selection.
+func TestMouseClickNoDragClearsSelection(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.height = 40
+	m.cachedTotalLines = 100
+	m.msgCache = &messageRenderCache{lastMaxScroll: 60}
+
+	// Single click (down + up at same position)
+	downMsg := tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      10, X: 5,
+	}
+	result, _ := m.Update(downMsg)
+	m2 := result.(Model)
+	if !m2.selection.Active {
+		t.Error("selection should be active after mouse down")
+	}
+
+	upMsg := tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionRelease,
+		Y:      10, X: 5,
+	}
+	result, _ = m2.Update(upMsg)
+	m3 := result.(Model)
+	if m3.selection.Done || m3.selection.Active {
+		t.Error("single click should clear selection")
+	}
+}

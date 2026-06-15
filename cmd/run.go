@@ -66,8 +66,8 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	model := ui.NewModel(runner, pricing)
 	model.SetSkillSuggestions(externalSkillSuggestions)
-	// Mouse wheel scrolling via WithMouseCellMotion.
-	// Hold Shift while dragging for native terminal text selection (SGR mouse protocol).
+	// Mouse interaction via WithMouseCellMotion: wheel scrolling + drag-to-select.
+	// Left-click drag selects text and auto-copies to clipboard on release.
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {

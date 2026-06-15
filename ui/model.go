@@ -121,6 +121,12 @@ type Model struct {
 	// Per-message render cache (messages are immutable once added)
 	msgCache *messageRenderCache
 
+	// Mouse drag selection
+	selection         SelectionState
+	clipboardFeedback time.Time  // timestamp of last clipboard copy for status bar feedback
+	cachedTotalLines  int        // total lines from last renderBody(), used by screenToLine()
+	lineMetas         []lineMeta // parallel to renderBody output: maps each line to its source message
+
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
 }
@@ -202,6 +208,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
+		// Handle motion events (drag) separately — they have Button=MouseButtonNone
+		if msg.Action == tea.MouseActionMotion {
+			if m.selection.Active {
+				m.selection.End = m.screenToLine(msg.Y, msg.X)
+			}
+			return m, nil
+		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			if m.state == stateReady || m.state == stateRunning {
@@ -219,6 +232,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, m.repaintCmd()
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionPress {
+				pt := m.screenToLine(msg.Y, msg.X)
+				m.selection = SelectionState{
+					Active: true,
+					Done:   false,
+					Start:  pt,
+					End:    pt,
+				}
+				return m, nil
+			} else if msg.Action == tea.MouseActionRelease {
+				if m.selection.Active {
+					m.selection.End = m.screenToLine(msg.Y, msg.X)
+					m.selection.Active = false
+					// Same position = no drag = clear selection (single click)
+					if m.selection.Start == m.selection.End {
+						m.selection = SelectionState{}
+					} else {
+						m.selection.Done = true
+						m.copySelection()
+					}
+				}
+				return m, nil
+			}
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -263,6 +300,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case EngineResponseMsg:
+		m.selection = SelectionState{} // new message: clear selection
 		if m.cancelled {
 			m.cancelled = false
 			return m, nil
@@ -451,6 +489,25 @@ func (m Model) scrollUp() Model {
 	return m
 }
 
+// footerHeight computes the footer height from the model state.
+// Matches the logic in View() Step 2.
+func (m Model) footerHeight() int {
+	h := 4 // 3 (status bar padding) + 1 (input line)
+	if m.showSuggestions {
+		h += len(m.suggestions)
+		if h > 8 {
+			h = 8
+		}
+	}
+	if len(m.activeOptions) > 0 {
+		h += len(m.activeOptions) + 2
+		if h > 10 {
+			h = 10
+		}
+	}
+	return h
+}
+
 // scrollDown decreases scroll offset by half the terminal height, clamped at 0.
 func (m Model) scrollDown() Model {
 	m.scrollOffset -= m.height / 2
@@ -505,6 +562,9 @@ func (m Model) View() string {
 	}
 
 	lines := m.renderBody(scrollContentWidth)
+	m.cachedTotalLines = len(lines)
+	m.cachedBodyLines = lines
+	lines = m.applySelectionHighlight(lines)
 	total := len(lines)
 	maxScroll := 0
 	scrollOff := m.scrollOffset
@@ -527,7 +587,7 @@ func (m Model) View() string {
 	m.msgCache.lastMaxScroll = maxScroll
 
 	// ---- Step 5: Render status bar with actual scroll info (single pass) ----
-	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth)
+	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth, m.clipboardFeedback)
 
 	// ---- Step 6: Pad/trim body to exactly bodyHeight ----
 	if m.state == stateInit || (len(m.messages) == 0 && m.streaming == "" && len(m.spinners) == 0) {
@@ -598,6 +658,11 @@ func (m Model) View() string {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any key press clears the current selection
+	if m.selection.Done {
+		m.selection = SelectionState{}
+	}
+
 	// ---- Terminal escape split bracket tracker ----
 	// On Windows 10, SGR mouse sequences [<65;25;31M can arrive split at buffer
 	// boundaries: '[' alone, then '<65;25;31M'. A lone '[' cannot be distinguished
@@ -1079,17 +1144,28 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 
 func (m Model) renderBody(width int) []string {
 	lines := []string{}
+	metas := []lineMeta{}
 	if m.state == stateInit {
 		lines = append(lines, renderLogoBox(width))
-		return strings.Split(lines[0], "\n")
+		logoLines := strings.Split(lines[0], "\n")
+		for range logoLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
+		m.lineMetas = metas
+		return logoLines
 	}
 
 	// Only show logo box on the initial welcome screen (before any conversation).
 	// Once messages exist, the logo wastes vertical space and leaves a blank area
 	// above the actual content (especially during stateRunning padding from TOP).
 	if len(m.messages) == 0 {
-		lines = append(lines, strings.Split(renderLogoBox(width), "\n")...)
+		logoLines := strings.Split(renderLogoBox(width), "\n")
+		lines = append(lines, logoLines...)
+		for range logoLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
 		lines = append(lines, "")
+		metas = append(metas, lineMeta{msgIdx: -1})
 	}
 
 	// Use per-message render cache: messages are immutable once added,
@@ -1102,38 +1178,68 @@ func (m Model) renderBody(width int) []string {
 	for i, msg := range m.messages {
 		if i < len(cache.lines) {
 			lines = append(lines, cache.lines[i]...)
+			for j := range cache.lines[i] {
+				metas = append(metas, lineMeta{msgIdx: i, lineOff: j})
+			}
 		} else {
 			rendered := renderMessage(msg, width)
 			rendered = append(rendered, "")
 			cache.lines = append(cache.lines, rendered)
 			lines = append(lines, rendered...)
+			for j := range rendered {
+				metas = append(metas, lineMeta{msgIdx: i, lineOff: j})
+			}
 		}
 	}
 
 	if m.state == stateApiKeyPrompt {
-		lines = append(lines, "┌──────────────────────────────────────────────┐")
-		lines = append(lines, "│  Welcome to DeepAct!                        │")
-		lines = append(lines, "│  🔑 DeepSeek API Key 需要配置才能使用。      │")
-		lines = append(lines, "│  获取地址: https://platform.deepseek.com     │")
-		lines = append(lines, "│                                              │")
-		lines = append(lines, "│  输入你的 API Key 后按 Enter 确认           │")
-		lines = append(lines, "└──────────────────────────────────────────────┘")
-		lines = append(lines, "")
-		lines = append(lines, "  "+InputPromptStyle.Render("API Key > ")+strings.Repeat("*", len(m.apiKeyInput))+"█")
+		apiKeyLines := []string{
+			"┌──────────────────────────────────────────────┐",
+			"│  Welcome to DeepAct!                        │",
+			"│  🔑 DeepSeek API Key 需要配置才能使用。      │",
+			"│  获取地址: https://platform.deepseek.com     │",
+			"│                                              │",
+			"│  输入你的 API Key 后按 Enter 确认           │",
+			"└──────────────────────────────────────────────┘",
+			"",
+			"  " + InputPromptStyle.Render("API Key > ") + strings.Repeat("*", len(m.apiKeyInput)) + "█",
+		}
+		lines = append(lines, apiKeyLines...)
+		for range apiKeyLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
+		m.lineMetas = metas
 		return lines
 	}
 	if len(m.toolTree) > 0 {
-		lines = append(lines, renderToolTree(m.toolTree, width)...)
+		toolLines := renderToolTree(m.toolTree, width)
+		lines = append(lines, toolLines...)
+		for range toolLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
 	}
 	if len(m.memberStatuses) > 0 {
 		// Roundtable member progress replaces thinking box and streaming
-		lines = append(lines, renderMemberProgress(m.memberStatuses, width)...)
+		memberLines := renderMemberProgress(m.memberStatuses, width)
+		lines = append(lines, memberLines...)
+		for range memberLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
 	} else if m.streaming != "" {
-		lines = append(lines, renderStreaming(m.streaming, width)...)
+		streamLines := renderStreaming(m.streaming, width)
+		lines = append(lines, streamLines...)
+		for range streamLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
 	}
 	if len(m.spinners) > 0 {
-		lines = append(lines, renderSpinners(m.spinners, width)...)
+		spinnerLines := renderSpinners(m.spinners, width)
+		lines = append(lines, spinnerLines...)
+		for range spinnerLines {
+			metas = append(metas, lineMeta{msgIdx: -1})
+		}
 	}
+	m.lineMetas = metas
 	return lines
 }
 
@@ -2160,11 +2266,10 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 	return inputCost + outputCost
 }
 
-func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int) string {
-	dragHint := "Shift+drag"
-	switch runtime.GOOS {
-	case "darwin":
-		dragHint = "⌥+drag"
+func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, clipboardFeedback time.Time) string {
+	dragHint := "Drag to select"
+	if !clipboardFeedback.IsZero() && time.Since(clipboardFeedback) < 2*time.Second {
+		dragHint = "✓ Copied"
 	}
 	newlineHint := "Alt+↩"
 	switch runtime.GOOS {
