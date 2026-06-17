@@ -41,6 +41,7 @@ type HandoffResult struct {
 	Artifacts   []string    `json:"artifacts,omitempty"`
 	Blocked     bool        `json:"blocked"`
 	BlockedBy   string      `json:"blocked_by,omitempty"`
+	TimedOut    bool        `json:"timed_out,omitempty"` // true when max iterations reached
 	Usage       *ModelUsage `json:"usage,omitempty"`
 }
 

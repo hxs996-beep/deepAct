@@ -72,6 +72,13 @@ type MemberStatus struct {
 	Verdict string // "approve", "conditional", "reject" (valid when done)
 }
 
+// TDDStage represents a phase in the TDD (Red-Green-Refactor) workflow.
+type TDDStage struct {
+	Phase  string // "red" | "red_verify" | "green" | "green_verify" | "refactor"
+	Status string // "running" | "done" | "waiting"
+	Detail string // human-readable detail shown in status bar
+}
+
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/round", Args: "<需求>", Description: "开启多角色圆桌讨论，探索方案并进行多方评审"},
@@ -114,21 +121,22 @@ type Model struct {
 	activeOptions  []string
 	selectedOption int
 
-	// Body render cache — avoids re-rendering markdown on every View() frame
-	cachedBodyLines []string
-	cachedBodyWidth int
-	bodyDirty       bool
 	// Per-message render cache (messages are immutable once added)
 	msgCache *messageRenderCache
 
 	// Mouse drag selection
 	selection         SelectionState
-	clipboardFeedback time.Time  // timestamp of last clipboard copy for status bar feedback
-	cachedTotalLines  int        // total lines from last renderBody(), used by screenToLine()
-	lineMetas         []lineMeta // parallel to renderBody output: maps each line to its source message
+	clipboardFeedback time.Time // timestamp of last clipboard copy for status bar feedback
+	clipboardError    string   // last clipboard error message, shown briefly in status bar
+	autoScrollDir     int      // auto-scroll direction during drag: -1=up, 0=none, +1=down
+	lastMouseX        int      // last mouse X during drag (screen coords, for auto-scroll)
+	lastMouseY        int      // last mouse Y during drag (screen coords, for auto-scroll)
 
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
+
+	// TDD (test-driven-development) phase tracking
+	tddStages []TDDStage
 }
 
 type messageRenderCache struct {
@@ -208,10 +216,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
-		// Handle motion events (drag) separately — they have Button=MouseButtonNone
+		// Handle motion events (drag) — they have Button=MouseButtonNone
 		if msg.Action == tea.MouseActionMotion {
 			if m.selection.Active {
-				m.selection.End = m.screenToLine(msg.Y, msg.X)
+				totalLines, bodyHeight, _ := m.computeLayout()
+				m.selection.End = screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
+				m.lastMouseX = msg.X
+				m.lastMouseY = msg.Y
+				// Auto-scroll edge detection
+				scrollEdge := 2
+				newDir := 0
+				if msg.Y < scrollEdge {
+					newDir = -1
+				} else if msg.Y >= bodyHeight-scrollEdge {
+					newDir = 1
+				}
+				if newDir != 0 && m.autoScrollDir == 0 {
+					m.autoScrollDir = newDir
+					return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+						return autoScrollTickMsg{}
+					})
+				}
+				m.autoScrollDir = newDir
 			}
 			return m, nil
 		}
@@ -234,29 +260,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.repaintCmd()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				pt := m.screenToLine(msg.Y, msg.X)
+				totalLines, bodyHeight, _ := m.computeLayout()
+				pt := screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
 				m.selection = SelectionState{
 					Active: true,
 					Done:   false,
 					Start:  pt,
 					End:    pt,
 				}
+				m.autoScrollDir = 0
+				m.lastMouseX = msg.X
+				m.lastMouseY = msg.Y
 				return m, nil
 			} else if msg.Action == tea.MouseActionRelease {
 				if m.selection.Active {
-					m.selection.End = m.screenToLine(msg.Y, msg.X)
+					totalLines, bodyHeight, plainLines := m.computeLayout()
+					m.selection.End = screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
 					m.selection.Active = false
-					// Same position = no drag = clear selection (single click)
+					m.autoScrollDir = 0
 					if m.selection.Start == m.selection.End {
 						m.selection = SelectionState{}
 					} else {
 						m.selection.Done = true
-						m.copySelection()
+						_, err := copySelection(plainLines, m.selection)
+						if err != nil {
+							m.clipboardError = err.Error()
+						} else {
+							m.clipboardError = ""
+						}
+						m.clipboardFeedback = time.Now()
 					}
 				}
 				return m, nil
 			}
 		}
+		return m, nil
+	case autoScrollTickMsg:
+		if m.selection.Active && m.autoScrollDir != 0 {
+			_, bodyHeight, _ := m.computeLayout()
+			maxScroll := m.msgCache.lastMaxScroll
+			m.scrollOffset -= m.autoScrollDir
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			if maxScroll > 0 && m.scrollOffset > maxScroll {
+				m.scrollOffset = maxScroll
+			}
+			totalLines, _, _ := m.computeLayout()
+			m.selection.End = screenToLine(m.lastMouseY, m.lastMouseX, m.scrollOffset, bodyHeight, totalLines)
+			return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+				return autoScrollTickMsg{}
+			})
+		}
+		m.autoScrollDir = 0
 		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -301,6 +357,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case EngineResponseMsg:
 		m.selection = SelectionState{} // new message: clear selection
+		m.autoScrollDir = 0
 		if m.cancelled {
 			m.cancelled = false
 			return m, nil
@@ -313,6 +370,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingContent = ""
 		m.thinkingActivity = ""
 		m.memberStatuses = nil // roundtable phase done, clear member cards
+		m.tddStages = nil      // TDD phase done, clear stage cards
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
 	case ProgressMsg:
@@ -435,6 +493,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:    "system",
 				Content: fmt.Sprintf("🧠 Skill activated: **%s** — %s", msg.Name, msg.Detail),
 			})
+		case "tdd_phase":
+			// Update or add TDD stage
+			found := false
+			for i, s := range m.tddStages {
+				if s.Phase == msg.Name {
+					m.tddStages[i].Status = "running"
+					m.tddStages[i].Detail = msg.Detail
+					found = true
+				} else if s.Status == "running" {
+					// Previous stages are now done
+					m.tddStages[i].Status = "done"
+				}
+			}
+			if !found {
+				// Mark all previous stages as done
+				for i := range m.tddStages {
+					if m.tddStages[i].Status == "waiting" {
+						m.tddStages[i].Status = "done"
+					}
+				}
+				// Add the new stage
+				m.tddStages = append(m.tddStages, TDDStage{
+					Phase:  msg.Name,
+					Status: "running",
+					Detail: msg.Detail,
+				})
+			}
 		}
 		return m, waitForProgress(m.progressChan)
 	case StatusUpdateMsg:
@@ -492,20 +577,42 @@ func (m Model) scrollUp() Model {
 // footerHeight computes the footer height from the model state.
 // Matches the logic in View() Step 2.
 func (m Model) footerHeight() int {
-	h := 4 // 3 (status bar padding) + 1 (input line)
+	h := 3 + 1 + inputBoxHeight(m) // 3 status bar + 1 separator + wrapped content lines
 	if m.showSuggestions {
-		h += len(m.suggestions)
-		if h > 8 {
-			h = 8
+		items := len(m.suggestions)
+		if items > maxPopupItems {
+			items = maxPopupItems
 		}
+		h += items + 1 // items + hint line (ignore overflow indicator)
 	}
 	if len(m.activeOptions) > 0 {
-		h += len(m.activeOptions) + 2
-		if h > 10 {
-			h = 10
+		items := len(m.activeOptions)
+		if items > maxPopupItems {
+			items = maxPopupItems
 		}
+		h += items + 1 // items + hint line (ignore overflow indicator)
 	}
 	return h
+}
+
+// computeLayout returns (totalLines, bodyHeight, plainLines) for the current model state.
+// Used by mouse event handlers for coordinate mapping and text extraction.
+func (m Model) computeLayout() (totalLines, bodyHeight int, plainLines []string) {
+	bh := m.height - m.footerHeight()
+	if bh < 1 {
+		bh = 1
+	}
+	_, plain := m.renderBody(m.renderBodyWidth())
+	return len(plain), bh, plain
+}
+
+// renderBodyWidth returns the content width used by renderBody.
+func (m Model) renderBodyWidth() int {
+	w := m.width - 1
+	if w < 20 {
+		w = 20
+	}
+	return w
 }
 
 // scrollDown decreases scroll offset by half the terminal height, clamped at 0.
@@ -529,7 +636,8 @@ func (m Model) View() string {
 
 	// API key prompt: full-screen centered, no bottom bars, no cursor blink
 	if m.state == stateApiKeyPrompt {
-		return strings.Join(m.renderBody(contentWidth), "\n")
+		rendered, _ := m.renderBody(contentWidth)
+		return strings.Join(rendered, "\n")
 	}
 
 	suggestionPopup := renderSuggestions(m, contentWidth)
@@ -561,10 +669,9 @@ func (m Model) View() string {
 		scrollContentWidth = 20
 	}
 
-	lines := m.renderBody(scrollContentWidth)
-	m.cachedTotalLines = len(lines)
-	m.cachedBodyLines = lines
-	lines = m.applySelectionHighlight(lines)
+	renderedLines, _ := m.renderBody(scrollContentWidth)
+	renderedLines = m.applySelectionHighlight(renderedLines)
+	lines := renderedLines
 	total := len(lines)
 	maxScroll := 0
 	scrollOff := m.scrollOffset
@@ -587,7 +694,7 @@ func (m Model) View() string {
 	m.msgCache.lastMaxScroll = maxScroll
 
 	// ---- Step 5: Render status bar with actual scroll info (single pass) ----
-	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth, m.clipboardFeedback)
+	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth, m.clipboardFeedback, m.clipboardError)
 
 	// ---- Step 6: Pad/trim body to exactly bodyHeight ----
 	if m.state == stateInit || (len(m.messages) == 0 && m.streaming == "" && len(m.spinners) == 0) {
@@ -1142,17 +1249,17 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	}
 }
 
-func (m Model) renderBody(width int) []string {
+func (m Model) renderBody(width int) (rendered []string, plain []string) {
 	lines := []string{}
-	metas := []lineMeta{}
+
 	if m.state == stateInit {
-		lines = append(lines, renderLogoBox(width))
-		logoLines := strings.Split(lines[0], "\n")
-		for range logoLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
+		logoRendered := renderLogoBox(width)
+		logoLines := strings.Split(logoRendered, "\n")
+		plainLines := make([]string, len(logoLines))
+		for i, l := range logoLines {
+			plainLines[i] = stripAnsi(l)
 		}
-		m.lineMetas = metas
-		return logoLines
+		return logoLines, plainLines
 	}
 
 	// Only show logo box on the initial welcome screen (before any conversation).
@@ -1161,11 +1268,7 @@ func (m Model) renderBody(width int) []string {
 	if len(m.messages) == 0 {
 		logoLines := strings.Split(renderLogoBox(width), "\n")
 		lines = append(lines, logoLines...)
-		for range logoLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
-		}
 		lines = append(lines, "")
-		metas = append(metas, lineMeta{msgIdx: -1})
 	}
 
 	// Use per-message render cache: messages are immutable once added,
@@ -1178,70 +1281,57 @@ func (m Model) renderBody(width int) []string {
 	for i, msg := range m.messages {
 		if i < len(cache.lines) {
 			lines = append(lines, cache.lines[i]...)
-			for j := range cache.lines[i] {
-				metas = append(metas, lineMeta{msgIdx: i, lineOff: j})
-			}
 		} else {
 			rendered := renderMessage(msg, width)
 			rendered = append(rendered, "")
 			cache.lines = append(cache.lines, rendered)
 			lines = append(lines, rendered...)
-			for j := range rendered {
-				metas = append(metas, lineMeta{msgIdx: i, lineOff: j})
-			}
 		}
 	}
 
 	if m.state == stateApiKeyPrompt {
 		apiKeyLines := []string{
-			"┌──────────────────────────────────────────────┐",
+			"┌────────────────────────────────────────────┐",
 			"│  Welcome to DeepAct!                        │",
 			"│  🔑 DeepSeek API Key 需要配置才能使用。      │",
 			"│  获取地址: https://platform.deepseek.com     │",
 			"│                                              │",
 			"│  输入你的 API Key 后按 Enter 确认           │",
-			"└──────────────────────────────────────────────┘",
+			"└────────────────────────────────────────────┘",
 			"",
 			"  " + InputPromptStyle.Render("API Key > ") + strings.Repeat("*", len(m.apiKeyInput)) + "█",
 		}
 		lines = append(lines, apiKeyLines...)
-		for range apiKeyLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
+		plainLines := make([]string, len(lines))
+		for i, l := range lines {
+			plainLines[i] = stripAnsi(l)
 		}
-		m.lineMetas = metas
-		return lines
+		return lines, plainLines
 	}
 	if len(m.toolTree) > 0 {
 		toolLines := renderToolTree(m.toolTree, width)
 		lines = append(lines, toolLines...)
-		for range toolLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
-		}
 	}
-	if len(m.memberStatuses) > 0 {
-		// Roundtable member progress replaces thinking box and streaming
-		memberLines := renderMemberProgress(m.memberStatuses, width)
-		lines = append(lines, memberLines...)
-		for range memberLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
-		}
+	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
+		// Overlay status area: render TDD phases (left) and/or member
+		// progress (right) in a single status block above the input.
+		overlayLines := renderOverlayStatus(m.tddStages, m.memberStatuses, width)
+		lines = append(lines, overlayLines...)
 	} else if m.streaming != "" {
 		streamLines := renderStreaming(m.streaming, width)
 		lines = append(lines, streamLines...)
-		for range streamLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
-		}
 	}
 	if len(m.spinners) > 0 {
 		spinnerLines := renderSpinners(m.spinners, width)
 		lines = append(lines, spinnerLines...)
-		for range spinnerLines {
-			metas = append(metas, lineMeta{msgIdx: -1})
-		}
 	}
-	m.lineMetas = metas
-	return lines
+	plainLines := make([]string, len(lines))
+	for i, l := range lines {
+		plainLines[i] = stripAnsi(l)
+	}
+	return lines, plainLines
 }
+
 
 func renderLogoBox(width int) string {
 	// Mascot whale art (user-chosen design) — left side
@@ -1950,6 +2040,169 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 	return strings.Split(rendered, "\n")
 }
 
+// tddPhaseMeta maps phase names to their display metadata.
+var tddPhaseMeta = map[string]struct {
+	Label   string
+	Emoji   string
+	PhaseID int // order: red=0, red_verify=1, green=2, green_verify=3, refactor=4
+}{
+	"red":          {"RED", "🔴", 0},
+	"red_verify":   {"VERIFY", "🔍", 1},
+	"green":        {"GREEN", "🟢", 2},
+	"green_verify": {"VERIFY", "🔍", 3},
+	"refactor":     {"REFACTOR", "♻️", 4},
+}
+
+// renderTDDStatus renders the TDD (Red-Green-Refactor) status block.
+// Shows each stage with its completion status: waiting (⬜), running (emoji), done (✅).
+func renderTDDStatus(stages []TDDStage, maxWidth int) []string {
+	if len(stages) == 0 {
+		return nil
+	}
+	var content []string
+	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("TDD: test-driven-development"))
+	content = append(content, "")
+
+	// Build ordered list of stages (red, red_verify, green, green_verify, refactor)
+	ordered := []struct {
+		Phase  string
+		Status string
+		Detail string
+	}{
+		{Phase: "red", Status: "waiting", Detail: "编写失败测试..."},
+		{Phase: "red_verify", Status: "waiting", Detail: "验证测试失败..."},
+		{Phase: "green", Status: "waiting", Detail: "编写最小实现..."},
+		{Phase: "green_verify", Status: "waiting", Detail: "验证测试通过..."},
+		{Phase: "refactor", Status: "waiting", Detail: "清理代码..."},
+	}
+
+	// Override with actual stage data
+	stageMap := make(map[string]TDDStage)
+	for _, s := range stages {
+		stageMap[s.Phase] = s
+	}
+
+	for i, o := range ordered {
+		if actual, ok := stageMap[o.Phase]; ok {
+			ordered[i].Status = actual.Status
+			if actual.Detail != "" {
+				ordered[i].Detail = actual.Detail
+			}
+		}
+	}
+
+	// Render each stage
+	for _, o := range ordered {
+		meta := tddPhaseMeta[o.Phase]
+		var line string
+		switch o.Status {
+		case "running":
+			frame := spinnerFrames[0]
+			line = fmt.Sprintf("  %s %s %s  %s",
+				frame, meta.Emoji+meta.Label, SpinnerStyle.Render(o.Detail), DimStyle.Render("running"))
+		case "done":
+			line = fmt.Sprintf("  ✓ %s %s", meta.Emoji+meta.Label, SpinnerDoneStyle.Render(o.Detail))
+		default:
+			line = fmt.Sprintf("  ⬜ %s %s", meta.Emoji+meta.Label, DimStyle.Render(o.Detail))
+		}
+		content = append(content, line)
+	}
+
+	rendered := ExecBlockStyle.Width(maxWidth).Render(strings.Join(content, "\n"))
+	return strings.Split(rendered, "\n")
+}
+
+// renderOverlayStatus renders both TDD phases and member progress in a single
+// overlay block. When both are present, they're displayed side-by-side (left/right)
+// with a vertical divider.
+func renderOverlayStatus(tddStages []TDDStage, members []MemberStatus, width int) []string {
+	tddActive := len(tddStages) > 0
+	memberActive := len(members) > 0
+
+	if !tddActive && !memberActive {
+		return nil
+	}
+
+	if tddActive && memberActive {
+		// Side-by-side layout: split width in half
+		halfWidth := (width - 3) / 2 // account for divider and spacing
+		if halfWidth < 30 {
+			halfWidth = 30
+		}
+		leftLines := renderTDDStatus(tddStages, halfWidth)
+		rightLines := renderMemberProgress(members, halfWidth)
+
+		// Combine side by side
+		maxLines := len(leftLines)
+		if len(rightLines) > maxLines {
+			maxLines = len(rightLines)
+		}
+
+		// Pad both columns to same height
+		for len(leftLines) < maxLines {
+			leftLines = append(leftLines, "")
+		}
+		for len(rightLines) < maxLines {
+			rightLines = append(rightLines, "")
+		}
+
+		divider := DimStyle.Render(" ┃ ")
+		combined := make([]string, maxLines)
+		for i := 0; i < maxLines; i++ {
+			l := leftLines[i]
+			r := rightLines[i]
+			// Truncate or pad left column
+			lStr := stripAnsi(l)
+			if len(lStr) > halfWidth {
+				l = truncateAnsi(l, halfWidth)
+			} else if len(lStr) < halfWidth {
+				l += strings.Repeat(" ", halfWidth-len(lStr))
+			}
+			combined[i] = l + divider + r
+		}
+		return combined
+	}
+
+	if tddActive {
+		// Ensure TDD panel gets full width (renderTDDStatus handles this via maxWidth)
+		return renderTDDStatus(tddStages, width)
+	}
+
+	return renderMemberProgress(members, width)
+}
+
+// truncateAnsi truncates a string containing ANSI escape codes to the given
+// visible width, preserving escape sequences.
+func truncateAnsi(s string, maxWidth int) string {
+	visible := 0
+	var result strings.Builder
+	var buf strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			buf.Reset()
+			buf.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			buf.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+				result.WriteString(buf.String())
+				buf.Reset()
+			}
+			continue
+		}
+		if visible >= maxWidth {
+			continue
+		}
+		result.WriteRune(r)
+		visible++
+	}
+	return result.String()
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -2238,8 +2491,10 @@ func inputBoxHeight(m Model) int {
 	lines := strings.Split(content, "\n")
 	totalLines := 0
 	for _, line := range lines {
-		runes := []rune(line)
-		lineCount := (len(runes) + innerWidth - 1) / innerWidth
+		// Use visual width (lipgloss.Width) to match wrapInputText behavior.
+		// CJK characters have width 2, emoji may have width 2+, etc.
+		w := lipgloss.Width(line)
+		lineCount := (w + innerWidth - 1) / innerWidth
 		if lineCount == 0 {
 			lineCount = 1
 		}
@@ -2266,10 +2521,14 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 	return inputCost + outputCost
 }
 
-func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, clipboardFeedback time.Time) string {
+func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, clipboardFeedback time.Time, clipboardError string) string {
 	dragHint := "Drag to select"
 	if !clipboardFeedback.IsZero() && time.Since(clipboardFeedback) < 2*time.Second {
-		dragHint = "✓ Copied"
+		if clipboardError != "" {
+			dragHint = "⚠ Copy failed"
+		} else {
+			dragHint = "✓ Copied"
+		}
 	}
 	newlineHint := "Alt+↩"
 	switch runtime.GOOS {
@@ -2318,9 +2577,20 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 	// inlined via ANSI codes, single \033[0m at the end. This avoids the
 	// intermediate resets between bar+content per-line and between lines,
 	// both of which cause background loss on Windows terminals.
-	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	fgBar := "\033[38;5;68m"
-	fgContent := "\033[38;5;250m"
+	// Colors respect dark/light mode via StatusBarStyle values (方案A).
+	var bgColor, fgBarColor, fgContentColor string
+	if isDark {
+		bgColor = "236"
+		fgBarColor = "68"
+		fgContentColor = "250"
+	} else {
+		bgColor = "255"
+		fgBarColor = "25"
+		fgContentColor = "236"
+	}
+	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
+	fgBar := fmt.Sprintf("\033[38;5;%sm", fgBarColor)
+	fgContent := fmt.Sprintf("\033[38;5;%sm", fgContentColor)
 	rows := strings.Join([]string{
 		fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 		fgBar + "▍" + fgContent + line,

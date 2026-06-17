@@ -141,7 +141,6 @@ func (h *RoundtableHall) Advance(ctx context.Context, userMsg string) (*EngineRe
 	default:
 		return nil, nil
 	}
-	return nil, nil
 }
 
 // handleReview runs all member agents in parallel to review one or all proposals,
@@ -292,6 +291,29 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 		}
 	}
 
+	// Check if any member timed out
+	hasTimedOut := false
+	timedOutMembers := ""
+	for _, r := range reviews {
+		if r.Error != "" && strings.Contains(r.Summary, "超时") {
+			hasTimedOut = true
+			if m := findMember(members, r.MemberID); m != nil {
+				if timedOutMembers != "" {
+					timedOutMembers += "、"
+				}
+				timedOutMembers += m.Name
+			}
+		}
+	}
+
+	if hasTimedOut {
+		if zh {
+			sb.WriteString(fmt.Sprintf("\n⚠️ %s 分析超时，以上发现仅供参考。\n", timedOutMembers))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n⚠️ %s timed out. Findings above are partial.\n", timedOutMembers))
+		}
+	}
+
 	if zh {
 		sb.WriteString("\n💡 评审完成。你可以根据以上意见选择方案，或继续讨论。")
 	} else {
@@ -359,7 +381,7 @@ SUMMARY: <一句话总结>`,
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: 3,
+		MaxIterations: 50,
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
@@ -453,6 +475,20 @@ func parseMemberReview(memberID string, proposalIndex int, result *HandoffResult
 	}
 
 	content := result.Summary
+
+	// Check if the sub-agent timed out (max iterations reached)
+	if result.TimedOut {
+		return MemberReview{
+			MemberID:      memberID,
+			ProposalIndex: proposalIndex,
+			Verdict:       VerdictConditional,
+			Score:         0,
+			Summary:       "⚠️ 该角色分析超时，以下为部分发现（仅供参考）",
+			Findings:      nil,
+			Elapsed:       elapsed,
+			Error:         content,
+		}
+	}
 
 	// Extract structured fields from the result
 	review := MemberReview{

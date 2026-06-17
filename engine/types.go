@@ -255,6 +255,16 @@ type SymbolRef struct {
 	Kind string `json:"kind"`
 }
 
+// Dimension is a single scoring criterion for eval records.
+type Dimension struct {
+	Name        string  `json:"name"`
+	Score       float64 `json:"score"`
+	Weight      float64 `json:"weight"`
+	Evidence    string  `json:"evidence"`
+	Issue       string  `json:"issue"`
+	Improvement string  `json:"improvement"`
+}
+
 type AmbiguityResult struct {
 	Score     float64  `json:"score"`
 	Missing   []string `json:"missing"`

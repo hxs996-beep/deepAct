@@ -9,14 +9,12 @@ import (
 )
 
 // TestScrollWithPgKeys verifies that keyboard scrolling via PgUp/PgDown
-// works correctly. This is the replacement for mouse-wheel scrolling after
-// removing WithMouseCellMotion (which blocked native terminal text selection).
+// works correctly.
 func TestScrollWithPgKeys(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
-	m.height = 40 // simulate a 40-row terminal
+	m.height = 40
 
-	// PgUp should increase scrollOffset by height/2 = 20
 	upMsg := tea.KeyMsg{Type: tea.KeyPgUp}
 	result, _ := m.Update(upMsg)
 	m2 := result.(Model)
@@ -24,7 +22,6 @@ func TestScrollWithPgKeys(t *testing.T) {
 		t.Errorf("PgUp: want scrollOffset=20, got %d", m2.scrollOffset)
 	}
 
-	// PgDown should decrease scrollOffset, clamped at 0
 	downMsg := tea.KeyMsg{Type: tea.KeyPgDown}
 	result, _ = m2.Update(downMsg)
 	m3 := result.(Model)
@@ -32,14 +29,12 @@ func TestScrollWithPgKeys(t *testing.T) {
 		t.Errorf("PgDown: want scrollOffset=0, got %d", m3.scrollOffset)
 	}
 
-	// PgDown at 0 should stay 0 (clamped)
 	result, _ = m3.Update(downMsg)
 	m4 := result.(Model)
 	if m4.scrollOffset != 0 {
 		t.Errorf("PgDown at 0: want scrollOffset=0, got %d", m4.scrollOffset)
 	}
 
-	// PgUp twice = 40, then PgDown once = 20
 	m4.scrollOffset = 0
 	result, _ = m4.Update(upMsg)
 	m5 := result.(Model)
@@ -55,22 +50,18 @@ func TestScrollWithPgKeys(t *testing.T) {
 	}
 }
 
-// TestNoMouseTracking verifies the model doesn't crash or produce unexpected
-// behavior when WithMouseCellMotion is not enabled (native terminal selection).
-// This is a smoke test — mouse events won't arrive via tea.MouseMsg, but the
-// model should handle other messages gracefully without relying on mouse state.
+// TestNoMouseTracking verifies the model doesn't crash when
+// WithMouseCellMotion is not enabled.
 func TestNoMouseTracking(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
 
-	// TickMsg should be handled without any mouse-related crash
 	tickMsg := TickMsg{}
 	result, _ := m.Update(tickMsg)
 	if result == nil {
 		t.Fatal("model returned nil after TickMsg")
 	}
 
-	// Window resize should be handled
 	winMsg := tea.WindowSizeMsg{Width: 100, Height: 40}
 	result, _ = m.Update(winMsg)
 	if result == nil {
@@ -85,7 +76,6 @@ func TestMouseWheelScroll(t *testing.T) {
 	m.height = 40
 	m.scrollOffset = 0
 
-	// Wheel down should decrease scrollOffset (clamped at 0)
 	downMsg := tea.MouseMsg{Button: tea.MouseButtonWheelDown}
 	result, _ := m.Update(downMsg)
 	m2 := result.(Model)
@@ -93,22 +83,19 @@ func TestMouseWheelScroll(t *testing.T) {
 		t.Errorf("WheelDown at 0: want scrollOffset=0, got %d", m2.scrollOffset)
 	}
 
-	// Wheel up should increase scrollOffset
 	upMsg := tea.MouseMsg{Button: tea.MouseButtonWheelUp}
 	result, _ = m2.Update(upMsg)
 	m3 := result.(Model)
-	if m3.scrollOffset != 13 { // height/3 = 40/3 ≈ 13
+	if m3.scrollOffset != 13 {
 		t.Errorf("WheelUp: want scrollOffset=13, got %d", m3.scrollOffset)
 	}
 
-	// Wheel down should decrease it
 	result, _ = m3.Update(downMsg)
 	m4 := result.(Model)
 	if m4.scrollOffset != 0 {
 		t.Errorf("WheelDown: want scrollOffset=0, got %d", m4.scrollOffset)
 	}
 
-	// Running state should also allow scroll
 	m4.state = stateRunning
 	result, _ = m4.Update(upMsg)
 	m5 := result.(Model)
@@ -130,7 +117,6 @@ func TestRunningStatePgScroll(t *testing.T) {
 		t.Errorf("PgUp during running: want scrollOffset=20, got %d", m2.scrollOffset)
 	}
 
-	// Normal input should still be blocked during running
 	enterMsg := tea.KeyMsg{Type: tea.KeyEnter}
 	result, _ = m2.Update(enterMsg)
 	if _, ok := result.(Model); !ok {
@@ -138,19 +124,19 @@ func TestRunningStatePgScroll(t *testing.T) {
 	}
 }
 
-
 // TestMouseDragSelection_StartDrag verifies mouse left-down starts selection.
 func TestMouseDragSelection_StartDrag(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
 	m.height = 40
-	m.cachedTotalLines = 100
-	m.msgCache = &messageRenderCache{lastMaxScroll: 60}
+	m.width = 100
+	m.msgCache = &messageRenderCache{}
+	m.messages = []DisplayMessage{{Role: "user", Content: "test message for selection"}}
 
 	downMsg := tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		Y:      10,
+		Y:      0,
 		X:      5,
 	}
 	result, _ := m.Update(downMsg)
@@ -181,19 +167,84 @@ func TestSelectionClearedOnKeyPress(t *testing.T) {
 	}
 }
 
-// TestMouseClickNoDragClearsSelection verifies single click clears existing selection.
-func TestMouseClickNoDragClearsSelection(t *testing.T) {
+func TestFooterHeightMatchesViewFooterHeight(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.width = 80
+	m.height = 24
+
+	inputLine := renderInputLine(m)
+	viewFooterHeight := 3 + renderedHeight(inputLine)
+	if got := m.footerHeight(); got != viewFooterHeight {
+		t.Fatalf("footerHeight should match View footer height: got %d, want %d", got, viewFooterHeight)
+	}
+}
+
+func TestAutoScrollTickTopEdgeScrollsUp(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.height = 20
+	m.width = 80
+	m.msgCache = &messageRenderCache{lastMaxScroll: 50}
+	m.scrollOffset = 0
+	m.autoScrollDir = -1
+	m.lastMouseX = 5
+	m.lastMouseY = 0
+	m.selection = SelectionState{
+		Active: true,
+		Start:  selPoint{Line: 99, Col: 5},
+		End:    selPoint{Line: 99, Col: 5},
+	}
+	for i := 0; i < 120; i++ {
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: "line"})
+	}
+
+	result, _ := m.Update(autoScrollTickMsg{})
+	m2 := result.(Model)
+	if m2.scrollOffset != 1 {
+		t.Fatalf("top-edge auto-scroll should increase scrollOffset to scroll up, got %d", m2.scrollOffset)
+	}
+}
+
+func TestAutoScrollTickBottomEdgeScrollsDown(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.height = 20
+	m.width = 80
+	m.msgCache = &messageRenderCache{lastMaxScroll: 50}
+	m.scrollOffset = 10
+	m.autoScrollDir = 1
+	m.lastMouseX = 5
+	m.lastMouseY = 19
+	m.selection = SelectionState{
+		Active: true,
+		Start:  selPoint{Line: 50, Col: 5},
+		End:    selPoint{Line: 50, Col: 5},
+	}
+	for i := 0; i < 120; i++ {
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: "line"})
+	}
+
+	result, _ := m.Update(autoScrollTickMsg{})
+	m2 := result.(Model)
+	if m2.scrollOffset != 9 {
+		t.Fatalf("bottom-edge auto-scroll should decrease scrollOffset to scroll down, got %d", m2.scrollOffset)
+	}
+}
+
+// TestModelMouseClickNoDrag verifies single click clears selection.
+func TestModelMouseClickNoDrag(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
 	m.height = 40
-	m.cachedTotalLines = 100
-	m.msgCache = &messageRenderCache{lastMaxScroll: 60}
+	m.width = 100
+	m.msgCache = &messageRenderCache{}
+	m.messages = []DisplayMessage{{Role: "user", Content: "test message"}}
 
-	// Single click (down + up at same position)
 	downMsg := tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		Y:      10, X: 5,
+		Y:      0, X: 5,
 	}
 	result, _ := m.Update(downMsg)
 	m2 := result.(Model)
@@ -204,7 +255,7 @@ func TestMouseClickNoDragClearsSelection(t *testing.T) {
 	upMsg := tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionRelease,
-		Y:      10, X: 5,
+		Y:      0, X: 5,
 	}
 	result, _ = m2.Update(upMsg)
 	m3 := result.(Model)

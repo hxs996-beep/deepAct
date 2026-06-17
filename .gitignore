@@ -2,9 +2,10 @@
 deepact
 *.exe
 
-# Build
+# Build output
 dist/
 bin/
+app/
 
 # IDE
 .idea/
@@ -33,8 +34,16 @@ vendor/
 
 # AI assistant artifacts
 .claude/
-.ldflags_temp  
-build/  
-build_release.ps1  
-package_release.ps1  
-dist/ 
+CLAUDE.md
+.ldflags_temp
+build/
+build_release.ps1
+package_release.ps1
+
+# Runtime data (generated at runtime)
+memory/
+retrieval/
+
+# Build verification artifacts
+BUILD_RESULT.txt
+BUILD_VERIFICATION.md

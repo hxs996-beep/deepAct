@@ -460,6 +460,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		e.updateTaskStateFromTools(allCalls, allResults)
 		e.runToolCallCount += len(regularCalls)
+
+		// Infer TDD phase from tool calls when TDD skill is active
+		if e.state != nil && e.state.ActiveSkillName == "test-driven-development" {
+			e.inferTDDPhase(allCalls, allResults)
+		}
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
@@ -545,6 +550,44 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 			handoff.Context = e.matchedSkillsContent + "\n\n" + handoff.Context
 		} else {
 			handoff.Context = e.matchedSkillsContent
+		}
+	}
+
+	// Inject main agent's working context (known files, findings, modifications)
+	// as a starting point for the sub-agent. The sub-agent should re-examine these
+	// from its own perspective to find blind spots the main agent missed.
+	if e.state != nil {
+		var agentCtx strings.Builder
+
+		if len(e.state.WorkingSet.Files) > 0 {
+			agentCtx.WriteString("\n## Main Agent Context (Review Starting Point)\n")
+			agentCtx.WriteString("The main agent examined these files. Re-examine them from your own perspective:\n")
+			for _, f := range e.state.WorkingSet.Files {
+				agentCtx.WriteString(fmt.Sprintf("- %s (%s)\n", f.Path, f.Notes))
+			}
+		}
+
+		if len(e.state.MemoryMarkers) > 0 {
+			agentCtx.WriteString("\nKey findings from the main agent (review for blind spots):\n")
+			for _, m := range e.state.MemoryMarkers {
+				agentCtx.WriteString(fmt.Sprintf("  ⚡ %s\n", m))
+			}
+		}
+
+		if len(e.state.ModifiedFiles) > 0 {
+			agentCtx.WriteString("\nFiles modified so far:\n")
+			for _, f := range e.state.ModifiedFiles {
+				agentCtx.WriteString(fmt.Sprintf("- %s\n", f))
+			}
+		}
+
+		extra := agentCtx.String()
+		if extra != "" {
+			if handoff.Context != "" {
+				handoff.Context = handoff.Context + extra
+			} else {
+				handoff.Context = extra
+			}
 		}
 	}
 
@@ -883,4 +926,201 @@ func cloneTaskState(s *TaskState) *TaskState {
 	var clone TaskState
 	json.Unmarshal(data, &clone)
 	return &clone
+}
+
+// isTestFile returns true if the file path looks like a test file.
+func isTestFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	// Common test file patterns: *_test.go, *_spec.*, test_*, *.test.*
+	if strings.HasSuffix(name, "_test") {
+		return true
+	}
+	if strings.HasSuffix(name, "_spec") {
+		return true
+	}
+	if strings.HasPrefix(name, "test_") {
+		return true
+	}
+	if strings.Contains(base, ".test.") {
+		return true
+	}
+	return false
+}
+
+// extractCmd extracts the command string from a bash tool call input.
+func extractCmd(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	if cmd, ok := m["command"].(string); ok {
+		return cmd
+	}
+	return ""
+}
+
+// isTestCommand returns true if the bash command is running tests.
+func isTestCommand(cmd string) bool {
+	if cmd == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(cmd))
+	testPatterns := []string{
+		"go test",
+		"npm test",
+		"npm run test",
+		"yarn test",
+		"yarn run test",
+		"pnpm test",
+		"pnpm run test",
+		"pytest",
+		"python -m pytest",
+		"python3 -m pytest",
+		"cargo test",
+		"jest",
+		"vitest",
+		"mocha",
+		"rspec",
+		"bundle exec rspec",
+		"rake test",
+		"mix test",
+		"dotnet test",
+		"npx jest",
+		"npx vitest",
+		"make test",
+	}
+	for _, p := range testPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// inferTDDPhase examines the tool calls and results from the current turn
+// and updates the engine's TDD phase state machine.
+//
+// State machine:
+//
+//	"" → RED (write/edit test file)
+//	RED → RED_VERIFY (bash with test command)
+//	RED_VERIFY → GREEN (write/edit non-test file after test failed)
+//	RED_VERIFY → RED (test passed unexpectedly, fix test)
+//	GREEN → GREEN_VERIFY (bash with test command)
+//	GREEN_VERIFY → REFACTOR (write/edit after test passed)
+//	GREEN_VERIFY → GREEN (test failed, fix implementation)
+//	REFACTOR → RED (write/edit test file)
+//
+// Phases and their meanings:
+//   - red:        Writing a failing test
+//   - red_verify: Running the test to confirm it fails
+//   - green:      Writing minimal implementation code
+//   - green_verify: Running the test to confirm it passes
+//   - refactor:   Cleaning up while keeping tests green
+func (e *Engine) inferTDDPhase(calls []ToolCallRequest, results []ToolResult) {
+	resultMap := make(map[string]ToolResult)
+	for _, r := range results {
+		resultMap[r.ToolCallID] = r
+	}
+
+	var newPhase string
+	var newDetail string
+
+	for _, call := range calls {
+		result := resultMap[call.ID]
+
+		switch call.Name {
+		case "write", "edit":
+			path := extractPathFromArgs(call.Input)
+			if isTestFile(path) {
+				newPhase = "red"
+				newDetail = "编写测试..."
+			} else if e.tddPhase == "red_verify" || e.tddPhase == "green_verify" || e.tddPhase == "refactor" || e.tddPhase == "green" {
+				// Non-test file edit during implementation or refactor phase
+				if e.tddPhase == "green_verify" || e.tddPhase == "refactor" {
+					newPhase = "refactor"
+					newDetail = "清理代码..."
+				} else if newPhase != "red" {
+					newPhase = "green"
+					newDetail = "编写实现..."
+				}
+			} else if newPhase != "red" && newPhase != "green" {
+				// First non-test edit without prior phase — could be GREEN
+				newPhase = "green"
+				newDetail = "编写实现..."
+			}
+
+		case "bash":
+			cmd := extractCmd(call.Input)
+			if isTestCommand(cmd) {
+				switch e.tddPhase {
+				case "red", "red_verify":
+					// Running test during RED phase — checking for expected failure
+					if result.ExitCode != nil && *result.ExitCode == 0 {
+						newPhase = "red_verify"
+						newDetail = "⚠️ 测试通过（预期失败）"
+					} else {
+						newPhase = "red_verify"
+						newDetail = "✅ 测试失败（符合预期）"
+					}
+				case "green", "green_verify":
+					if result.ExitCode != nil && *result.ExitCode == 0 {
+						newPhase = "green_verify"
+						newDetail = "✅ 测试通过"
+					} else {
+						newPhase = "green_verify"
+						newDetail = "❌ 测试失败"
+					}
+				case "refactor":
+					if result.ExitCode != nil && *result.ExitCode == 0 {
+						newPhase = "refactor"
+						newDetail = "✅ 测试通过（重构后）"
+					} else {
+						newPhase = "refactor"
+						newDetail = "❌ 重构导致测试失败"
+					}
+				default:
+					// Test run without prior phase — determine from exit code
+					if result.ExitCode != nil && *result.ExitCode == 0 {
+						newPhase = "green_verify"
+						newDetail = "✅ 测试通过"
+					} else {
+						newPhase = "red_verify"
+						newDetail = "✅ 测试失败（符合预期）"
+					}
+				}
+			}
+		}
+	}
+
+	// Only emit event and update state if phase actually changed
+	if newPhase != "" && newPhase != e.tddPhase {
+		e.tddPhase = newPhase
+		e.tddPhaseDetail = newDetail
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "tdd_phase",
+				Name:   newPhase,
+				Detail: newDetail,
+			})
+		}
+	} else if newPhase != "" && newPhase == e.tddPhase && newDetail != e.tddPhaseDetail {
+		// Same phase but detail changed (e.g., verify outcome updated)
+		e.tddPhaseDetail = newDetail
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "tdd_phase",
+				Name:   newPhase,
+				Detail: newDetail,
+			})
+		}
+	}
 }
