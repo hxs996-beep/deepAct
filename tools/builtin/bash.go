@@ -190,6 +190,9 @@ func storeFullOutput(artifactDir string, stdout, stderr []byte, truncated bool) 
 }
 
 func truncateOutput(data []byte) (string, bool) {
+	// Normalize Windows \r\n line endings — \r in terminal causes cursor to return
+	// to column 0, overwriting rendered content and making lines "invisible".
+	data = bytes.ReplaceAll(data, []byte("\r"), []byte{})
 	if len(data) <= bashOutputLimit {
 		return string(data), false
 	}

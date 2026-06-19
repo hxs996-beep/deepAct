@@ -278,29 +278,26 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Keyword-based skill auto-matching — if no skill is active and user input
-	// contains keywords matching a skill, auto-activate it.
+	// Keyword-based skill suggestion — no auto-activation.
+	// Match top skills and suggest them as a block so the model can decide
+	// whether to activate one via the activate_skill tool.
 	if e.state.ActiveSkillName == "" {
-		if matched := e.skills.MatchByKeywords(userMsg); matched != nil && !e.activatedSkills[matched.Name] {
-			e.activatedSkills[matched.Name] = true
-			e.lastActivatedSkill = matched.Name
-			e.state.ActiveSkillName = matched.Name
-			e.state.ActiveSkillContent = matched.Content
-
-			skillMsg := fmt.Sprintf(
-				"[SKILL ACTIVATED: %s] (keyword match)\n\nThe following methodology has been activated. Follow it precisely.\n\n%s",
-				matched.Name, matched.Content,
-			)
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", matched.Name, matched.Content)
-
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "skill_activated",
-					Name:   matched.Name,
-					Detail: matched.Description + " (keyword match)",
-				})
+		if matched := e.skills.MatchTopSkills(3, userMsg); len(matched) > 0 {
+			var sb strings.Builder
+			if zh {
+				sb.WriteString("## 建议的技能\n以下技能可能适合当前任务：\n\n")
+			} else {
+				sb.WriteString("## Suggested Skills\nSkills that may be relevant:\n\n")
 			}
+			for _, s := range matched {
+				sb.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
+			}
+			if zh {
+				sb.WriteString("\n使用 `/<skillname>` 激活，或让模型用 `activate_skill` tool 建议。")
+			} else {
+				sb.WriteString("\nUse `/<skillname>` to activate, or ask the model to suggest via `activate_skill` tool.")
+			}
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, sb.String())
 		}
 	}
 

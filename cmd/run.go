@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -66,9 +67,17 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	model := ui.NewModel(runner, pricing)
 	model.SetSkillSuggestions(externalSkillSuggestions)
-	// Mouse interaction via WithMouseCellMotion: wheel scrolling + drag-to-select.
+	// Mouse interaction: wheel scrolling + drag-to-select.
 	// Left-click drag selects text and auto-copies to clipboard on release.
-	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
+	// On Windows ConPTY, WithMouseAllMotion (mode 1003) is used instead of
+	// WithMouseCellMotion (mode 1002) because ConPTY's mode 1002 encoding
+	// drops wheel events and fragments SGR motion sequences, causing
+	// stuttery selection and non-functional scrolling.
+	mouseOpt := tea.WithMouseCellMotion
+	if runtime.GOOS == "windows" {
+		mouseOpt = tea.WithMouseAllMotion
+	}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), mouseOpt()}
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
@@ -113,16 +122,16 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
-// buildSkillsBlock renders a brief skills hint for the system prompt.
-// Full skill details are not listed here — the engine auto-matches skills
-// by keyword when the user's input contains relevant terms.
+// buildSkillsBlock renders a static skills hint for the stable zone.
+// Dynamic skill suggestions (matched by keyword per-turn) are injected
+// separately via pendingPinnedMessages in the engine loop.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. The engine will also auto-detect relevant skills from your request.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
 	return b.String()
 }
 

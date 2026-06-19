@@ -154,15 +154,15 @@ func BuildBlockB(taskState string) string {
 }
 
 // BuildStableSessionContext returns a user message containing session-stable content
-// (AGENTS.md, environment, language directive). This message is at the top of the messages
+// (deepact.md, environment, language directive). This message is at the top of the messages
 // array (after system prompt) and stays identical across turns, enabling prefix cache hits.
-func BuildStableSessionContext(agentsMD string, envInfo EnvironmentInfo, userLang string) string {
+func BuildStableSessionContext(deepactMD string, envInfo EnvironmentInfo, userLang string) string {
 	var builder strings.Builder
 	builder.WriteString("# Block S: Session Context (Stable)\n\n")
-	if strings.TrimSpace(agentsMD) != "" {
-		builder.WriteString("## AGENTS.md\n")
-		builder.WriteString(agentsMD)
-		if !strings.HasSuffix(agentsMD, "\n") {
+	if strings.TrimSpace(deepactMD) != "" {
+		builder.WriteString("## deepact.md\n")
+		builder.WriteString(deepactMD)
+		if !strings.HasSuffix(deepactMD, "\n") {
 			builder.WriteString("\n")
 		}
 		builder.WriteString("\n")

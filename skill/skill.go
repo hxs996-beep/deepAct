@@ -6,7 +6,10 @@
 // so the model can decide which methodology to apply.
 package skill
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Skill defines a methodology template that can be injected
 // into the agent's context to guide its behavior.
@@ -14,7 +17,7 @@ type Skill struct {
 	Name        string   // Unique identifier, e.g. "debugging"
 	Description string   // Short description for matching
 	Content     string   // Full skill instructions injected into prompt
-	Keywords    []string // Intent keywords (kept for reference, not used for auto-matching)
+	Keywords    []string // Keywords used by MatchTopSkills to suggest relevant skills
 	NextSkills  []string // Skill names suggested after this skill completes, enabling auto-activation chains
 }
 
@@ -48,16 +51,20 @@ func (r *Registry) All() []*Skill {
 	return r.skills
 }
 
-// MatchByKeywords finds the best matching skill for the given input string.
-// It checks each skill's Keywords list against the input (case-insensitive).
-// Returns the skill with the most keyword matches, or nil if none match.
-func (r *Registry) MatchByKeywords(input string) *Skill {
-	if input == "" {
+// MatchTopSkills returns the top N skills matching the given input string,
+// sorted by keyword match count descending. Skills with zero matches are excluded.
+// This is used to suggest relevant skills to the model in the runtime context,
+// rather than auto-activating any skill.
+func (r *Registry) MatchTopSkills(n int, input string) []*Skill {
+	if n <= 0 || input == "" {
 		return nil
 	}
 	inputLower := strings.ToLower(input)
-	var best *Skill
-	bestCount := 0
+	type scored struct {
+		skill *Skill
+		count int
+	}
+	var results []scored
 	for _, s := range r.skills {
 		count := 0
 		for _, kw := range s.Keywords {
@@ -68,10 +75,29 @@ func (r *Registry) MatchByKeywords(input string) *Skill {
 				count++
 			}
 		}
-		if count > 0 && count > bestCount {
-			best = s
-			bestCount = count
+		if count > 0 {
+			results = append(results, scored{skill: s, count: count})
 		}
 	}
-	return best
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].count > results[j].count
+	})
+	if len(results) > n {
+		results = results[:n]
+	}
+	out := make([]*Skill, len(results))
+	for i, r := range results {
+		out[i] = r.skill
+	}
+	return out
+}
+
+// MatchByKeywords finds the best matching skill for the given input string.
+// Deprecated: Use MatchTopSkills instead.
+func (r *Registry) MatchByKeywords(input string) *Skill {
+	top := r.MatchTopSkills(1, input)
+	if len(top) == 0 {
+		return nil
+	}
+	return top[0]
 }
