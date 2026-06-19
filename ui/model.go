@@ -47,13 +47,14 @@ type ToolNode struct {
 }
 
 type StatusInfo struct {
-	Model        string
-	TokensIn     int
-	TokensOut    int
-	Cost         float64
-	SessionCost  float64
-	AgentStatus  string
-	ExtraMessage string
+	Model          string
+	TokensIn       int
+	TokensOut      int
+	CacheHitTokens int
+	Cost           float64
+	SessionCost    float64
+	AgentStatus    string
+	ExtraMessage   string
 }
 
 type Suggestion struct {
@@ -431,7 +432,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.memberStatuses = nil
 			}
 		case "agent_start":
-			displayName := "🧠 " + msg.Name
+			displayName := msg.Name
 			goal := msg.Detail
 			if len(goal) > 60 {
 				goal = goal[:60] + "..."
@@ -441,7 +442,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.spinners[0].Goal = displayName + " running..."
 			}
 		case "agent_done":
-			displayName := "🧠 " + msg.Name
+			displayName := msg.Name
 			for i := range m.toolTree {
 				if m.toolTree[i].Name == displayName && !m.toolTree[i].Done {
 					m.toolTree[i].Done = true
@@ -485,13 +486,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "usage":
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
+			m.status.CacheHitTokens += msg.CacheHit
 			cost := estimateCost(msg.TokensIn, msg.TokensOut, msg.CacheHit, msg.ModelName, &m.pricing)
 			m.status.Cost = cost
 			m.status.SessionCost += cost
 		case "skill_activated":
 			m.messages = append(m.messages, DisplayMessage{
 				Role:    "system",
-				Content: fmt.Sprintf("🧠 Skill activated: **%s** — %s", msg.Name, msg.Detail),
+				Content: fmt.Sprintf("Skill activated: **%s** — %s", msg.Name, msg.Detail),
 			})
 		case "tdd_phase":
 			// Update or add TDD stage
@@ -2094,16 +2096,17 @@ func renderTDDStatus(stages []TDDStage, maxWidth int) []string {
 	// Render each stage
 	for _, o := range ordered {
 		meta := tddPhaseMeta[o.Phase]
+		phaseLabel := meta.Emoji + " " + meta.Label
 		var line string
 		switch o.Status {
 		case "running":
 			frame := spinnerFrames[0]
-			line = fmt.Sprintf("  %s %s %s  %s",
-				frame, meta.Emoji+meta.Label, SpinnerStyle.Render(o.Detail), DimStyle.Render("running"))
+			line = fmt.Sprintf("  %s  %s   %s  %s",
+				frame, phaseLabel, SpinnerStyle.Render(o.Detail), DimStyle.Render("running"))
 		case "done":
-			line = fmt.Sprintf("  ✓ %s %s", meta.Emoji+meta.Label, SpinnerDoneStyle.Render(o.Detail))
+			line = fmt.Sprintf("  ✓   %s   %s", phaseLabel, SpinnerDoneStyle.Render(o.Detail))
 		default:
-			line = fmt.Sprintf("  ⬜ %s %s", meta.Emoji+meta.Label, DimStyle.Render(o.Detail))
+			line = fmt.Sprintf("  ·   %s   %s", phaseLabel, DimStyle.Render(o.Detail))
 		}
 		content = append(content, line)
 	}
@@ -2229,7 +2232,7 @@ func renderThinkingBox(activity string, width int) []string {
 		icon := "⚙️"
 		switch name {
 		case "deepact":
-			icon = "🧠"
+			icon = ""
 		case "sub", "searcher":
 			icon = "🔍"
 		case "planner":
@@ -2536,17 +2539,17 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 		newlineHint = "⌥+↩"
 	}
 
-	leftPart := fmt.Sprintf(" ↑%.1fK ↓%.1fK", float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
-	if scrollMax > 0 {
-		pct := int(float64(scrollOffset) / float64(scrollMax) * 100)
-		if pct < 0 {
-			pct = 0
+	// Compute cache hit rate as integer percentage
+	var cacheRate int
+	if status.TokensIn > 0 {
+		cacheRate = int(float64(status.CacheHitTokens) / float64(status.TokensIn) * 100)
+		if cacheRate > 100 {
+			cacheRate = 100
 		}
-		if pct > 100 {
-			pct = 100
-		}
-		leftPart = fmt.Sprintf(" ↑%d%% │ ↑%.1fK ↓%.1fK", pct, float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
 	}
+	cacheStr := fmt.Sprintf("%d%%", cacheRate)
+
+	leftPart := fmt.Sprintf(" %s ↑%.1fK ↓%.1fK", cacheStr, float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
 	rightPart := fmt.Sprintf("%s │ %s │ Esc │ ^Q", dragHint, newlineHint)
 
 	// Reserve 1 column for the blue bar on the left

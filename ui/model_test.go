@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -164,6 +166,52 @@ func TestSelectionClearedOnKeyPress(t *testing.T) {
 	m2 := result.(Model)
 	if m2.selection.Done || m2.selection.Active {
 		t.Error("key press should clear selection")
+	}
+}
+
+func TestStatusBarShowsCacheHitRate(t *testing.T) {
+	tests := []struct {
+		name          string
+		tokensIn      int
+		cacheHit      int
+		wantSubstring string // expected in rendered status bar
+	}{
+		{
+			name:          "75 percent hit rate",
+			tokensIn:      10000,
+			cacheHit:      7500,
+			wantSubstring: "75%",
+		},
+		{
+			name:          "zero hit rate",
+			tokensIn:      10000,
+			cacheHit:      0,
+			wantSubstring: "0%",
+		},
+		{
+			name:          "hundred percent hit rate",
+			tokensIn:      5000,
+			cacheHit:      5000,
+			wantSubstring: "100%",
+		},
+		{
+			name:          "no tokens yet shows zero",
+			tokensIn:      0,
+			cacheHit:      0,
+			wantSubstring: "0%",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := StatusInfo{
+				TokensIn:       tt.tokensIn,
+				CacheHitTokens: tt.cacheHit,
+			}
+			line := renderStatusBar(status, 0, 0, 80, time.Time{}, "")
+			if !strings.Contains(line, tt.wantSubstring) {
+				t.Errorf("renderStatusBar wants %q in output, got: %q", tt.wantSubstring, line)
+			}
+		})
 	}
 }
 

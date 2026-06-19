@@ -278,6 +278,32 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Keyword-based skill auto-matching — if no skill is active and user input
+	// contains keywords matching a skill, auto-activate it.
+	if e.state.ActiveSkillName == "" {
+		if matched := e.skills.MatchByKeywords(userMsg); matched != nil && !e.activatedSkills[matched.Name] {
+			e.activatedSkills[matched.Name] = true
+			e.lastActivatedSkill = matched.Name
+			e.state.ActiveSkillName = matched.Name
+			e.state.ActiveSkillContent = matched.Content
+
+			skillMsg := fmt.Sprintf(
+				"[SKILL ACTIVATED: %s] (keyword match)\n\nThe following methodology has been activated. Follow it precisely.\n\n%s",
+				matched.Name, matched.Content,
+			)
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", matched.Name, matched.Content)
+
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{
+					Type:   "skill_activated",
+					Name:   matched.Name,
+					Detail: matched.Description + " (keyword match)",
+				})
+			}
+		}
+	}
+
 	// Roundtable command handling — /round <goal> (post-skill check)
 	// Same as above: create state, replace message, fall through.
 	if rc := parseRoundtableCommand(userMsg); rc != nil {

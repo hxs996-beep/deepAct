@@ -6,6 +6,8 @@
 // so the model can decide which methodology to apply.
 package skill
 
+import "strings"
+
 // Skill defines a methodology template that can be injected
 // into the agent's context to guide its behavior.
 type Skill struct {
@@ -44,4 +46,32 @@ func (r *Registry) Get(name string) *Skill {
 // All returns all registered skills.
 func (r *Registry) All() []*Skill {
 	return r.skills
+}
+
+// MatchByKeywords finds the best matching skill for the given input string.
+// It checks each skill's Keywords list against the input (case-insensitive).
+// Returns the skill with the most keyword matches, or nil if none match.
+func (r *Registry) MatchByKeywords(input string) *Skill {
+	if input == "" {
+		return nil
+	}
+	inputLower := strings.ToLower(input)
+	var best *Skill
+	bestCount := 0
+	for _, s := range r.skills {
+		count := 0
+		for _, kw := range s.Keywords {
+			if kw == "" {
+				continue
+			}
+			if strings.Contains(inputLower, strings.ToLower(kw)) {
+				count++
+			}
+		}
+		if count > 0 && count > bestCount {
+			best = s
+			bestCount = count
+		}
+	}
+	return best
 }

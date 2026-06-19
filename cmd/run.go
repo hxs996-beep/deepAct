@@ -113,50 +113,16 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
-// buildSkillsBlock renders all registered skills as a stable system prompt block.
-// Format includes skill chains via next_skills for auto-activation.
+// buildSkillsBlock renders a brief skills hint for the system prompt.
+// Full skill details are not listed here — the engine auto-matches skills
+// by keyword when the user's input contains relevant terms.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type /<skillname> (e.g., /tdd) to activate a skill's full methodology. Otherwise, use these as guidance for how to approach the task.\n\n")
-
-	// First, render skill chains
-	b.WriteString("### Skill Chains\n")
-	b.WriteString("When one skill completes, the next skill in its chain auto-activates:\n")
-	seen := make(map[string]bool)
-	for i := len(all) - 1; i >= 0; i-- {
-		s := all[i]
-		if seen[s.Name] {
-			continue
-		}
-		seen[s.Name] = true
-		if len(s.NextSkills) > 0 {
-			nextList := make([]string, len(s.NextSkills))
-			for j, ns := range s.NextSkills {
-				nextList[j] = "`" + ns + "`"
-			}
-			b.WriteString(fmt.Sprintf("- **`/%s`** → %s\n", s.Name, strings.Join(nextList, " or ")))
-		}
-	}
-
-	// Then, render full list with descriptions
-	b.WriteString("\n### Skill Reference\n")
-	seen = make(map[string]bool)
-	for i := len(all) - 1; i >= 0; i-- {
-		s := all[i]
-		if seen[s.Name] {
-			continue
-		}
-		seen[s.Name] = true
-		chain := ""
-		if len(s.NextSkills) > 0 {
-			chain = " → " + strings.Join(s.NextSkills, ", ")
-		}
-		b.WriteString(fmt.Sprintf("- `/%s`: %s%s\n", s.Name, s.Description, chain))
-	}
+	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. The engine will also auto-detect relevant skills from your request.\n")
 	return b.String()
 }
 
