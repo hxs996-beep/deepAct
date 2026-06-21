@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +23,7 @@ import (
 	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
 	"github.com/deepact/deepact/tools/builtin"
+	"github.com/deepact/deepact/tools/mcp"
 	"github.com/deepact/deepact/ui"
 )
 
@@ -81,6 +84,13 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
+	}
+
+	// Close MCP server connections after the session ends
+	if runner, ok := runner.(*ui.ProgressEngineRunner); ok {
+		for _, c := range runner.Deps.MCPManagers {
+			c.Close()
+		}
 	}
 	return nil
 }
@@ -156,6 +166,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	registry := tools.NewRegistry()
 	registerBuiltinTools(registry)
+
+	// Start MCP servers and register their tools
+	var mcpManagers []*mcp.ManagedServer
+	if err := registerMCPTools(registry, workDir, &mcpManagers); err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("MCP: %w", err)
+	}
+
 	toolExecutor := tools.NewEngineExecutor(registry)
 	toolExecutor.ArtifactDir = defaultArtifactDir()
 
@@ -238,7 +255,44 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Skills:     skillReg,
 		Router:     routing,
 	}
+	// Store MCP managers (as io.Closer) for cleanup on shutdown
+	mcpClosers := make([]io.Closer, len(mcpManagers))
+	for i := range mcpManagers {
+		mcpClosers[i] = mcpManagers[i]
+	}
+	deps.MCPManagers = mcpClosers
 	return config, deps, nil
+}
+
+// registerMCPTools loads MCP server config, starts each server, and
+// registers their tools in the tool registry with a "<server>_" prefix.
+func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp.ManagedServer) error {
+	cfg, err := mcp.LoadConfig(workDir)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg == nil {
+		return nil // no MCP servers configured
+	}
+
+	for _, sc := range cfg.Servers {
+		manager, err := mcp.StartServer(sc)
+		if err != nil {
+			log.Printf("⚠️  MCP server %q failed to start, skipping: %v", sc.Name, err)
+			continue
+		}
+		*managers = append(*managers, manager)
+
+		for _, mt := range manager.Tools() {
+			wrapper := &mcp.ToolWrapper{
+				Client:    manager.Client,
+				MCPServer: sc.Name,
+				MCPTool:   mt,
+			}
+			registry.Register(wrapper)
+		}
+	}
+	return nil
 }
 
 func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.EngineClient, error) {

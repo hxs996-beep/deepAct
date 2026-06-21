@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,15 +17,16 @@ import (
 var loopLog = dlog.New("[loop] ")
 
 type EngineDeps struct {
-	Model      ModelClient
-	Tools      ToolExecutor
-	Policy     PolicyChecker
-	Context    ContextBuilder
-	Compressor Compressor
-	Session    SessionStore
-	Agents     *AgentRegistry
-	Skills     *skill.Registry
-	Router     ModelRouter
+	Model       ModelClient
+	Tools       ToolExecutor
+	Policy      PolicyChecker
+	Context     ContextBuilder
+	Compressor  Compressor
+	Session     SessionStore
+	Agents      *AgentRegistry
+	Skills      *skill.Registry
+	Router      ModelRouter
+	MCPManagers []io.Closer // MCP server connections to close on shutdown
 }
 
 type Engine struct {
@@ -488,6 +490,29 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Auto-deactivate skill when user intent shifts from development to operational use.
+	// This prevents skill methodology (e.g., TDD) from constraining verification
+	// or ad-hoc testing after development is complete.
+	if e.state.ActiveSkillName != "" && !strings.HasPrefix(strings.TrimSpace(userMsg), "/") {
+		if e.detectIntentShift(userMsg) {
+			skillName := e.state.ActiveSkillName
+			e.deactivateSkill()
+			msg := fmt.Sprintf("✅ 自动解除 skill `%s`：检测到意图从开发转向使用/验证。", skillName)
+			if !zh {
+				msg = fmt.Sprintf("✅ Auto-deactivated skill `%s`: intent shift from development to usage/verification.", skillName)
+			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{
+					Type:   "skill_deactivated",
+					Name:   skillName,
+					Detail: "auto-deactivated due to intent shift",
+				})
+			}
+			loopLog.Printf("auto-deactivated skill %q: user intent shift detected", skillName)
+		}
+	}
+
 	// Scope is implicitly confirmed when user sends any message
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
@@ -756,6 +781,74 @@ func (e *Engine) recordRunEval(_ bool) {
 	if err := e.evalStore.Insert(rec); err != nil {
 		loopLog.Printf("record eval: %v", err)
 	}
+}
+
+// detectIntentShift checks if the user's message signals an intent shift from
+// "development/implementation" to "operational use/verification" of existing work.
+// When detected, the active skill should be auto-deactivated so its methodology
+// no longer constrains the agent's behavior.
+//
+// Heuristics:
+//   - "用这个/拿这个/试试这个 X" pattern: user wants to USE/TRY existing code
+//   - Operational intent (看看/试试/跑一下/检查/验证) without development intent (写/实现/开发/添加)
+func (e *Engine) detectIntentShift(userMsg string) bool {
+	msg := strings.ToLower(userMsg)
+
+	// Strong shift signals: user wants to apply something to existing work
+	strongShiftPhrases := []string{
+		"用这个",   // "use this..."
+		"拿这个",   // "take this..."
+		"试试这个", // "try this..."
+		"用这个token",
+		"用这个key",
+		"用这个密钥",
+	}
+	for _, p := range strongShiftPhrases {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+
+	// General heuristic: operational intent without development intent
+	// Development keywords indicate the user is still building/implementing
+	devWords := []string{"写", "实现", "开发", "添加", "增加", "创建", "修改", "重构", "设计", "建一个"}
+	// Operational keywords indicate the user wants to use/verify existing work
+	opWords := []string{
+		"看看", "看一下", "看一看", "检查", "检查一下", "验证", "验证一下",
+		"试试", "试一下", "测试一下",
+		"跑一下", "跑起来", "启动", "运行", "运行一下",
+		"看看结果", "看看效果",
+	}
+
+	hasDev := false
+	for _, w := range devWords {
+		if strings.Contains(msg, w) {
+			hasDev = true
+			break
+		}
+	}
+	hasOp := false
+	for _, w := range opWords {
+		if strings.Contains(msg, w) {
+			hasOp = true
+			break
+		}
+	}
+
+	return hasOp && !hasDev
+}
+
+// deactivateSkill clears the active skill state, releasing the agent from
+// the skill's methodology constraints.
+func (e *Engine) deactivateSkill() {
+	e.state.ActiveSkillName = ""
+	e.state.ActiveSkillContent = ""
+	e.matchedSkillsContent = ""
+	// Keep lastActivatedSkill for chain tracking purposes
+	// Keep activatedSkills map for deduplication purposes
+	// Reset TDD-specific phase tracking
+	e.tddPhase = ""
+	e.tddPhaseDetail = ""
 }
 
 func msgIsChinese(msg string) bool {

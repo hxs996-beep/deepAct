@@ -527,7 +527,7 @@ func (ib *InputBuffer) rebuildPasteText() {
 		}
 	}
 	ib.pasteLines = strings.Count(pasted, "\n") + 1
-	indicator := fmt.Sprintf("[Pasted +%d lines]  (Enter 提交)", ib.pasteLines)
+	indicator := PasteIndicatorStyle.Render(fmt.Sprintf("[Pasted +%d lines]", ib.pasteLines))
 	ib.text = []rune(ib.pastePrefix + indicator + ib.pasteSuffix)
 	ib.cursor = len(ib.text)
 }

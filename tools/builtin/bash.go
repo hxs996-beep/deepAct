@@ -10,6 +10,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 
 	"github.com/deepact/deepact/artifact"
 	"github.com/deepact/deepact/tools"
@@ -193,10 +196,31 @@ func truncateOutput(data []byte) (string, bool) {
 	// Normalize Windows \r\n line endings — \r in terminal causes cursor to return
 	// to column 0, overwriting rendered content and making lines "invisible".
 	data = bytes.ReplaceAll(data, []byte("\r"), []byte{})
+	// On Windows, cmd.exe outputs in system ANSI codepage (e.g. GBK for Chinese).
+	// Convert to UTF-8 so error messages display correctly instead of mojibake.
+	data = decodeWindowsOutput(data)
 	if len(data) <= bashOutputLimit {
 		return string(data), false
 	}
 	return string(data[:bashOutputLimit]), true
+}
+
+// decodeWindowsOutput converts Windows ANSI codepage output to UTF-8 on Windows.
+// On non-Windows or if already valid UTF-8, returns data unchanged.
+// Uses GBK (simplifiedchinese) decoding as the primary fallback — the most common
+// ANSI codepage for Chinese/Asian Windows systems producing mojibake.
+func decodeWindowsOutput(data []byte) []byte {
+	if runtime.GOOS != "windows" {
+		return data
+	}
+	if utf8.Valid(data) {
+		return data
+	}
+	decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes(data)
+	if err != nil {
+		return data
+	}
+	return decoded
 }
 
 func statusFromErr(err error) string {
