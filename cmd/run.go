@@ -121,6 +121,15 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		return ""
 	}
 	var b strings.Builder
+	b.WriteString("Available skills: /")
+	for i, s := range all {
+		if i > 0 {
+			b.WriteString(", /")
+		}
+		b.WriteString(s.Name)
+	}
+	b.WriteString("\n")
+	b.WriteString("\n")
 	b.WriteString("## Available Skills\n")
 	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. The engine will also auto-detect relevant skills from your request.\n")
 	return b.String()
@@ -182,27 +191,23 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillReg := skill.NewRegistry()
 	skill.RegisterBuiltinSkills(skillReg)
 
-	// Load external skills from .deepact/skills/ directories.
-	// Project-level skills loaded first, then user-level (user wins on conflict).
-	projectSkillsDir := filepath.Join(workDir, ".deepact", "skills")
+	// Load user-installed skills from ~/.deepact/skills/.
+	// These override embedded skills with the same name.
 	if home, err := os.UserHomeDir(); err == nil {
 		userSkillsDir := filepath.Join(home, ".deepact", "skills")
-		externalSkills, err := skill.LoadExternalSkillsFromPaths(projectSkillsDir, userSkillsDir)
+		userSkills, err := skill.LoadExternalSkills(userSkillsDir)
 		if err != nil {
-			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
+			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load user skills: %w", err)
 		}
-		for _, s := range externalSkills {
+		for _, s := range userSkills {
 			skillReg.Register(s)
 		}
-	} else {
-		// fallback: project-level only
-		externalSkills, err := skill.LoadExternalSkills(projectSkillsDir)
-		if err != nil {
-			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
-		}
-		for _, s := range externalSkills {
-			skillReg.Register(s)
-		}
+	}
+
+	// Register the skill_install tool so users can install skills from the community registry.
+	if home, err := os.UserHomeDir(); err == nil {
+		userSkillsDir := filepath.Join(home, ".deepact", "skills")
+		registry.Register(builtin.NewSkillInstallTool(userSkillsDir, skillReg))
 	}
 
 	// Build rendered skills list for stable system prompt block

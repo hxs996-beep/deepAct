@@ -1,0 +1,153 @@
+name = "writing-skills"
+description = "Use when creating new skills, editing existing skills, or verifying skills work before deployment"
+keywords = ["创建skill", "编写技能", "skill开发", "skill", "技能", "创建技能"]
+content = """
+# Writing Skills
+
+## Overview
+
+**Writing skills IS Test-Driven Development applied to process documentation.**
+
+A skill is a written methodology you follow when a situation calls for it. It defines a complete workflow with stopping conditions, success criteria, and clear guidance for each phase.
+
+## Before You Create
+
+### Is This a Skill or a Tool?
+
+**Skills** are thinking frameworks — methodologies, workflows, processes. They define HOW you do something.
+- "First investigate root cause, then fix"
+- "Write test first, then implement"
+- "Design before building"
+
+**Tools** are direct actions — reading, writing, executing commands.
+- Use a Read tool to read a file
+- Use a Write tool to write code
+- Use a Bash tool to run commands
+
+If your idea is "tell me how to think about X" → it's a skill.
+If your idea is "do X directly" → it might be a tool, not a skill.
+
+### Already Covered?
+
+Check existing skills before creating:
+- **debugging** → covers all bug investigation methodology
+- **brainstorming** → covers all requirements gathering and design
+- **test-driven-development** → covers all TDD workflows
+
+If your workflow invokes these, reference them as sub-skills rather than duplicating.
+
+### Is There Demand?
+
+Before writing a skill, verify there's actual demand. Check:
+1. Do conversations keep hitting the same workflow gaps?
+2. Are you repeating the same instructions across sessions?
+3. Does the skill solve a recurring pattern?
+
+If it's a one-off scenario, a checklist or quick reference is better.
+
+## Skill File Structure
+
+Skills live in `skills/<name>/SKILL.md`. Each skill is a standalone markdown file with YAML frontmatter:
+
+```markdown
+---
+name: skill-name
+description: One-sentence trigger — "Use when <situation>"
+---
+
+# Skill Name
+
+## Overview
+
+<why this skill exists, when to use>
+
+## The Process
+
+<step-by-step workflow>
+
+## Red Flags
+
+<what means you're doing it wrong>
+```
+
+### Frontmatter
+
+- **name**: kebab-case, unique, matches directory name
+- **description**: One sentence. Starts with "Use when". Describes the EXACT triggering condition.
+
+Good: "Use when encountering a test failure in a test file shared across multiple test runs"
+Bad: "For debugging" (too vague — overlaps with existing skills)
+
+### Content Structure
+
+Every skill needs:
+1. **Overview** — When to use it, core principle, what makes this different from guessing
+2. **The Process** — Step-by-step, each step is one action
+3. **Red Flags** — Behaviors that mean you're rationalizing skipping this
+
+Good skills also include:
+4. **Quick Reference** — Table or summary for experienced users
+5. **Common Mistakes** — Patterns that look productive but aren't
+6. **Verification** — How to confirm you did it right
+
+### Picking the Right Structure
+
+Use whichever structure best communicates the workflow:
+
+**Checklist** — for mechanical processes (deployment, setup)
+**Flowchart** — for decision-heavy processes (debugging, triage)
+**Dialog with examples** — for interaction patterns (code review, feedback)
+
+### Keeping Skills Alive
+
+**Dead skills** don't get used. To keep skills useful:
+
+1. **Verify after creation** — After writing a skill, use it in a real scenario. If the workflow is unclear or incomplete in practice, fix it before calling it done.
+2. **Verify during use** — When you use a skill and find it confusing or incomplete, fix it immediately. A skill that's not updated isn't a skill — it's a historical artifact.
+3. **Remove dead skills** — If a skill isn't invoked after multiple sessions, archive or remove it.
+
+## How Skills Apply
+
+**Skills override default system prompt behavior.**
+
+When a skill says "Do X" and your default instructions say "Don't do X," the skill wins. Skills are an explicit tool the user or AI invoked to change behavior — they represent a conscious choice to follow this methodology.
+
+**Skills stack similarly.** If you invoke multiple skills, their guidance applies simultaneously. If skills conflict (unlikely if well-designed), ask the user for clarification.
+
+**Skill guidance isn't optional.** When a skill says "You MUST do X before Y," you must follow it. Skills are guardrails that prevent common failure modes — skipping them is skipping the whole point.
+
+## Integrating Skills Within Skills
+
+**Sub-skills in process steps:**
+
+```markdown
+### Step 3: Create Failing Test
+
+Use superpowers:test-driven-development to write the failing test.
+
+Requirements:
+1. Test must fail for expected reason
+2. Test must use real code (no mocks)
+3. Test must be minimal
+```
+
+This means: invoke the TDD skill, follow any instructions in it that apply, then continue with this skill's remaining steps.
+
+**Referencing other skills:** Reference by name as `superpowers:<skill-name>`. Each reference is a link — the engineer reads AND follows the referenced skill at that point.
+
+## Verification
+
+After creating or updating a skill:
+
+1. **Test the skill in a real scenario** — find a session where this skill should apply and use it
+2. **Check readability** — can you follow it without confusion?
+3. **Check completeness** — does it have stopping conditions and success criteria?
+4. **Check for dead links** — referenced skills exist?
+5. **Commit the skill** — `git add skills/<name>/ && git commit -m "feat: add <name> skill"`
+
+If any check fails, fix before declaring done.
+
+## Examples
+
+See `skills/writing-skills/examples/` for complete skill examples.
+"""
