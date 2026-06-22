@@ -18,10 +18,10 @@ type ContextAssembler struct {
 	systemPrompt       string
 	projectRoot        string
 	estimator          *llm.TokenEstimator
-	agentsMD           string // cached AGENTS.md content, read once at startup
+	deepactMD          string // cached deepact.md content, read once at startup
 	envInfo            EnvironmentInfo // session-stable env info, built once at startup
 	userLang           string          // detected once from first history, cached for cache stability
-	stableSessionBlock string          // built once from agentsMD + envInfo + userLang, cached for cache stability
+	stableSessionBlock string          // built once from deepactMD + envInfo + userLang, cached for cache stability
 	skillsBlock        string          // built once from skill registry, cached for cache stability
 }
 
@@ -40,7 +40,7 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 		systemPrompt: systemPrompt,
 		projectRoot:  projectRoot,
 		estimator:    estimator,
-		agentsMD:     readAgentsMD(),
+		deepactMD:    readDeepactMD(),
 		envInfo:      buildEnvironmentInfo(),
 	}
 }
@@ -64,7 +64,7 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.userLang = detectUserLanguage(history)
 	}
 	if a.stableSessionBlock == "" {
-		a.stableSessionBlock = BuildStableSessionContext(a.agentsMD, a.envInfo, a.userLang)
+		a.stableSessionBlock = BuildStableSessionContext(a.deepactMD, a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
@@ -135,14 +135,14 @@ func buildEnvironmentInfo() EnvironmentInfo {
 	}
 }
 
-func readAgentsMD() string {
+func readDeepactMD() string {
 	home, _ := os.UserHomeDir()
 	paths := []string{
-		"/etc/deepact/AGENTS.md",
-		filepath.Join(home, ".deepact", "AGENTS.md"),
-		filepath.Join(".deepact", "AGENTS.md"),
-		"AGENTS.md",
-		filepath.Join(".deepact", "AGENTS.override.md"),
+		"/etc/deepact/deepact.md",
+		filepath.Join(home, ".deepact", "deepact.md"),
+		filepath.Join(".deepact", "deepact.md"),
+		"deepact.md",
+		filepath.Join(".deepact", "deepact.override.md"),
 	}
 
 	var parts []string

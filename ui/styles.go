@@ -41,6 +41,7 @@ var (
 	ScrollbarThumbStyle  lipgloss.Style
 	SloganStyle          lipgloss.Style
 	InputBarStyle        lipgloss.Style // blue vertical bar matching logo gradient
+	PasteIndicatorStyle  lipgloss.Style // dim/subtle color for paste-shorthand indicator
 
 	// Block styles — background-color differentiated sections (no borders)
 	SearchBlockStyle   lipgloss.Style // file search / grep results
@@ -92,6 +93,7 @@ func initStyles() {
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
 		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
 		InputBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("68"))
+		PasteIndicatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 		SearchBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("234")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		ExecBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("235")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
@@ -129,6 +131,7 @@ func initStyles() {
 		ScrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25"))
 		SloganStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
 		InputBarStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).Foreground(lipgloss.Color("25"))
+		PasteIndicatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 
 		SearchBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		ExecBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)

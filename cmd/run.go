@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
 	"github.com/deepact/deepact/tools/builtin"
+	"github.com/deepact/deepact/tools/mcp"
 	"github.com/deepact/deepact/ui"
 )
 
@@ -66,12 +70,27 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 
 	model := ui.NewModel(runner, pricing)
 	model.SetSkillSuggestions(externalSkillSuggestions)
-	// Mouse interaction via WithMouseCellMotion: wheel scrolling + drag-to-select.
+	// Mouse interaction: wheel scrolling + drag-to-select.
 	// Left-click drag selects text and auto-copies to clipboard on release.
-	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
+	// On Windows ConPTY, WithMouseAllMotion (mode 1003) is used instead of
+	// WithMouseCellMotion (mode 1002) because ConPTY's mode 1002 encoding
+	// drops wheel events and fragments SGR motion sequences, causing
+	// stuttery selection and non-functional scrolling.
+	mouseOpt := tea.WithMouseCellMotion
+	if runtime.GOOS == "windows" {
+		mouseOpt = tea.WithMouseAllMotion
+	}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), mouseOpt()}
 	p := tea.NewProgram(model, opts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
+	}
+
+	// Close MCP server connections after the session ends
+	if runner, ok := runner.(*ui.ProgressEngineRunner); ok {
+		for _, c := range runner.Deps.MCPManagers {
+			c.Close()
+		}
 	}
 	return nil
 }
@@ -113,9 +132,9 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
-// buildSkillsBlock renders a brief skills hint for the system prompt.
-// Full skill details are not listed here — the engine auto-matches skills
-// by keyword when the user's input contains relevant terms.
+// buildSkillsBlock renders a static skills hint for the stable zone.
+// Dynamic skill suggestions (matched by keyword per-turn) are injected
+// separately via pendingPinnedMessages in the engine loop.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
@@ -131,7 +150,7 @@ func buildSkillsBlock(all []*skill.Skill) string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. The engine will also auto-detect relevant skills from your request.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
 	return b.String()
 }
 
@@ -156,6 +175,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	registry := tools.NewRegistry()
 	registerBuiltinTools(registry)
+
+	// Start MCP servers and register their tools
+	var mcpManagers []*mcp.ManagedServer
+	if err := registerMCPTools(registry, workDir, &mcpManagers); err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("MCP: %w", err)
+	}
+
 	toolExecutor := tools.NewEngineExecutor(registry)
 	toolExecutor.ArtifactDir = defaultArtifactDir()
 
@@ -234,7 +260,44 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Skills:     skillReg,
 		Router:     routing,
 	}
+	// Store MCP managers (as io.Closer) for cleanup on shutdown
+	mcpClosers := make([]io.Closer, len(mcpManagers))
+	for i := range mcpManagers {
+		mcpClosers[i] = mcpManagers[i]
+	}
+	deps.MCPManagers = mcpClosers
 	return config, deps, nil
+}
+
+// registerMCPTools loads MCP server config, starts each server, and
+// registers their tools in the tool registry with a "<server>_" prefix.
+func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp.ManagedServer) error {
+	cfg, err := mcp.LoadConfig(workDir)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg == nil {
+		return nil // no MCP servers configured
+	}
+
+	for _, sc := range cfg.Servers {
+		manager, err := mcp.StartServer(sc)
+		if err != nil {
+			log.Printf("⚠️  MCP server %q failed to start, skipping: %v", sc.Name, err)
+			continue
+		}
+		*managers = append(*managers, manager)
+
+		for _, mt := range manager.Tools() {
+			wrapper := &mcp.ToolWrapper{
+				Client:    manager.Client,
+				MCPServer: sc.Name,
+				MCPTool:   mt,
+			}
+			registry.Register(wrapper)
+		}
+	}
+	return nil
 }
 
 func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.EngineClient, error) {

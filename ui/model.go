@@ -192,9 +192,12 @@ func (m Model) ProgressChan() chan ProgressMsg {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Tick(logoDelay, func(time.Time) tea.Msg {
-		return TickMsg{}
-	})
+	return tea.Batch(
+		tea.SetWindowTitle("DeepACT"),
+		tea.Tick(logoDelay, func(time.Time) tea.Msg {
+			return TickMsg{}
+		}),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -933,10 +936,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// ---- Alt+Enter sequence detection: pendingEsc + Enter = insert newline ----
+	// On Windows ConPTY and some terminals, Alt+Enter arrives as two separate
+	// events: KeyEsc (Alt prefix) then KeyEnter (without Alt=true set). Without
+	// setting Alt=true on the Enter event, HandleKey treats it as plain Enter
+	// and submits instead of inserting a newline.
 	if m.pendingEsc {
 		m.pendingEsc = false
 		if msg.Type == tea.KeyEnter {
-			m.inputBuf.insertAtCursor('\n')
+			altMsg := msg
+			altMsg.Alt = true
+			m.inputBuf.HandleKey(altMsg)
 			return m, nil
 		}
 		// Not Enter — clear flag and fall through to normal handling
@@ -946,11 +955,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// This must be checked BEFORE options/suggestions handlers, which would
 	// intercept KeyEnter without checking msg.Alt.
 	// Clear suggestions since the user explicitly chose to insert a newline
-	// rather than autocomplete.
+	// rather than autocomplete. Delegate to HandleKey so PasteMode state is
+	// handled correctly (insertAtCursor directly would corrupt the indicator).
 	if msg.Type == tea.KeyEnter && msg.Alt {
 		m.showSuggestions = false
 		m.suggestions = nil
-		m.inputBuf.insertAtCursor('\n')
+		m.inputBuf.HandleKey(msg)
 		return m, nil
 	}
 
@@ -958,10 +968,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// On iTerm2 default config, Option+Enter sends \r without ESC prefix, so
 	// msg.Alt is false. We use the macOS HID API (CGEventSourceFlagsState) to
 	// detect the physical Option key — zero terminal state modification.
+	// Delegate to HandleKey so PasteMode state is handled correctly.
 	if runtime.GOOS == "darwin" && msg.Type == tea.KeyEnter && !msg.Alt && optionKeyPressed() {
 		m.showSuggestions = false
 		m.suggestions = nil
-		m.inputBuf.insertAtCursor('\n')
+		m.inputBuf.HandleKey(msg)
+		return m, nil
+	}
+
+	// ---- Windows Alt key detection (ConPTY / Windows Terminal): insert newline ----
+	// On Windows, ConPTY and most terminals send Alt+Enter as a plain KeyEnter
+	// event without the Alt=true modifier. We use GetAsyncKeyState to detect
+	// the physical Alt key independently of what the terminal reports.
+	// Delegate to HandleKey so PasteMode state is handled correctly.
+	if runtime.GOOS == "windows" && msg.Type == tea.KeyEnter && !msg.Alt && optionKeyPressed() {
+		m.showSuggestions = false
+		m.suggestions = nil
+		altMsg := msg
+		altMsg.Alt = true
+		m.inputBuf.HandleKey(altMsg)
 		return m, nil
 	}
 
@@ -1157,13 +1182,13 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) submitInput() (tea.Model, tea.Cmd) {
-	if strings.TrimSpace(m.inputBuf.Value()) == "" {
+	content := m.inputBuf.SubmitContent()
+	if strings.TrimSpace(content) == "" {
 		return m, nil
 	}
 	if m.state == stateRunning {
 		return m, nil
 	}
-	content := m.inputBuf.Value()
 	m.inputBuf.SetValue("")
 	m.cancelled = false
 	m.messages = append(m.messages, DisplayMessage{Role: "user", Content: content})
@@ -1620,26 +1645,29 @@ func parseDiffHunks(fullDetail string) []ToolNode {
 	return children
 }
 
-// parseOutputLines splits multi-line output into child nodes (skip summary line).
+// parseOutputLines splits multi-line output into child nodes.
+// Unlike the earlier design (which skipped line 0 as a "summary"), bash output
+// has no summary line — every line is content. Start from index 0.
 func parseOutputLines(fullDetail string, maxLines int) []ToolNode {
 	if fullDetail == "" {
 		return nil
 	}
 	lines := strings.Split(fullDetail, "\n")
-	if len(lines) <= 2 {
-		return nil // only summary line or empty
+	if len(lines) <= 1 {
+		return nil
 	}
 
 	var children []ToolNode
-	for i := 1; i < len(lines) && len(children) < maxLines; i++ {
-		if lines[i] == "" && i < len(lines)-1 {
+	for i := 0; i < len(lines) && len(children) < maxLines; i++ {
+		line := strings.TrimRight(lines[i], "\r")
+		if line == "" && i < len(lines)-1 {
 			continue
 		}
-		children = append(children, ToolNode{Name: "output", Detail: lines[i]})
+		children = append(children, ToolNode{Name: "output", Detail: line})
 	}
 
-	if len(lines)-1 > maxLines {
-		children = append(children, ToolNode{Name: "output", Detail: fmt.Sprintf("… and %d more lines", len(lines)-1-maxLines)})
+	if len(lines) > maxLines {
+		children = append(children, ToolNode{Name: "output", Detail: fmt.Sprintf("… and %d more lines", len(lines)-maxLines)})
 	}
 	return children
 }
@@ -2333,7 +2361,14 @@ func buildHelpText(commands []Suggestion) string {
 	b.WriteString("| `Enter` | Submit input |\n")
 	b.WriteString("| `Tab` | Autocomplete suggestion |\n")
 	b.WriteString("| `\u2191/\u2193` | Navigate suggestions |\n")
-	b.WriteString("| `Alt+Enter` | Insert newline |\n")
+	switch runtime.GOOS {
+	case "windows":
+		b.WriteString("| `Ctrl+Enter` | Insert newline |\n")
+	case "darwin":
+		b.WriteString("| `⌥+Enter` | Insert newline |\n")
+	default:
+		b.WriteString("| `Alt+Enter` | Insert newline |\n")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		b.WriteString("| `⌥+drag` | Select text (bypasses mouse scroll) |\n")
@@ -2535,6 +2570,8 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 	}
 	newlineHint := "Alt+↩"
 	switch runtime.GOOS {
+	case "windows":
+		newlineHint = "Ctrl+↩"
 	case "darwin":
 		newlineHint = "⌥+↩"
 	}

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -362,19 +364,51 @@ const (
 	ActionCursorEnd
 )
 
+// pasteThreshold is the minimum newline count or total rune count to trigger
+// paste-shorthand mode (show line count instead of the full pasted content
+// in the input box).
+const pasteThresholdNewlines = 3  // ≥3 newlines → paste
+const pasteThresholdRunes = 200   // ≥200 runes → paste
+
+// pasteGap is the maximum interval between two input events for them to be
+// considered part of the same paste burst. Human typing gaps are typically
+// 100ms+; terminal paste events arrive essentially back-to-back (sub-millisecond
+// on Unix, a few ms apart on Windows ConPTY). 100ms safely separates the two.
+//
+// On Windows, Bubble Tea's coninput reader bypasses the ANSI parser, so
+// bracketed-paste markers (\x1b[200~...\x1b[201~) never arrive as a single
+// KeyRunes event with msg.Paste set — each pasted character (including each
+// newline) arrives as a separate KeyEventRecord. We MUST use this time window
+// to detect paste bursts on Windows, otherwise the first pasted newline would
+// immediately trigger ActionSubmit.
+const pasteGap = 100 * time.Millisecond
+
 // InputBuffer manages the text input state: text buffer, cursor, and selection.
 type InputBuffer struct {
 	text   []rune
 	cursor int
 
-	// Pasting is set true while bracketed paste is active so that
-	// pasted newlines insert \n rather than triggering submit.
-	Pasting bool
+	// Paste shorthand mode: when a large paste is detected, store the full
+	// content here and show "📋 已粘贴 N 行" in the input instead.
+	PasteContent string // full content to submit (prefix + pasted + suffix)
+	PasteMode    bool   // when true, show paste indicator in input
+	pasteLines   int    // line count of the PASTED portion (excludes prefix)
+	pastePrefix  string // text typed before the paste, shown before indicator
+	pasteSuffix  string // text typed after the burst, shown after indicator
 
-	// lastRuneTime records when the last KeyRunes event was processed.
-	// Used to detect paste: if KeyEnter arrives within a short window
-	// after KeyRunes, it's likely a paste newline, not submit.
-	lastRuneTime time.Time
+	// lastEventTime is the timestamp of the most recent KeyRunes/KeyEnter/
+	// KeySpace event. Used to detect paste bursts (events arriving within
+	// pasteGap of each other).
+	lastEventTime time.Time
+
+	// (pendingSubmit was removed: Enter now submits immediately;
+	// only fast events in a paste burst insert newlines.)
+
+	// burstStartLen records len(ib.text) at the moment the current paste
+	// burst began. Everything in text[:burstStartLen] is the user's pre-burst
+	// input (the prefix); text[burstStartLen:] is accumulating paste content.
+	// Used to split prefix from pasted content when entering PasteMode.
+	burstStartLen int
 }
 
 func NewInputBuffer() *InputBuffer {
@@ -388,6 +422,33 @@ func (ib *InputBuffer) Value() string {
 func (ib *InputBuffer) SetValue(s string) {
 	ib.text = []rune(s)
 	ib.cursor = len(ib.text)
+	ib.PasteMode = false
+	ib.PasteContent = ""
+	ib.pasteLines = 0
+	ib.pastePrefix = ""
+	ib.pasteSuffix = ""
+	ib.burstStartLen = 0
+	ib.lastEventTime = time.Time{}
+}
+
+// SubmitContent returns the content to submit. In paste shorthand mode it
+// returns the full pasted content; otherwise returns the input buffer text.
+// After calling, paste mode is cleared regardless.
+func (ib *InputBuffer) SubmitContent() string {
+	if ib.PasteMode {
+		content := ib.PasteContent
+		ib.PasteMode = false
+		ib.PasteContent = ""
+		ib.pasteLines = 0
+		ib.pastePrefix = ""
+		ib.pasteSuffix = ""
+		ib.text = nil
+		ib.cursor = 0
+		ib.burstStartLen = 0
+		ib.lastEventTime = time.Time{}
+		return content
+	}
+	return ib.Value()
 }
 
 func (ib *InputBuffer) Cursor() int {
@@ -420,78 +481,266 @@ func (ib *InputBuffer) insertRunes(runes []rune) {
 	}
 }
 
+// enterPasteMode splits the current text at burstStartLen: the prefix
+// (user's pre-burst input) is preserved and shown before the indicator;
+// the rest (accumulated paste) drives the line count. PasteContent holds
+// the full submitted content = prefix + pasted portion.
+func (ib *InputBuffer) enterPasteMode(fullText string, nlCount int) {
+	prefix := ""
+	pasted := fullText
+	textRunes := []rune(fullText)
+	if ib.burstStartLen > 0 && ib.burstStartLen <= len(textRunes) {
+		prefix = string(textRunes[:ib.burstStartLen])
+		pasted = string(textRunes[ib.burstStartLen:])
+	}
+	// Line count reflects only the pasted portion (excludes prefix).
+	pastedNl := strings.Count(pasted, "\n")
+	ib.pastePrefix = prefix
+	ib.PasteContent = fullText
+	ib.pasteLines = pastedNl + 1
+	ib.pasteSuffix = ""
+	ib.PasteMode = true
+	ib.rebuildPasteText()
+}
+
+// rebuildPasteText regenerates the visible text: prefix + indicator + suffix.
+// The indicator's line count reflects only the pasted portion (the part of
+// PasteContent after the prefix, excluding any appended suffix). Cursor is
+// placed at the end so new input appends after the suffix.
+func (ib *InputBuffer) rebuildPasteText() {
+	pasted := ib.PasteContent
+	// Use rune slices for proper CJK handling: len() on string is bytes,
+	// but burstStartLen and cursor track rune counts.
+	if len(ib.pastePrefix) > 0 {
+		preRunes := []rune(ib.pastePrefix)
+		paRunes := []rune(pasted)
+		if len(paRunes) >= len(preRunes) && string(paRunes[:len(preRunes)]) == ib.pastePrefix {
+			pasted = string(paRunes[len(preRunes):])
+		}
+	}
+	// Exclude appended suffix from the pasted portion for line counting.
+	if len(ib.pasteSuffix) > 0 {
+		sufRunes := []rune(ib.pasteSuffix)
+		paRunes := []rune(pasted)
+		if len(paRunes) >= len(sufRunes) && string(paRunes[len(paRunes)-len(sufRunes):]) == ib.pasteSuffix {
+			pasted = string(paRunes[:len(paRunes)-len(sufRunes)])
+		}
+	}
+	ib.pasteLines = strings.Count(pasted, "\n") + 1
+	indicator := PasteIndicatorStyle.Render(fmt.Sprintf("[Pasted +%d lines]", ib.pasteLines))
+	ib.text = []rune(ib.pastePrefix + indicator + ib.pasteSuffix)
+	ib.cursor = len(ib.text)
+}
+
+// cancelPaste clears all paste state, returning the input to empty.
+func (ib *InputBuffer) cancelPaste() {
+	ib.PasteMode = false
+	ib.PasteContent = ""
+	ib.pasteLines = 0
+	ib.pastePrefix = ""
+	ib.pasteSuffix = ""
+	ib.text = nil
+	ib.cursor = 0
+	ib.burstStartLen = 0
+}
+
 // HandleKey processes a keyboard event and returns the action to take.
 // The buffer is mutated inline for insert/delete/cursor operations.
+//
+// Paste detection strategy:
+//   - Bracketed paste (Unix/macOS): the whole paste arrives as a single
+//     KeyRunes event with msg.Paste == true. We check the batch size.
+//   - Time-window burst (Windows ConPTY, or terminals without bracketed
+//     paste): pastes arrive as a rapid burst of KeyRunes/KeyEnter events,
+//     each within pasteGap of the previous. We track lastEventTime; if an
+//     event arrives within pasteGap, it's part of a burst. When the burst
+//     accumulates ≥3 newlines, we switch to PasteMode.
+//
+// IME safety: runes are ALWAYS inserted into ib.text immediately. The burst
+// detector only decides whether an Enter inserts \n (paste) or submits — it
+// never defers rune insertion. IME composition bursts (which contain no
+// Enter keys) are therefore never misclassified as paste.
+//
+// PasteMode display: once entered, the visible input stays as
+// "📋 已粘贴 N 行  (Enter 提交)" + a suffix of user-typed continuation.
+// Fast events (still inside the paste burst) absorb into PasteContent and
+// update N. Slow events (user typing after the burst) append to both
+// PasteContent and the visible suffix. The indicator is never replaced by
+// the raw pasted content — only Enter submits, Backspace cancels.
 func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
+	now := time.Now()
+	fast := !ib.lastEventTime.IsZero() && now.Sub(ib.lastEventTime) < pasteGap
+
+	// ---- PasteMode: indicator stays, new input appends as suffix ----
+	if ib.PasteMode {
+		switch msg.Type {
+		case tea.KeyEnter:
+			if msg.Alt || (!fast && runtime.GOOS == "windows" && ctrlKeyPressed()) {
+				// Deliberate manual newline — append visibly to suffix.
+				ib.PasteContent += "\n"
+				ib.pasteSuffix += "\n"
+				ib.rebuildPasteText()
+				ib.lastEventTime = now
+				return ActionNewline
+			}
+			if fast {
+				// More paste arriving — absorb newline, update line count.
+				ib.PasteContent += "\n"
+				ib.rebuildPasteText()
+				ib.lastEventTime = now
+				return ActionNewline
+			}
+			// Slow Enter — submit the accumulated content.
+			return ActionSubmit
+
+		case tea.KeyBackspace:
+			if len(ib.pasteSuffix) > 0 {
+				// Pop the last user-typed char from suffix and PasteContent.
+				ib.pasteSuffix = ib.pasteSuffix[:len(ib.pasteSuffix)-1]
+				ib.PasteContent = ib.PasteContent[:len(ib.PasteContent)-1]
+				ib.rebuildPasteText()
+				ib.lastEventTime = now
+				return ActionBackspace
+			}
+			// No suffix — cancel the paste entirely (clear input).
+			ib.cancelPaste()
+			ib.lastEventTime = time.Time{}
+			return ActionBackspace
+
+		case tea.KeyRunes:
+			runes := msg.Runes
+			if isTerminalEscapeResidue(runes) {
+				return ActionNone
+			}
+			filtered := make([]rune, 0, len(runes))
+			for _, r := range runes {
+				if r == '\n' || r == '\r' {
+					filtered = append(filtered, '\n')
+				} else if !isLikelyControlOrphan(r) {
+					filtered = append(filtered, r)
+				}
+			}
+			if len(filtered) == 0 {
+				return ActionNone
+			}
+			ib.PasteContent += string(filtered)
+			if !fast {
+				// User typing after the burst — show after the indicator.
+				ib.pasteSuffix += string(filtered)
+			}
+			ib.rebuildPasteText()
+			ib.lastEventTime = now
+			return ActionRuneInserted
+
+		case tea.KeySpace:
+			ib.PasteContent += " "
+			if !fast {
+				ib.pasteSuffix += " "
+			}
+			ib.rebuildPasteText()
+			ib.lastEventTime = now
+			return ActionRuneInserted
+
+		default:
+			// Left/Right/Home/End/Delete are no-ops in PasteMode — the
+			// indicator + suffix display is append-only.
+			return ActionNone
+		}
+	}
+
+	// ---- Normal (non-paste) input handling ----
 	switch {
 	case msg.Type == tea.KeyEnter && !msg.Alt:
-		if ib.Pasting {
-			// During bracketed paste, newlines are literal content
+		// Windows: Ctrl+Enter = newline when NOT in a paste burst (fast).
+		// Detected via physical key state since bubbletea's KeyMsg lacks a
+		// Ctrl modifier field. Must gate on !fast to avoid intercepting paste
+		// newlines when the user hasn't released Ctrl after Ctrl+V.
+		if !fast && runtime.GOOS == "windows" && ctrlKeyPressed() {
+			ib.burstStartLen = 0
 			ib.insertAtCursor('\n')
 			return ActionNewline
 		}
-		// Paste detection: if Enter arrives within 100ms of a KeyRunes event,
-		// it's likely a paste newline, not manual submission.
-		if !ib.lastRuneTime.IsZero() && time.Since(ib.lastRuneTime) < 100*time.Millisecond {
+		if fast {
+			// Paste newline mid-burst — insert as literal \n, don't submit.
+			// Mark burstStartLen on the first fast event so we can later
+			// split prefix (pre-burst typing) from pasted content.
+			if ib.burstStartLen == 0 {
+				ib.burstStartLen = len(ib.text)
+			}
 			ib.insertAtCursor('\n')
+			nlCount := strings.Count(string(ib.text), "\n")
+			if nlCount >= pasteThresholdNewlines {
+				ib.enterPasteMode(string(ib.text), nlCount)
+			}
+			ib.lastEventTime = now
 			return ActionNewline
 		}
-		// Plain Enter -> submit
+		// Slow Enter — submit immediately.
+		ib.burstStartLen = 0
+		ib.lastEventTime = time.Time{}
 		return ActionSubmit
 
 	case msg.Type == tea.KeyEnter && msg.Alt:
-		// Option/Alt+Enter -> newline (Mac Option key = Alt in terminals)
+		// Option/Alt+Enter -> newline (Mac Option key = Alt in terminals).
+		// This is a deliberate manual newline, not a paste — don't update
+		// lastEventTime so it doesn't seed a fake burst.
+		ib.burstStartLen = 0
 		ib.insertAtCursor('\n')
 		return ActionNewline
 
 	case msg.Type == tea.KeyBackspace:
+		// (pendingSubmit was removed; normal backspace behavior applies.)
 		if ib.cursor > 0 {
 			ib.text = append(ib.text[:ib.cursor-1], ib.text[ib.cursor:]...)
 			ib.cursor--
 		}
+		ib.burstStartLen = 0
+		ib.lastEventTime = time.Time{}
 		return ActionBackspace
 
 	case msg.Type == tea.KeyDelete:
+		ib.burstStartLen = 0
 		if ib.cursor < len(ib.text) {
 			ib.text = append(ib.text[:ib.cursor], ib.text[ib.cursor+1:]...)
 		}
+		ib.lastEventTime = time.Time{}
 		return ActionDelete
 
 	case msg.Type == tea.KeyLeft:
+		ib.burstStartLen = 0
 		if ib.cursor > 0 {
 			ib.cursor--
 		}
+		ib.lastEventTime = time.Time{}
 		return ActionCursorLeft
 
 	case msg.Type == tea.KeyRight:
+		ib.burstStartLen = 0
 		if ib.cursor < len(ib.text) {
 			ib.cursor++
 		}
+		ib.lastEventTime = time.Time{}
 		return ActionCursorRight
 
 	case msg.Type == tea.KeyHome:
+		ib.burstStartLen = 0
 		ib.cursor = 0
+		ib.lastEventTime = time.Time{}
 		return ActionCursorHome
 
 	case msg.Type == tea.KeyEnd:
+		ib.burstStartLen = 0
 		ib.cursor = len(ib.text)
+		ib.lastEventTime = time.Time{}
 		return ActionCursorEnd
 
 	case msg.Type == tea.KeyRunes:
 		// Filter out control characters and escape sequences that leak from
-		// terminal responses (e.g., OSC 11 color query, SGR mouse events) that
-		// Bubble Tea doesn't fully intercept as typed messages.
+		// terminal responses (e.g., OSC 11 color query, SGR mouse events).
 		runes := msg.Runes
-		// Step 1: batch-level check — if the entire rune sequence looks like
-		// an escape sequence residue (e.g. "[13;57M" or ";13;57M"), discard the
-		// whole batch. These are never legitimate user input.
 		if isTerminalEscapeResidue(runes) {
 			return ActionNone
 		}
-		// Step 2: individual character filtering — remove control characters,
-		// DEL, C1 controls, and private-use/non-characters.
-		// Always preserve \n in KeyRunes — it never comes from keyboard input,
-		// only from bracketed paste (WithBracketedPaste). Likewise convert \r to \n.
 		filtered := make([]rune, 0, len(runes))
 		for _, r := range runes {
 			if r == '\n' || r == '\r' {
@@ -500,15 +749,49 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 				filtered = append(filtered, r)
 			}
 		}
-		if len(filtered) > 0 {
-			ib.lastRuneTime = time.Now()
-			ib.insertRunes(filtered)
-			return ActionRuneInserted
+		if len(filtered) == 0 {
+			return ActionNone
 		}
-		return ActionNone
+
+		// (pendingSubmit was removed.)
+		// Mark the burst boundary on the first fast event: everything in
+		// text[:burstStartLen] is pre-burst typing (the prefix shown before
+		// the indicator when we later enter PasteMode).
+		if fast && ib.burstStartLen == 0 {
+			ib.burstStartLen = len(ib.text)
+		}
+
+		// Insert runes into text immediately (IME-safe: no deferred buffer).
+		ib.insertRunes(filtered)
+
+		// Check whether this looks like a paste: either a single large
+		// bracketed-paste batch (msg.Paste, Unix/macOS) or a fast burst
+		// whose accumulated text just crossed the newline threshold.
+		enteredPaste := false
+		if msg.Paste {
+			nlCount := strings.Count(string(ib.text), "\n")
+			if nlCount >= pasteThresholdNewlines || len(filtered) >= pasteThresholdRunes {
+				ib.enterPasteMode(string(ib.text), nlCount)
+				enteredPaste = true
+			}
+		} else if fast {
+			nlCount := strings.Count(string(ib.text), "\n")
+			if nlCount >= pasteThresholdNewlines {
+				ib.enterPasteMode(string(ib.text), nlCount)
+				enteredPaste = true
+			}
+		}
+		// Slow rune ends any in-progress burst that didn't reach the threshold.
+		if !enteredPaste && !fast {
+			ib.burstStartLen = 0
+		}
+		ib.lastEventTime = now
+		return ActionRuneInserted
 
 	case msg.Type == tea.KeySpace:
+		ib.burstStartLen = 0
 		ib.insertAtCursor(' ')
+		ib.lastEventTime = now
 		return ActionRuneInserted
 	}
 
