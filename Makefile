@@ -8,10 +8,10 @@ LDFLAGS  := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.da
 GOFLAGS  := -ldflags="$(LDFLAGS)"
 
 build:
-	go build $(GOFLAGS) -o $(BINARY) .
+	CGO_ENABLED=0 go build $(GOFLAGS) -o $(BINARY) .
 
 install:
-	go install $(GOFLAGS) .
+	CGO_ENABLED=0 go install $(GOFLAGS) .
 
 test:
 	go test ./... -count=1 -race -timeout=120s

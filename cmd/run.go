@@ -133,6 +133,7 @@ func buildSkillSuggestions(reg *skill.Registry) {
 }
 
 // buildSkillsBlock renders a static skills hint for the stable zone.
+// Each skill is shown as "name: description" so the model knows what each does.
 // Dynamic skill suggestions (matched by keyword per-turn) are injected
 // separately via pendingPinnedMessages in the engine loop.
 func buildSkillsBlock(all []*skill.Skill) string {
@@ -141,7 +142,19 @@ func buildSkillsBlock(all []*skill.Skill) string {
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
+	b.WriteString("\n")
+	for _, s := range all {
+		b.WriteString("- **")
+		b.WriteString(s.Name)
+		b.WriteString("**: ")
+		if s.Description != "" {
+			b.WriteString(s.Description)
+		} else {
+			b.WriteString("(no description)")
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
@@ -208,27 +221,23 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillReg := skill.NewRegistry()
 	skill.RegisterBuiltinSkills(skillReg)
 
-	// Load external skills from .deepact/skills/ directories.
-	// Project-level skills loaded first, then user-level (user wins on conflict).
-	projectSkillsDir := filepath.Join(workDir, ".deepact", "skills")
+	// Load user-installed skills from ~/.deepact/skills/.
+	// These override embedded skills with the same name.
 	if home, err := os.UserHomeDir(); err == nil {
 		userSkillsDir := filepath.Join(home, ".deepact", "skills")
-		externalSkills, err := skill.LoadExternalSkillsFromPaths(projectSkillsDir, userSkillsDir)
+		userSkills, err := skill.LoadExternalSkills(userSkillsDir)
 		if err != nil {
-			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
+			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load user skills: %w", err)
 		}
-		for _, s := range externalSkills {
+		for _, s := range userSkills {
 			skillReg.Register(s)
 		}
-	} else {
-		// fallback: project-level only
-		externalSkills, err := skill.LoadExternalSkills(projectSkillsDir)
-		if err != nil {
-			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load external skills: %w", err)
-		}
-		for _, s := range externalSkills {
-			skillReg.Register(s)
-		}
+	}
+
+	// Register the skill_install tool so users can install skills from the community registry.
+	if home, err := os.UserHomeDir(); err == nil {
+		userSkillsDir := filepath.Join(home, ".deepact", "skills")
+		registry.Register(builtin.NewSkillInstallTool(userSkillsDir, skillReg))
 	}
 
 	// Build rendered skills list for stable system prompt block

@@ -1,48 +1,47 @@
-# AGENTS.md - DeepAct Development Guidelines
+# AGENTS.md - DeepAct 开发指南
 
-> This file defines the development conventions, coding standards, and architectural
-> constraints for all contributors (human and AI) working on this project.
-
----
-
-## Project Identity
-
-- **Name**: deepact (CLI binary: `deepact`)
-- **Language**: Go 1.24+
-- **Architecture**: Staged guarded agent loop with dual-model routing
-- **Target**: Cross-platform CLI (macOS, Windows, Linux)
+> 本文定义了本项目面向所有贡献者（人类和 AI）的开发规范、编码标准和架构约束。
 
 ---
 
-## Code Conventions
+## 项目标识
 
-### Go Style
-
-- Follow standard `gofmt` formatting (enforced by CI)
-- Use `golangci-lint` with config in `.golangci.yml`
-- Error handling: always wrap with context (`fmt.Errorf("doing X: %w", err)`)
-- No `panic()` in library code; only in `main()` for unrecoverable init failures
-- Interfaces: define at the consumer, not the provider
-- Package naming: short, lowercase, singular (e.g., `engine`, `router`, `policy`)
-
-### File Organization
-
-- One primary type per file (e.g., `scorer.go` contains `Scorer`)
-- Test files: `*_test.go` in the same package
-
-### Naming
-
-- Exported types: `PascalCase`
-- Unexported: `camelCase`
-- Interfaces: verb-noun or "-er" suffix (`Router`, `ContextBuilder`, `AmbiguityDetector`)
-- Config structs: `XxxConfig` suffix
-- Options: functional options pattern for complex constructors
+- **名称**: deepact（CLI 二进制: `deepact`）
+- **语言**: Go 1.24+
+- **架构**: 分阶段守卫式 Agent 循环，双模型路由
+- **目标**: 跨平台 CLI（macOS、Windows、Linux）
 
 ---
 
-## Architecture Rules (MANDATORY)
+## 代码规范
 
-### Layer Dependency Rules
+### Go 风格
+
+- 遵循标准 `gofmt` 格式化（CI 强制检查）
+- 使用 `golangci-lint`，配置见 `.golangci.yml`
+- 错误处理：始终用 `fmt.Errorf("doing X: %w", err)` 包装上下文
+- 库代码中禁止 `panic()`；仅 `main()` 中可用于不可恢复的启动失败
+- 接口：定义在消费者侧，而非提供者侧
+- 包命名：简短、小写、单数（例如 `engine`、`router`、`policy`）
+
+### 文件组织
+
+- 每个文件一个主要类型（例如 `scorer.go` 包含 `Scorer`）
+- 测试文件：`*_test.go` 放同一包内
+
+### 命名
+
+- 导出类型：`PascalCase`
+- 非导出：`camelCase`
+- 接口：动词-名词或 "-er" 后缀（`Router`、`ContextBuilder`、`AmbiguityDetector`）
+- 配置结构体：`XxxConfig` 后缀
+- 选项：复杂构造器使用函数式选项模式（functional options pattern）
+
+---
+
+## 架构规则（必须遵守）
+
+### 层依赖规则
 
 ```
 cmd/ → engine/, router/, policy/, context/
@@ -51,108 +50,108 @@ cmd/ → engine/, router/, policy/, context/
                  ↓
               session/, artifact/
                  ↓
-              config/ (shared, no upward deps)
+              config/（共享层，无向上依赖）
 ```
 
-**NEVER VIOLATE:**
-- `engine/` never imports `ui/` or `cmd/`
-- `tools/` never imports `engine/` (communicate via interfaces)
-- `llm/` is standalone (no project-specific logic)
-- `policy/` reads state but never mutates it directly
-- `ui/` only consumes events from engine (observer pattern)
+**禁止违反：**
+- `engine/` 不得导入 `ui/` 或 `cmd/`
+- `tools/` 不得导入 `engine/`（通过接口通信）
+- `llm/` 保持独立（不含项目特定逻辑）
+- `policy/` 读取状态但不直接修改
+- `ui/` 仅消费 engine 的事件（观察者模式）
 
-### Interface Boundaries
+### 接口边界
 
-Every cross-layer call MUST go through a defined interface:
-- Engine ↔ Tools: via `Tool` interface
-- Engine ↔ LLM: via `ModelClient` interface
-- Engine ↔ Policy: via `PolicyChecker` interface
-- UI ↔ Engine: via event channel (no direct method calls)
+跨层调用必须通过已定义的接口：
+- Engine ↔ Tools：通过 `Tool` 接口
+- Engine ↔ LLM：通过 `ModelClient` 接口
+- Engine ↔ Policy：通过 `PolicyChecker` 接口
+- UI ↔ Engine：通过事件通道（禁止直接方法调用）
 
-### State Management
+### 状态管理
 
-- **TaskState** is the single source of truth for the current task
-- TaskState is immutable within a turn; only the Compactor rewrites it
-- Tool results stored in Artifact Store, referenced by SHA256
-- Session events are append-only (JSONL); never modify past events
-
----
-
-## Design Principles
-
-### 1. Guard Before Act
-
-Every destructive action (file edit, shell command) must pass through:
-1. Ambiguity Gate (is scope clear?)
-2. Scope Guard (is this within confirmed scope?)
-3. Design Guard (is the approach robust?)
-4. Loop Guard (are we not in a loop?)
-
-### 2. Structured Over Verbose
-
-- Prefer structured JSON (TaskState) over natural language descriptions
-- Response format: `{summary, changes, next_step, questions}`
-- Never repeat information already in TaskState.decisions
-
-### 3. Bookend Context Layout
-
-- Most important info at TOP and BOTTOM of prompts
-- Middle section is bounded and minimal
-- Never dump entire file contents; use targeted snippets
-
-### 4. Verify Before Trust
-
-- Every API/symbol reference must be grounded (LSP or grep verification)
-- Every plan must pass design anti-pattern checks
-- Every edit must be followed by verification (lint/test/compile)
-
-### 5. Fail Loud, Recover Gracefully
-
-- Never silently swallow errors
-- On failure: log, increment failure counter, potentially escalate model
-- After 3 consecutive failures: stop, diagnose, ask user
+- **TaskState** 是当前任务的唯一真相来源
+- TaskState 在一次 turn 内不可变；仅 Compactor 可重写
+- 工具结果存储在 Artifact Store 中，通过 SHA256 引用
+- 会话事件是追加写入的（JSONL）；禁止修改历史事件
 
 ---
 
-## DeepSeek-Specific Rules
+## 设计原则
 
-### Model Interaction
+### 1. Guard Before Act（先守卫，后执行）
 
-1. **reasoning_content**: Treat as opaque. Store verbatim. Echo exactly in next request.
-2. **Tool results**: Always include full ToolResultEnvelope with matching tool_call_id.
-3. **System prompt**: Keep stable across turns (enables cache hits → 98% cost reduction).
-4. **Temperature**: 0.0 for code generation, 0.6 for planning, 1.0 for brainstorming.
+每个破坏性操作（文件编辑、shell 命令）必须经过：
+1. Ambiguity Gate（语义是否清晰？）
+2. Scope Guard（是否在已确认范围内？）
+3. Design Guard（方案是否健壮？）
+4. Loop Guard（是否陷入循环？）
 
-### Known Failure Modes (Code Must Prevent)
+### 2. Structured Over Verbose（结构化优于冗长）
 
-| Failure Mode | Guard | Location |
+- 优先使用结构化 JSON（TaskState）而非自然语言描述
+- 回复格式：`{summary, changes, next_step, questions}`
+- 绝不重复 TaskState.decisions 中已有的信息
+
+### 3. Bookend Context Layout（两端式上下文布局）
+
+- 最重要的信息放在 Prompt 的**顶部**和**底部**
+- 中间部分有界且精简
+- 绝不倾倒整个文件内容；使用精准代码片段
+
+### 4. Verify Before Trust（先验证，后信任）
+
+- 每个 API/符号引用必须通过 LSP 或 grep 验证
+- 每个计划必须通过设计反模式检查
+- 每次编辑后必须验证（lint/编译/测试）
+
+### 5. Fail Loud, Recover Gracefully（响亮失败，优雅恢复）
+
+- 绝不静默吞掉错误
+- 失败时：记录日志、递增失败计数、必要时升级模型
+- 连续 3 次失败后：停止、诊断、询问用户
+
+---
+
+## DeepSeek 特定规则
+
+### 模型交互
+
+1. **reasoning_content**: 视为不透明数据。原样存储。在下一轮请求中原样回传。
+2. **工具结果**: 始终包含完整的 ToolResultEnvelope，使用匹配的 tool_call_id。
+3. **系统提示词**: 跨 turn 保持稳定（启用缓存命中 → 可节省 98% 成本）。
+4. **温度**: 代码生成 0.0，规划 0.6，头脑风暴 1.0。
+
+### 已知失败模式（代码必须防范）
+
+| 失败模式 | 守卫机制 | 代码位置 |
 |---|---|---|
-| Over-implementation | Ambiguity Gate | `policy/ambiguity.go` |
-| Lazy/stupid design | Design Guard | `policy/design_guard.go` |
-| Tool call loops | Loop Guard + Tool Dedupe | `engine/guards.go` |
-| Verbose repetition | TaskState dedup + forced rebase | `context/compactor.go` |
-| Hallucinated APIs | Grounding requirement | `policy/design_guard.go` |
-| Context degradation | Bookend layout + short prompts | `context/builder.go` |
+| 过度实现（Over-implementation） | Ambiguity Gate | `policy/ambiguity.go` |
+| 偷懒/愚蠢设计 | Design Guard | `policy/design_guard.go` |
+| 工具调用循环 | Loop Guard + Tool Dedupe | `engine/guards.go` |
+| 啰嗦重复 | TaskState 去重 + 强制 rebase | `context/compactor.go` |
+| 幻觉 API | 验证要求（Grounding） | `policy/design_guard.go` |
+| 上下文退化 | Bookend 布局 + 简短 Prompt | `context/builder.go` |
 
-### Prompt Engineering Rules
+### Prompt 工程规则
 
-- Always include stop conditions: "If missing info, ask. Do not implement."
-- Always include anti-pattern examples in system prompt
-- Force self-challenge questions after plan generation
-- Include `TaskState.decisions` with "DO NOT restate these" instruction
+- 始终包含停止条件："信息不足时询问用户，不要擅自实现。"
+- 始终在 system prompt 中包含反模式示例
+- 计划生成后强制自我质疑
+- 包含 TaskState.decisions 并注明"不要重复以下内容"
 
 ---
 
-## Testing Requirements
+## 测试要求
 
-### Unit Tests
+### 单元测试
 
-- Every exported function must have tests
-- Table-driven tests preferred
-- Mock external dependencies (LLM, file system, LSP)
-- Coverage target: >50% for core packages (engine/, router/, policy/)
+- 每个导出函数必须有测试
+- 优先使用表驱动测试（table-driven tests）
+- 模拟外部依赖（LLM、文件系统、LSP）
+- 核心包覆盖目标：>50%（engine/、router/、policy/）
 
-### Test Patterns
+### 测试模式
 
 ```go
 func TestAmbiguityGate_DetectsVagueRequest(t *testing.T) {
@@ -163,14 +162,14 @@ func TestAmbiguityGate_DetectsVagueRequest(t *testing.T) {
         wantAmb bool
     }{
         {
-            name:    "vague improve request",
-            input:   "improve the config handling",
+            name:    "模糊的改进请求",
+            input:   "改进配置处理逻辑",
             state:   TaskState{},
             wantAmb: true,
         },
         {
-            name:    "specific fix with file",
-            input:   "fix the nil pointer in config/loader.go line 45",
+            name:    "明确的修复请求（含文件）",
+            input:   "修复 config/loader.go 第 45 行的空指针",
             state:   TaskState{},
             wantAmb: false,
         },
@@ -181,9 +180,9 @@ func TestAmbiguityGate_DetectsVagueRequest(t *testing.T) {
 
 ---
 
-## Git Conventions
+## Git 规范
 
-### Commit Messages
+### 提交信息
 
 ```
 <type>(<scope>): <description>
@@ -192,7 +191,7 @@ Types: feat, fix, refactor, docs, test, chore, perf
 Scope: engine, router, policy, tools, llm, context, ui, session, config
 ```
 
-Examples:
+示例：
 ```
 feat(engine): add staged loop with ambiguity gate
 fix(llm): preserve reasoning_content echo in multi-turn
@@ -200,67 +199,67 @@ refactor(tools): extract ToolResultEnvelope to shared type
 test(policy): add design guard anti-pattern detection tests
 ```
 
-### Push Rules (MANDATORY)
+### 推送规则（必须遵守）
 
 - **git push 必须先询问用户** — 获得用户确认后才能执行 push
 - **代码编译成功即止** — 不需要额外验证（lint、test 等），除非用户明确要求
 
-### Branch Naming
+### 分支命名
 
 ```
-feat/<short-description>
-fix/<issue-number>-<short-description>
-refactor/<module>-<what>
+feat/<简短描述>
+fix/<issue 编号>-<简短描述>
+refactor/<模块>-<内容>
 ```
 
 ---
 
-## Security Rules
+## 安全规则
 
-### Sensitive Data
+### 敏感数据
 
-- NEVER log API keys, tokens, or credentials
-- NEVER store secrets in artifacts (redact before storage)
-- NEVER include `.env` or credential files in session data
-- Tool outputs: scan for patterns (API keys, passwords) before storing
+- 绝不在日志中记录 API 密钥、令牌或凭证
+- 绝不在 artifacts 中存储密钥（存储前脱敏）
+- 绝不在会话数据中包含 `.env` 或凭证文件
+- 工具输出：在存储前扫描密钥模式（API keys、密码等）
 
-### Shell Execution
+### Shell 执行
 
-- Maintain allowlist of safe commands (configurable)
-- Dangerous commands require explicit user confirmation
-- Default deny: `rm -rf`, `git push --force`, `DROP TABLE`, `chmod 777`
-- All shell execution logged in session events
+- 维护安全命令白名单（可配置）
+- 危险命令需要用户明确确认
+- 默认拒绝：`rm -rf`、`git push --force`、`DROP TABLE`、`chmod 777`
+- 所有 shell 执行记录到会话事件中
 
-### Network
+### 网络
 
-- Only connect to configured API endpoints
-- No arbitrary HTTP requests without user approval
-- Proxy support for corporate environments
-
----
-
-## Performance Guidelines
-
-### Context Budget
-
-- Default limit: 1M tokens (configurable via `max_budget_tokens` in config.toml)
-- Unified compression: single 80% threshold triggers full compact (Flash archive)
-
-### Streaming
-
-- Always stream API responses (never buffer full response)
-- UI updates on each streaming chunk
-- Tool outputs: digest immediately, store full output async
-
-### Startup Time
-
-- Target: <500ms to first interactive prompt
-- Lazy-load: LSP connections, MCP discovery, heavy configs
-- Pre-warm: API client connection, session load
+- 仅连接到已配置的 API 端点
+- 未经用户批准，禁止发起任意 HTTP 请求
+- 支持企业环境的代理配置
 
 ---
 
-## Code Reading Protocol (MANDATORY)
+## 性能指南
+
+### 上下文预算
+
+- 默认限制：100 万 Token（可通过 `max_budget_tokens` 在 config.toml 中配置）
+- 统一压缩：单个 80% 阈值触发全量压缩（Flash archive）
+
+### 流式处理
+
+- 始终流式返回 API 响应（绝不缓存完整响应后再返回）
+- UI 在每次流式块到达时更新
+- 工具输出：立即生成摘要，异步存储完整内容
+
+### 启动时间
+
+- 目标：<500ms 到达首个交互式提示
+- 懒加载：LSP 连接、MCP 发现、重型配置
+- 预热：API 客户端连接、会话加载
+
+---
+
+## 代码读取协议（必须遵守）
 
 **`read` 工具对同一文件有 4 次上限**（LoopGuard: `guards.go:68`，按路径去重计数）。超过即阻塞，每次读取必须精打细算。
 
@@ -288,43 +287,43 @@ lsp workspaceSymbol → lsp hover/goToDefinition → read symbol=X → read offs
 
 ---
 
-## Development Workflow
+## 开发工作流
 
-### Adding a New Tool
+### 添加新工具
 
-1. Create file in `tools/builtin/<name>.go`
-2. Implement `Tool` interface (Spec + Run)
-3. Register via `registry.Register()` in `cmd/run.go`
-4. Add tests in `tools/builtin/<name>_test.go`
-5. Update tool schema in system prompt template
+1. 在 `tools/builtin/<name>.go` 创建文件
+2. 实现 `Tool` 接口（Spec + Run）
+3. 在 `cmd/run.go` 中通过 `registry.Register()` 注册
+4. 在 `tools/builtin/<name>_test.go` 添加测试
+5. 在 system prompt 模板中更新工具 schema
 
-### Adding a New Guard
+### 添加新守卫
 
-1. Define detection logic in `policy/`
-2. Integrate into engine loop at appropriate stage
-3. Add configuration toggle in `config/schema.go`
-4. Write tests with positive/negative cases
-5. Document trigger conditions
+1. 在 `policy/` 中定义检测逻辑
+2. 在 engine 循环的适当阶段集成
+3. 在 `config/schema.go` 中添加配置开关
+4. 编写包含正反例的测试
+5. 记录触发条件
 
-### Adding a New Model Feature
+### 添加新模型功能
 
-1. Implement in `llm/` package
-2. Expose via `ModelClient` interface
-3. Update router if routing logic changes
-4. Test with recorded API responses
+1. 在 `llm/` 包中实现
+2. 通过 `ModelClient` 接口暴露
+3. 如果路由逻辑变化，更新 router
+4. 使用录制的 API 响应进行测试
 
 ---
 
-## Review Checklist
+## 审查清单
 
-Before merging any PR:
+合并 PR 前检查：
 
-- [ ] Follows layer dependency rules
-- [ ] No direct imports across layer boundaries (only through interfaces)
-- [ ] Error handling: all errors wrapped with context
-- [ ] Tests added for new functionality
-- [ ] No hardcoded values that should be configurable
-- [ ] No secrets or sensitive data in code/tests
-- [ ] Cross-platform: uses `filepath` not `path`, no hardcoded separators
-- [ ] Documentation updated if interface changed
-- [ ] `golangci-lint` passes
+- [ ] 遵循层依赖规则
+- [ ] 没有跨层直接导入（仅通过接口通信）
+- [ ] 错误处理：所有错误都包装了上下文
+- [ ] 新功能已添加测试
+- [ ] 没有不应硬编码的值
+- [ ] 代码和测试中没有密钥或敏感数据
+- [ ] 跨平台：使用 `filepath` 而非 `path`，无硬编码分隔符
+- [ ] 接口变更时更新了文档
+- [ ] `golangci-lint` 通过

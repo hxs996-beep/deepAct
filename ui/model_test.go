@@ -233,24 +233,24 @@ func TestAutoScrollTickTopEdgeScrollsUp(t *testing.T) {
 	m.state = stateReady
 	m.height = 20
 	m.width = 80
-	m.msgCache = &messageRenderCache{lastMaxScroll: 50}
-	m.scrollOffset = 0
 	m.autoScrollDir = -1
 	m.lastMouseX = 5
 	m.lastMouseY = 0
+	// Auto-scroll now operates on the mouse-down snapshot (sel.Scroll), not the
+	// live scrollOffset, so the selection stays anchored while dragging.
 	m.selection = SelectionState{
-		Active: true,
-		Start:  selPoint{Line: 99, Col: 5},
-		End:    selPoint{Line: 99, Col: 5},
-	}
-	for i := 0; i < 120; i++ {
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: "line"})
+		Active:     true,
+		Start:      selPoint{Line: 99, Col: 5},
+		End:        selPoint{Line: 99, Col: 5},
+		Plain:      make([]string, 200),
+		BodyHeight: 20,
+		Scroll:     0,
 	}
 
 	result, _ := m.Update(autoScrollTickMsg{})
 	m2 := result.(Model)
-	if m2.scrollOffset != 1 {
-		t.Fatalf("top-edge auto-scroll should increase scrollOffset to scroll up, got %d", m2.scrollOffset)
+	if m2.selection.Scroll != 1 {
+		t.Fatalf("top-edge auto-scroll should increase snapshot Scroll to scroll up, got %d", m2.selection.Scroll)
 	}
 }
 
@@ -259,24 +259,22 @@ func TestAutoScrollTickBottomEdgeScrollsDown(t *testing.T) {
 	m.state = stateReady
 	m.height = 20
 	m.width = 80
-	m.msgCache = &messageRenderCache{lastMaxScroll: 50}
-	m.scrollOffset = 10
 	m.autoScrollDir = 1
 	m.lastMouseX = 5
 	m.lastMouseY = 19
 	m.selection = SelectionState{
-		Active: true,
-		Start:  selPoint{Line: 50, Col: 5},
-		End:    selPoint{Line: 50, Col: 5},
-	}
-	for i := 0; i < 120; i++ {
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: "line"})
+		Active:     true,
+		Start:      selPoint{Line: 50, Col: 5},
+		End:        selPoint{Line: 50, Col: 5},
+		Plain:      make([]string, 200),
+		BodyHeight: 20,
+		Scroll:     10,
 	}
 
 	result, _ := m.Update(autoScrollTickMsg{})
 	m2 := result.(Model)
-	if m2.scrollOffset != 9 {
-		t.Fatalf("bottom-edge auto-scroll should decrease scrollOffset to scroll down, got %d", m2.scrollOffset)
+	if m2.selection.Scroll != 9 {
+		t.Fatalf("bottom-edge auto-scroll should decrease snapshot Scroll to scroll down, got %d", m2.selection.Scroll)
 	}
 }
 

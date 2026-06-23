@@ -333,7 +333,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		for _, call := range calls {
 			if r.onProgress != nil {
-				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
+				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
 			}
 			if call.Name == HandoffToolName && input.Depth < maxSubAgentDepth {
 				// Execute sub-sub-agent

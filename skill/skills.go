@@ -1,8 +1,15 @@
 package skill
 
-// RegisterBuiltinSkills is a no-op. All skills are loaded from external TOML files
-// in .deepact/skills/. Built-in Go skills were removed in favor of richer external
-// TOML definitions (brainstorming, systematic-debugging, verification-before-completion, etc.).
+// RegisterBuiltinSkills loads all skills embedded in the binary.
+// These are the default skill set, shipped with every DeepAct install.
+// User-installed skills in ~/.deepact/skills/ override these by name.
 func RegisterBuiltinSkills(r *Registry) {
-	// no-op: built-in skills removed, all skills come from TOML files
+	embedded, err := LoadEmbeddedSkills()
+	if err != nil {
+		// This should never happen — embedded skills are compiled in.
+		return
+	}
+	for _, s := range embedded {
+		r.Register(s)
+	}
 }

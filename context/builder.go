@@ -20,7 +20,8 @@ type ContextAssembler struct {
 	estimator          *llm.TokenEstimator
 	deepactMD          string // cached deepact.md content, read once at startup
 	envInfo            EnvironmentInfo // session-stable env info, built once at startup
-	userLang           string          // detected once from first history, cached for cache stability
+	userLang           string          // detected once from first user message, locked for the whole session
+	userLangSet        bool            // true once first-user-message language has been determined (even if "")
 	stableSessionBlock string          // built once from deepactMD + envInfo + userLang, cached for cache stability
 	skillsBlock        string          // built once from skill registry, cached for cache stability
 }
@@ -59,17 +60,25 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	// Message 1: System prompt — identical every turn → cached ✓
 	messages = append(messages, engine.ModelMessage{Role: "system", Content: a.systemPrompt})
 
-	// Message 2: Session-stable context — detected once, cached → cached ✓
-	if a.userLang == "" {
+	// Message 2: Session-stable context — language detected from the FIRST
+	// user message and locked for the session (see detectUserLanguage). We only
+	// resolve it once the first real user message is present, then cache both
+	// the language and the assembled block so they never change again — this
+	// keeps the prefix stable for DeepSeek's cache AND prevents later English
+	// confirmations ("ok") from flipping the locked language.
+	if !a.userLangSet && hasFirstUserMessage(history) {
 		a.userLang = detectUserLanguage(history)
+		a.userLangSet = true
 	}
-	if a.stableSessionBlock == "" {
+	if a.stableSessionBlock == "" && a.userLangSet {
 		a.stableSessionBlock = BuildStableSessionContext(a.deepactMD, a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
 	// Message 3: Available skills — stable across the session → cached ✓
-	if a.skillsBlock != "" {
+	// Skip when a skill is active: the model should focus on the active skill's
+	// methodology, not be distracted by other available skills.
+	if a.skillsBlock != "" && (state == nil || state.ActiveSkillName == "") {
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
@@ -135,6 +144,18 @@ func buildEnvironmentInfo() EnvironmentInfo {
 	}
 }
 
+// hasFirstUserMessage reports whether history contains at least one non-empty
+// user message. Used to defer language detection until the first real user
+// turn arrives (the engine may call Build before any user input).
+func hasFirstUserMessage(history []engine.Message) bool {
+	for _, m := range history {
+		if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func readDeepactMD() string {
 	home, _ := os.UserHomeDir()
 	paths := []string{
@@ -142,6 +163,7 @@ func readDeepactMD() string {
 		filepath.Join(home, ".deepact", "deepact.md"),
 		filepath.Join(".deepact", "deepact.md"),
 		"deepact.md",
+		filepath.Join(home, ".deepact", "rules.md"),
 		filepath.Join(".deepact", "deepact.override.md"),
 	}
 

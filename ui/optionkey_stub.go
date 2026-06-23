@@ -1,4 +1,4 @@
-//go:build (!darwin || !cgo || !optionkey) && !windows
+//go:build !darwin && !windows
 
 package ui
 
