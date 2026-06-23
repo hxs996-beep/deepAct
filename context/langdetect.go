@@ -69,8 +69,13 @@ func packageHasTypeScript(path string) bool {
 	return strings.Contains(string(data), "\"typescript\"")
 }
 
+// detectUserLanguage determines the response language from the user's FIRST
+// message in the session. It deliberately ignores later messages so that
+// short English confirmations ("ok", "yes", "确认") or English-heavy tool
+// output cannot flip the language away from what the user originally wrote.
+// The result is locked for the whole session (see ContextAssembler.userLang).
 func detectUserLanguage(history []engine.Message) string {
-	for i := len(history) - 1; i >= 0; i-- {
+	for i := 0; i < len(history); i++ {
 		if history[i].Role == "user" && strings.TrimSpace(history[i].Content) != "" {
 			return classifyTextLanguage(history[i].Content)
 		}

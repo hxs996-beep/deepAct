@@ -76,6 +76,11 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
+	// pendingDiffConfirm holds the same plan after the user confirms the approach
+	// (file list). The diff is presented for detail review; on second confirmation,
+	// the plan is executed.
+	pendingDiffConfirm *PendingEditPlan
+
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
@@ -84,6 +89,13 @@ type Engine struct {
 	runUsageAccum    ModelUsage
 	runToolCallCount int
 	runErrorCount    int
+
+	// isChinese is set once from the first user message in the session.
+	// All per-turn UI messages (skill list, activation prompts, etc.) use
+	// this instead of recomputing msgIsChinese per-turn, which would switch
+	// to English when the user types "ok"/"yes" to confirm.
+	isChinese    bool
+	langDetected bool
 }
 
 // PendingEditPlan captures the agent's proposed changes before execution.
@@ -158,7 +170,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.state == nil {
 		return nil, fmt.Errorf("state not initialized")
 	}
-	zh := msgIsChinese(userMsg)
+	// Detect language once at session start, not per-turn.
+	// This prevents "ok"/"yes"/"confirm" from switching UI to English.
+	if !e.langDetected {
+		e.isChinese = msgIsChinese(userMsg)
+		e.langDetected = true
+	}
+	zh := e.isChinese
 	if err := e.emitEvent("user_message", StageIntake, userMsg); err != nil {
 		return nil, err
 	}
@@ -339,81 +357,100 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Edit plan confirmation — user approved the agent's proposed changes
+	// Phase 1: Edit plan approach confirmed — show the diff for detail review
 	if e.pendingEditPlan != nil && isDangerousConfirmation(userMsg) {
-		zh := msgIsChinese(userMsg)
+		zh := e.isChinese
 		plan := e.pendingEditPlan
-		e.pendingEditPlan = nil // consume before execution
+		e.pendingEditPlan = nil
 
-		// Restore task state from the plan snapshot, then mark confirmed.
-		// Order matters: restore first, then set PlanConfirmed/ConfirmedScope
-		// so they aren't overwritten by the restore.
 		if plan.State != nil {
 			*e.state = *plan.State
 		}
 		e.state.PlanConfirmed = true
-		e.state.ConfirmedScope = true // prevents guard re-blocking subsequent edits in this session
+		e.state.ConfirmedScope = true
 
-		msg := "✅ 修改方案已确认，开始执行..."
+		diffContent := formatEditPlanDiff(plan, zh)
+		e.pendingDiffConfirm = plan
+
+		msg := "✅ 方案已确认，以下是具体修改内容：\n\n" + diffContent
 		if !zh {
-			msg = "✅ Edit plan confirmed, executing..."
+			msg = "✅ Approach confirmed. Here are the detailed changes:\n\n" + diffContent
 		}
 		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+		return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+	}
 
-		// Re-emit the assistant message with tool_calls so that subsequent tool
-		// result messages have a valid preceding assistant reference.
-		// The API requires: assistant(tool_calls) → tool(tool_call_id) ordering.
-		assistantMsg := Message{
-			Role:      "assistant",
-			Content:   plan.Reasoning,
-			Timestamp: time.Now(),
-		}
-		assistantMsg.ToolCalls = make([]MessageToolCall, 0, len(plan.Calls))
-		for _, c := range plan.Calls {
-			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, MessageToolCall{
-				ID:        c.ID,
-				Name:      c.Name,
-				Arguments: string(c.Input),
-			})
-		}
-		e.history = append(e.history, assistantMsg)
+	// Phase 2: Diff review confirmed — execute the plan
+	if e.pendingDiffConfirm != nil {
+		if isDangerousConfirmation(userMsg) {
+			zh := e.isChinese
+			plan := e.pendingDiffConfirm
+			e.pendingDiffConfirm = nil
 
-		// Execute the stored calls directly, skipping non-destructive
-		// read/grep/glob — their results were consumed by the model's
-		// reasoning before the plan was blocked. Re-executing them on
-		// confirmation would be redundant (user already agreed to the plan).
-		regularCalls := make([]ToolCallRequest, 0, len(plan.Calls))
-		for _, c := range plan.Calls {
-			if c.Name == HandoffToolName {
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs(c.Input)})
-				}
-				result := e.executeHandoff(ctx, c)
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
-				}
-				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-			} else if c.Name != "read" && c.Name != "grep" && c.Name != "glob" {
-				regularCalls = append(regularCalls, c)
+			msg := "✅ 修改内容已确认，开始执行..."
+			if !zh {
+				msg = "✅ Diff confirmed, executing..."
 			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+
+			// Re-emit the assistant message with tool_calls
+			assistantMsg := Message{
+				Role:      "assistant",
+				Content:   plan.Reasoning,
+				Timestamp: time.Now(),
+			}
+			assistantMsg.ToolCalls = make([]MessageToolCall, 0, len(plan.Calls))
+			for _, c := range plan.Calls {
+				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, MessageToolCall{
+					ID:        c.ID,
+					Name:      c.Name,
+					Arguments: string(c.Input),
+				})
+			}
+			e.history = append(e.history, assistantMsg)
+
+			// Execute the stored calls, skipping non-destructive reads
+			regularCalls := make([]ToolCallRequest, 0, len(plan.Calls))
+			for _, c := range plan.Calls {
+				if c.Name == HandoffToolName {
+					if e.config.OnProgress != nil {
+						e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", c.Input)})
+					}
+					result := e.executeHandoff(ctx, c)
+					if e.config.OnProgress != nil {
+						e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
+					}
+					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+				} else if c.Name != "read" && c.Name != "grep" && c.Name != "glob" {
+					regularCalls = append(regularCalls, c)
+				}
+			}
+			if len(regularCalls) > 0 {
+				for _, call := range regularCalls {
+					if e.config.OnProgress != nil {
+						e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+					}
+				}
+				toolResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, regularCalls)
+				for _, result := range toolResults {
+					if e.config.OnProgress != nil {
+						e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
+					}
+					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+				}
+				e.updateTaskStateFromTools(regularCalls, toolResults)
+			}
+			// Fall through to the agent loop — the agent can see tool results
+			// and decide if further changes are needed.
+		} else {
+			// User declined the diff — clear the pending plan
+			e.pendingDiffConfirm = nil
+			msg := "已取消修改"
+			if !e.isChinese {
+				msg = "Changes cancelled"
+			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 		}
-		if len(regularCalls) > 0 {
-			for _, call := range regularCalls {
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
-				}
-			}
-			toolResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, regularCalls)
-			for _, result := range toolResults {
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
-				}
-				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-			}
-			e.updateTaskStateFromTools(regularCalls, toolResults)
-		}
-		// Fall through to the agent loop below — the agent can see tool results
-		// and decide if further changes are needed.
 	}
 
 	// Dangerous command confirmation — simple exact match, safety feature only

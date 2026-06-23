@@ -39,7 +39,7 @@ const SystemPromptBlockA = "# Identity\n" +
 	"- Batch independent tool calls in parallel when possible\n" +
 		"- Reuse file contents already in history: if you already read a file in a previous turn, do NOT re-read it — the content is in the conversation history. Use <!-- REMEMBER: path --> to track what you've read.\n\n" +
 	"# Response Format\n" +
-	"- ALWAYS respond in the same language as the user's most recent message. If user writes Chinese, respond in Chinese. If English, respond in English. Never switch language unless user switches first.\n" +
+	"- Respond in the user's language. The session language is locked from the user's first message (see Response Language directive); keep using that language for the whole session even if later messages or tool output are in another language.\n" +
 	"- Answer in ≤3 lines unless showing code or the task requires detail\n" +
 	"- No preamble (\"Here's what I'll do...\", \"Let me help you...\")\n" +
 	"- No postamble (\"Let me know if you need anything else...\")\n" +

@@ -24,6 +24,17 @@ type SelectionState struct {
 	Done   bool     // drag complete, highlight persists
 	Start  selPoint // mouse-down position
 	End    selPoint // current / mouse-up position
+
+	// Snapshot of the body content captured at mouse-down. Selection indices
+	// (Start/End.Line) reference these arrays, so highlight and clipboard
+	// extraction stay anchored to what the user actually clicked — even while
+	// streaming output appends lines and shifts the live view underneath.
+	// Rendered is the styled line array (pre-highlight); Plain is the
+	// ANSI-stripped counterpart used for clipboard extraction.
+	Rendered   []string
+	Plain      []string
+	BodyHeight int
+	Scroll     int // snapshot-local scroll offset (adjusted by auto-scroll)
 }
 
 // autoScrollTickMsg is sent by the auto-scroll timer during edge-drag.
@@ -325,8 +336,15 @@ func sliceByVisualCol(s string, colStart, colEnd int) string {
 
 // copySelection extracts selected text and copies it to the clipboard.
 // Returns ("", nil) on empty text, (text, nil) on success, ("", err) on failure.
+// When the selection carries a body snapshot (sel.Plain), extraction uses the
+// snapshot so the copied text matches what was highlighted at mouse-down
+// instead of the live (possibly shifted) view.
 func copySelection(plainLines []string, sel SelectionState) (string, error) {
-	text := extractSelectionText(plainLines, sel)
+	plain := plainLines
+	if sel.Plain != nil {
+		plain = sel.Plain
+	}
+	text := extractSelectionText(plain, sel)
 	if text == "" {
 		return "", nil
 	}

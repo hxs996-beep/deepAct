@@ -133,6 +133,7 @@ func buildSkillSuggestions(reg *skill.Registry) {
 }
 
 // buildSkillsBlock renders a static skills hint for the stable zone.
+// Each skill is shown as "name: description" so the model knows what each does.
 // Dynamic skill suggestions (matched by keyword per-turn) are injected
 // separately via pendingPinnedMessages in the engine loop.
 func buildSkillsBlock(all []*skill.Skill) string {
@@ -140,17 +141,20 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Available skills: /")
-	for i, s := range all {
-		if i > 0 {
-			b.WriteString(", /")
-		}
-		b.WriteString(s.Name)
-	}
-	b.WriteString("\n")
-	b.WriteString("\n")
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/tdd`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
+	b.WriteString("\n")
+	for _, s := range all {
+		b.WriteString("- **")
+		b.WriteString(s.Name)
+		b.WriteString("**: ")
+		if s.Description != "" {
+			b.WriteString(s.Description)
+		} else {
+			b.WriteString("(no description)")
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 

@@ -106,9 +106,10 @@ type Model struct {
 	progressChan        chan ProgressMsg
 	scrollOffset        int
 	cancelled           bool
-	pendingEsc          bool // tracks ESC prefix for Alt+Enter sequence detection
 	pricing             engine.PricingConfig
 	needsRepaint        bool // forces full Bubble Tea repaint on next frame
+
+	escAt               time.Time // timestamp of last ESC key, for time-windowed Alt+Enter detection
 
 	// Slash command suggestions
 	showSuggestions    bool
@@ -158,8 +159,9 @@ type ProgressMsg struct {
 }
 
 const (
-	logoDelay   = 500 * time.Millisecond
-	spinnerRate = 100 * time.Millisecond
+	logoDelay     = 500 * time.Millisecond
+	spinnerRate   = 100 * time.Millisecond
+	escWindow     = 500 * time.Millisecond // max delay between ESC and Enter to qualify as Alt+Enter
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -223,8 +225,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle motion events (drag) — they have Button=MouseButtonNone
 		if msg.Action == tea.MouseActionMotion {
 			if m.selection.Active {
-				totalLines, bodyHeight, _ := m.computeLayout()
-				m.selection.End = screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
+				sel := m.selection
+				// Map against the mouse-down snapshot, not the live view:
+				// streaming output may have appended lines and shifted the
+				// live layout, which would otherwise move the selection
+				// anchor away from what the user is dragging over.
+				sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
 				m.lastMouseX = msg.X
 				m.lastMouseY = msg.Y
 				// Auto-scroll edge detection
@@ -232,9 +238,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				newDir := 0
 				if msg.Y < scrollEdge {
 					newDir = -1
-				} else if msg.Y >= bodyHeight-scrollEdge {
+				} else if msg.Y >= sel.BodyHeight-scrollEdge {
 					newDir = 1
 				}
+				m.selection = sel
 				if newDir != 0 && m.autoScrollDir == 0 {
 					m.autoScrollDir = newDir
 					return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
@@ -264,13 +271,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.repaintCmd()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				totalLines, bodyHeight, _ := m.computeLayout()
-				pt := screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
+				// Snapshot the body at mouse-down. Selection indices anchor
+				// into this snapshot so highlight and copy stay correct even
+				// if streaming output later shifts the live view.
+				totalLines, bodyHeight, rendered, plain := m.computeLayoutFull()
+				maxScroll := 0
+				if totalLines > bodyHeight {
+					maxScroll = totalLines - bodyHeight
+				}
+				scroll := m.scrollOffset
+				if scroll > maxScroll {
+					scroll = maxScroll
+				}
+				if scroll < 0 {
+					scroll = 0
+				}
+				pt := screenToLine(msg.Y, msg.X, scroll, bodyHeight, totalLines)
 				m.selection = SelectionState{
-					Active: true,
-					Done:   false,
-					Start:  pt,
-					End:    pt,
+					Active:     true,
+					Done:       false,
+					Start:      pt,
+					End:        pt,
+					Rendered:   rendered,
+					Plain:      plain,
+					BodyHeight: bodyHeight,
+					Scroll:     scroll,
 				}
 				m.autoScrollDir = 0
 				m.lastMouseX = msg.X
@@ -278,15 +303,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			} else if msg.Action == tea.MouseActionRelease {
 				if m.selection.Active {
-					totalLines, bodyHeight, plainLines := m.computeLayout()
-					m.selection.End = screenToLine(msg.Y, msg.X, m.scrollOffset, bodyHeight, totalLines)
-					m.selection.Active = false
+					sel := m.selection
+					sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
+					sel.Active = false
 					m.autoScrollDir = 0
-					if m.selection.Start == m.selection.End {
+					if sel.Start == sel.End {
 						m.selection = SelectionState{}
 					} else {
-						m.selection.Done = true
-						_, err := copySelection(plainLines, m.selection)
+						sel.Done = true
+						m.selection = sel
+						// copySelection uses sel.Plain (the snapshot), so the
+						// clipboard receives exactly what was selected at
+						// mouse-down, not the live shifted view.
+						_, err := copySelection(nil, m.selection)
 						if err != nil {
 							m.clipboardError = err.Error()
 						} else {
@@ -301,17 +330,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case autoScrollTickMsg:
 		if m.selection.Active && m.autoScrollDir != 0 {
-			_, bodyHeight, _ := m.computeLayout()
-			maxScroll := m.msgCache.lastMaxScroll
-			m.scrollOffset -= m.autoScrollDir
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
+			sel := m.selection
+			// Auto-scroll within the snapshot rather than the live view,
+			// keeping the selection anchored to the frozen content.
+			totalLines := len(sel.Plain)
+			maxScroll := 0
+			if totalLines > sel.BodyHeight {
+				maxScroll = totalLines - sel.BodyHeight
 			}
-			if maxScroll > 0 && m.scrollOffset > maxScroll {
-				m.scrollOffset = maxScroll
+			sel.Scroll -= m.autoScrollDir
+			if sel.Scroll < 0 {
+				sel.Scroll = 0
 			}
-			totalLines, _, _ := m.computeLayout()
-			m.selection.End = screenToLine(m.lastMouseY, m.lastMouseX, m.scrollOffset, bodyHeight, totalLines)
+			if maxScroll > 0 && sel.Scroll > maxScroll {
+				sel.Scroll = maxScroll
+			}
+			sel.End = screenToLine(m.lastMouseY, m.lastMouseX, sel.Scroll, sel.BodyHeight, totalLines)
+			m.selection = sel
 			return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
 				return autoScrollTickMsg{}
 			})
@@ -579,23 +614,19 @@ func (m Model) scrollUp() Model {
 	return m
 }
 
-// footerHeight computes the footer height from the model state.
-// Matches the logic in View() Step 2.
+// footerHeight computes the footer height the same way View() does: by
+// rendering the input line and any popups and summing their rendered row
+// counts. This is shared with View() (via computeLayout) so mouse coordinate
+// mapping uses the identical body height that was actually displayed — the
+// previous formula diverged from View by 1 row whenever a popup showed an
+// overflow indicator or was suppressed by state, shifting selection mapping.
 func (m Model) footerHeight() int {
-	h := 3 + 1 + inputBoxHeight(m) // 3 status bar + 1 separator + wrapped content lines
-	if m.showSuggestions {
-		items := len(m.suggestions)
-		if items > maxPopupItems {
-			items = maxPopupItems
-		}
-		h += items + 1 // items + hint line (ignore overflow indicator)
+	h := 3 + renderedHeight(renderInputLine(m))
+	if m.showSuggestions && len(m.suggestions) > 0 {
+		h += renderedHeight(renderSuggestions(m, m.width))
 	}
 	if len(m.activeOptions) > 0 {
-		items := len(m.activeOptions)
-		if items > maxPopupItems {
-			items = maxPopupItems
-		}
-		h += items + 1 // items + hint line (ignore overflow indicator)
+		h += renderedHeight(renderOptionsPopup(m, m.width))
 	}
 	return h
 }
@@ -603,12 +634,20 @@ func (m Model) footerHeight() int {
 // computeLayout returns (totalLines, bodyHeight, plainLines) for the current model state.
 // Used by mouse event handlers for coordinate mapping and text extraction.
 func (m Model) computeLayout() (totalLines, bodyHeight int, plainLines []string) {
+	totalLines, bodyHeight, _, plainLines = m.computeLayoutFull()
+	return totalLines, bodyHeight, plainLines
+}
+
+// computeLayoutFull returns the live body layout plus the rendered (styled) and
+// plain line arrays. Used at mouse-down to snapshot the body so a selection
+// stays anchored even while streaming output shifts the live view.
+func (m Model) computeLayoutFull() (totalLines, bodyHeight int, rendered, plain []string) {
 	bh := m.height - m.footerHeight()
 	if bh < 1 {
 		bh = 1
 	}
-	_, plain := m.renderBody(m.renderBodyWidth())
-	return len(plain), bh, plain
+	rendered, plain = m.renderBody(m.renderBodyWidth())
+	return len(plain), bh, rendered, plain
 }
 
 // renderBodyWidth returns the content width used by renderBody.
@@ -674,29 +713,62 @@ func (m Model) View() string {
 		scrollContentWidth = 20
 	}
 
-	renderedLines, _ := m.renderBody(scrollContentWidth)
-	renderedLines = m.applySelectionHighlight(renderedLines)
-	lines := renderedLines
-	total := len(lines)
+	var lines []string
+	total := 0
 	maxScroll := 0
-	scrollOff := m.scrollOffset
-	if total > bodyHeight {
-		needScrollbar = true
-		maxScroll = total - bodyHeight
-		if scrollOff > maxScroll {
-			scrollOff = maxScroll
+	scrollOff := 0
+	frozen := (m.selection.Active || m.selection.Done) && m.selection.Rendered != nil
+	if frozen {
+		// Selection freeze: display the body snapshot captured at mouse-down
+		// so the highlight and copy target stay aligned with what the user
+		// clicked, even while streaming output appends lines and shifts the
+		// live view. Copy the snapshot first — applySelectionHighlight mutates
+		// the slice in place and must not corrupt the stored snapshot.
+		sel := m.selection
+		lines = append([]string(nil), sel.Rendered...)
+		lines = m.applySelectionHighlight(lines)
+		total = len(lines)
+		scrollOff = sel.Scroll
+		if total > bodyHeight {
+			needScrollbar = true
+			maxScroll = total - bodyHeight
+			if scrollOff > maxScroll {
+				scrollOff = maxScroll
+			}
+			if scrollOff < 0 {
+				scrollOff = 0
+			}
+			end := total - scrollOff
+			start := end - bodyHeight
+			if start < 0 {
+				start = 0
+			}
+			lines = lines[start:end]
 		}
-		if scrollOff < 0 {
-			scrollOff = 0
+	} else {
+		renderedLines, _ := m.renderBody(scrollContentWidth)
+		renderedLines = m.applySelectionHighlight(renderedLines)
+		lines = renderedLines
+		total = len(lines)
+		scrollOff = m.scrollOffset
+		if total > bodyHeight {
+			needScrollbar = true
+			maxScroll = total - bodyHeight
+			if scrollOff > maxScroll {
+				scrollOff = maxScroll
+			}
+			if scrollOff < 0 {
+				scrollOff = 0
+			}
+			end := total - scrollOff
+			start := end - bodyHeight
+			if start < 0 {
+				start = 0
+			}
+			lines = lines[start:end]
 		}
-		end := total - scrollOff
-		start := end - bodyHeight
-		if start < 0 {
-			start = 0
-		}
-		lines = lines[start:end]
+		m.msgCache.lastMaxScroll = maxScroll
 	}
-	m.msgCache.lastMaxScroll = maxScroll
 
 	// ---- Step 5: Render status bar with actual scroll info (single pass) ----
 	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth, m.clipboardFeedback, m.clipboardError)
@@ -852,7 +924,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinners = nil
 			m.toolTree = nil
 			m.streaming = ""
-			m.pendingEsc = false
+			m.escAt = time.Time{}
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
 		} else if m.state == stateReady {
@@ -862,11 +934,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// instead of submitting.
 				m.showSuggestions = false
 				m.suggestions = nil
-				m.pendingEsc = true
+				m.escAt = time.Now()
 			}
 			// ESC byte may be the first half of Option+Enter on macOS terminals.
-			// Set a flag so that a subsequent KeyEnter is treated as Alt+Enter.
-			m.pendingEsc = true
+			// Record timestamp; a subsequent Enter within escWindow is treated as Alt+Enter.
+			m.escAt = time.Now()
 		}
 		return m, nil
 	}
@@ -935,20 +1007,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// ---- Alt+Enter sequence detection: pendingEsc + Enter = insert newline ----
-	// On Windows ConPTY and some terminals, Alt+Enter arrives as two separate
-	// events: KeyEsc (Alt prefix) then KeyEnter (without Alt=true set). Without
-	// setting Alt=true on the Enter event, HandleKey treats it as plain Enter
-	// and submits instead of inserting a newline.
-	if m.pendingEsc {
-		m.pendingEsc = false
-		if msg.Type == tea.KeyEnter {
+	// ---- Alt+Enter sequence detection: ESC + Enter within time window = insert newline ----
+	// On terminals that send Alt+Enter as two separate events (ESC then Enter),
+	// we use a time window to distinguish genuine Alt+Enter from ESC (dismiss)
+	// followed by Enter (submit) after a delay.
+	if !m.escAt.IsZero() {
+		if time.Since(m.escAt) > escWindow {
+			m.escAt = time.Time{} // expired, treat as two separate keys
+		} else if msg.Type == tea.KeyEnter {
+			m.escAt = time.Time{}
 			altMsg := msg
 			altMsg.Alt = true
 			m.inputBuf.HandleKey(altMsg)
 			return m, nil
+		} else if msg.Type != tea.KeyEsc {
+			// Non-Enter, non-ESC key after ESC — not Alt+Enter, clear
+			m.escAt = time.Time{}
 		}
-		// Not Enter — clear flag and fall through to normal handling
+		// msg.Type == tea.KeyEsc: another ESC, update escAt (handled above)
 	}
 
 	// ---- Alt+Enter (single event, e.g. Kitty protocol \x1b[13;3u): insert newline ----
@@ -972,7 +1048,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if runtime.GOOS == "darwin" && msg.Type == tea.KeyEnter && !msg.Alt && optionKeyPressed() {
 		m.showSuggestions = false
 		m.suggestions = nil
-		m.inputBuf.HandleKey(msg)
+		altMsg := msg
+		altMsg.Alt = true
+		m.inputBuf.HandleKey(altMsg)
 		return m, nil
 	}
 
@@ -1209,7 +1287,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.state = stateRunning
-	m.pendingEsc = false
+	m.escAt = time.Time{}
 	m.afterResidue = false
 	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
 	return m, tea.Batch(
@@ -1690,7 +1768,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 
 	for _, node := range toolTree {
 		switch node.Name {
-		case "grep", "glob", "read":
+		case "grep", "glob", "read", "lsp":
 			searchItems = append(searchItems, node)
 		case "bash":
 			execItems = append(execItems, node)
@@ -2511,34 +2589,6 @@ func wrapInputText(text string, width int) string {
 		}
 	}
 	return strings.Join(result, "\n")
-}
-
-func inputBoxHeight(m Model) int {
-	if m.width <= 0 {
-		return 1
-	}
-	innerWidth := m.width - 6
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-	cursor := "█"
-	if m.state == stateRunning {
-		cursor = ""
-	}
-	content := m.inputBuf.Value() + cursor
-	lines := strings.Split(content, "\n")
-	totalLines := 0
-	for _, line := range lines {
-		// Use visual width (lipgloss.Width) to match wrapInputText behavior.
-		// CJK characters have width 2, emoji may have width 2+, etc.
-		w := lipgloss.Width(line)
-		lineCount := (w + innerWidth - 1) / innerWidth
-		if lineCount == 0 {
-			lineCount = 1
-		}
-		totalLines += lineCount
-	}
-	return totalLines
 }
 
 func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *engine.PricingConfig) float64 {

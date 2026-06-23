@@ -237,7 +237,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.pendingEditPlan = plan
 
 			// Build a rich plan summary for the user
-			zh := msgIsChinese(e.history[0].Content) // check first user message language
+			zh := e.isChinese
 			planSummary := formatEditPlanSummary(plan, zh)
 
 			// Add assistant (with tool_calls) first, then tool messages to close IDs.
@@ -371,7 +371,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					Timestamp:  time.Now(),
 				})
 			}
-			zh := msgIsChinese(e.history[0].Content)
+			zh := e.isChinese
 			var question string
 			if zh {
 				question = fmt.Sprintf("💡 模型建议激活 skill **`%s`**。%s\n\n是否确认？", params.SkillName, params.Reasoning)
@@ -398,7 +398,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Execute handoff calls (sub-agents)
 	for _, call := range handoffCalls {
 		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs(call.Input)})
+			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input)})
 		}
 		result := e.executeHandoff(ctx, call)
 		if e.config.OnProgress != nil {
@@ -424,7 +424,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if len(readOnlyCalls) > 0 {
 			for _, call := range readOnlyCalls {
 				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
+					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
 				}
 			}
 			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
@@ -439,7 +439,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// Sequential execute destructive tools (edit/write — show each diff progressively)
 		for _, call := range destructiveCalls {
 			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Input)})
+				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
 			}
 			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
 			if len(results) > 0 {
@@ -614,7 +614,7 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 	}
 }
 
-func summarizeArgs(input json.RawMessage) string {
+func summarizeArgs(toolName string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -647,6 +647,21 @@ func summarizeArgs(input json.RawMessage) string {
 	if p, ok := m["path"].(string); ok {
 		path = p
 	}
+
+	// Grep/glob: show pattern first, path as short suffix.
+	if toolName == "grep" || toolName == "glob" {
+		if pattern, ok := m["pattern"].(string); ok {
+			if path != "" {
+				return fmt.Sprintf("%s in %s", pattern, shortPath(path))
+			}
+			return pattern
+		}
+		if path != "" {
+			return shortPath(path)
+		}
+		return ""
+	}
+
 	if path == "" {
 		if pattern, ok := m["pattern"].(string); ok {
 			return pattern
@@ -676,7 +691,7 @@ func summarizeArgs(input json.RawMessage) string {
 		return path
 	}
 
-	return path
+	return shortPath(path)
 }
 
 // shortPath shortens a file path for display — shows last two components.
@@ -858,30 +873,20 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 		newStr, _ := m["new_string"].(string)
 		action.OldText = oldStr
 		action.NewText = newStr
-		if oldStr != "" && newStr != "" {
-			action.Summary = "修改文件内容"
-		} else if pattern, ok := m["pattern"].(string); ok {
-			replacement, _ := m["replacement"].(string)
-			action.Summary = fmt.Sprintf("替换匹配 %q → %q", truncateStr(pattern, 50), truncateStr(replacement, 50))
-		} else {
-			action.Summary = "编辑文件"
-		}
 	} else {
 		// write tool
 		if content, ok := m["content"].(string); ok {
 			action.NewText = content
-			action.Summary = fmt.Sprintf("写入 %d 个字符", len(content))
-		} else {
-			action.Summary = "写入文件"
 		}
 	}
+	// Summary is intentionally empty — formatEditPlanSummary shows only the path list.
 	return action
 }
 
 // formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
-// The summary always shows the reasoning (WHY) first, then a file list, then asks
-// the user to confirm. Reasoning is never truncated — the user needs the full
-// explanation to make an informed decision.
+// The summary shows the reasoning (WHY) first, then a file list, then asks
+// the user to confirm the APPROACH. On confirmation, formatEditPlanDiff will
+// show the actual diff for detail review before execution.
 func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 	var sb strings.Builder
 
@@ -898,21 +903,85 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 		sb.WriteString("\n")
 	}
 
-	// Step 2: Show the file list — WHAT will be changed.
+	// Step 2: Show the file list — WHICH files will be changed (paths only).
 	if zh {
 		sb.WriteString("\n📋 计划修改以下文件：\n")
 	} else {
 		sb.WriteString("\n📋 Planned changes:\n")
 	}
 	for _, edit := range plan.Edits {
-		sb.WriteString(fmt.Sprintf("  • `%s` — %s\n", edit.Path, edit.Summary))
+		sb.WriteString(fmt.Sprintf("  • `%s`\n", edit.Path))
 	}
 
 	// Step 3: Ask for confirmation.
 	if zh {
-		sb.WriteString("\n确认执行以上修改？")
+		sb.WriteString("\n确认执行修改？")
 	} else {
-		sb.WriteString("\nConfirm these changes?")
+		sb.WriteString("\nProceed with the changes?")
+	}
+	return sb.String()
+}
+
+// formatEditPlanDiff shows the actual content changes for detail review.
+// Called after the user confirms the approach (file list) but before execution.
+func formatEditPlanDiff(plan *PendingEditPlan, zh bool) string {
+	var sb strings.Builder
+
+	if zh {
+		sb.WriteString("📝 具体修改内容：\n\n")
+	} else {
+		sb.WriteString("📝 Changes in detail:\n\n")
+	}
+
+	for i, edit := range plan.Edits {
+		if zh {
+			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
+		} else {
+			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
+		}
+		if edit.Tool == "edit" {
+			if edit.OldText != "" && edit.NewText != "" {
+				if zh {
+					sb.WriteString("   原内容:\n")
+				} else {
+					sb.WriteString("   Old:\n")
+				}
+				sb.WriteString("   ```\n")
+				sb.WriteString(truncateStr(edit.OldText, 2000))
+				sb.WriteString("\n   ```\n")
+				if zh {
+					sb.WriteString("   新内容:\n")
+				} else {
+					sb.WriteString("   New:\n")
+				}
+				sb.WriteString("   ```\n")
+				sb.WriteString(truncateStr(edit.NewText, 2000))
+				sb.WriteString("\n   ```\n")
+			} else {
+				// pattern-based edit
+				if zh {
+					sb.WriteString("   (基于模式匹配的替换)\n")
+				} else {
+					sb.WriteString("   (pattern-based replacement)\n")
+				}
+			}
+		} else if edit.Tool == "write" {
+			if zh {
+				sb.WriteString("   写入内容:\n")
+			} else {
+				sb.WriteString("   Content:\n")
+			}
+			sb.WriteString("   ```\n")
+			sb.WriteString(truncateStr(edit.NewText, 2000))
+			sb.WriteString("\n   ```\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if zh {
+		sb.WriteString("以上修改内容确认无误？确认后将开始执行。")
+	} else {
+		sb.WriteString("Does the diff look correct? Confirm to execute.")
 	}
 	return sb.String()
 }
