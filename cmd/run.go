@@ -217,12 +217,8 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 
-	// Initialize skill registry with built-in methodology skills
+	// Initialize skill registry from user-installed skills in ~/.deepact/skills/.
 	skillReg := skill.NewRegistry()
-	skill.RegisterBuiltinSkills(skillReg)
-
-	// Load user-installed skills from ~/.deepact/skills/.
-	// These override embedded skills with the same name.
 	if home, err := os.UserHomeDir(); err == nil {
 		userSkillsDir := filepath.Join(home, ".deepact", "skills")
 		userSkills, err := skill.LoadExternalSkills(userSkillsDir)

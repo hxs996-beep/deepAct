@@ -1646,6 +1646,10 @@ func toolIcon(name string) string {
 		return "[?]"
 	case "lsp":
 		return "[@]"
+	case "skill_install":
+		return "[+]"
+	case "handoff_to_agent":
+		return "[→]"
 	default:
 		return "[*]"
 	}

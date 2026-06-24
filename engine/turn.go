@@ -666,6 +666,9 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 		if pattern, ok := m["pattern"].(string); ok {
 			return pattern
 		}
+		if name, ok := m["name"].(string); ok {
+			return name
+		}
 		return ""
 	}
 
