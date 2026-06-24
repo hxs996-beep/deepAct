@@ -648,6 +648,32 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 		path = p
 	}
 
+	// Skill/agent tools — show the human-relevant target, not an empty line.
+	switch toolName {
+	case "skill_install", "activate_skill":
+		// skill_install uses "name"; activate_skill uses "skill_name".
+		if n, ok := m["name"].(string); ok && n != "" {
+			return "install skill: " + n
+		}
+		if n, ok := m["skill_name"].(string); ok && n != "" {
+			return "activate skill: " + n
+		}
+	case "handoff_to_agent":
+		agent, _ := m["agent"].(string)
+		goal, _ := m["goal"].(string)
+		if goal != "" && len(goal) > 60 {
+			goal = goal[:60] + "..."
+		}
+		switch {
+		case agent != "" && goal != "":
+			return "→ " + agent + ": " + goal
+		case agent != "":
+			return "→ " + agent
+		case goal != "":
+			return goal
+		}
+	}
+
 	// Grep/glob: show pattern first, path as short suffix.
 	if toolName == "grep" || toolName == "glob" {
 		if pattern, ok := m["pattern"].(string); ok {
@@ -659,17 +685,17 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 		if path != "" {
 			return shortPath(path)
 		}
-		return ""
+		return fallbackSummary(toolName, m)
 	}
 
 	if path == "" {
-		if pattern, ok := m["pattern"].(string); ok {
+		if pattern, ok := m["pattern"].(string); ok && strings.TrimSpace(pattern) != "" {
 			return pattern
 		}
-		if name, ok := m["name"].(string); ok {
+		if name, ok := m["name"].(string); ok && strings.TrimSpace(name) != "" {
 			return name
 		}
-		return ""
+		return fallbackSummary(toolName, m)
 	}
 
 	// Edit tool: show change preview from old_string/new_string.
@@ -694,7 +720,46 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 		return path
 	}
 
-	return shortPath(path)
+	if path != "" {
+		return shortPath(path)
+	}
+	// Last resort: never return an empty summary — an empty Detail renders as
+	// a bare icon with no context (e.g. "[*]  ✓"), which tells the user nothing.
+	return fallbackSummary(toolName, m)
+}
+
+// fallbackSummary builds a non-empty one-line summary for tools whose argument
+// shape isn't handled by the specialized branches above (MCP tools, custom
+// tools, future built-ins). It picks the most informative string field and,
+// if none exists, falls back to the tool name itself so the UI always shows
+// something meaningful.
+func fallbackSummary(toolName string, m map[string]interface{}) string {
+	// Prefer fields that commonly carry the "what": query, pattern, command,
+	// name, url, description — in that order.
+	for _, key := range []string{"query", "pattern", "command", "url", "source_url", "description", "text", "value"} {
+		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
+			s = strings.TrimSpace(s)
+			if len(s) > 80 {
+				s = s[:80] + "..."
+			}
+			return s
+		}
+	}
+	// Any first non-empty string field beats nothing.
+	for k, v := range m {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			s = strings.TrimSpace(s)
+			if len(s) > 80 {
+				s = s[:80] + "..."
+			}
+			return k + ": " + s
+		}
+	}
+	// Truly nothing to show — at least name the tool.
+	if toolName != "" {
+		return toolName
+	}
+	return "—"
 }
 
 // shortPath shortens a file path for display — shows last two components.

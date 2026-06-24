@@ -1,272 +1,125 @@
-# AGENTS.md - DeepAct 开发指南
+# deepact.md — AI 编码指南
 
-> 本文定义了本项目面向所有贡献者（人类和 AI）的开发规范、编码标准和架构约束。
-
----
-
-## 项目标识
-
-- **名称**: deepact（CLI 二进制: `deepact`）
-- **语言**: Go 1.24+
-- **架构**: 分阶段守卫式 Agent 循环，双模型路由
-- **目标**: 跨平台 CLI（macOS、Windows、Linux）
-
----
-
-## 代码规范
-
-### Go 风格
-
-- 遵循标准 `gofmt` 格式化（CI 强制检查）
-- 使用 `golangci-lint`，配置见 `.golangci.yml`
-- 错误处理：始终用 `fmt.Errorf("doing X: %w", err)` 包装上下文
-- 库代码中禁止 `panic()`；仅 `main()` 中可用于不可恢复的启动失败
-- 接口：定义在消费者侧，而非提供者侧
-- 包命名：简短、小写、单数（例如 `engine`、`router`、`policy`）
-
-### 文件组织
-
-- 每个文件一个主要类型（例如 `scorer.go` 包含 `Scorer`）
-- 测试文件：`*_test.go` 放同一包内
-
-### 命名
-
-- 导出类型：`PascalCase`
-- 非导出：`camelCase`
-- 接口：动词-名词或 "-er" 后缀（`Router`、`ContextBuilder`、`AmbiguityDetector`）
-- 配置结构体：`XxxConfig` 后缀
-- 选项：复杂构造器使用函数式选项模式（functional options pattern）
-
----
-
-## 架构规则（必须遵守）
-
-### 层依赖规则
-
-```
-cmd/ → engine/, router/, policy/, context/
-                 ↓
-              tools/, llm/
-                 ↓
-              session/, artifact/
-                 ↓
-              config/（共享层，无向上依赖）
-```
-
-**禁止违反：**
-- `engine/` 不得导入 `ui/` 或 `cmd/`
-- `tools/` 不得导入 `engine/`（通过接口通信）
-- `llm/` 保持独立（不含项目特定逻辑）
-- `policy/` 读取状态但不直接修改
-- `ui/` 仅消费 engine 的事件（观察者模式）
-
-### 接口边界
-
-跨层调用必须通过已定义的接口：
-- Engine ↔ Tools：通过 `Tool` 接口
-- Engine ↔ LLM：通过 `ModelClient` 接口
-- Engine ↔ Policy：通过 `PolicyChecker` 接口
-- UI ↔ Engine：通过事件通道（禁止直接方法调用）
-
-### 状态管理
-
-- **TaskState** 是当前任务的唯一真相来源
-- TaskState 在一次 turn 内不可变；仅 Compactor 可重写
-- 工具结果存储在 Artifact Store 中，通过 SHA256 引用
-- 会话事件是追加写入的（JSONL）；禁止修改历史事件
+> 本文定义了一套通用编码规范和设计原则，帮助 AI 在**任意项目**中写出更健壮、更可维护的代码。所有代码生成和修改都应遵守以下准则。
 
 ---
 
 ## 设计原则
 
-### 1. Guard Before Act（先守卫，后执行）
+### 1. Think Before Coding（先想清楚，再写代码）
 
-每个破坏性操作（文件编辑、shell 命令）必须经过：
+**不要假设。不要隐藏困惑。暴露权衡。**
+
+实现之前：
+- 明确陈述你的假设。如果不确定，问清楚。
+- 如果有多种合理解释，全部列出，不要默默选一个。
+- 如果有更简单的方案，说出来。合理时可以 push back。
+- 如果某事不清楚，停下来。指出模糊之处并提问。
+
+每个破坏性操作（文件编辑、shell 命令）进一步经过四道守卫：
 1. Ambiguity Gate（语义是否清晰？）
 2. Scope Guard（是否在已确认范围内？）
 3. Design Guard（方案是否健壮？）
 4. Loop Guard（是否陷入循环？）
 
-### 2. Structured Over Verbose（结构化优于冗长）
+### 2. Simplicity First（简约优先）
 
-- 优先使用结构化 JSON（TaskState）而非自然语言描述
-- 回复格式：`{summary, changes, next_step, questions}`
-- 绝不重复 TaskState.decisions 中已有的信息
+**解决问题的最小代码。不写投机性代码。**
 
-### 3. Bookend Context Layout（两端式上下文布局）
+- 不多写一行未要求的特性代码
+- 不抽象一次性使用的代码
+- 不添加未要求的"灵活性"或"可配置性"
+- 不处理不可能发生的错误场景
+- 200 行能写成 50 行，就重写
 
-- 最重要的信息放在 Prompt 的**顶部**和**底部**
+### 3. Structured Over Verbose（结构化优于冗长）
+
+- 优先用结构化格式而非自然语言段落
+- 回复格式清晰：`{summary, changes, next_step, questions}`
+- 绝不重复已有信息
+- 优先展示差异/片段，而非完整文件
+
+### 4. Bookend Context Layout（两端式上下文布局）
+
+- 最重要的信息放在响应的**顶部**和**底部**
 - 中间部分有界且精简
 - 绝不倾倒整个文件内容；使用精准代码片段
+- 引用代码时标注文件路径和行号
 
-### 4. Verify Before Trust（先验证，后信任）
+### 5. Verify Before Trust（先验证，后信任）
 
-- 每个 API/符号引用必须通过 LSP 或 grep 验证
-- 每个计划必须通过设计反模式检查
-- 每次编辑后必须验证（lint/编译/测试）
+- 每个 API/符号引用必须在代码库中验证（LSP 或 grep）
+- 每个计划必须检查是否存在设计反模式
+- 每次编辑后必须验证（编译/测试通过）
+- 不确定的东西说"我不确定"，不要编造
 
-### 5. Fail Loud, Recover Gracefully（响亮失败，优雅恢复）
+### 6. Fail Loud, Recover Gracefully（响亮失败，优雅恢复）
 
 - 绝不静默吞掉错误
-- 失败时：记录日志、递增失败计数、必要时升级模型
+- 失败时：记录日志、分析原因、必要时升级方案
 - 连续 3 次失败后：停止、诊断、询问用户
 
----
+### 7. Surgical Changes（外科手术式修改）
 
-## DeepSeek 特定规则
+**只动你必须动的。只清理你自己留下的混乱。**
 
-### 模型交互
+编辑现有代码时：
+- 不"改进"相邻代码、注释或格式
+- 不重构没坏的东西
+- 匹配现有风格，即使你会用不同方式写
+- 发现无关的死代码，提一下，但别删
 
-1. **reasoning_content**: 视为不透明数据。原样存储。在下一轮请求中原样回传。
-2. **工具结果**: 始终包含完整的 ToolResultEnvelope，使用匹配的 tool_call_id。
-3. **系统提示词**: 跨 turn 保持稳定（启用缓存命中 → 可节省 98% 成本）。
-4. **温度**: 代码生成 0.0，规划 0.6，头脑风暴 1.0。
+你的修改产生孤儿时：
+- 删除**你的修改导致**不再使用的 import/变量/函数
+- 不要删除已有的死代码（除非被要求）
 
-### 已知失败模式（代码必须防范）
+**校验标准**：每一行改动的代码都应能直接追溯到用户的请求。
 
-| 失败模式 | 守卫机制 | 代码位置 |
-|---|---|---|
-| 过度实现（Over-implementation） | Ambiguity Gate | `policy/ambiguity.go` |
-| 偷懒/愚蠢设计 | Design Guard | `policy/design_guard.go` |
-| 工具调用循环 | Loop Guard + Tool Dedupe | `engine/guards.go` |
-| 啰嗦重复 | TaskState 去重 + 强制 rebase | `context/compactor.go` |
-| 幻觉 API | 验证要求（Grounding） | `policy/design_guard.go` |
-| 上下文退化 | Bookend 布局 + 简短 Prompt | `context/builder.go` |
+### 8. Goal-Driven Execution（目标驱动执行）
 
-### Prompt 工程规则
+**定义成功标准。循环直到验证通过。**
 
-- 始终包含停止条件："信息不足时询问用户，不要擅自实现。"
-- 始终在 system prompt 中包含反模式示例
-- 计划生成后强制自我质疑
-- 包含 TaskState.decisions 并注明"不要重复以下内容"
+将任务转化为可验证的目标：
+- "加校验" → "为无效输入写测试，然后让测试通过"
+- "修 bug" → "写一个重现 bug 的测试，然后让测试通过"
+- "重构 X" → "确保重构前后测试均通过"
 
----
-
-## 测试要求
-
-### 单元测试
-
-- 每个导出函数必须有测试
-- 优先使用表驱动测试（table-driven tests）
-- 模拟外部依赖（LLM、文件系统、LSP）
-- 核心包覆盖目标：>50%（engine/、router/、policy/）
-
-### 测试模式
-
-```go
-func TestAmbiguityGate_DetectsVagueRequest(t *testing.T) {
-    tests := []struct {
-        name    string
-        input   string
-        state   TaskState
-        wantAmb bool
-    }{
-        {
-            name:    "模糊的改进请求",
-            input:   "改进配置处理逻辑",
-            state:   TaskState{},
-            wantAmb: true,
-        },
-        {
-            name:    "明确的修复请求（含文件）",
-            input:   "修复 config/loader.go 第 45 行的空指针",
-            state:   TaskState{},
-            wantAmb: false,
-        },
-    }
-    // ...
-}
+多步骤任务必须陈述简要计划并附带验证点：
 ```
+1. [步骤] → 验证：[检查方式]
+2. [步骤] → 验证：[检查方式]
+3. [步骤] → 验证：[检查方式]
+```
+
+强成功标准让你可以独立循环推进。弱标准（"让它跑起来"）需要不断澄清。
 
 ---
 
-## Git 规范
-
-### 提交信息
-
-```
-<type>(<scope>): <description>
-
-Types: feat, fix, refactor, docs, test, chore, perf
-Scope: engine, router, policy, tools, llm, context, ui, session, config
-```
-
-示例：
-```
-feat(engine): add staged loop with ambiguity gate
-fix(llm): preserve reasoning_content echo in multi-turn
-refactor(tools): extract ToolResultEnvelope to shared type
-test(policy): add design guard anti-pattern detection tests
-```
-
-### 推送规则（必须遵守）
-
-- **git push 必须先询问用户** — 获得用户确认后才能执行 push
-- **代码编译成功即止** — 不需要额外验证（lint、test 等），除非用户明确要求
-
-### 分支命名
-
-```
-feat/<简短描述>
-fix/<issue 编号>-<简短描述>
-refactor/<模块>-<内容>
-```
-
----
-
-## 安全规则
+## 安全红线
 
 ### 敏感数据
 
 - 绝不在日志中记录 API 密钥、令牌或凭证
-- 绝不在 artifacts 中存储密钥（存储前脱敏）
-- 绝不在会话数据中包含 `.env` 或凭证文件
-- 工具输出：在存储前扫描密钥模式（API keys、密码等）
+- 绝不在代码中硬编码密钥或凭证
+- 绝不在提交中包含 `.env` 或凭证文件
+- 工具输出在保存前扫描密钥模式（API keys、密码等）
 
 ### Shell 执行
 
-- 维护安全命令白名单（可配置）
 - 危险命令需要用户明确确认
 - 默认拒绝：`rm -rf`、`git push --force`、`DROP TABLE`、`chmod 777`
-- 所有 shell 执行记录到会话事件中
-
-### 网络
-
-- 仅连接到已配置的 API 端点
-- 未经用户批准，禁止发起任意 HTTP 请求
-- 支持企业环境的代理配置
+- 所有 shell 执行应记录到上下文
 
 ---
 
-## 性能指南
+## 代码读取协议
 
-### 上下文预算
-
-- 默认限制：100 万 Token（可通过 `max_budget_tokens` 在 config.toml 中配置）
-- 统一压缩：单个 80% 阈值触发全量压缩（Flash archive）
-
-### 流式处理
-
-- 始终流式返回 API 响应（绝不缓存完整响应后再返回）
-- UI 在每次流式块到达时更新
-- 工具输出：立即生成摘要，异步存储完整内容
-
-### 启动时间
-
-- 目标：<500ms 到达首个交互式提示
-- 懒加载：LSP 连接、MCP 发现、重型配置
-- 预热：API 客户端连接、会话加载
-
----
-
-## 代码读取协议（必须遵守）
-
-**`read` 工具对同一文件有 4 次上限**（LoopGuard: `guards.go:68`，按路径去重计数）。超过即阻塞，每次读取必须精打细算。
+**高效读取，减少重复。** 每次读取操作都有成本，必须精打细算。
 
 ### 优先级顺序（严格从左到右）
 
 ```
-lsp workspaceSymbol → lsp hover/goToDefinition → read symbol=X → read offset/limit
+LSP workspaceSymbol → LSP hover/goToDefinition → read symbol=X → read offset/limit
 ```
 
 | 你要做什么 | 用这个 | 为什么 |
@@ -281,49 +134,37 @@ lsp workspaceSymbol → lsp hover/goToDefinition → read symbol=X → read offs
 ### 红线规则
 
 - **同一文件 `read` 不超过 2 次**。如果需要更多，说明前面没用 LSP。
-- **禁止 `read offset/limit` 分段读同一文件**。这是最常见的 LoopGuard 触发原因。改为先 `lsp workspaceSymbol` 找到目标符号，再用一次 `read symbol=X`。
+- **禁止 `read offset/limit` 分段读同一文件**。先 `lsp workspaceSymbol` 找到目标符号，再用一次 `read symbol=X`。
 - **先 LSP 后 read**。在任何 `read` 调用之前，先问自己："我用 LSP 能找吗？"
 - **Batch 原则**。如果确实需要看多个不连续区域，先全部用 `lsp workspaceSymbol` 定位，再一次性批量 `read`。
 
 ---
 
-## 开发工作流
+## 工作流
 
-### 添加新工具
+### 开发阶段
 
-1. 在 `tools/builtin/<name>.go` 创建文件
-2. 实现 `Tool` 接口（Spec + Run）
-3. 在 `cmd/run.go` 中通过 `registry.Register()` 注册
-4. 在 `tools/builtin/<name>_test.go` 添加测试
-5. 在 system prompt 模板中更新工具 schema
+1. 理解需求 → 陈述假设 → 澄清模糊点
+2. 制定计划 → 定义验证点
+3. 按计划执行 → 每步验证
+4. 审视结果 → 确保每一行改动都源自用户请求
 
-### 添加新守卫
+### 提交准则
 
-1. 在 `policy/` 中定义检测逻辑
-2. 在 engine 循环的适当阶段集成
-3. 在 `config/schema.go` 中添加配置开关
-4. 编写包含正反例的测试
-5. 记录触发条件
-
-### 添加新模型功能
-
-1. 在 `llm/` 包中实现
-2. 通过 `ModelClient` 接口暴露
-3. 如果路由逻辑变化，更新 router
-4. 使用录制的 API 响应进行测试
+- 提交信息格式：`<type>(<scope>): <description>`
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`
+- 提交前确保无敏感数据泄露
 
 ---
 
-## 审查清单
+## 验收清单
 
-合并 PR 前检查：
+完成工作前检查：
 
-- [ ] 遵循层依赖规则
-- [ ] 没有跨层直接导入（仅通过接口通信）
-- [ ] 错误处理：所有错误都包装了上下文
-- [ ] 新功能已添加测试
-- [ ] 没有不应硬编码的值
-- [ ] 代码和测试中没有密钥或敏感数据
-- [ ] 跨平台：使用 `filepath` 而非 `path`，无硬编码分隔符
-- [ ] 接口变更时更新了文档
-- [ ] `golangci-lint` 通过
+- [ ] 所有需求点已覆盖
+- [ ] 新增代码有对应测试
+- [ ] 编译通过
+- [ ] 测试通过
+- [ ] 没有硬编码的密钥或凭证
+- [ ] 没有留下死代码或调试输出
+- [ ] 每一行改动都能追溯到用户请求

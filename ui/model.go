@@ -1825,7 +1825,7 @@ func renderSearchBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, nodeDetailLabel(node), status))
 		for _, child := range node.Children {
 			detail := child.Detail
 			if len(detail) > width-8 {
@@ -1835,6 +1835,20 @@ func renderSearchBlock(nodes []ToolNode, width int) []string {
 		}
 	}
 	return strings.Split(SearchBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
+}
+
+// nodeDetailLabel returns the text shown after a tool node's icon. When the
+// engine didn't supply a Detail (e.g. for activate_skill / handoff_to_agent /
+// MCP tools whose arg shape isn't recognized), it falls back to the tool name
+// so the node never renders as a bare icon with no context.
+func nodeDetailLabel(node ToolNode) string {
+	if strings.TrimSpace(node.Detail) != "" {
+		return node.Detail
+	}
+	if node.Name != "" {
+		return node.Name
+	}
+	return "—"
 }
 
 func renderExecBlock(nodes []ToolNode, width int) []string {
@@ -1851,7 +1865,7 @@ func renderExecBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, nodeDetailLabel(node), status))
 		for _, child := range node.Children {
 			detail := child.Detail
 			if len(detail) > width-8 {
