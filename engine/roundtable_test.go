@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -152,7 +153,7 @@ func (m *mockSimpleAgent) Spec() AgentSpec {
 }
 func (m *mockSimpleAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
 	return &HandoffResult{
-		Summary: m.response,
+		Summary:     m.response,
 		Conclusions: []string{m.response},
 	}, nil
 }
@@ -161,12 +162,32 @@ func (m *mockSimpleAgent) SetOnProgress(fn ProgressFunc) {}
 // mockPromptRunner supports RunWithPrompt for role injection testing.
 type mockPromptRunner struct {
 	mockSimpleAgent
+	// refuteResponses maps a substring of a finding's content to the refute
+	// sub-agent response. When the goal contains "证伪" (refute stage) and a
+	// key matches the goal text, that response is returned instead of the
+	// default. refuteErr, if set, is returned for refute-stage calls.
+	refuteResponses map[string]string
+	refuteErr       error
 }
 
 func (m *mockPromptRunner) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
+	// Refute stage: goal contains the "证伪" marker. Dispatch by finding content.
+	if strings.Contains(input.Goal, "证伪") {
+		if m.refuteErr != nil {
+			return nil, m.refuteErr
+		}
+		for substr, resp := range m.refuteResponses {
+			if strings.Contains(input.Goal, substr) {
+				return &HandoffResult{Summary: resp, Conclusions: []string{resp}}, nil
+			}
+		}
+		// Default refute response: confirmed (degrade-safe).
+		resp := "VERDICT: confirmed\nREASON: 默认确认"
+		return &HandoffResult{Summary: resp, Conclusions: []string{resp}}, nil
+	}
 	// Include the extra prompt in the response so we can verify it was injected
 	return &HandoffResult{
-		Summary: m.response + "\n\n[received prompt: " + extraPrompt + "]",
+		Summary:     m.response + "\n\n[received prompt: " + extraPrompt + "]",
 		Conclusions: []string{m.response},
 	}, nil
 }
@@ -178,7 +199,7 @@ func newTestEngine(t *testing.T) *Engine {
 
 	// Register mock sub agent
 	reg.Register(&mockPromptRunner{
-		mockSimpleAgent{
+		mockSimpleAgent: mockSimpleAgent{
 			id:       AgentSub,
 			response: "# 分析结果\n从架构角度看，建议采用微服务架构。\nSUMMARY: 建议采用微服务架构",
 		},
@@ -191,9 +212,9 @@ func newTestEngine(t *testing.T) *Engine {
 	})
 
 	e := &Engine{
-		agents:     reg,
-		state:      &TaskState{TaskID: "test-team"},
-		config:     EngineConfig{},
+		agents:          reg,
+		state:           &TaskState{TaskID: "test-team"},
+		config:          EngineConfig{},
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
@@ -337,15 +358,15 @@ func TestSynthesizeTeamOutput_FallbackWhenNoPlanner(t *testing.T) {
 	// Engine with only a sub agent, no planner
 	reg := NewAgentRegistry()
 	reg.Register(&mockPromptRunner{
-		mockSimpleAgent{
+		mockSimpleAgent: mockSimpleAgent{
 			id:       AgentSub,
 			response: "mock response",
 		},
 	})
 	e := &Engine{
-		agents:     reg,
-		state:      &TaskState{TaskID: "test-fallback"},
-		config:     EngineConfig{},
+		agents:          reg,
+		state:           &TaskState{TaskID: "test-fallback"},
+		config:          EngineConfig{},
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
@@ -428,6 +449,169 @@ func TestHandleTeamFlow_CustomMembers(t *testing.T) {
 	}
 	if thoughts[0].MemberID != "custom1" {
 		t.Errorf("MemberID = %q, want %q", thoughts[0].MemberID, "custom1")
+	}
+}
+
+// --- refute stage parsing ---
+
+func TestParseRefuteResult_Confirmed(t *testing.T) {
+	content := "代码中确实存在该问题。\nVERDICT: confirmed\nREASON: 在 foo.go:42 找到未校验输入"
+	r := parseRefuteResult(content)
+	if r.Outcome != RefuteConfirmed {
+		t.Errorf("Outcome = %q, want %q", r.Outcome, RefuteConfirmed)
+	}
+	if r.Reason == "" {
+		t.Errorf("Reason should not be empty for confirmed finding")
+	}
+}
+
+func TestParseRefuteResult_Refuted(t *testing.T) {
+	content := "未能找到证据,该 finding 为误报。\nVERDICT: refuted\nREASON: 实际调用方已做校验"
+	r := parseRefuteResult(content)
+	if r.Outcome != RefuteRefuted {
+		t.Errorf("Outcome = %q, want %q", r.Outcome, RefuteRefuted)
+	}
+}
+
+func TestParseRefuteResult_UnparseableDefaultsConfirmed(t *testing.T) {
+	// 无 VERDICT 行 -> 解析失败 -> 默认 confirmed(降级保留,不丢真问题)
+	r := parseRefuteResult("模型胡言乱语没有结构化输出")
+	if r.Outcome != RefuteConfirmed {
+		t.Errorf("Outcome = %q, want default %q", r.Outcome, RefuteConfirmed)
+	}
+}
+
+func TestParseRefuteResult_CaseInsensitive(t *testing.T) {
+	r := parseRefuteResult("VERDICT: Refuted\nREASON: 误报")
+	if r.Outcome != RefuteRefuted {
+		t.Errorf("Outcome = %q, want %q (case-insensitive)", r.Outcome, RefuteRefuted)
+	}
+}
+
+// --- refuteFindings tests ---
+
+// newRefuteTestEngine builds an engine whose mock sub-agent dispatches refute
+// responses by matching finding-content substrings in refuteResponses.
+func newRefuteTestEngine(t *testing.T, refuteResponses map[string]string, refuteErr error) *Engine {
+	t.Helper()
+	reg := NewAgentRegistry()
+	reg.Register(&mockPromptRunner{
+		mockSimpleAgent: mockSimpleAgent{id: AgentSub, response: "ignore"},
+		refuteResponses: refuteResponses,
+		refuteErr:       refuteErr,
+	})
+	e := &Engine{
+		agents:          reg,
+		state:           &TaskState{TaskID: "test-refute"},
+		config:          EngineConfig{},
+		activatedSkills: make(map[string]bool),
+	}
+	e.roundtableHall = NewRoundtableHall(e)
+	return e
+}
+
+func TestRefuteFindings_FiltersRefuted(t *testing.T) {
+	// "SQL注入未校验" -> confirmed; "缺少日志输出" -> refuted.
+	// Keys are chosen to NOT collide with prompt-template words (误报/幻觉/confirmed).
+	responses := map[string]string{
+		"SQL注入未校验": "代码中确实存在\nVERDICT: confirmed\nREASON: foo.go 有该问题",
+		"缺少日志输出":   "无证据\nVERDICT: refuted\nREASON: 实际已有日志",
+	}
+	e := newRefuteTestEngine(t, responses, nil)
+
+	targets := []refuteTarget{
+		{ProposalIndex: 0, MemberID: "sec", Finding: Finding{Content: "SQL注入未校验", Severity: "critical", Category: "security"}},
+		{ProposalIndex: 0, MemberID: "sec", Finding: Finding{Content: "缺少日志输出", Severity: "medium", Category: "correctness"}},
+	}
+	proposals := []string{"方案A"}
+
+	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 refute results, got %d", len(result))
+	}
+	confirmedKey := findingKey(0, "sec", "SQL注入未校验")
+	refutedKey := findingKey(0, "sec", "缺少日志输出")
+	if result[confirmedKey].Outcome != RefuteConfirmed {
+		t.Errorf("SQL注入未校验 should be confirmed, got %q", result[confirmedKey].Outcome)
+	}
+	if result[refutedKey].Outcome != RefuteRefuted {
+		t.Errorf("缺少日志输出 should be refuted, got %q", result[refutedKey].Outcome)
+	}
+}
+
+func TestRefuteFindings_AgentErrorKeepsFinding(t *testing.T) {
+	// sub-agent returns error for all refute calls -> degrade to confirmed.
+	e := newRefuteTestEngine(t, nil, fmt.Errorf("sub-agent boom"))
+
+	targets := []refuteTarget{
+		{ProposalIndex: 0, MemberID: "sec", Finding: Finding{Content: "某个问题"}},
+	}
+	proposals := []string{"方案A"}
+
+	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result even on error, got %d", len(result))
+	}
+	key := findingKey(0, "sec", "某个问题")
+	if result[key].Outcome != RefuteConfirmed {
+		t.Errorf("on agent error should default to confirmed, got %q", result[key].Outcome)
+	}
+}
+
+// TestHandleReview_WithRefuteStage exercises the full handleReview pipeline:
+// the review sub-agent returns two findings, the refute sub-agent refutes one
+// of them, and the final report shows the refute count and one fewer finding.
+func TestHandleReview_WithRefuteStage(t *testing.T) {
+	// Review-stage response: verdict + score + two findings.
+	// Finding contents are distinct, non-template strings so the refute mock
+	// can dispatch on them.
+	reviewResp := "评审完成。\n- [high/security] SQL注入未校验\n- [low/correctness] 缺少日志输出\nVERDICT: conditional\nSCORE: 70\nSUMMARY: 有两个问题"
+
+	// Refute stage: "SQL注入未校验" survives (confirmed); "缺少日志输出" refuted.
+	responses := map[string]string{
+		"SQL注入未校验": "代码确有问题\nVERDICT: confirmed\nREASON: foo.go 有注入",
+		"缺少日志输出":   "无证据\nVERDICT: refuted\nREASON: 实际已有日志",
+	}
+
+	reg := NewAgentRegistry()
+	reg.Register(&mockPromptRunner{
+		mockSimpleAgent: mockSimpleAgent{id: AgentSub, response: reviewResp},
+		refuteResponses: responses,
+	})
+	e := &Engine{
+		agents:          reg,
+		state:           &TaskState{TaskID: "test-review"},
+		config:          EngineConfig{},
+		activatedSkills: make(map[string]bool),
+	}
+	e.roundtableHall = NewRoundtableHall(e)
+
+	e.state.Roundtable = &RoundtableState{
+		Goal:      "测试需求",
+		Phase:     RoundtableReview,
+		Proposals: []string{"方案A"},
+		Members:   []RoundtableMember{{ID: "sec", Name: "安全", Avatar: "🔐", Stance: "安全", Prompt: "安全工程师"}},
+	}
+
+	resp, err := e.roundtableHall.handleReview(context.Background(), "方案1", true)
+	if err != nil {
+		t.Fatalf("handleReview error: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("handleReview returned nil response")
+	}
+	if !strings.Contains(resp.Summary, "证伪检验") {
+		t.Errorf("report should contain refute transparency line;\ngot: %s", resp.Summary)
+	}
+	if !strings.Contains(resp.Summary, "已剔除 1 条") {
+		t.Errorf("report should state 1 refuted finding;\ngot: %s", resp.Summary)
+	}
+	// The refuted finding should no longer appear; the confirmed one should.
+	if strings.Contains(resp.Summary, "缺少日志输出") {
+		t.Errorf("refuted finding should be filtered out of report")
+	}
+	if !strings.Contains(resp.Summary, "SQL注入未校验") {
+		t.Errorf("confirmed finding should remain in report")
 	}
 }
 

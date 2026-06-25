@@ -91,6 +91,33 @@ type Finding struct {
 	Suggestion string `json:"suggestion"` // how to fix it
 }
 
+// RefuteOutcome is the verdict of the refute stage on a single finding.
+type RefuteOutcome string
+
+const (
+	RefuteConfirmed RefuteOutcome = "confirmed" // 代码中找到具体证据,finding 真实
+	RefuteRefuted   RefuteOutcome = "refuted"   // 未能找到证据,判为误报/幻觉
+)
+
+// RefuteResult captures the refute stage's verdict on one finding.
+type RefuteResult struct {
+	Outcome RefuteOutcome `json:"outcome"`
+	Reason  string        `json:"reason,omitempty"` // 证伪/确认的依据
+}
+
+// refuteTarget pairs a finding with its origin (proposal + reviewer) so the
+// refute stage can report results back by stable key.
+type refuteTarget struct {
+	ProposalIndex int
+	MemberID      string
+	Finding       Finding
+}
+
+// findingKey builds a stable key for a finding across the review->refute pipeline.
+func findingKey(proposalIndex int, memberID, content string) string {
+	return fmt.Sprintf("%d:%s:%s", proposalIndex, memberID, content)
+}
+
 // RoundtableCommand represents a parsed /round command.
 type RoundtableCommand struct {
 	Goal string
@@ -506,6 +533,25 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 	}
 	wg.Wait()
 
+	// Refute stage: 用反向偏见 sub-agent 逐条证伪,剔除假阳性 finding。
+	// 失败/解析不出时默认 confirmed(降级保留,不丢真问题)。
+	refutedCount := 0
+	if targets := collectAllFindings(reviews); len(targets) > 0 {
+		refuteMap := h.refuteFindings(ctx, state.Roundtable.Goal, proposals, targets)
+		for i := range reviews {
+			kept := reviews[i].Findings[:0]
+			for _, f := range reviews[i].Findings {
+				key := findingKey(reviews[i].ProposalIndex, reviews[i].MemberID, f.Content)
+				if r, ok := refuteMap[key]; ok && r.Outcome == RefuteRefuted {
+					refutedCount++
+					continue
+				}
+				kept = append(kept, f)
+			}
+			reviews[i].Findings = kept
+		}
+	}
+
 	state.Roundtable.Reviews = reviews
 	state.Roundtable.Phase = RoundtableDone
 
@@ -593,6 +639,15 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 		for _, c := range conflicts {
 			sb.WriteString(c)
 			sb.WriteString("\n")
+		}
+	}
+
+	// Refute stage transparency: report how many false-positive findings were filtered.
+	if refutedCount > 0 {
+		if zh {
+			sb.WriteString(fmt.Sprintf("\n🛡 证伪检验:已剔除 %d 条疑似误报 finding(经独立 sub-agent 复核代码后判定无据)\n", refutedCount))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n🛡 Refute check: filtered %d likely false-positive findings (independently verified against the code)\n", refutedCount))
 		}
 	}
 
@@ -713,6 +768,125 @@ SUMMARY: <一句话总结>`,
 	return review
 }
 
+// collectAllFindings flattens all findings across reviews into refute targets.
+func collectAllFindings(reviews []MemberReview) []refuteTarget {
+	var targets []refuteTarget
+	for _, r := range reviews {
+		for _, f := range r.Findings {
+			targets = append(targets, refuteTarget{
+				ProposalIndex: r.ProposalIndex,
+				MemberID:      r.MemberID,
+				Finding:       f,
+			})
+		}
+	}
+	return targets
+}
+
+// refuteFindings runs the refute stage: for each finding, an independent
+// sub-agent with a refute-biased prompt tries to disprove it. Returns a map
+// keyed by findingKey. On sub-agent error or unparseable output, the finding
+// defaults to RefuteConfirmed (degrade-safe: never drop a real finding).
+//
+// Refute bias (mirrors claude-code AGENTIC_REFUTE_SYSTEM): default assumption
+// is that the finding is a false positive; only concrete code evidence flips
+// it to confirmed. The agent MUST read/grep the code, not judge from the
+// proposal text alone.
+func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, proposals []string, targets []refuteTarget) map[string]RefuteResult {
+	results := make(map[string]RefuteResult, len(targets))
+	if len(targets) == 0 {
+		return results
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t refuteTarget) {
+			defer wg.Done()
+			key := findingKey(t.ProposalIndex, t.MemberID, t.Finding.Content)
+			verdict := h.refuteOne(ctx, goal, proposals, t)
+			mu.Lock()
+			results[key] = verdict
+			mu.Unlock()
+		}(t)
+	}
+	wg.Wait()
+	return results
+}
+
+// refuteOne drives a single refute sub-agent for one finding.
+func (h *RoundtableHall) refuteOne(ctx context.Context, goal string, proposals []string, t refuteTarget) RefuteResult {
+	proposalText := ""
+	if t.ProposalIndex >= 0 && t.ProposalIndex < len(proposals) {
+		proposalText = proposals[t.ProposalIndex]
+	}
+	f := t.Finding
+
+	refuteGoal := fmt.Sprintf(`请证伪以下评审 finding。你的默认立场是：该 finding 是误报/幻觉，除非你在代码中找到具体证据证明它真实存在。
+
+## 原始需求
+%s
+
+## 被评审的方案
+%s
+
+## 待证伪的 finding
+- 内容: %s
+- 严重程度: %s
+- 分类: %s
+
+## 证伪要求
+- 必须使用 read/grep/glob/lsp 工具查看相关代码，不得仅凭方案文本下结论
+- 只有在代码中找到具体证据（确有该问题）才判定 confirmed
+- 找不到证据、或代码显示实际已处理/不适用，判定 refuted
+- 不信任注释中的安全声明，以代码为准
+
+## 输出格式
+在最后输出以下两行用于解析：
+VERDICT: <confirmed|refuted>
+REASON: <一句话依据>`,
+		goal, proposalText, f.Content, f.Severity, f.Category)
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          refuteGoal,
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 50,
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		// Degrade-safe: keep the finding.
+		return RefuteResult{Outcome: RefuteConfirmed, Reason: fmt.Sprintf("refute agent unavailable: %v", err)}
+	}
+
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+
+	var content string
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		if err != nil || result == nil {
+			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
+		}
+		content = result.Summary
+	} else {
+		// Fallback: regular Run.
+		result, err := agent.Run(ctx, handoff)
+		if err != nil || result == nil {
+			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
+		}
+		content = result.Summary
+	}
+
+	return parseRefuteResult(content)
+}
+
 // memberError creates a MemberReview for a failed review and emits completion.
 func (h *RoundtableHall) memberError(memberID string, proposalIndex int, summary string, err error, start time.Time) MemberReview {
 	review := MemberReview{
@@ -802,8 +976,8 @@ func parseMemberReview(memberID string, proposalIndex int, result *HandoffResult
 		Verdict:       parseVerdict(content),
 		Score:         parseScore(content),
 		Summary:       parseSummaryLine(content),
-		Elapsed:  elapsed,
-		Findings: parseFindings(content),
+		Elapsed:       elapsed,
+		Findings:      parseFindings(content),
 	}
 
 	// Fallback: use conclusions from the HandoffResult
@@ -881,6 +1055,48 @@ func clampScore(score int) int {
 		return 100
 	}
 	return score
+}
+
+// parseRefuteResult extracts the refute stage's verdict from a sub-agent result.
+// Format expected at the end of the content:
+//
+//	VERDICT: <confirmed|refuted>
+//	REASON: <一句话依据>
+//
+// Unparseable output defaults to RefuteConfirmed — failure to refute must never
+// silently drop a real finding (宁可保留假阳性,不可漏掉真问题).
+func parseRefuteResult(content string) RefuteResult {
+	result := RefuteResult{Outcome: RefuteConfirmed}
+
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "verdict: refuted") || strings.Contains(lower, "verdict:refuted") {
+		result.Outcome = RefuteRefuted
+	} else if strings.Contains(lower, "verdict: confirmed") || strings.Contains(lower, "verdict:confirmed") {
+		result.Outcome = RefuteConfirmed
+	} else {
+		// Fuzzy: scan the last 500 chars for a bare refuted/confirmed keyword.
+		tail := lower
+		if len(tail) > 500 {
+			tail = tail[len(tail)-500:]
+		}
+		if strings.Contains(tail, "refuted") {
+			result.Outcome = RefuteRefuted
+		} else if !strings.Contains(tail, "confirmed") {
+			// No verdict signal at all -> default confirmed (degrade-safe).
+			return result
+		}
+	}
+
+	// Extract REASON line (case-insensitive).
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "reason:") {
+			result.Reason = strings.TrimSpace(trimmed[len("reason:"):])
+			break
+		}
+	}
+	return result
 }
 
 func parseSummaryLine(content string) string {
