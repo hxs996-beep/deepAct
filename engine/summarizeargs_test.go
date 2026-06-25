@@ -89,7 +89,7 @@ func TestSummarizeArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			got := summarizeArgs(tt.toolName, raw)
+			got := summarizeArgs(tt.toolName, raw, "")
 
 			if tt.want != "" && got != tt.want {
 				t.Fatalf("summarizeArgs(%q) = %q, want %q", tt.toolName, got, tt.want)
@@ -124,7 +124,7 @@ func TestSummarizeArgsNeverEmpty(t *testing.T) {
 	for _, tool := range tools {
 		for _, in := range inputs {
 			raw, _ := json.Marshal(in)
-			got := summarizeArgs(tool, raw)
+			got := summarizeArgs(tool, raw, "")
 			if got == "" {
 				t.Errorf("summarizeArgs(%q, %v) returned empty — UI would show a bare icon", tool, in)
 			}

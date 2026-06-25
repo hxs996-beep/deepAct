@@ -82,7 +82,7 @@ type TDDStage struct {
 
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
-	{Command: "/round", Args: "<需求>", Description: "开启多角色圆桌讨论，探索方案并进行多方评审"},
+	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
 type Model struct {

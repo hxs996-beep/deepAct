@@ -194,26 +194,20 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runToolCallCount = 0
 	e.runErrorCount = 0
 
-	// Roundtable command handling — /round <goal>
-	// Must be checked BEFORE parseSkillCommand, which would otherwise
-	// treat "/round" as an unknown skill name.
-	// No longer intercepts — creates state and lets the main agent
-	// generate proposals in its normal loop.
-	if rc := parseRoundtableCommand(userMsg); rc != nil {
+	// Team command handling — /team <goal>
+	// Uses the roundtable infrastructure to run parallel multi-perspective brainstorming.
+	// Unlike /round, /team immediately runs all members and synthesizes a unified plan.
+	if tc := parseTeamCommand(userMsg); tc != nil {
 		e.state.Roundtable = &RoundtableState{
-			Goal:  rc.Goal,
-			Phase: RoundtableExplore,
+			Goal:  tc.Goal,
+			Phase: RoundtableTeamExplore,
 		}
-		// Replace raw "/round <goal>" with a proper task prompt
-		// so the main agent generates proposals in its normal loop.
-		// Also override userMsg so subsequent skill parsing doesn't
-		// see "/round" and treat it as an unknown skill.
+		// Replace raw "/team <goal>" so the main agent loop sees a proper prompt
 		if len(e.history) > 0 {
-			newContent := fmt.Sprintf(
-				"需求：%s\n\n请生成 2-3 个不同的实现方案。\n\n每个方案请以「## 方案 N: 标题」开头，对每个方案说明：\n1. 方案思路\n2. 涉及的主要文件和改动\n3. 优缺点",
-				rc.Goal)
-			e.history[len(e.history)-1].Content = newContent
-			userMsg = newContent
+			e.history[len(e.history)-1].Content = fmt.Sprintf(
+				"团队协作模式已启动：%s\n\n请等待团队成员完成分析并生成统一方案。",
+				tc.Goal)
+			userMsg = fmt.Sprintf("团队协作模式已启动：%s\n\n请等待团队成员完成分析并生成统一方案。", tc.Goal)
 		}
 	}
 
@@ -321,27 +315,23 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Roundtable command handling — /round <goal> (post-skill check)
-	// Same as above: create state, replace message, fall through.
-	if rc := parseRoundtableCommand(userMsg); rc != nil {
-		if e.state.Roundtable == nil {
-			e.state.Roundtable = &RoundtableState{
-				Goal:  rc.Goal,
-				Phase: RoundtableExplore,
-			}
-			if len(e.history) > 0 {
-				e.history[len(e.history)-1].Content = fmt.Sprintf(
-					"需求：%s\n\n请生成 2-3 个不同的实现方案。\n\n每个方案请以「## 方案 N: 标题」开头，对每个方案说明：\n1. 方案思路\n2. 涉及的主要文件和改动\n3. 优缺点",
-					rc.Goal)
-			}
-		}
-	}
-
-	// Roundtable active — only intercept in Review phase (user triggered "都评一下")
+	// Roundtable Review phase — still supported for programmatic flow
 	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableReview {
 		response, err := e.roundtableHall.Advance(ctx, userMsg)
 		if err != nil {
 			return nil, fmt.Errorf("roundtable advance: %w", err)
+		}
+		if response != nil {
+			return response, nil
+		}
+	}
+
+	// Team Explore phase — run all team members, synthesize, inject plan, then
+	// let the main agent continue with the team's output in context.
+	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableTeamExplore {
+		response, err := e.roundtableHall.handleTeamFlow(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("team flow: %w", err)
 		}
 		if response != nil {
 			return response, nil
@@ -369,7 +359,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.PlanConfirmed = true
 		e.state.ConfirmedScope = true
 
-		diffContent := formatEditPlanDiff(plan, zh)
+		diffContent := formatEditPlanDiff(plan, zh, e.config.WorkDir)
 		e.pendingDiffConfirm = plan
 
 		msg := "✅ 方案已确认，以下是具体修改内容：\n\n" + diffContent
@@ -414,7 +404,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			for _, c := range plan.Calls {
 				if c.Name == HandoffToolName {
 					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", c.Input)})
+						e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", c.Input, e.config.WorkDir)})
 					}
 					result := e.executeHandoff(ctx, c)
 					if e.config.OnProgress != nil {
@@ -428,7 +418,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if len(regularCalls) > 0 {
 				for _, call := range regularCalls {
 					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+						e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 					}
 				}
 				toolResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, regularCalls)
@@ -626,34 +616,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Run() call continues from the correct position. +1 because 'turns' was
 	// not incremented after a Done break — it still points to the completed turn.
 	e.state.TurnNumber = turns + 1
-
-	// Roundtable Explore → extract proposals from the main agent's output
-	// and transition to Review phase (awaiting user "都评一下" command).
-	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableExplore {
-		summary := ""
-		for i := len(e.history) - 1; i >= 0; i-- {
-			if e.history[i].Role == "assistant" && e.history[i].Content != "" {
-				summary = e.history[i].Content
-				break
-			}
-		}
-		summary = stripDSMLTokens(summary)
-		proposals := extractProposals(summary)
-		if len(proposals) == 0 && summary != "" {
-			proposals = []string{summary}
-		}
-		if len(proposals) > 0 {
-			e.state.Roundtable.Proposals = proposals
-			e.state.Roundtable.Phase = RoundtableReview
-			// Append the review prompt to the response
-			if zh {
-				summary = summary + "\n\n💡 输入「都评一下」让所有角色同时评审这些方案，或指定某个方案（如「评方案2」）单独评审。"
-			} else {
-				summary = summary + "\n\n💡 Say \"review all\" to have all roles review these proposals, or specify one (e.g. \"review approach 2\")."
-			}
-			return &EngineResponse{Summary: summary, Stage: StageAct}, nil
-		}
-	}
 
 	// Clean up completed roundtable state. It was available in Block B for this
 	// Run() call's context; subsequent turns don't need stale roundtable data.

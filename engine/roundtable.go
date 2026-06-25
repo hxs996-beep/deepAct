@@ -12,10 +12,12 @@ import (
 type RoundtablePhase int
 
 const (
-	RoundtableIdle    RoundtablePhase = iota
-	RoundtableExplore                 // brainstorming proposals
-	RoundtableReview                  // parallel multi-stance review
-	RoundtableDone                    // finished, awaiting normal flow
+	RoundtableIdle           RoundtablePhase = iota
+	RoundtableExplore                        // brainstorming proposals
+	RoundtableReview                         // parallel multi-stance review
+	RoundtableTeamExplore                    // team brainstorm: members generate ideas in parallel
+	RoundtableTeamSynthesize                 // team synthesis: merge all perspectives into a plan
+	RoundtableDone                           // finished, awaiting normal flow
 )
 
 func (p RoundtablePhase) String() string {
@@ -24,6 +26,10 @@ func (p RoundtablePhase) String() string {
 		return "explore"
 	case RoundtableReview:
 		return "review"
+	case RoundtableTeamExplore:
+		return "team_explore"
+	case RoundtableTeamSynthesize:
+		return "team_synthesize"
 	case RoundtableDone:
 		return "done"
 	default:
@@ -70,6 +76,13 @@ const (
 	VerdictReject      ReviewVerdict = "reject"
 )
 
+// TeamThought is the output from one team member during team exploration.
+type TeamThought struct {
+	MemberID string `json:"member_id"`
+	Content  string `json:"content"`
+	Summary  string `json:"summary"` // extracted from SUMMARY: marker
+}
+
 // Finding is a single issue discovered by a reviewer.
 type Finding struct {
 	Severity   string `json:"severity"`   // critical / high / medium / low
@@ -115,6 +128,298 @@ type RoundtableHall struct {
 
 func NewRoundtableHall(e *Engine) *RoundtableHall {
 	return &RoundtableHall{engine: e}
+}
+
+// handleTeamFlow orchestrates the full agent team workflow:
+// 1. Runs all team members in parallel to generate ideas
+// 2. Synthesizes all perspectives into a unified plan
+// 3. Returns the team output as an EngineResponse
+func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, error) {
+	state := h.engine.state
+	if state.Roundtable == nil {
+		return nil, nil
+	}
+
+	zh := msgIsChinese(state.Roundtable.Goal)
+	goal := state.Roundtable.Goal
+	members := state.Roundtable.Members
+	if len(members) == 0 {
+		members = DefaultRoundtableMembers
+	}
+
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "roundtable_phase",
+			Name:   "team_explore",
+			Detail: fmt.Sprintf("团队协作：%d 位角色并行分析...", len(members)),
+		})
+	}
+
+	// Step 1: Run all members in parallel
+	thoughts := h.runTeamExplore(ctx, goal, members)
+
+	// Step 2: Synthesize all perspectives into a unified plan
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "roundtable_phase",
+			Name:   "team_synthesize",
+			Detail: "合并各角色视角，生成统一方案...",
+		})
+	}
+
+	plan := h.synthesizeTeamOutput(ctx, goal, thoughts)
+
+	// Step 3: Build the output report
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("## 🤝 团队协作方案\n\n")
+	} else {
+		sb.WriteString("## 🤝 Team Collaboration Plan\n\n")
+	}
+
+	// Show each member's contribution
+	if zh {
+		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", goal))
+		sb.WriteString("### 各角色分析\n\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", goal))
+		sb.WriteString("### Member Perspectives\n\n")
+	}
+	for _, t := range thoughts {
+		member := findMember(members, t.MemberID)
+		avatar := ""
+		name := t.MemberID
+		if member != nil {
+			avatar = member.Avatar + " "
+			name = member.Name
+		}
+		sb.WriteString(fmt.Sprintf("%s**%s**\n\n", avatar, name))
+		sb.WriteString(t.Content)
+		sb.WriteString("\n\n---\n\n")
+	}
+
+	// Show the synthesized plan
+	if plan != "" {
+		if zh {
+			sb.WriteString("### 📋 统一方案\n\n")
+		} else {
+			sb.WriteString("### 📋 Unified Plan\n\n")
+		}
+		sb.WriteString(plan)
+		sb.WriteString("\n\n")
+	}
+
+	if zh {
+		sb.WriteString("\n💡 团队协作完成。以上方案已注入上下文，后续交互将基于团队方案执行。")
+	} else {
+		sb.WriteString("\n💡 Team collaboration complete. The plan above has been injected into context for subsequent execution.")
+	}
+
+	// Step 4: Inject the synthesized plan as a pinned message for the main agent
+	if plan != "" {
+		pinned := fmt.Sprintf("[TEAM PLAN: %s]\n\n%s", goal, plan)
+		h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
+	} else {
+		// Fallback: inject all member thoughts
+		var fallback strings.Builder
+		fallback.WriteString(fmt.Sprintf("[TEAM THOUGHTS: %s]\n\n", goal))
+		for _, t := range thoughts {
+			member := findMember(members, t.MemberID)
+			name := t.MemberID
+			if member != nil {
+				name = member.Name
+			}
+			fallback.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
+		}
+		h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, fallback.String())
+	}
+
+	// Step 5: Mark phase as done
+	state.Roundtable.Phase = RoundtableDone
+
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "roundtable_phase",
+			Name:   "team_done",
+			Detail: fmt.Sprintf("%d 位角色协作完成", len(members)),
+		})
+	}
+
+	return &EngineResponse{Summary: sb.String(), Stage: StageAct}, nil
+}
+
+// runTeamExplore runs all team members in parallel to generate ideas from their
+// respective professional perspectives. Returns a slice of TeamThought results.
+func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, members []RoundtableMember) []TeamThought {
+	type task struct {
+		Member RoundtableMember
+		Index  int
+	}
+	var tasks []task
+	for i, m := range members {
+		tasks = append(tasks, task{Member: m, Index: i})
+	}
+
+	results := make([]TeamThought, len(tasks))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, t := range tasks {
+		wg.Add(1)
+		go func(t task) {
+			defer wg.Done()
+			thought := h.runMemberThought(ctx, t.Member, goal)
+			mu.Lock()
+			results[t.Index] = thought
+			mu.Unlock()
+		}(t)
+	}
+	wg.Wait()
+
+	return results
+}
+
+// runMemberThought executes a single team member's exploration as a sub-agent.
+// Each member receives a role-specific prompt to analyze the goal from their perspective.
+func (h *RoundtableHall) runMemberThought(ctx context.Context, member RoundtableMember, goal string) TeamThought {
+	start := time.Now()
+
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "member_start",
+			Name:   member.ID,
+			Detail: member.Name,
+		})
+	}
+
+	taskGoal := buildTeamExploreGoal(goal, member)
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          taskGoal,
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 50,
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		h.emitThoughtDone(member, "分析出错")
+		return TeamThought{
+			MemberID: member.ID,
+			Content:  fmt.Sprintf("分析失败: %v", err),
+			Summary:  "error",
+		}
+	}
+
+	// Type-assert to get the SubAgentRunner for RunWithPrompt
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+	pr, ok := agent.(promptRunner)
+	if !ok {
+		result, err := agent.Run(ctx, handoff)
+		if err != nil {
+			h.emitThoughtDone(member, "分析出错")
+			return TeamThought{MemberID: member.ID, Content: fmt.Sprintf("分析失败: %v", err), Summary: "error"}
+		}
+		summary := extractTeamSummary(result.Summary)
+		h.emitThoughtDone(member, summary)
+		return TeamThought{
+			MemberID: member.ID,
+			Content:  result.Summary,
+			Summary:  summary,
+		}
+	}
+
+	result, err := pr.RunWithPrompt(ctx, handoff, member.Prompt)
+	if err != nil {
+		h.emitThoughtDone(member, "分析出错")
+		return TeamThought{MemberID: member.ID, Content: fmt.Sprintf("分析失败: %v", err), Summary: "error"}
+	}
+
+	summary := extractTeamSummary(result.Summary)
+	h.emitThoughtDone(member, summary)
+
+	elapsed := time.Since(start).Round(time.Millisecond).String()
+	_ = elapsed // available for logging if needed
+
+	return TeamThought{
+		MemberID: member.ID,
+		Content:  result.Summary,
+		Summary:  summary,
+	}
+}
+
+// emitThoughtDone emits a member_done progress event for team exploration.
+func (h *RoundtableHall) emitThoughtDone(member RoundtableMember, summary string) {
+	if h.engine.config.OnProgress == nil {
+		return
+	}
+	status := "✅"
+	if summary == "error" || summary == "" {
+		status = "❌"
+	}
+	h.engine.config.OnProgress(ProgressEvent{
+		Type:   "member_done",
+		Name:   member.ID,
+		Detail: fmt.Sprintf("%s %s %s", member.Avatar, member.Name, status),
+	})
+}
+
+// synthesizeTeamOutput uses the planner agent to merge all member thoughts
+// into a unified, actionable implementation plan.
+func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, thoughts []TeamThought) string {
+	members := h.engine.state.Roundtable.Members
+	if len(members) == 0 {
+		members = DefaultRoundtableMembers
+	}
+
+	// Build the synthesis context from all member thoughts
+	var ctxBuilder strings.Builder
+	ctxBuilder.WriteString(fmt.Sprintf("## 原始需求\n%s\n\n", goal))
+	ctxBuilder.WriteString("## 各角色分析结果\n\n")
+	for _, t := range thoughts {
+		member := findMember(members, t.MemberID)
+		name := t.MemberID
+		if member != nil {
+			name = member.Name
+		}
+		ctxBuilder.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
+	}
+
+	handoff := Handoff{
+		Agent:         AgentPlanner,
+		Goal:          "基于以上各角色的分析结果，生成一个统一的、可执行的实现方案。请综合考虑所有视角，输出一个结构化的方案。",
+		Context:       ctxBuilder.String(),
+		Tools:         []string{"read", "grep", "glob"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 15,
+	}
+
+	agent, err := h.engine.agents.Get(AgentPlanner)
+	if err != nil {
+		// Fallback: concatenate all thoughts
+		var sb strings.Builder
+		for _, t := range thoughts {
+			member := findMember(members, t.MemberID)
+			name := t.MemberID
+			if member != nil {
+				name = member.Name
+			}
+			sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", name, t.Summary))
+		}
+		return sb.String()
+	}
+
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+
+	return result.Summary
 }
 
 // Advance steps through the roundtable phases given the current user message.
@@ -834,4 +1139,78 @@ func parseReviewTarget(userMsg string, numProposals int) []int {
 
 	// Not a review command
 	return nil
+}
+
+// TeamCommand represents a parsed /team command.
+type TeamCommand struct {
+	Goal string
+}
+
+// parseTeamCommand checks if userMsg is a /team command.
+func parseTeamCommand(userMsg string) *TeamCommand {
+	trimmed := strings.TrimSpace(userMsg)
+	if trimmed == "" {
+		return nil
+	}
+	// Handle leading newlines in userMsg: find the first non-empty line
+	lines := strings.SplitN(trimmed, "\n", 2)
+	firstLine := strings.TrimSpace(lines[0])
+	if !strings.HasPrefix(firstLine, "/") {
+		return nil
+	}
+	rest := firstLine[1:]
+	parts := strings.SplitN(rest, " ", 2)
+	if len(parts) == 0 {
+		return nil
+	}
+	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
+	if cmd != "team" {
+		return nil
+	}
+	args := ""
+	if len(parts) > 1 {
+		args = strings.TrimSpace(parts[1])
+	}
+	if args == "" {
+		return nil
+	}
+	return &TeamCommand{Goal: args}
+}
+
+// buildTeamExploreGoal creates the task prompt for a roundtable member during team exploration.
+// Each member receives the shared goal plus their unique role and stance.
+func buildTeamExploreGoal(goal string, member RoundtableMember) string {
+	return fmt.Sprintf(`## 任务
+从你的专业角度分析以下需求，输出你的专业意见和建议。
+
+## 你的角色
+%s - %s
+
+## 需求
+%s
+
+## 输出要求
+- 分析需求的关键点和潜在风险
+- 给出你的专业建议和实现思路
+- 列出你认为需要特别注意的事项
+- 最后用一行 SUMMARY: <总结> 概括你的核心观点`, member.Name, member.Stance, goal)
+}
+
+// extractTeamSummary extracts the SUMMARY: line from a member's output.
+// Returns the summary text or empty string if not found.
+func extractTeamSummary(content string) string {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "summary:") {
+			rest := strings.TrimSpace(trimmed[len("summary:"):])
+			// Also handle "SUMMARY:"
+			if rest == "" {
+				rest = strings.TrimSpace(trimmed[len("SUMMARY:"):])
+			}
+			return rest
+		}
+	}
+	return ""
 }

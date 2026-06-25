@@ -238,7 +238,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 			// Build a rich plan summary for the user
 			zh := e.isChinese
-			planSummary := formatEditPlanSummary(plan, zh)
+			planSummary := formatEditPlanSummary(plan, zh, e.config.WorkDir)
 
 			// Add assistant (with tool_calls) first, then tool messages to close IDs.
 			e.history = append(e.history, assistant)
@@ -398,7 +398,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Execute handoff calls (sub-agents)
 	for _, call := range handoffCalls {
 		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input)})
+			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input, e.config.WorkDir)})
 		}
 		result := e.executeHandoff(ctx, call)
 		if e.config.OnProgress != nil {
@@ -424,7 +424,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if len(readOnlyCalls) > 0 {
 			for _, call := range readOnlyCalls {
 				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 				}
 			}
 			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
@@ -439,7 +439,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// Sequential execute destructive tools (edit/write — show each diff progressively)
 		for _, call := range destructiveCalls {
 			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 			}
 			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
 			if len(results) > 0 {
@@ -614,7 +614,7 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 	}
 }
 
-func summarizeArgs(toolName string, input json.RawMessage) string {
+func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -635,9 +635,9 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 			line, _ := m["line"].(float64)
 			chr, _ := m["character"].(float64)
 			if line > 0 {
-				return fmt.Sprintf("%s %s:%d:%d", op, shortPath(fp), int(line), int(chr))
+				return fmt.Sprintf("%s %s:%d:%d", op, relPath(fp, cwd), int(line), int(chr))
 			}
-			return fmt.Sprintf("%s %s", op, shortPath(fp))
+			return fmt.Sprintf("%s %s", op, relPath(fp, cwd))
 		}
 		return op
 	}
@@ -678,12 +678,12 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 	if toolName == "grep" || toolName == "glob" {
 		if pattern, ok := m["pattern"].(string); ok {
 			if path != "" {
-				return fmt.Sprintf("%s in %s", pattern, shortPath(path))
+				return fmt.Sprintf("%s in %s", pattern, relPath(path, cwd))
 			}
 			return pattern
 		}
 		if path != "" {
-			return shortPath(path)
+			return relPath(path, cwd)
 		}
 		return fallbackSummary(toolName, m)
 	}
@@ -721,7 +721,7 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 	}
 
 	if path != "" {
-		return shortPath(path)
+		return relPath(path, cwd)
 	}
 	// Last resort: never return an empty summary — an empty Detail renders as
 	// a bare icon with no context (e.g. "[*]  ✓"), which tells the user nothing.
@@ -762,11 +762,19 @@ func fallbackSummary(toolName string, m map[string]interface{}) string {
 	return "—"
 }
 
-// shortPath shortens a file path for display — shows last two components.
-func shortPath(p string) string {
+// relPath shortens a file path for display — shows relative path from cwd
+// (project root). Falls back to last-two-components if the path isn't under cwd
+// or if cwd is empty.
+func relPath(p, cwd string) string {
 	if p == "" {
 		return p
 	}
+	if cwd != "" {
+		if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	// Fallback: show last two components.
 	base := filepath.Base(p)
 	dir := filepath.Dir(p)
 	parent := filepath.Base(dir)
@@ -774,6 +782,12 @@ func shortPath(p string) string {
 		return parent + "/" + base
 	}
 	return base
+}
+
+// shortPath shortens a file path for display — shows last two components.
+// Deprecated: use relPath(p, cwd) for project-root-relative display.
+func shortPath(p string) string {
+	return relPath(p, "")
 }
 
 func briefDigest(digest string) string {
@@ -955,7 +969,7 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 // The summary shows the reasoning (WHY) first, then a file list, then asks
 // the user to confirm the APPROACH. On confirmation, formatEditPlanDiff will
 // show the actual diff for detail review before execution.
-func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
+func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 	var sb strings.Builder
 
 	// Step 1: Show the reasoning — WHY these changes are proposed.
@@ -978,7 +992,7 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 		sb.WriteString("\n📋 Planned changes:\n")
 	}
 	for _, edit := range plan.Edits {
-		sb.WriteString(fmt.Sprintf("  • `%s`\n", edit.Path))
+		sb.WriteString(fmt.Sprintf("  • `%s`\n", relPath(edit.Path, cwd)))
 	}
 
 	// Step 3: Ask for confirmation.
@@ -992,7 +1006,7 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 
 // formatEditPlanDiff shows the actual content changes for detail review.
 // Called after the user confirms the approach (file list) but before execution.
-func formatEditPlanDiff(plan *PendingEditPlan, zh bool) string {
+func formatEditPlanDiff(plan *PendingEditPlan, zh bool, cwd string) string {
 	var sb strings.Builder
 
 	if zh {
@@ -1002,10 +1016,11 @@ func formatEditPlanDiff(plan *PendingEditPlan, zh bool) string {
 	}
 
 	for i, edit := range plan.Edits {
+		dispPath := relPath(edit.Path, cwd)
 		if zh {
-			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
+			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, dispPath)
 		} else {
-			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
+			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, dispPath)
 		}
 		if edit.Tool == "edit" {
 			if edit.OldText != "" && edit.NewText != "" {
