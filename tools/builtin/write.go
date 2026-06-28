@@ -26,8 +26,9 @@ func (t *WriteTool) Spec() tools.ToolSpec {
 }
 
 type writeInput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"` // alias for path (DeepSeek sometimes emits this)
+	Content  string `json:"content"`
 }
 
 func (t *WriteTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolResultEnvelope, error) {
@@ -35,7 +36,7 @@ func (t *WriteTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Too
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("invalid input: %v", err)}, err
 	}
-	payload.Path = strings.TrimSpace(payload.Path)
+	payload.Path = strings.TrimSpace(applyFilePathAlias(payload.Path, strings.TrimSpace(payload.FilePath)))
 	if payload.Path == "" {
 		err := errors.New("path is required")
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err

@@ -30,6 +30,7 @@ func (t *EditTool) Spec() tools.ToolSpec {
 
 type editInput struct {
 	Path       string `json:"path"`
+	FilePath   string `json:"file_path"` // alias for path (DeepSeek sometimes emits this)
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all"`
@@ -40,7 +41,7 @@ func (t *EditTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("invalid input: %v", err)}, err
 	}
-	payload.Path = strings.TrimSpace(payload.Path)
+	payload.Path = strings.TrimSpace(applyFilePathAlias(payload.Path, strings.TrimSpace(payload.FilePath)))
 	if payload.Path == "" {
 		err := errors.New("path is required")
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err

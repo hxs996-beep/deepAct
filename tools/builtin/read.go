@@ -44,10 +44,11 @@ func (t *ReadTool) Spec() tools.ToolSpec {
 }
 
 type readInput struct {
-	Path   string `json:"path"`
-	Symbol string `json:"symbol"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"` // alias for path (DeepSeek sometimes emits this)
+	Symbol   string `json:"symbol"`
+	Offset   int    `json:"offset"`
+	Limit    int    `json:"limit"`
 }
 
 func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolResultEnvelope, error) {
@@ -55,7 +56,7 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("invalid input: %v", err)}, err
 	}
-	payload.Path = strings.TrimSpace(payload.Path)
+	payload.Path = strings.TrimSpace(applyFilePathAlias(payload.Path, strings.TrimSpace(payload.FilePath)))
 	if payload.Path == "" {
 		err := errors.New("path is required")
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
