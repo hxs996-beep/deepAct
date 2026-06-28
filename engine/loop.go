@@ -45,6 +45,7 @@ type Engine struct {
 	history    []Message
 	guards     *GuardSystem
 	readLoop   *ReadLoopState
+	errorLoop  *ErrorLoopState
 	evalStore  EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
@@ -139,6 +140,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		history:         make([]Message, 0),
 		guards:          guard,
 		readLoop:        NewReadLoopState(),
+		errorLoop:       NewErrorLoopState(0),
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
@@ -204,6 +206,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	if e.readLoop != nil {
 		e.readLoop.Reset()
+	}
+	if e.errorLoop != nil {
+		e.errorLoop.Reset()
 	}
 	e.matchedSkillsContent = ""
 	e.tddPhase = ""
@@ -691,6 +696,21 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				}
 				// read ops do not feed consecutiveSameOp
 			} else {
+				// Error-streak guard: keys on coarse (tool, path) — without the
+				// content signature — so repeated FAILING calls with slightly
+				// varied args on the same target still accumulate and trip,
+				// unlike the content-hash-based LoopGuard/consecutiveSameOp.
+				if e.errorLoop != nil {
+					action := e.errorLoop.Check(coarseOp(turnResult.LastOp), turnResult.LastOpError)
+					if action.Type == GuardBlock {
+						msg := "检测到重复的工具错误，Agent 在同一操作上反复失败。请提供新的方向或修正参数。"
+						if !zh {
+							msg = "Detected repeated tool errors on the same operation. The agent may be stuck. Please provide new direction or correct the parameters."
+						}
+						loopLog.Printf("error-loop block for %s", turnResult.LastOp)
+						return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "loop_guard", FinishReason: "loop_detected"}, nil
+					}
+				}
 				if turnResult.LastOp == lastOp {
 					consecutiveSameOp++
 					if consecutiveSameOp >= 5 {
@@ -1385,6 +1405,21 @@ func splitReadKey(key string) (path, scope string) {
 		return before, after
 	}
 	return rest, ""
+}
+
+// coarseOp reduces a LastOp key to its "tool:path" form by dropping the
+// content-signature suffix ("#sig") used for edit/write and the scope suffix
+// ("::scope") used for read. ErrorLoopState keys on this coarse form so that
+// repeated failing attempts with varied arguments on the same (tool, path)
+// still accumulate into one streak.
+func coarseOp(op string) string {
+	if before, _, ok := strings.Cut(op, "#"); ok {
+		op = before
+	}
+	if before, _, ok := strings.Cut(op, "::"); ok {
+		op = before
+	}
+	return op
 }
 
 // describeScope turns a scope string into a human-readable phrase.

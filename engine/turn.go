@@ -21,6 +21,10 @@ type TurnResult struct {
 	Questions    []string
 	FinishReason string
 	LastOp       string // "toolName:path" for loop detection, empty if irrelevant
+	// LastOpError is true when the operation recorded in LastOp returned an
+	// error status this turn. Used by ErrorLoopState to detect repeated
+	// failing operations that defeat the content-hash-based loop guards.
+	LastOpError bool
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
@@ -510,6 +514,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	// Execute regular tool calls.
 	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
+	// statusByID records each call's outcome status so the loop-detection block
+	// below can tell whether the first op errored (feeds ErrorLoopState).
+	statusByID := make(map[string]string, len(regularCalls))
 	if len(regularCalls) > 0 {
 		toolsStart := time.Now()
 		var readOnlyCalls, destructiveCalls []ToolCallRequest
@@ -533,6 +540,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				if e.config.OnProgress != nil {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
+				statusByID[result.ToolCallID] = result.Status
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
 		}
@@ -548,6 +556,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				if e.config.OnProgress != nil {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
+				statusByID[result.ToolCallID] = result.Status
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
 		}
@@ -588,6 +597,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else {
 			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
 		}
+		// Record whether this op errored so ErrorLoopState can catch repeated
+		// failures on the same (tool, path) that defeat content-hash guards.
+		result.LastOpError = statusByID[c.ID] == "error"
 		break
 	}
 	return result, nil

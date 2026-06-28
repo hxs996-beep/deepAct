@@ -413,3 +413,61 @@ func (s *ReadLoopState) Reset() {
 	defer s.mu.Unlock()
 	s.counts = make(map[string]int)
 }
+
+// ErrorLoopState tracks consecutive failures of the same coarse operation
+// (keyed "tool:path", WITHOUT content hash) and blocks when a tool keeps
+// erroring on the same file without progress.
+//
+// Rationale: LoopGuard and consecutiveSameOp both incorporate a content
+// signature, so a model that re-issues a failing call with slightly varied
+// arguments (common when confused by an error) defeats them and loops
+// indefinitely. This guard keys only on (tool, path) so varied-but-failing
+// attempts on the same target still accumulate. A success on the same key
+// resets the streak. Read ops are excluded — they have ReadLoopState.
+type ErrorLoopState struct {
+	mu        sync.Mutex
+	counts    map[string]int // key: coarse "tool:path"
+	maxErrors int
+}
+
+func NewErrorLoopState(maxErrors int) *ErrorLoopState {
+	if maxErrors <= 0 {
+		maxErrors = 3
+	}
+	return &ErrorLoopState{counts: make(map[string]int), maxErrors: maxErrors}
+}
+
+// Check records an error or success for opKey. On error, increments the
+// streak and returns GuardBlock once it reaches maxErrors. On success,
+// clears the streak for opKey. opKey is the coarse "tool:path" form.
+func (s *ErrorLoopState) Check(opKey string, isError bool) GuardAction {
+	if s == nil || opKey == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !isError {
+		delete(s.counts, opKey)
+		return GuardAction{Type: GuardAllow}
+	}
+	s.counts[opKey]++
+	if s.counts[opKey] >= s.maxErrors {
+		return GuardAction{
+			Type: GuardBlock,
+			Message: fmt.Sprintf(
+				"Repeated tool errors on %s (%d times). The agent appears stuck on a failing operation; provide new direction.",
+				opKey, s.counts[opKey],
+			),
+		}
+	}
+	return GuardAction{Type: GuardAllow}
+}
+
+func (s *ErrorLoopState) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts = make(map[string]int)
+}
