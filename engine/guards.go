@@ -65,13 +65,9 @@ func extractToolKey(call ToolCallRequest) string {
 	case "write":
 		contentHash = extractWriteContentHash(call.Input)
 	case "read":
-		// Track read by path + scope (symbol/offset/limit) — different sections
-		// of the same file are distinct operations; only truly repeated reads block.
-		scopeHash := extractReadScopeHash(call.Input)
-		if scopeHash == "" {
-			return "read:" + path
-		}
-		return "read:" + path + ":" + scopeHash
+		// Human-readable scope ("", "symbol:Run", "L10-50") — aligned with
+		// LastOp and ReadRecord so all three use one consistent key form.
+		return "read:" + path + "::" + extractReadScope(call.Input)
 	default:
 		// grep/glob/bash etc. — not tracked for loops
 		return ""
@@ -107,26 +103,6 @@ func extractWriteContentHash(input json.RawMessage) string {
 		return ""
 	}
 	h := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(h[:])
-}
-
-// extractReadScopeHash computes a hash of (symbol, offset, limit) from read input.
-// Different reads on the same file (different sections) produce different hashes,
-// preventing false loop detection when exploring code. Returns "" if no scope params.
-func extractReadScopeHash(input json.RawMessage) string {
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	symbol, _ := m["symbol"].(string)
-	offset, _ := m["offset"].(float64)
-	limit, _ := m["limit"].(float64)
-
-	if symbol == "" && offset == 0 && limit == 0 {
-		return "" // bare read with just path, fall back to path-only tracking
-	}
-
-	h := sha256.Sum256([]byte(fmt.Sprintf("symbol=%s|offset=%d|limit=%d", symbol, int(offset), int(limit))))
 	return hex.EncodeToString(h[:])
 }
 
@@ -392,4 +368,48 @@ func isDestructiveTool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// ReadLoopState tracks per-(path,scope) read counts and applies a two-tier
+// policy: 3rd read of the same key → nudge (GuardDiagnose); 4th → block.
+// Different (path, scope) keys are independent. Reset on new user message.
+//
+// Rationale: reading a file can help the LLM self-correct, so the first
+// repeated reads are allowed and the 3rd injects a nudge giving the agent a
+// chance to recover; only if it keeps re-reading the same scope do we block.
+type ReadLoopState struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func NewReadLoopState() *ReadLoopState {
+	return &ReadLoopState{counts: make(map[string]int)}
+}
+
+// Check returns GuardAllow (1st-2nd), GuardDiagnose (3rd, nudge), or
+// GuardBlock (4th+). key is the scope-aware read key "read:path::scope".
+func (s *ReadLoopState) Check(key string) GuardAction {
+	if s == nil || key == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts[key]++
+	switch s.counts[key] {
+	case 1, 2:
+		return GuardAction{Type: GuardAllow}
+	case 3:
+		return GuardAction{Type: GuardDiagnose, Message: "read-loop-nudge"}
+	default: // 4+
+		return GuardAction{Type: GuardBlock, Message: "read-loop-block"}
+	}
+}
+
+func (s *ReadLoopState) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts = make(map[string]int)
 }

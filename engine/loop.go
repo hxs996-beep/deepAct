@@ -44,6 +44,7 @@ type Engine struct {
 	state      *TaskState
 	history    []Message
 	guards     *GuardSystem
+	readLoop   *ReadLoopState
 	evalStore  EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
@@ -137,6 +138,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		state:           &TaskState{TaskID: cfg.SessionID},
 		history:         make([]Message, 0),
 		guards:          guard,
+		readLoop:        NewReadLoopState(),
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
@@ -199,6 +201,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Reset per-Run state
 	if e.guards.loop != nil {
 		e.guards.loop.Reset()
+	}
+	if e.readLoop != nil {
+		e.readLoop.Reset()
 	}
 	e.matchedSkillsContent = ""
 	e.tddPhase = ""
@@ -659,24 +664,47 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			break
 		}
 
-		// Detect loops: same tool+path+content repeated 5+ times.
-		// Content signature is derived from content-bearing fields (old_string,
-		// pattern, content, etc.), so different edits on the same file or different
-		// reads of the same file are treated as distinct operations.
+		// Loop detection: read ops go through ReadLoopState (two-tier:
+		// 3rd same (path,scope) → nudge, 4th → block). Non-read ops keep the
+		// original consecutiveSameOp guard (5 consecutive same first-calls →
+		// block), which covers tools LoopGuard doesn't track (grep/bash/etc.).
 		if turnResult.LastOp != "" {
-			if turnResult.LastOp == lastOp {
-				consecutiveSameOp++
-				if consecutiveSameOp >= 5 {
-					msg := "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
-					if !zh {
-						msg = "Detected repeated operation loop. The agent may be stuck. Please provide new direction."
-					}
-					return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "loop_guard", FinishReason: "loop_detected"}, nil
+			if strings.HasPrefix(turnResult.LastOp, "read:") {
+				action := e.readLoop.Check(turnResult.LastOp)
+				switch action.Type {
+				case GuardDiagnose:
+					nudge := buildReadLoopNudge(turnResult.LastOp, zh)
+					e.history = append(e.history, Message{
+						Role:    "user",
+						Content: nudge,
+					})
+					loopLog.Printf("read-loop nudge injected for %s", turnResult.LastOp)
+				case GuardBlock:
+					msg := buildReadLoopBlockMsg(turnResult.LastOp, zh)
+					return &EngineResponse{
+						Summary:      msg,
+						Stage:        StageAct,
+						Blocked:      true,
+						BlockedBy:    "loop_guard",
+						FinishReason: "loop_detected",
+					}, nil
 				}
+				// read ops do not feed consecutiveSameOp
 			} else {
-				consecutiveSameOp = 0
+				if turnResult.LastOp == lastOp {
+					consecutiveSameOp++
+					if consecutiveSameOp >= 5 {
+						msg := "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
+						if !zh {
+							msg = "Detected repeated operation loop. The agent may be stuck. Please provide new direction."
+						}
+						return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "loop_guard", FinishReason: "loop_detected"}, nil
+					}
+				} else {
+					consecutiveSameOp = 0
+				}
+				lastOp = turnResult.LastOp
 			}
-			lastOp = turnResult.LastOp
 		}
 		turns++
 	}
@@ -1317,4 +1345,65 @@ func (e *Engine) clearSessionState() {
 	e.deactivateSkill()
 	e.activatedSkills = make(map[string]bool)
 	e.lastActivatedSkill = ""
+}
+
+// buildReadLoopNudge builds the nudge message for the 3rd repeated read of the
+// same (path, scope). key has form "read:path::scope".
+func buildReadLoopNudge(key string, zh bool) string {
+	path, scope := splitReadKey(key)
+	scopeDesc := describeScope(scope, zh)
+	if zh {
+		return fmt.Sprintf("[LOOP NUDGE] 你已 3 次读取 %s 的 %s，内容已在对话历史中。"+
+			"不要再读取它。请直接基于已有内容产出分析结论；如需新的具体信息，改用 lsp"+
+			"（hover/goToDefinition/workspaceSymbol）或读取该文件尚未读过的区段。", path, scopeDesc)
+	}
+	return fmt.Sprintf("[LOOP NUDGE] You have read %s (%s) 3 times; its content is already in conversation history. "+
+		"Do not read it again. Produce your analysis from existing content; for new specifics use lsp "+
+		"(hover/goToDefinition/workspaceSymbol) or read an un-read section of the file.", path, scopeDesc)
+}
+
+// buildReadLoopBlockMsg builds the block message for the 4th repeated read.
+func buildReadLoopBlockMsg(key string, zh bool) string {
+	path, scope := splitReadKey(key)
+	scopeDesc := describeScope(scope, zh)
+	if zh {
+		return fmt.Sprintf("检测到重复读取循环：已反复读取 %s（%s），nudge 后仍未改善。"+
+			"Agent 可能卡住了。请澄清：是想查看哪段未读内容，还是基于已有内容直接给出结论？", path, scopeDesc)
+	}
+	return fmt.Sprintf("Repeated read loop detected: %s (%s) has been read repeatedly despite a nudge. "+
+		"The agent may be stuck. Please clarify: do you want to view an un-read section, or conclude from existing content?", path, scopeDesc)
+}
+
+// splitReadKey splits "read:path::scope" into (path, scope).
+func splitReadKey(key string) (path, scope string) {
+	const prefix = "read:"
+	if !strings.HasPrefix(key, prefix) {
+		return key, ""
+	}
+	rest := key[len(prefix):]
+	if before, after, ok := strings.Cut(rest, "::"); ok {
+		return before, after
+	}
+	return rest, ""
+}
+
+// describeScope turns a scope string into a human-readable phrase.
+func describeScope(scope string, zh bool) string {
+	if scope == "" {
+		if zh {
+			return "整个文件"
+		}
+		return "entire file"
+	}
+	if strings.HasPrefix(scope, "symbol:") {
+		name := scope[len("symbol:"):]
+		if zh {
+			return name + " 方法"
+		}
+		return name + " symbol"
+	}
+	if zh {
+		return "第 " + scope + " 行区间"
+	}
+	return "lines " + scope
 }

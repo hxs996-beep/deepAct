@@ -187,38 +187,6 @@ func TestExtractWriteContentHash(t *testing.T) {
 	}
 }
 
-func TestExtractReadScopeHash(t *testing.T) {
-	// No scope params → empty
-	h1 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go"}`))
-	if h1 != "" {
-		t.Errorf("no scope params should return empty, got %s", h1)
-	}
-	// Symbol produces deterministic hash
-	h2 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestFoo"}`))
-	if h2 == "" {
-		t.Error("expected non-empty hash for symbol")
-	}
-	h3 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestFoo"}`))
-	if h2 != h3 {
-		t.Error("hash should be deterministic")
-	}
-	// Different symbols produce different hashes
-	h4 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestBar"}`))
-	if h2 == h4 {
-		t.Error("different symbols should produce different hashes")
-	}
-	// Offset produces hash
-	h5 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","offset":10}`))
-	if h5 == "" {
-		t.Error("expected non-empty hash for offset")
-	}
-	// Invalid json → empty
-	h6 := extractReadScopeHash(json.RawMessage(`bad`))
-	if h6 != "" {
-		t.Errorf("expected empty for invalid json, got %s", h6)
-	}
-}
-
 func TestExtractToolKey(t *testing.T) {
 	// edit tool produces key with hash
 	editCall := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
@@ -230,16 +198,22 @@ func TestExtractToolKey(t *testing.T) {
 		t.Error("edit tool key should include content hash")
 	}
 
-	// read no scope → path-only key
+	// read no scope → "read:path::"
 	readNoScope := extractToolKey(makeToolCall("read", `{"path":"foo.go"}`))
-	if readNoScope != "read:foo.go" {
-		t.Errorf("read no scope should be 'read:foo.go', got %q", readNoScope)
+	if readNoScope != "read:foo.go::" {
+		t.Errorf("read no scope should be 'read:foo.go::', got %q", readNoScope)
 	}
 
-	// read with symbol → includes hash
+	// read with symbol → "read:path::symbol:Name"
 	readSym := extractToolKey(makeToolCall("read", `{"path":"foo.go","symbol":"TestFoo"}`))
-	if !strings.HasPrefix(readSym, "read:foo.go:") {
-		t.Errorf("read with symbol should include hash, got %q", readSym)
+	if readSym != "read:foo.go::symbol:TestFoo" {
+		t.Errorf("read with symbol should be 'read:foo.go::symbol:TestFoo', got %q", readSym)
+	}
+
+	// read with offset/limit → "read:path::L<off>-<limit>"
+	readRange := extractToolKey(makeToolCall("read", `{"path":"foo.go","offset":10,"limit":50}`))
+	if readRange != "read:foo.go::L10-50" {
+		t.Errorf("read with offset/limit should be 'read:foo.go::L10-50', got %q", readRange)
 	}
 
 	// grep not tracked

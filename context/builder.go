@@ -125,6 +125,11 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		messages = append(messages, engine.ModelMessage{Role: "system", Content: reminder})
 	}
 
+	// Read-history hint: warn the agent against re-reading files already read.
+	if hint := BuildReadHistoryHint(state.ReadHistory, a.userLang); hint != "" {
+		messages = append(messages, engine.ModelMessage{Role: "system", Content: hint})
+	}
+
 	return messages
 }
 
@@ -205,12 +210,14 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		TurnNumber       int                       `json:"turn_number"`
 		ConsecutiveFails int                       `json:"consecutive_failures"`
 		EditScopeFiles   int                       `json:"edit_scope_files"`
+		ReadHistory      []readRecordVolatile      `json:"read_history,omitempty"`
 		Roundtable       *roundtableVolatile       `json:"roundtable,omitempty"`
 	}{
 		ActiveSkillName:  state.ActiveSkillName,
 		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
+		ReadHistory:      flattenReadHistory(state.ReadHistory),
 		Roundtable:       flattenRoundtable(state.Roundtable),
 	}
 	data, err := json.Marshal(volatile)
@@ -218,6 +225,92 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		return ""
 	}
 	return string(data)
+}
+
+// readRecordVolatile is the compact form of a ReadRecord injected into Block B.
+type readRecordVolatile struct {
+	Path  string `json:"path"`
+	Scope string `json:"scope,omitempty"`
+}
+
+// flattenReadHistory keeps the last 20 read records to bound prompt size; the
+// most recent reads matter most for the agent's current reasoning.
+func flattenReadHistory(records []engine.ReadRecord) []readRecordVolatile {
+	if len(records) == 0 {
+		return nil
+	}
+	start := 0
+	if len(records) > 20 {
+		start = len(records) - 20
+	}
+	out := make([]readRecordVolatile, 0, len(records)-start)
+	for _, r := range records[start:] {
+		out = append(out, readRecordVolatile{Path: r.Path, Scope: r.Scope})
+	}
+	return out
+}
+
+// BuildReadHistoryHint renders a system message listing already-read files
+// (aggregated by path) so the agent avoids re-reading them. Returns "" when
+// there is nothing to show.
+func BuildReadHistoryHint(records []engine.ReadRecord, lang string) string {
+	if len(records) == 0 {
+		return ""
+	}
+	zh := lang == "zh" || lang == "chinese"
+	byPath := make(map[string][]string)
+	order := []string{}
+	for _, r := range records {
+		if _, ok := byPath[r.Path]; !ok {
+			order = append(order, r.Path)
+		}
+		byPath[r.Path] = append(byPath[r.Path], describeScopeForHint(r.Scope, zh))
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("已读文件（内容已在对话历史中，不要重读）：\n")
+	} else {
+		sb.WriteString("Files already read (content is in conversation history — do not re-read):\n")
+	}
+	for _, p := range order {
+		seen := map[string]bool{}
+		uniq := []string{}
+		for _, s := range byPath[p] {
+			if !seen[s] {
+				seen[s] = true
+				uniq = append(uniq, s)
+			}
+		}
+		joined := strings.Join(uniq, ", ")
+		if zh {
+			sb.WriteString("- " + p + "（" + joined + "）\n")
+		} else {
+			sb.WriteString("- " + p + " (" + joined + ")\n")
+		}
+	}
+	if zh {
+		sb.WriteString("需要新信息时：用 lsp 或读取该文件尚未读过的区段。")
+	} else {
+		sb.WriteString("For new info: use lsp or read an un-read section of the file.")
+	}
+	return sb.String()
+}
+
+// describeScopeForHint renders a scope string for the read-history hint.
+func describeScopeForHint(scope string, zh bool) string {
+	if scope == "" {
+		if zh {
+			return "全文"
+		}
+		return "full"
+	}
+	if strings.HasPrefix(scope, "symbol:") {
+		return scope
+	}
+	if zh {
+		return "行 " + scope
+	}
+	return "L " + scope
 }
 
 // roundtableVolatile is a compact representation of roundtable results
