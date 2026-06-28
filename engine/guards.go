@@ -130,6 +130,28 @@ func extractReadScopeHash(input json.RawMessage) string {
 	return hex.EncodeToString(h[:])
 }
 
+// readMultiTargetView is engine's view of a read_multi target (mirrors the
+// tools/builtin readMultiTarget struct, kept unexported and local to avoid a
+// tools→engine import).
+type readMultiTargetView struct {
+	Path   string `json:"path"`
+	Symbol string `json:"symbol"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
+}
+
+// parseReadMultiTargets parses the targets array from a read_multi tool call's
+// input. Returns nil on error.
+func parseReadMultiTargets(input json.RawMessage) []readMultiTargetView {
+	var m struct {
+		Targets []readMultiTargetView `json:"targets"`
+	}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return nil
+	}
+	return m.Targets
+}
+
 // Check inspects a tool call for loop behavior. Returns GuardBlock if the
 // same (tool, path, contentHash) tuple has been repeated too many times.
 // Reset clears all loop tracking state (e.g., on new user message).
@@ -197,10 +219,20 @@ type GuardSystem struct {
 	loop  *LoopGuard
 }
 
+// SetLanguage propagates the session-locked language flag to the scope guard
+// for bilingual dangerous-command prompts.
+func (g *GuardSystem) SetLanguage(zh bool) {
+	if g == nil || g.scope == nil {
+		return
+	}
+	g.scope.SetLanguage(zh)
+}
+
 type ScopeGuard struct {
 	autoConfirm        bool
 	dangerousPending   string // normalized command pending user confirmation
 	dangerousConfirmed map[string]bool
+	isChinese          bool // session-locked language flag for bilingual prompts
 }
 
 func NewScopeGuard(autoConfirm bool) *ScopeGuard {
@@ -208,6 +240,11 @@ func NewScopeGuard(autoConfirm bool) *ScopeGuard {
 		autoConfirm:        autoConfirm,
 		dangerousConfirmed: make(map[string]bool),
 	}
+}
+
+// SetLanguage sets the session-locked language flag used for bilingual guard messages.
+func (g *ScopeGuard) SetLanguage(zh bool) {
+	g.isChinese = zh
 }
 
 // ConfirmDangerous marks a pending dangerous command as confirmed by the user.
@@ -337,7 +374,10 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 			g.dangerousPending = normalized
 			return GuardAction{
 				Type:    GuardAskUser,
-				Message: fmt.Sprintf("⚠️ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
+				Message: pickPrompt(g.isChinese,
+					fmt.Sprintf("⚠️ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", dp.reason, cmd),
+					fmt.Sprintf("⚠️ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
+				),
 			}
 		}
 	}
