@@ -213,6 +213,19 @@ type TaskState struct {
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
 	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
+
+	// ReadHistory records each file read this session (path + scope) so the
+	// prompt can warn the agent against re-reading, and the loop guard can count
+	// repeated reads of the same (path, scope). Cleared on new user message.
+	ReadHistory []ReadRecord `json:"read_history"`
+}
+
+// ReadRecord captures a single read operation for loop-prevention and prompt
+// injection. Scope is a human-readable string: "" for a full-file read,
+// "symbol:Run" for a symbol read, "L10-50" for an offset/limit range.
+type ReadRecord struct {
+	Path  string `json:"path"`
+	Scope string `json:"scope"`
 }
 
 type FileCollapse struct {

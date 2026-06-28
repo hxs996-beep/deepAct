@@ -471,16 +471,17 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Record the first operation for loop detection.
 	// For destructive tools (edit/write), include content hash so different edits
 	// on the same file are recognized as distinct operations.
-	// For read operations, use only tool:path — content hash is unreliable (read
-	// may lack content-bearing fields or vary in offset/limit/symbol), and repeatedly
-	// reading the same file is itself a sign of a stuck agent.
+	// For read operations, include a human-readable scope (symbol/offset/limit) so
+	// reading different sections of the same file produces distinct LastOps and is
+	// not counted as a loop. Repeated reads of the SAME scope are still caught.
+	// Key form is aligned with LoopGuard's read key ("read:path::scope").
 	for _, c := range regularCalls {
 		path := extractPathFromArgs(c.Input)
 		if path == "" {
 			continue
 		}
 		if c.Name == "read" {
-			result.LastOp = c.Name + ":" + path
+			result.LastOp = c.Name + ":" + path + "::" + extractReadScope(c.Input)
 		} else {
 			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
 		}
@@ -727,6 +728,10 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 			addToWorkingSet(e.state, path, "modified")
 		case "read":
 			addToWorkingSet(e.state, path, "read")
+			e.state.ReadHistory = append(e.state.ReadHistory, ReadRecord{
+				Path:  path,
+				Scope: extractReadScope(call.Input),
+			})
 		case "grep", "glob":
 			if i < len(results) && results[i].Status == "ok" {
 				addToWorkingSet(e.state, path, "searched")
@@ -760,6 +765,37 @@ func extractPathFromArgs(input json.RawMessage) string {
 		return p
 	}
 	return ""
+}
+
+// extractReadScope derives a human-readable scope string from a read tool call's
+// arguments: "" for a bare full-file read, "symbol:<name>" for a symbol read,
+// "L<offset>-<limit>" for an offset/limit range (offset defaults to 1 when only
+// limit is given; limit is omitted when only offset is given). Used as the scope
+// component of the loop-detection key and the ReadRecord.
+func extractReadScope(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	if symbol, ok := m["symbol"].(string); ok && symbol != "" {
+		return "symbol:" + symbol
+	}
+	offset, _ := m["offset"].(float64)
+	limit, _ := m["limit"].(float64)
+	if int(offset) == 0 && int(limit) == 0 {
+		return ""
+	}
+	start := int(offset)
+	if start == 0 {
+		start = 1
+	}
+	if int(limit) == 0 {
+		return fmt.Sprintf("L%d-", start)
+	}
+	return fmt.Sprintf("L%d-%d", start, int(limit))
 }
 
 // contentSignature returns a short hash of the tool call's input arguments,

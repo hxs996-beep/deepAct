@@ -11,22 +11,17 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/deepact/deepact/tools"
 )
 
 const (
-	maxReadBytes    = 1 << 20 // 1MB safety cap — refuse to read larger files
-	maxReadTokens   = 25000   // max tokens to return inline; beyond this → truncate with offset/limit hint
-	charsPerToken   = 4       // rough estimate: 4 chars ≈ 1 token for code
-
-	fileUnchangedStub = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
+	maxReadBytes  = 1 << 20 // 1MB safety cap — refuse to read larger files
+	maxReadTokens = 25000   // max tokens to return inline; beyond this → truncate with offset/limit hint
+	charsPerToken = 4       // rough estimate: 4 chars ≈ 1 token for code
 )
 
-type ReadTool struct {
-	mtimeCache sync.Map // absPath → mtimeMs (int64)
-}
+type ReadTool struct{}
 
 func NewReadTool() *ReadTool {
 	return &ReadTool{}
@@ -81,11 +76,6 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))}, nil
 	}
 
-	// Mtime cache: skip stub return on cache hit — returning a stub instead of content
-	// creates a loop where the agent reads the same file, gets a stub, doesn't know
-	// what to do, and reads again. LoopGuard at the engine level handles read loops.
-	// Update cache now so repeated reads within the same mtime are not penalized.
-
 	file, err := os.Open(safePath)
 	if err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("open file: %v", err)}, err
@@ -127,11 +117,6 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	content := builder.String()
 	if content == "" {
 		content = "(empty)"
-	}
-
-	// Update mtime cache only for full reads (no offset/limit)
-	if payload.Offset == 0 && payload.Limit == 0 {
-		t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
 	}
 
 	const lspHint = "\n\n---\nNeed to find a symbol definition, type info, or references? Use the `lsp` tool instead of reading the whole file (e.g., `lsp operation=hover file_path=<path> line=<line> character=<char>`)."
