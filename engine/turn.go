@@ -72,7 +72,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		Model:     modelName,
 		Messages:  messages,
 		Tools:     e.toolSpecsWithHandoff(),
-		MaxTokens: 8192,
+		MaxTokens: e.maxOutputTokens(),
 	}
 	turnLog.Printf("turn %d start: model=%s msgs=%d ctx_build=%s", e.state.TurnNumber, modelName, len(messages), ctxBuildDur)
 	streamStart := time.Now()
@@ -610,6 +610,15 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 // which is required for DeepSeek's per-model prefix cache to work.
 func (e *Engine) selectModel() string {
 	return e.config.ModelName
+}
+
+// maxOutputTokens returns the per-turn completion cap, falling back to the
+// default when the config doesn't override it.
+func (e *Engine) maxOutputTokens() int {
+	if e.config.MaxOutputTokens > 0 {
+		return e.config.MaxOutputTokens
+	}
+	return DefaultMaxOutputTokens
 }
 
 // usageOrZero safely extracts an int field from a possibly-nil *ModelUsage,

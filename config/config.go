@@ -37,6 +37,11 @@ type routingConfig struct {
 
 type contextConfig struct {
 	MaxBudgetTokens int `toml:"max_budget_tokens"`
+	// MaxOutputTokens caps the LLM completion length per turn (max_tokens).
+	// 0 = use the engine default. DeepSeek's 1M context window supports large
+	// completions; a generous budget lets the model emit full code edits in one
+	// turn instead of being cut off and forced to continue piecemeal.
+	MaxOutputTokens int `toml:"max_output_tokens"`
 }
 
 type guardsConfig struct {
@@ -174,6 +179,9 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens
+	}
+	if f.Context.MaxOutputTokens > 0 {
+		cfg.MaxOutputTokens = f.Context.MaxOutputTokens
 	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold

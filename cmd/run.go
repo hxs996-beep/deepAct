@@ -203,6 +203,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		runner.SetFlashModel(config.FlashModelName)
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
+	runner.SetMaxOutputTokens(config.MaxOutputTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
 

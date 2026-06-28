@@ -26,6 +26,7 @@ type SubAgentRunner struct {
 	modelName        string // default (Pro) model
 	flashModelName   string // Flash model for cheaper agents
 	maxContextTokens int    // context window limit; 0 = use defaultSubAgentContext
+	maxOutputTokens  int    // per-turn completion cap; 0 = use DefaultMaxOutputTokens
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
 	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
@@ -70,6 +71,18 @@ func (r *SubAgentRunner) SetSessionID(id string) {
 // SetMaxContextTokens overrides the default context window limit for this runner.
 func (r *SubAgentRunner) SetMaxContextTokens(tokens int) {
 	r.maxContextTokens = tokens
+}
+
+// SetMaxOutputTokens overrides the per-turn completion cap for sub-agents.
+func (r *SubAgentRunner) SetMaxOutputTokens(tokens int) {
+	r.maxOutputTokens = tokens
+}
+
+func (r *SubAgentRunner) outputTokenCap() int {
+	if r.maxOutputTokens > 0 {
+		return r.maxOutputTokens
+	}
+	return DefaultMaxOutputTokens
 }
 
 // SetCompressor sets the CompressionOrchestrator for layered compression (same as main agent).
@@ -214,7 +227,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Model:           modelName,
 			Messages:        history,
 			Tools:           filteredTools,
-			MaxTokens:       4096,
+			MaxTokens:       r.outputTokenCap(),
 			ThinkingEnabled: false, // sub-agents do structured tasks, don't need open-ended thinking
 		}
 

@@ -17,6 +17,16 @@ import (
 
 var loopLog = dlog.New("[loop] ")
 
+const (
+	// DefaultMaxOutputTokens is the per-turn LLM completion cap when the config
+	// doesn't override it. DeepSeek's 1M context window supports large
+	// completions, so 128K lets the model emit full code edits in one turn
+	// rather than being cut off and forced to continue piecemeal (the old 8K
+	// cap was set to save tokens / push the model to answer early, but it
+	// truncated real code output).
+	DefaultMaxOutputTokens = 128 * 1024
+)
+
 type EngineDeps struct {
 	Model       ModelClient
 	Tools       ToolExecutor
