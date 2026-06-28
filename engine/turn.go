@@ -588,7 +588,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// not counted as a loop. Repeated reads of the SAME scope are still caught.
 	// Key form is aligned with LoopGuard's read key ("read:path::scope").
 	for _, c := range regularCalls {
-		path := extractPathFromArgs(c.Input)
+		path := extractPathFromArgs(c.Input, e.config.WorkDir)
 		if path == "" {
 			continue
 		}
@@ -958,7 +958,7 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 			}
 			continue
 		}
-		path := extractPathFromArgs(call.Input)
+		path := extractPathFromArgs(call.Input, e.config.WorkDir)
 		if path == "" {
 			continue
 		}
@@ -1031,8 +1031,11 @@ func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	}
 }
 
-// extractPathFromArgs extracts a file path from tool call arguments.
-func extractPathFromArgs(input json.RawMessage) string {
+// extractPathFromArgs extracts a file path from tool call arguments and
+// normalizes it against workDir so the same physical file yields one path
+// regardless of how the model addressed it (relative/absolute/file_path).
+// Used for loop-detection keys and file-set tracking.
+func extractPathFromArgs(input json.RawMessage, workDir string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -1041,13 +1044,13 @@ func extractPathFromArgs(input json.RawMessage) string {
 		return ""
 	}
 	if p, ok := m["path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["file_path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["filePath"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	return ""
 }
@@ -1339,7 +1342,7 @@ func (e *Engine) inferTDDPhase(calls []ToolCallRequest, results []ToolResult) {
 
 		switch call.Name {
 		case "write", "edit":
-			path := extractPathFromArgs(call.Input)
+			path := extractPathFromArgs(call.Input, e.config.WorkDir)
 			if isTestFile(path) {
 				newPhase = "red"
 				newDetail = "编写测试..."

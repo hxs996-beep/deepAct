@@ -123,7 +123,7 @@ type PendingEditAction struct {
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopGuard(6), // block after 6 repeats of same (tool, path)
+		loop:  NewLoopGuard(cfg.WorkDir, 6), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
 		model:      deps.Model,

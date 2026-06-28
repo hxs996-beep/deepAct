@@ -335,7 +335,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}
 
 		// Per-file loop detection: same tool+file repeated N consecutive turns → block
-		opKey := firstOpKey(calls)
+		opKey := firstOpKey(calls, r.workDir)
 		if opKey != "" {
 			if opKey == lastOpKey {
 				sameOpCount++
@@ -398,12 +398,12 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 // summarizeHistory extracts the last meaningful assistant output from history
 // when the sub-agent runs out of iterations. Falls back to listing tool outputs.
 // firstOpKey extracts "toolName:path" from the first path-bearing call for loop detection.
-func firstOpKey(calls []ToolCallRequest) string {
+func firstOpKey(calls []ToolCallRequest, workDir string) string {
 	for _, c := range calls {
 		if c.Name != "edit" && c.Name != "write" {
 			continue
 		}
-		if path := extractPathFromArgs(c.Input); path != "" {
+		if path := extractPathFromArgs(c.Input, workDir); path != "" {
 			return c.Name + ":" + path
 		}
 	}

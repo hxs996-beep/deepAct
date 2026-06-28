@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -31,20 +32,39 @@ type LoopGuard struct {
 	mu         sync.Mutex
 	entries    map[string]*loopEntry // key: "toolName:path:contentHash"
 	maxRepeats int
+	workDir    string // base for normalizing relative paths in keys
 }
 
 type loopEntry struct {
 	count int
 }
 
-func NewLoopGuard(maxRepeats int) *LoopGuard {
+func NewLoopGuard(workDir string, maxRepeats int) *LoopGuard {
 	if maxRepeats <= 0 {
 		maxRepeats = 4
 	}
 	return &LoopGuard{
 		entries:    make(map[string]*loopEntry),
 		maxRepeats: maxRepeats,
+		workDir:    workDir,
 	}
+}
+
+// normalizePath canonicalizes a file path so the same physical file yields one
+// loop-detection key regardless of how the model addressed it (relative path,
+// "./" prefix, absolute path, or via the file_path alias). Relative paths are
+// resolved against workDir; without a workDir they are only Cleaned. This
+// prevents the model from splitting its repeat count across path forms and
+// never tripping the guard — the root cause of repeated reads.
+func normalizePath(p, workDir string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) || workDir == "" {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(filepath.Join(workDir, p))
 }
 
 // extractToolKey extracts a unique key from a tool call for loop detection.
@@ -52,8 +72,8 @@ func NewLoopGuard(maxRepeats int) *LoopGuard {
 // exploratory tools. Content hash ensures that different edits on the same
 // file (different old_string→new_string) are treated as distinct operations,
 // preventing false loop detection when modifying multiple locations.
-func extractToolKey(call ToolCallRequest) string {
-	path := extractPathField(call.Input)
+func extractToolKey(call ToolCallRequest, workDir string) string {
+	path := extractPathField(call.Input, workDir)
 	if path == "" {
 		return ""
 	}
@@ -140,7 +160,7 @@ func (g *LoopGuard) Reset() {
 	g.entries = make(map[string]*loopEntry)
 }
 
-func extractPathField(input json.RawMessage) string {
+func extractPathField(input json.RawMessage, workDir string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -149,10 +169,10 @@ func extractPathField(input json.RawMessage) string {
 		return ""
 	}
 	if p, ok := m["path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["file_path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	return ""
 }
@@ -162,7 +182,7 @@ func (g *LoopGuard) Check(call ToolCallRequest) GuardAction {
 		return GuardAction{Type: GuardAllow}
 	}
 
-	k := extractToolKey(call)
+	k := extractToolKey(call, g.workDir)
 	if k == "" {
 		return GuardAction{Type: GuardAllow}
 	}
