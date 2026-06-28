@@ -107,7 +107,7 @@ ERROR: symbol not found
 <!-- read_multi targets: engine/roundtable.go::symbol:Run | engine/guards.go::L55-85 | context/prompt.go:: | tools/builtin/read.go::symbol:missingSym -->
 ```
 
-`engine/turn.go` 的 `updateTaskStateFromTools` 中：若 `ToolName == "read_multi"`，解析该注释行，为每个 target 追加一条 `ReadRecord{Path, Scope}`。scope 串口径与单读完全一致：裸读 `""`、`symbol:X`、`L a-b`。
+`engine/turn.go` 的 `updateTaskStateFromTools` 中：若 `ToolName == "read_multi"`，解析该注释行，为每个 target 追加一条 `ReadRecord{Path, Scope}`。scope 串口径与单读完全一致：裸读 `""`、`symbol:X`、`L a-b`。**降级**：若注释行缺失或格式不符（旧版结果 / 手工构造），静默跳过 ReadHistory 记账，不报错——记账是 best-effort，缺失最坏导致重复读，由 loop-guard 兜底拦截。
 
 > 备选方案（不采用）：在 `ToolResultEnvelope` 增加 `StructuredMeta` 字段透传 sub-target 列表——更干净但跨层改 `tools`/`engine` 接口，改动面大。
 
