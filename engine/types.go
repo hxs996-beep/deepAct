@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+// UserIntent classifies the user's intention for the current message,
+// used to control PlanConfirmed reset and analysis-only constraints.
+type UserIntent int
+
+const (
+	IntentContinue UserIntent = iota // continuing previous task — keep PlanConfirmed
+	IntentNewTopic                   // new topic, different from previous goal — reset PlanConfirmed
+	IntentAnalyze                    // analysis/explanation only, no modifications — reset + inject constraint
+)
+
 type Stage int
 
 const (
@@ -52,6 +62,7 @@ type EngineConfig struct {
 	ModelName              string // default (Pro) model name
 	FlashModelName         string // Flash model name for cheaper agents
 	BaseURL                string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
+	SubAgentBaseURL        string // separate API base URL for sub-agents (cache isolation); empty = same as BaseURL
 	MaxTurns               int
 	MaxIterationsPerTurn   int
 	MaxContextTokens       int
@@ -66,6 +77,17 @@ type EngineConfig struct {
 	Pricing                PricingConfig
 	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
 	PromptVersion          string // SHA256 hash of the system prompt for tracking
+
+	// VerifyConclusions enables automatic conclusion verification: before the agent's
+	// first edit/write in each Run(), an independent contrarian sub-agent checks whether
+	// the agent's reasoning/conclusions are actually supported by code evidence.
+	// Default: false, no extra verification.
+	VerifyConclusions bool
+	// ConfidenceThreshold is the minimum confidence score (0-100) required for the
+	// agent's conclusions to proceed with edits. Below this threshold, the engine
+	// presents the verifier's issues+questions to the user instead of the edit plan.
+	// Only effective when VerifyConclusions is true. Default: 60.
+	ConfidenceThreshold int
 }
 
 type EngineResponse struct {
@@ -213,6 +235,19 @@ type TaskState struct {
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
 	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
+
+	// ReadHistory records each file read this session (path + scope) so the
+	// prompt can warn the agent against re-reading, and the loop guard can count
+	// repeated reads of the same (path, scope). Cleared on new user message.
+	ReadHistory []ReadRecord `json:"read_history"`
+}
+
+// ReadRecord captures a single read operation for loop-prevention and prompt
+// injection. Scope is a human-readable string: "" for a full-file read,
+// "symbol:Run" for a symbol read, "L10-50" for an offset/limit range.
+type ReadRecord struct {
+	Path  string `json:"path"`
+	Scope string `json:"scope"`
 }
 
 type FileCollapse struct {
