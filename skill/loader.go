@@ -11,11 +11,12 @@ import (
 
 // SkillFile represents the TOML structure for an external skill file.
 type SkillFile struct {
-	Name        string   `toml:"name"`
-	Description string   `toml:"description"`
-	Keywords    []string `toml:"keywords"`
-	Content     string   `toml:"content"`
-	NextSkills  []string `toml:"next_skills"`
+	Name                   string   `toml:"name"`
+	Description            string   `toml:"description"`
+	Keywords               []string `toml:"keywords"`
+	Content                string   `toml:"content"`
+	NextSkills             []string `toml:"next_skills"`
+	AutoActivateThreshold  *int     `toml:"auto_activate_threshold"`
 }
 
 // LoadExternalSkills loads skill definitions from TOML files in the given
@@ -48,11 +49,12 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 			continue
 		}
 		skills = append(skills, &Skill{
-			Name:        sf.Name,
-			Description: sf.Description,
-			Keywords:    sf.Keywords,
-			Content:     sf.Content,
-			NextSkills:  sf.NextSkills,
+			Name:                  sf.Name,
+			Description:           sf.Description,
+			Keywords:              sf.Keywords,
+			Content:               sf.Content,
+			NextSkills:            sf.NextSkills,
+			AutoActivateThreshold: sf.AutoActivateThreshold,
 		})
 	}
 	return skills, nil

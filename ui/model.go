@@ -82,6 +82,7 @@ type TDDStage struct {
 
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
+	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
 	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
@@ -139,6 +140,13 @@ type Model struct {
 
 	// TDD (test-driven-development) phase tracking
 	tddStages []TDDStage
+
+	// Collapsed-by-default diff file blocks. Maps file path (ToolNode.Detail)
+	// to expanded state. Clicking a diff file header toggles expansion so the
+	// full diff is shown on demand; by default only the modified file list is
+	// rendered, which keeps scrolling/selection glitch-free (diff content rows
+	// are not rendered at all when collapsed).
+	expandedDiffs map[string]bool
 }
 
 type messageRenderCache struct {
@@ -175,6 +183,7 @@ func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
 		state:    stateInit,
 		messages: []DisplayMessage{},
 		inputBuf: NewInputBuffer(),
+		expandedDiffs: map[string]bool{},
 		status: StatusInfo{
 			Model:       "pro",
 			TokensIn:    0,
@@ -287,6 +296,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					scroll = 0
 				}
 				pt := screenToLine(msg.Y, msg.X, scroll, bodyHeight, totalLines)
+				// Click on a diff file header toggles its expansion instead of
+				// starting a text selection. Default-collapsed diff blocks keep
+				// scrolling/selection glitch-free; the user expands on demand.
+				if file, ok := diffHeaderAt(m, pt.Line, plain); ok {
+					if m.expandedDiffs == nil {
+						m.expandedDiffs = map[string]bool{}
+					}
+					m.expandedDiffs[file] = !m.expandedDiffs[file]
+					m.selection = SelectionState{}
+					m.autoScrollDir = 0
+					return m, m.repaintCmd()
+				}
 				m.selection = SelectionState{
 					Active:     true,
 					Done:       false,
@@ -928,14 +949,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
 		} else if m.state == stateReady {
-			if m.showSuggestions {
-				// Dismiss suggestions first, then set pendingEsc as fallback
-				// so the Enter that follows Option+Enter inserts a newline
-				// instead of submitting.
-				m.showSuggestions = false
-				m.suggestions = nil
-				m.escAt = time.Now()
-			}
+			// ESC: clear input buffer, discard current input
+			m.inputBuf.SetValue("")
+			m.showSuggestions = false
+			m.suggestions = nil
 			// ESC byte may be the first half of Option+Enter on macOS terminals.
 			// Record timestamp; a subsequent Enter within escWindow is treated as Alt+Enter.
 			m.escAt = time.Now()
@@ -1414,7 +1431,7 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		return lines, plainLines
 	}
 	if len(m.toolTree) > 0 {
-		toolLines := renderToolTree(m.toolTree, width)
+		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
 	}
 	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
@@ -1754,9 +1771,9 @@ func parseOutputLines(fullDetail string, maxLines int) []ToolNode {
 	return children
 }
 
-func renderToolTree(toolTree []ToolNode, width int) []string {
+func (m Model) renderToolTree(width int) []string {
 	lines := []string{}
-	if len(toolTree) == 0 {
+	if len(m.toolTree) == 0 {
 		return lines
 	}
 
@@ -1770,7 +1787,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 	var diffItems []ToolNode
 	var otherItems []ToolNode
 
-	for _, node := range toolTree {
+	for _, node := range m.toolTree {
 		switch node.Name {
 		case "grep", "glob", "read", "lsp":
 			searchItems = append(searchItems, node)
@@ -1804,7 +1821,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 		}
 	}
 	if len(doneDiffItems) > 0 {
-		lines = append(lines, renderDiffBlock(doneDiffItems, blockWidth)...)
+		lines = append(lines, m.renderDiffBlock(doneDiffItems, blockWidth)...)
 		lines = append(lines, "")
 	}
 
@@ -1877,7 +1894,7 @@ func renderExecBlock(nodes []ToolNode, width int) []string {
 	return strings.Split(ExecBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
 }
 
-func renderDiffBlock(nodes []ToolNode, width int) []string {
+func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	var content []string
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
@@ -1887,8 +1904,21 @@ func renderDiffBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
-		if node.Done && len(node.Children) > 0 {
+		expanded := m.expandedDiffs[node.Detail]
+		indicator := "[+]"
+		if expanded {
+			indicator = "[-]"
+		}
+		// Collapsed: show a one-line summary with add/remove counts so the user
+		// knows the change size without expanding. Expanded: just the header,
+		// hunks follow.
+		fileLine := fmt.Sprintf("  %s :: %s%s", indicator, node.Detail, status)
+		if !expanded && node.Done && len(node.Children) > 0 {
+			added, removed := diffStats(node)
+			fileLine += DimStyle.Render(fmt.Sprintf("  (+%d -%d)", added, removed))
+		}
+		content = append(content, fileLine)
+		if expanded && node.Done && len(node.Children) > 0 {
 			for _, child := range node.Children {
 				if child.DetailFull != "" {
 					diffLines := renderDiffHunkBlock(child.DetailFull, width-6)
@@ -1908,6 +1938,51 @@ func renderDiffBlock(nodes []ToolNode, width int) []string {
 	}
 	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
 	return result
+}
+
+// diffHeaderAt checks whether plain-line index `idx` is a diff file header row
+// (the clickable `  [+] :: file` / `  [-] :: file` line). Returns the matched
+// file path and true if so. Used by the mouse handler to toggle expansion
+// instead of starting a selection.
+func diffHeaderAt(m Model, idx int, plain []string) (string, bool) {
+	if idx < 0 || idx >= len(plain) {
+		return "", false
+	}
+	line := plain[idx]
+	if !strings.Contains(line, ":: ") {
+		return "", false
+	}
+	for _, node := range m.toolTree {
+		if !node.Done || node.Detail == "" {
+			continue
+		}
+		if node.Name != "edit" && node.Name != "write" {
+			continue
+		}
+		if strings.Contains(line, ":: "+node.Detail) {
+			return node.Detail, true
+		}
+	}
+	return "", false
+}
+
+// diffStats counts added/removed lines across a diff tool node's hunks for the
+// collapsed summary. Lines starting with "+" (but not "+++") count as added,
+// "-" (but not "---") as removed.
+func diffStats(node ToolNode) (added, removed int) {
+	for _, child := range node.Children {
+		for _, line := range strings.Split(child.DetailFull, "\n") {
+			if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
+				continue
+			}
+			if strings.HasPrefix(line, "+") {
+				added++
+			} else if strings.HasPrefix(line, "-") {
+				removed++
+			}
+		}
+	}
+	return added, removed
 }
 
 func renderToolSummary(toolTree []ToolNode) string {

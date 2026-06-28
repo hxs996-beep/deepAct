@@ -394,6 +394,88 @@ func TestBuildRequestBody_ThinkingMode(t *testing.T) {
 	}
 }
 
+func TestValidateToolCallResponses_BackfillsOrphanedIDs(t *testing.T) {
+	// assistant emitted two tool_call_ids but only one has a tool response.
+	// The missing one must be backfilled with a placeholder tool message.
+	msgs := []Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "call_a", Type: "function", Function: FunctionCall{Name: "read"}},
+			{ID: "call_b", Type: "function", Function: FunctionCall{Name: "edit"}},
+		}},
+		{Role: "tool", ToolCallID: "call_b", Content: "edited"},
+	}
+	out := validateToolCallResponses(msgs)
+
+	// Expect: user, assistant, tool(call_b), tool(call_a backfilled)
+	if len(out) != 4 {
+		t.Fatalf("len(out) = %d, want 4: %+v", len(out), out)
+	}
+	if out[2].ToolCallID != "call_b" {
+		t.Errorf("out[2].ToolCallID = %q, want call_b", out[2].ToolCallID)
+	}
+	if out[3].Role != "tool" || out[3].ToolCallID != "call_a" {
+		t.Errorf("out[3] = %+v, want backfilled tool for call_a", out[3])
+	}
+}
+
+func TestValidateToolCallResponses_AllAnswered(t *testing.T) {
+	// Both ids answered — no backfill, no duplication.
+	msgs := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "a"}, {ID: "b"}}},
+		{Role: "tool", ToolCallID: "a", Content: "ra"},
+		{Role: "tool", ToolCallID: "b", Content: "rb"},
+	}
+	out := validateToolCallResponses(msgs)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3 (no backfill)", len(out))
+	}
+}
+
+func TestValidateToolCallResponses_NoToolCalls(t *testing.T) {
+	// Plain messages with no tool_calls pass through unchanged.
+	msgs := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "hello"},
+	}
+	out := validateToolCallResponses(msgs)
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+}
+
+func TestBuildRequestBody_BackfillsOrphanedToolCallID(t *testing.T) {
+	// End-to-end: buildRequestBody must produce a valid message sequence even
+	// when an assistant tool_call has no matching tool response.
+	client := &DeepSeekClient{}
+	body, err := client.buildRequestBody(ChatRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []Message{
+			{Role: "user", Content: "go"},
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{ID: "orphan", Type: "function", Function: FunctionCall{Name: "read"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody error: %v", err)
+	}
+	var parsed struct {
+		Messages []Message `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	// Expect: user, assistant(tool_calls), tool(orphan)
+	if len(parsed.Messages) != 3 {
+		t.Fatalf("len(messages) = %d, want 3", len(parsed.Messages))
+	}
+	last := parsed.Messages[2]
+	if last.Role != "tool" || last.ToolCallID != "orphan" {
+		t.Errorf("last message = %+v, want backfilled tool for orphan", last)
+	}
+}
+
 func newTestServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -437,6 +519,30 @@ func newTestClientWithRetry(t *testing.T, baseURL string, retry RetryPolicy) *De
 
 func overrideEndpoint(c *DeepSeekClient, url string) {
 	c.endpoint = url
+}
+
+func TestChatCompletionsURL(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		want string
+	}{
+		{"empty", "", ""},
+		{"deepseek base", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions"},
+		{"deepseek base trailing slash", "https://api.deepseek.com/", "https://api.deepseek.com/chat/completions"},
+		{"volcano coding v3", "https://ark.cn-beijing.volces.com/api/coding/v3", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"},
+		{"openrouter", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"},
+		{"already full idempotent", "https://api.deepseek.com/chat/completions", "https://api.deepseek.com/chat/completions"},
+		{"sub-agent query preserved", "https://api.deepseek.com?sub=1", "https://api.deepseek.com/chat/completions?sub=1"},
+		{"volcano sub-agent query", "https://ark.cn-beijing.volces.com/api/coding/v3?sub=1", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions?sub=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chatCompletionsURL(tt.base); got != tt.want {
+				t.Errorf("chatCompletionsURL(%q) = %q, want %q", tt.base, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestValidateReasoningEcho_FillsMissing(t *testing.T) {

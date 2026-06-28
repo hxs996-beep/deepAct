@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	deeplogconfig "github.com/deepact/deepact/config"
 )
 
 var setCmd = &cobra.Command{
@@ -24,9 +26,10 @@ func runSet(cmd *cobra.Command, args []string) error {
 		if err := storeAPIKey(value); err != nil {
 			return fmt.Errorf("store key: %w", err)
 		}
-		fmt.Printf("API key saved to %s\n", apiKeyPath())
+		fmt.Printf("API key saved to %s\n", deeplogconfig.UserConfigPath())
 		return nil
 	default:
 		return fmt.Errorf("unknown setting: %q (supported: api-key)", key)
 	}
 }
+

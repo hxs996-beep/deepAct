@@ -1,6 +1,4 @@
-package context
-
-const ExamplesBlock = `# Examples: Wrong vs Right (Do NOT copy blindly; follow patterns)
+# Examples: Wrong vs Right (Do NOT copy blindly; follow patterns)
 
 ## 1) Bug Fix — Minimal Fix vs Over-Refactor
 
@@ -24,16 +22,16 @@ RIGHT:
 You searched for existing feature patterns, found similar code in store/user_store.go, and implemented the new feature using the same interface and wiring. You reused existing validation helpers and kept the same naming style. The feature integrates cleanly without architectural drift.
 
 Checklist:
-- Did I match the project’s existing pattern?
+- Did I match the project's existing pattern?
 - Did I avoid introducing new abstractions without request?
 
 ## 3) Refactor — Scoped vs Sprawling
 
 WRONG:
-The user asked for a small refactor in router/dispatch.go. You also reformatted unrelated files, renamed structs, and rearranged packages. The diff is huge, reviewers can’t tell what changed, and you broke tests.
+The user asked for a small refactor in router/dispatch.go. You also reformatted unrelated files, renamed structs, and rearranged packages. The diff is huge, reviewers can't tell what changed, and you broke tests.
 
 RIGHT:
-You limited the refactor to the requested function, kept naming and package structure intact, and did not touch unrelated files. The change is easy to review and doesn’t add risk.
+You limited the refactor to the requested function, kept naming and package structure intact, and did not touch unrelated files. The change is easy to review and doesn't add risk.
 
 Checklist:
 - Is the refactor only where requested?
@@ -42,10 +40,10 @@ Checklist:
 ## 4) API Usage — Verified vs Hallucinated
 
 WRONG:
-You used a method you remember from another project (e.g., cfg.LoadFromEnv), but it doesn't exist here. You didn.t verify it with LSP (hover/goToDefinition). The code fails to compile and wastes time.
+You used a method you remember from another project (e.g., cfg.LoadFromEnv), but it doesn't exist here. You didn't verify it with LSP (hover/goToDefinition). The code fails to compile and wastes time.
 
 RIGHT:
-You searched for the method, saw it didn’t exist, and used the actual available API. If still unclear, you asked the user instead of guessing. You explicitly stated when an API could not be verified.
+You searched for the method, saw it didn't exist, and used the actual available API. If still unclear, you asked the user instead of guessing. You explicitly stated when an API could not be verified.
 
 Checklist:
 - Did I verify API existence in this repo?
@@ -62,4 +60,3 @@ You asked 1-3 clarifying questions and proposed a short plan. You waited for con
 Checklist:
 - Is the request ambiguous? If yes, did I ask?
 - Did I wait for confirmation before editing?
-`

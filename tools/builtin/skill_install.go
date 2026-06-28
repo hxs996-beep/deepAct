@@ -106,11 +106,12 @@ func (t *SkillInstallTool) Run(ctx tools.ToolContext, input json.RawMessage) (to
 
 	// Register in the running registry (overrides embedded if name matches)
 	t.registry.Register(&skill.Skill{
-		Name:        sf.Name,
-		Description: sf.Description,
-		Keywords:    sf.Keywords,
-		Content:     sf.Content,
-		NextSkills:  sf.NextSkills,
+		Name:                  sf.Name,
+		Description:           sf.Description,
+		Keywords:              sf.Keywords,
+		Content:               sf.Content,
+		NextSkills:            sf.NextSkills,
+		AutoActivateThreshold: sf.AutoActivateThreshold,
 	})
 
 	digest := fmt.Sprintf("✅ Skill '%s' installed to %s\n   Description: %s", sf.Name, targetPath, sf.Description)

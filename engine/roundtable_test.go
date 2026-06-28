@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,7 +63,7 @@ func TestParseTeamCommand_NotTeam(t *testing.T) {
 func TestBuildTeamExploreGoal(t *testing.T) {
 	goal := "实现代码评审功能"
 	member := DefaultRoundtableMembers[0] // 架构师
-	result := buildTeamExploreGoal(goal, member)
+	result := buildTeamExploreGoal(goal, member, true)
 
 	if !strings.Contains(result, goal) {
 		t.Errorf("result should contain the goal %q", goal)
@@ -81,7 +82,7 @@ func TestBuildTeamExploreGoal(t *testing.T) {
 func TestBuildTeamExploreGoal_AllMembers(t *testing.T) {
 	goal := "设计一个日志系统"
 	for _, member := range DefaultRoundtableMembers {
-		result := buildTeamExploreGoal(goal, member)
+		result := buildTeamExploreGoal(goal, member, true)
 		if !strings.Contains(result, goal) {
 			t.Errorf("member %s: result missing goal", member.ID)
 		}
@@ -316,7 +317,7 @@ func TestHandleTeamFlow_MemberPromptInjection(t *testing.T) {
 func TestRunTeamExplore_ReturnsThoughtsForAllMembers(t *testing.T) {
 	e := newTestEngine(t)
 
-	thoughts := e.roundtableHall.runTeamExplore(context.Background(), "测试需求", DefaultRoundtableMembers)
+	thoughts := e.roundtableHall.runTeamExplore(context.Background(), "测试需求", DefaultRoundtableMembers, true)
 
 	if len(thoughts) != len(DefaultRoundtableMembers) {
 		t.Fatalf("expected %d thoughts, got %d", len(DefaultRoundtableMembers), len(thoughts))
@@ -344,7 +345,7 @@ func TestSynthesizeTeamOutput_WithPlanner(t *testing.T) {
 		{MemberID: "security", Content: "从安全角度看，需要权限控制", Summary: "权限控制"},
 	}
 
-	plan := e.roundtableHall.synthesizeTeamOutput(context.Background(), "测试需求", thoughts)
+	plan := e.roundtableHall.synthesizeTeamOutput(context.Background(), "测试需求", thoughts, true)
 
 	if plan == "" {
 		t.Fatal("expected non-empty plan from synthesis")
@@ -380,7 +381,7 @@ func TestSynthesizeTeamOutput_FallbackWhenNoPlanner(t *testing.T) {
 		{MemberID: "security", Content: "安全分析", Summary: "安全方案"},
 	}
 
-	plan := e.roundtableHall.synthesizeTeamOutput(context.Background(), "测试需求", thoughts)
+	plan := e.roundtableHall.synthesizeTeamOutput(context.Background(), "测试需求", thoughts, true)
 
 	// Fallback should concatenate summaries
 	if plan == "" {
@@ -399,8 +400,11 @@ func TestHandleTeamFlow_ProgressEvents(t *testing.T) {
 	}
 
 	var events []ProgressEvent
+	var eventsMu sync.Mutex
 	e.config.OnProgress = func(ev ProgressEvent) {
+		eventsMu.Lock()
 		events = append(events, ev)
+		eventsMu.Unlock()
 	}
 
 	_, err := e.roundtableHall.handleTeamFlow(context.Background())
@@ -442,7 +446,7 @@ func TestHandleTeamFlow_CustomMembers(t *testing.T) {
 		Members: customMembers,
 	}
 
-	thoughts := e.roundtableHall.runTeamExplore(context.Background(), "测试自定义成员", customMembers)
+	thoughts := e.roundtableHall.runTeamExplore(context.Background(), "测试自定义成员", customMembers, true)
 
 	if len(thoughts) != 1 {
 		t.Fatalf("expected 1 thought for 1 custom member, got %d", len(thoughts))
@@ -525,7 +529,7 @@ func TestRefuteFindings_FiltersRefuted(t *testing.T) {
 	}
 	proposals := []string{"方案A"}
 
-	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets)
+	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets, true)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 refute results, got %d", len(result))
 	}
@@ -548,7 +552,7 @@ func TestRefuteFindings_AgentErrorKeepsFinding(t *testing.T) {
 	}
 	proposals := []string{"方案A"}
 
-	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets)
+	result := e.roundtableHall.refuteFindings(context.Background(), "需求", proposals, targets, true)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result even on error, got %d", len(result))
 	}

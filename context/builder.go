@@ -8,41 +8,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deepact/deepact/context/promptset"
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 )
 
 type ContextAssembler struct {
-	langPack           string
-	examples           string
-	systemPrompt       string
-	projectRoot        string
-	estimator          *llm.TokenEstimator
-	deepactMD          string // cached deepact.md content, read once at startup
-	envInfo            EnvironmentInfo // session-stable env info, built once at startup
-	userLang           string          // detected once from first user message, locked for the whole session
-	userLangSet        bool            // true once first-user-message language has been determined (even if "")
-	stableSessionBlock string          // built once from deepactMD + envInfo + userLang, cached for cache stability
-	skillsBlock        string          // built once from skill registry, cached for cache stability
+	systemPromptWithLang  string // system prompt in the detected user language, built once and cached
+	projectRoot           string
+	estimator             *llm.TokenEstimator
+	deepactMD             string // cached deepact.md content, read once at startup
+	envInfo               EnvironmentInfo // session-stable env info, built once at startup
+	userLang              string          // detected once from first user message, locked for the whole session
+	userLangSet           bool            // true once first-user-message language has been determined (even if "")
+	stableSessionBlock    string          // built once from deepactMD + envInfo + userLang, cached for cache stability
+	skillsBlock           string          // built once from skill registry, cached for cache stability
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
-	lang := DetectLanguage(projectRoot)
-	langPack := GetLangPack(lang)
-	systemPrompt := SystemPromptBlockA + "\n\n# Language Pack\n" + langPack + "\n\n" + ExamplesBlock
+	// systemPrompt is built lazily once userLang is known (see Build).
+	// We still detect the project language for langPack selection.
+	_ = DetectLanguage(projectRoot)
 
 	if estimator == nil {
 		estimator = llm.NewTokenEstimator()
 	}
 
 	return &ContextAssembler{
-		langPack:     langPack,
-		examples:     ExamplesBlock,
-		systemPrompt: systemPrompt,
-		projectRoot:  projectRoot,
-		estimator:    estimator,
-		deepactMD:    readDeepactMD(),
-		envInfo:      buildEnvironmentInfo(),
+		projectRoot: projectRoot,
+		estimator:   estimator,
+		deepactMD:   readDeepactMD(),
+		envInfo:     buildEnvironmentInfo(),
 	}
 }
 
@@ -58,7 +54,12 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 
 	// === STABLE ZONE (TOP — prefix cache friendly) ===
 	// Message 1: System prompt — identical every turn → cached ✓
-	messages = append(messages, engine.ModelMessage{Role: "system", Content: a.systemPrompt})
+	// Built once from the detected user language's prompt set (see below).
+	prompt := a.systemPromptWithLang
+	if prompt == "" {
+		prompt = "(loading...)"
+	}
+	messages = append(messages, engine.ModelMessage{Role: "system", Content: prompt})
 
 	// Message 2: Session-stable context — language detected from the FIRST
 	// user message and locked for the session (see detectUserLanguage). We only
@@ -70,15 +71,27 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.userLang = detectUserLanguage(history)
 		a.userLangSet = true
 	}
+	// Once userLang is known, build the system prompt from the appropriate
+	// language's prompt set. This is done once and cached, keeping the prefix
+	// stable across turns. No separate language directive is needed — the
+	// prompt itself is already in the correct language.
+	if a.userLangSet && a.userLang != "" && a.systemPromptWithLang == "" {
+		lang := DetectLanguage(a.projectRoot)
+		langPack := GetLangPack(lang, a.userLang)
+		prompts := promptset.Get(a.userLang)
+		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPack + "\n\n" + prompts.Examples
+	}
 	if a.stableSessionBlock == "" && a.userLangSet {
 		a.stableSessionBlock = BuildStableSessionContext(a.deepactMD, a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
 	// Message 3: Available skills — stable across the session → cached ✓
-	// Skip when a skill is active: the model should focus on the active skill's
-	// methodology, not be distracted by other available skills.
-	if a.skillsBlock != "" && (state == nil || state.ActiveSkillName == "") {
+	// Always included, even when a skill is active. Removing it shifts all subsequent
+	// messages (history, Block B) by one position, destroying the prefix cache for the
+	// rest of the session. The active skill's methodology is enforced via the
+	// [SKILL ACTIVATED] pinned message, not by hiding the skills list.
+	if a.skillsBlock != "" {
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
@@ -103,11 +116,11 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 
 	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-	// Block B: minimal task state fields only
-	blockB := BuildBlockB(formatTaskStateVolatile(state))
+	// Block B: minimal task state fields only + language directive at end
+	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
-	reminder := BuildTaskReminder(state)
+	reminder := BuildTaskReminder(state, a.userLang)
 	if reminder != "" {
 		messages = append(messages, engine.ModelMessage{Role: "system", Content: reminder})
 	}

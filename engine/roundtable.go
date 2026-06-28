@@ -47,12 +47,42 @@ type RoundtableState struct {
 }
 
 // RoundtableMember defines a single reviewer's identity and stance.
+// Name/Stance/Prompt hold the Chinese values (the historical defaults);
+// NameEn/StanceEn/PromptEn hold the English variants. The live value is picked
+// per-call via the display* helpers based on the session language.
 type RoundtableMember struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Avatar string `json:"avatar"`
-	Stance string `json:"stance"`
-	Prompt string `json:"prompt"` // system-level instruction injected as extraPrompt
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	NameEn   string `json:"name_en,omitempty"`
+	Avatar   string `json:"avatar"`
+	Stance   string `json:"stance"`
+	StanceEn string `json:"stance_en,omitempty"`
+	Prompt   string `json:"prompt"`     // Chinese system-level instruction injected as extraPrompt
+	PromptEn string `json:"prompt_en,omitempty"` // English variant
+}
+
+// displayName returns the member's name in the language matching zh.
+func (m RoundtableMember) displayName(zh bool) string {
+	if zh || m.NameEn == "" {
+		return m.Name
+	}
+	return m.NameEn
+}
+
+// displayStance returns the member's stance in the language matching zh.
+func (m RoundtableMember) displayStance(zh bool) string {
+	if zh || m.StanceEn == "" {
+		return m.Stance
+	}
+	return m.StanceEn
+}
+
+// displayPrompt returns the member's role prompt in the language matching zh.
+func (m RoundtableMember) displayPrompt(zh bool) string {
+	if zh || m.PromptEn == "" {
+		return m.Prompt
+	}
+	return m.PromptEn
 }
 
 // MemberReview is the result from one roundtable member's review.
@@ -178,23 +208,23 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "team_explore",
-			Detail: fmt.Sprintf("团队协作：%d 位角色并行分析...", len(members)),
+			Detail: fmt.Sprintf(pickPrompt(zh, "Team collaboration: %d members analyzing in parallel...", "团队协作：%d 位角色并行分析..."), len(members)),
 		})
 	}
 
 	// Step 1: Run all members in parallel
-	thoughts := h.runTeamExplore(ctx, goal, members)
+	thoughts := h.runTeamExplore(ctx, goal, members, zh)
 
 	// Step 2: Synthesize all perspectives into a unified plan
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "team_synthesize",
-			Detail: "合并各角色视角，生成统一方案...",
+			Detail: pickPrompt(zh, "Merging member perspectives into a unified plan...", "合并各角色视角，生成统一方案..."),
 		})
 	}
 
-	plan := h.synthesizeTeamOutput(ctx, goal, thoughts)
+	plan := h.synthesizeTeamOutput(ctx, goal, thoughts, zh)
 
 	// Step 3: Build the output report
 	var sb strings.Builder
@@ -218,7 +248,7 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 		name := t.MemberID
 		if member != nil {
 			avatar = member.Avatar + " "
-			name = member.Name
+			name = member.displayName(zh)
 		}
 		sb.WriteString(fmt.Sprintf("%s**%s**\n\n", avatar, name))
 		sb.WriteString(t.Content)
@@ -254,7 +284,7 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 			member := findMember(members, t.MemberID)
 			name := t.MemberID
 			if member != nil {
-				name = member.Name
+				name = member.displayName(zh)
 			}
 			fallback.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
 		}
@@ -268,7 +298,7 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "team_done",
-			Detail: fmt.Sprintf("%d 位角色协作完成", len(members)),
+			Detail: fmt.Sprintf(pickPrompt(zh, "%d members finished collaboration", "%d 位角色协作完成"), len(members)),
 		})
 	}
 
@@ -277,7 +307,7 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 
 // runTeamExplore runs all team members in parallel to generate ideas from their
 // respective professional perspectives. Returns a slice of TeamThought results.
-func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, members []RoundtableMember) []TeamThought {
+func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, members []RoundtableMember, zh bool) []TeamThought {
 	type task struct {
 		Member RoundtableMember
 		Index  int
@@ -295,7 +325,7 @@ func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, member
 		wg.Add(1)
 		go func(t task) {
 			defer wg.Done()
-			thought := h.runMemberThought(ctx, t.Member, goal)
+			thought := h.runMemberThought(ctx, t.Member, goal, zh)
 			mu.Lock()
 			results[t.Index] = thought
 			mu.Unlock()
@@ -308,18 +338,18 @@ func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, member
 
 // runMemberThought executes a single team member's exploration as a sub-agent.
 // Each member receives a role-specific prompt to analyze the goal from their perspective.
-func (h *RoundtableHall) runMemberThought(ctx context.Context, member RoundtableMember, goal string) TeamThought {
+func (h *RoundtableHall) runMemberThought(ctx context.Context, member RoundtableMember, goal string, zh bool) TeamThought {
 	start := time.Now()
 
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "member_start",
 			Name:   member.ID,
-			Detail: member.Name,
+			Detail: member.displayName(zh),
 		})
 	}
 
-	taskGoal := buildTeamExploreGoal(goal, member)
+	taskGoal := buildTeamExploreGoal(goal, member, zh)
 
 	handoff := Handoff{
 		Agent:         AgentSub,
@@ -328,14 +358,15 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 		Depth:         0,
 		NoNudge:       true,
 		MaxIterations: 50,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
-		h.emitThoughtDone(member, "分析出错")
+		h.emitThoughtDone(member, "error")
 		return TeamThought{
 			MemberID: member.ID,
-			Content:  fmt.Sprintf("分析失败: %v", err),
+			Content:  fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err),
 			Summary:  "error",
 		}
 	}
@@ -347,9 +378,12 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 	pr, ok := agent.(promptRunner)
 	if !ok {
 		result, err := agent.Run(ctx, handoff)
+		if result != nil {
+			h.engine.accumulateUsage(result.Usage)
+		}
 		if err != nil {
-			h.emitThoughtDone(member, "分析出错")
-			return TeamThought{MemberID: member.ID, Content: fmt.Sprintf("分析失败: %v", err), Summary: "error"}
+			h.emitThoughtDone(member, "error")
+			return TeamThought{MemberID: member.ID, Content: fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err), Summary: "error"}
 		}
 		summary := extractTeamSummary(result.Summary)
 		h.emitThoughtDone(member, summary)
@@ -360,10 +394,13 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 		}
 	}
 
-	result, err := pr.RunWithPrompt(ctx, handoff, member.Prompt)
+	result, err := pr.RunWithPrompt(ctx, handoff, member.displayPrompt(zh))
+	if result != nil {
+		h.engine.accumulateUsage(result.Usage)
+	}
 	if err != nil {
-		h.emitThoughtDone(member, "分析出错")
-		return TeamThought{MemberID: member.ID, Content: fmt.Sprintf("分析失败: %v", err), Summary: "error"}
+		h.emitThoughtDone(member, "error")
+		return TeamThought{MemberID: member.ID, Content: fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err), Summary: "error"}
 	}
 
 	summary := extractTeamSummary(result.Summary)
@@ -391,13 +428,13 @@ func (h *RoundtableHall) emitThoughtDone(member RoundtableMember, summary string
 	h.engine.config.OnProgress(ProgressEvent{
 		Type:   "member_done",
 		Name:   member.ID,
-		Detail: fmt.Sprintf("%s %s %s", member.Avatar, member.Name, status),
+		Detail: fmt.Sprintf("%s %s %s", member.Avatar, member.displayName(h.engine.isChinese), status),
 	})
 }
 
 // synthesizeTeamOutput uses the planner agent to merge all member thoughts
 // into a unified, actionable implementation plan.
-func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, thoughts []TeamThought) string {
+func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, thoughts []TeamThought, zh bool) string {
 	members := h.engine.state.Roundtable.Members
 	if len(members) == 0 {
 		members = DefaultRoundtableMembers
@@ -405,25 +442,29 @@ func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, 
 
 	// Build the synthesis context from all member thoughts
 	var ctxBuilder strings.Builder
-	ctxBuilder.WriteString(fmt.Sprintf("## 原始需求\n%s\n\n", goal))
-	ctxBuilder.WriteString("## 各角色分析结果\n\n")
+	ctxBuilder.WriteString(fmt.Sprintf(pickPrompt(zh, "## Original Requirement\n%s\n\n", "## 原始需求\n%s\n\n"), goal))
+	ctxBuilder.WriteString(pickPrompt(zh, "## Member Analyses\n\n", "## 各角色分析结果\n\n"))
 	for _, t := range thoughts {
 		member := findMember(members, t.MemberID)
 		name := t.MemberID
 		if member != nil {
-			name = member.Name
+			name = member.displayName(zh)
 		}
 		ctxBuilder.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
 	}
 
 	handoff := Handoff{
-		Agent:         AgentPlanner,
-		Goal:          "基于以上各角色的分析结果，生成一个统一的、可执行的实现方案。请综合考虑所有视角，输出一个结构化的方案。",
+		Agent:        AgentPlanner,
+		Goal: pickPrompt(zh,
+			"Based on the member analyses above, produce a unified, actionable implementation plan. Consider all perspectives and output a structured plan.",
+			"基于以上各角色的分析结果，生成一个统一的、可执行的实现方案。请综合考虑所有视角，输出一个结构化的方案。",
+		),
 		Context:       ctxBuilder.String(),
 		Tools:         []string{"read", "grep", "glob"},
 		Depth:         0,
 		NoNudge:       true,
 		MaxIterations: 15,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
 	agent, err := h.engine.agents.Get(AgentPlanner)
@@ -434,7 +475,7 @@ func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, 
 			member := findMember(members, t.MemberID)
 			name := t.MemberID
 			if member != nil {
-				name = member.Name
+				name = member.displayName(zh)
 			}
 			sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", name, t.Summary))
 		}
@@ -446,6 +487,7 @@ func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, 
 		return ""
 	}
 
+	h.engine.accumulateUsage(result.Usage)
 	return result.Summary
 }
 
@@ -525,7 +567,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 		wg.Add(1)
 		go func(idx int, t reviewTask) {
 			defer wg.Done()
-			review := h.runMemberReview(ctx, t.Member, state.Roundtable.Goal, proposals[t.ProposalIdx], t.ProposalIdx)
+			review := h.runMemberReview(ctx, t.Member, state.Roundtable.Goal, proposals[t.ProposalIdx], t.ProposalIdx, zh)
 			mu.Lock()
 			reviews[idx] = review
 			mu.Unlock()
@@ -537,7 +579,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 	// 失败/解析不出时默认 confirmed(降级保留,不丢真问题)。
 	refutedCount := 0
 	if targets := collectAllFindings(reviews); len(targets) > 0 {
-		refuteMap := h.refuteFindings(ctx, state.Roundtable.Goal, proposals, targets)
+		refuteMap := h.refuteFindings(ctx, state.Roundtable.Goal, proposals, targets, zh)
 		for i := range reviews {
 			kept := reviews[i].Findings[:0]
 			for _, f := range reviews[i].Findings {
@@ -585,7 +627,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 			name := r.MemberID
 			if member != nil {
 				avatar = member.Avatar + " "
-				name = member.Name
+				name = member.displayName(zh)
 			}
 
 			verdictIcon := "✅"
@@ -596,14 +638,14 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 				verdictIcon = "❌"
 			}
 
-			sb.WriteString(fmt.Sprintf("%s%s  %s (评分: %d/100)\n", avatar, name, verdictIcon, r.Score))
+			sb.WriteString(fmt.Sprintf("%s%s  %s (%s: %d/100)\n", avatar, name, verdictIcon, pickPrompt(zh, "score", "评分"), r.Score))
 			if r.Elapsed != "" {
 				sb.WriteString(fmt.Sprintf("⏱ %s\n", r.Elapsed))
 			}
 			if r.Error != "" {
-				sb.WriteString(fmt.Sprintf("⚠️ 评审出错: %s\n", r.Error))
+				sb.WriteString(fmt.Sprintf(pickPrompt(zh, "⚠️ review error: %s\n", "⚠️ 评审出错: %s\n"), r.Error))
 			} else {
-				sb.WriteString(fmt.Sprintf("**结论**: %s\n\n", r.Summary))
+				sb.WriteString(fmt.Sprintf(pickPrompt(zh, "**Verdict**: %s\n\n", "**结论**: %s\n\n"), r.Summary))
 				if len(r.Findings) > 0 {
 					for _, f := range r.Findings {
 						sevIcon := "🔴"
@@ -617,7 +659,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 						}
 						sb.WriteString(fmt.Sprintf("- %s [%s/%s] %s", sevIcon, f.Severity, f.Category, f.Content))
 						if f.Suggestion != "" {
-							sb.WriteString(fmt.Sprintf("\n  → 建议: %s", f.Suggestion))
+							sb.WriteString(fmt.Sprintf(pickPrompt(zh, "\n  → suggestion: %s", "\n  → 建议: %s"), f.Suggestion))
 						}
 						sb.WriteString("\n")
 					}
@@ -659,9 +701,9 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 			hasTimedOut = true
 			if m := findMember(members, r.MemberID); m != nil {
 				if timedOutMembers != "" {
-					timedOutMembers += "、"
+					timedOutMembers += pickPrompt(zh, ", ", "、")
 				}
-				timedOutMembers += m.Name
+				timedOutMembers += m.displayName(zh)
 			}
 		}
 	}
@@ -684,7 +726,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "roundtable_phase",
 			Name:   "review_done",
-			Detail: fmt.Sprintf("%d 个方案 × %d 位角色评审完成", len(indices), len(members)),
+			Detail: fmt.Sprintf(pickPrompt(zh, "%d proposals × %d members reviewed", "%d 个方案 × %d 位角色评审完成"), len(indices), len(members)),
 		})
 	}
 
@@ -694,7 +736,7 @@ func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bo
 // runMemberReview executes a single roundtable member's review as a sub-agent.
 // It emits member_start / member_done progress events so the UI can show
 // each member's status without displaying the LLM's raw thinking.
-func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableMember, goal, proposalText string, proposalIndex int) MemberReview {
+func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableMember, goal, proposalText string, proposalIndex int, zh bool) MemberReview {
 	start := time.Now()
 
 	// Emit member start progress
@@ -702,12 +744,16 @@ func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableM
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "member_start",
 			Name:   member.ID,
-			Detail: member.Name,
+			Detail: member.displayName(zh),
 		})
 	}
 
-	// Build the review goal: target a specific proposal
-	reviewGoal := fmt.Sprintf(`请以「%s」的立场评审以下方案。
+	// Build the review goal: target a specific proposal.
+	// VERDICT/SCORE/SUMMARY prefixes are parsed by parseMemberReview and MUST
+	// be preserved verbatim in both languages.
+	var reviewGoal string
+	if zh {
+		reviewGoal = fmt.Sprintf(`请以「%s」的立场评审以下方案。
 
 ## 你的立场
 %s
@@ -730,7 +776,33 @@ func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableM
 VERDICT: <approve|conditional|reject>
 SCORE: <0-100>
 SUMMARY: <一句话总结>`,
-		member.Name, member.Stance, goal, proposalText)
+			member.displayName(zh), member.displayStance(zh), goal, proposalText)
+	} else {
+		reviewGoal = fmt.Sprintf(`Review the following proposal from the perspective of "%s".
+
+## Your Stance
+%s
+
+## Requirement Under Review
+%s
+
+## Proposal Under Review
+%s
+
+## Review Requirements
+- Review against the actual codebase (use read/grep/glob tools to inspect code if needed)
+- Point out specific issues and suggest improvements
+- Tag each issue with severity (critical/high/medium/low) and category (security/design/performance/correctness/other)
+- Finally give an overall score (0-100) and verdict (approve/conditional/reject)
+- Score >= 80 = approve, 60-79 = conditional, < 60 = reject
+
+## Output Format
+At the end, output exactly these three lines for parsing:
+VERDICT: <approve|conditional|reject>
+SCORE: <0-100>
+SUMMARY: <one-sentence summary>`,
+			member.displayName(zh), member.displayStance(zh), goal, proposalText)
+	}
 
 	// Use the generic sub-agent with the member's role prompt injected
 	// via RunWithPrompt. The member's Prompt serves as the system-level
@@ -742,11 +814,12 @@ SUMMARY: <一句话总结>`,
 		Depth:         0,
 		NoNudge:       true,
 		MaxIterations: 50,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
-		return h.memberError(member.ID, proposalIndex, fmt.Sprintf("评审失败: %v", err), err, start)
+		return h.memberError(member.ID, proposalIndex, fmt.Sprintf(pickPrompt(zh, "review failed: %v", "评审失败: %v"), err), err, start)
 	}
 
 	// Type-assert to get the SubAgentRunner for RunWithPrompt
@@ -757,12 +830,18 @@ SUMMARY: <一句话总结>`,
 	if !ok {
 		// Fallback: use regular Run without prompt injection
 		result, err := agent.Run(ctx, handoff)
+		if result != nil {
+			h.engine.accumulateUsage(result.Usage)
+		}
 		review := parseMemberReview(member.ID, proposalIndex, result, err, start)
 		h.emitMemberDone(member, review)
 		return review
 	}
 
-	result, err := pr.RunWithPrompt(ctx, handoff, member.Prompt)
+	result, err := pr.RunWithPrompt(ctx, handoff, member.displayPrompt(zh))
+	if result != nil {
+		h.engine.accumulateUsage(result.Usage)
+	}
 	review := parseMemberReview(member.ID, proposalIndex, result, err, start)
 	h.emitMemberDone(member, review)
 	return review
@@ -792,7 +871,7 @@ func collectAllFindings(reviews []MemberReview) []refuteTarget {
 // is that the finding is a false positive; only concrete code evidence flips
 // it to confirmed. The agent MUST read/grep the code, not judge from the
 // proposal text alone.
-func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, proposals []string, targets []refuteTarget) map[string]RefuteResult {
+func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, proposals []string, targets []refuteTarget, zh bool) map[string]RefuteResult {
 	results := make(map[string]RefuteResult, len(targets))
 	if len(targets) == 0 {
 		return results
@@ -806,7 +885,7 @@ func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, propos
 		go func(t refuteTarget) {
 			defer wg.Done()
 			key := findingKey(t.ProposalIndex, t.MemberID, t.Finding.Content)
-			verdict := h.refuteOne(ctx, goal, proposals, t)
+			verdict := h.refuteOne(ctx, goal, proposals, t, zh)
 			mu.Lock()
 			results[key] = verdict
 			mu.Unlock()
@@ -817,14 +896,18 @@ func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, propos
 }
 
 // refuteOne drives a single refute sub-agent for one finding.
-func (h *RoundtableHall) refuteOne(ctx context.Context, goal string, proposals []string, t refuteTarget) RefuteResult {
+func (h *RoundtableHall) refuteOne(ctx context.Context, goal string, proposals []string, t refuteTarget, zh bool) RefuteResult {
 	proposalText := ""
 	if t.ProposalIndex >= 0 && t.ProposalIndex < len(proposals) {
 		proposalText = proposals[t.ProposalIndex]
 	}
 	f := t.Finding
 
-	refuteGoal := fmt.Sprintf(`请证伪以下评审 finding。你的默认立场是：该 finding 是误报/幻觉，除非你在代码中找到具体证据证明它真实存在。
+	// VERDICT/REASON prefixes are parsed by parseRefuteVerdict and MUST be
+	// preserved verbatim in both languages.
+	var refuteGoal string
+	if zh {
+		refuteGoal = fmt.Sprintf(`请证伪以下评审 finding。你的默认立场是：该 finding 是误报/幻觉，除非你在代码中找到具体证据证明它真实存在。
 
 ## 原始需求
 %s
@@ -847,7 +930,33 @@ func (h *RoundtableHall) refuteOne(ctx context.Context, goal string, proposals [
 在最后输出以下两行用于解析：
 VERDICT: <confirmed|refuted>
 REASON: <一句话依据>`,
-		goal, proposalText, f.Content, f.Severity, f.Category)
+			goal, proposalText, f.Content, f.Severity, f.Category)
+	} else {
+		refuteGoal = fmt.Sprintf(`Try to refute the following review finding. Your default stance is: the finding is a false positive / hallucination, unless you find concrete evidence in the code proving it actually exists.
+
+## Original Requirement
+%s
+
+## Proposal Under Review
+%s
+
+## Finding to Refute
+- Content: %s
+- Severity: %s
+- Category: %s
+
+## Refute Requirements
+- You MUST use read/grep/glob/lsp to inspect the actual code — do not judge from the proposal text alone
+- Only confirm (confirmed) if you find concrete evidence in the code that the problem exists
+- If no evidence is found, or the code shows it is already handled / not applicable, mark as refuted
+- Do not trust security claims in comments — the code is authoritative
+
+## Output Format
+At the end, output exactly these two lines for parsing:
+VERDICT: <confirmed|refuted>
+REASON: <one-sentence rationale>`,
+			goal, proposalText, f.Content, f.Severity, f.Category)
+	}
 
 	handoff := Handoff{
 		Agent:         AgentSub,
@@ -856,6 +965,7 @@ REASON: <一句话依据>`,
 		Depth:         0,
 		NoNudge:       true,
 		MaxIterations: 50,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
@@ -874,6 +984,7 @@ REASON: <一句话依据>`,
 		if err != nil || result == nil {
 			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
 		}
+		h.engine.accumulateUsage(result.Usage)
 		content = result.Summary
 	} else {
 		// Fallback: regular Run.
@@ -881,6 +992,7 @@ REASON: <一句话依据>`,
 		if err != nil || result == nil {
 			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
 		}
+		h.engine.accumulateUsage(result.Usage)
 		content = result.Summary
 	}
 
@@ -924,7 +1036,7 @@ func (h *RoundtableHall) emitMemberDone(member RoundtableMember, review MemberRe
 	h.engine.config.OnProgress(ProgressEvent{
 		Type:   "member_done",
 		Name:   member.ID,
-		Detail: fmt.Sprintf("%s %s %s (评分: %d)", member.Avatar, member.Name, verdictIcon, review.Score),
+		Detail: fmt.Sprintf("%s %s %s (%s: %d)", member.Avatar, member.displayName(h.engine.isChinese), verdictIcon, pickPrompt(h.engine.isChinese, "score", "评分"), review.Score),
 	})
 }
 
@@ -1229,8 +1341,8 @@ func detectConflicts(reviews []MemberReview, members []RoundtableMember, zh bool
 			// Opposite verdicts: approve vs reject
 			if (a.Verdict == VerdictApprove && b.Verdict == VerdictReject) ||
 				(a.Verdict == VerdictReject && b.Verdict == VerdictApprove) {
-				aName := memberName(members, a.MemberID)
-				bName := memberName(members, b.MemberID)
+				aName := memberName(members, a.MemberID, zh)
+				bName := memberName(members, b.MemberID, zh)
 				if zh {
 					conflicts = append(conflicts, fmt.Sprintf(
 						"🔴 **%s** ✅ 通过  vs  **%s** ❌ 拒绝\n  → 两人结论完全相反，需要你判断谁的分析更合理。",
@@ -1258,8 +1370,8 @@ func detectConflicts(reviews []MemberReview, members []RoundtableMember, zh bool
 				diff = -diff
 			}
 			if diff > 40 {
-				aName := memberName(members, a.MemberID)
-				bName := memberName(members, b.MemberID)
+				aName := memberName(members, a.MemberID, zh)
+				bName := memberName(members, b.MemberID, zh)
 				if zh {
 					conflicts = append(conflicts, fmt.Sprintf(
 						"🟠 **%s** (%d分)  vs  **%s** (%d分)  — 评分差距 %d 分\n  → 双方对方案质量判断差异较大，需要你权衡。",
@@ -1278,7 +1390,7 @@ func detectConflicts(reviews []MemberReview, members []RoundtableMember, zh bool
 	for _, r := range reviews {
 		for _, f := range r.Findings {
 			if f.Severity == "critical" {
-				m := memberName(members, r.MemberID)
+				m := memberName(members, r.MemberID, zh)
 				criticalFindings = append(criticalFindings, fmt.Sprintf("%s: %s", m, f.Content))
 			}
 		}
@@ -1299,9 +1411,9 @@ func detectConflicts(reviews []MemberReview, members []RoundtableMember, zh bool
 	return conflicts
 }
 
-func memberName(members []RoundtableMember, id string) string {
+func memberName(members []RoundtableMember, id string, zh bool) string {
 	if m := findMember(members, id); m != nil {
-		return m.Name
+		return m.displayName(zh)
 	}
 	return id
 }
@@ -1395,8 +1507,10 @@ func parseTeamCommand(userMsg string) *TeamCommand {
 
 // buildTeamExploreGoal creates the task prompt for a roundtable member during team exploration.
 // Each member receives the shared goal plus their unique role and stance.
-func buildTeamExploreGoal(goal string, member RoundtableMember) string {
-	return fmt.Sprintf(`## 任务
+// The SUMMARY: prefix is parsed by extractTeamSummary and MUST be preserved in both languages.
+func buildTeamExploreGoal(goal string, member RoundtableMember, zh bool) string {
+	if zh {
+		return fmt.Sprintf(`## 任务
 从你的专业角度分析以下需求，输出你的专业意见和建议。
 
 ## 你的角色
@@ -1409,7 +1523,22 @@ func buildTeamExploreGoal(goal string, member RoundtableMember) string {
 - 分析需求的关键点和潜在风险
 - 给出你的专业建议和实现思路
 - 列出你认为需要特别注意的事项
-- 最后用一行 SUMMARY: <总结> 概括你的核心观点`, member.Name, member.Stance, goal)
+- 最后用一行 SUMMARY: <总结> 概括你的核心观点`, member.displayName(zh), member.displayStance(zh), goal)
+	}
+	return fmt.Sprintf(`## Task
+Analyze the following requirement from your professional perspective and provide your expert opinion and suggestions.
+
+## Your Role
+%s - %s
+
+## Requirement
+%s
+
+## Output Requirements
+- Analyze the key points and potential risks of the requirement
+- Provide your expert advice and implementation ideas
+- List anything that needs special attention
+- End with one line SUMMARY: <summary> capturing your core viewpoint`, member.displayName(zh), member.displayStance(zh), goal)
 }
 
 // extractTeamSummary extracts the SUMMARY: line from a member's output.

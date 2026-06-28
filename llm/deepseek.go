@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	dlog "github.com/deepact/deepact/internal/log"
 )
@@ -17,9 +18,34 @@ import (
 var debugLog = dlog.New("[llm] ")
 
 const (
-	DefaultDeepSeekEndpoint = "https://api.deepseek.com/chat/completions"
+	// DefaultDeepSeekEndpoint is the DeepSeek official API base URL (no path).
+	// Users may override it via [model].base_url in config (e.g. to point at the
+	// Volcano Engine Ark coding plan: https://ark.cn-beijing.volces.com/api/coding/v3).
+	// The "/chat/completions" path is appended by chatCompletionsURL at request time.
+	DefaultDeepSeekEndpoint = "https://api.deepseek.com"
 	DefaultOpenRouterURL    = "https://openrouter.ai/api/v1"
 )
+
+// chatCompletionsURL normalizes an API base URL into a full chat completions
+// POST endpoint. Users configure a base such as "https://api.deepseek.com" or
+// "https://ark.cn-beijing.volces.com/api/coding/v3"; the "/chat/completions"
+// path is appended here, preserving any query string (e.g. "?sub=1" used for
+// sub-agent prefix-cache isolation). Idempotent: a base already ending in
+// "/chat/completions" is returned unchanged.
+func chatCompletionsURL(base string) string {
+	if base == "" {
+		return ""
+	}
+	path, query, _ := strings.Cut(base, "?")
+	if strings.HasSuffix(path, "/chat/completions") {
+		return base
+	}
+	path = strings.TrimSuffix(path, "/") + "/chat/completions"
+	if query != "" {
+		return path + "?" + query
+	}
+	return path
+}
 
 var errSSEDone = errors.New("sse done")
 
@@ -41,6 +67,23 @@ func (c *DeepSeekClient) Fork() *DeepSeekClient {
 	return &DeepSeekClient{
 		apiKey:       c.apiKey,
 		endpoint:     c.endpoint,
+		http:         c.http,
+		limiter:      c.limiter,
+		retry:        c.retry,
+		estimator:    c.estimator,
+		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
+	}
+}
+
+// ForkWithEndpoint creates a new DeepSeekClient sharing the same HTTP client, limiter,
+// retry policy, and token estimator, but with an independent ReasoningEchoManager AND
+// a different API endpoint. Used by sub-agents to isolate their prefix cache partition
+// from the main agent's, preventing sub-agent calls from polluting the main agent's
+// DeepSeek server-side prefix cache.
+func (c *DeepSeekClient) ForkWithEndpoint(endpoint string) *DeepSeekClient {
+	return &DeepSeekClient{
+		apiKey:       c.apiKey,
+		endpoint:     chatCompletionsURL(endpoint),
 		http:         c.http,
 		limiter:      c.limiter,
 		retry:        c.retry,
@@ -72,10 +115,7 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 	if estimator == nil {
 		estimator = NewTokenEstimator()
 	}
-	endpoint := baseURL + "/chat/completions"
-	if strings.HasSuffix(baseURL, "/chat/completions") {
-		endpoint = baseURL
-	}
+	endpoint := chatCompletionsURL(baseURL)
 	return &DeepSeekClient{
 		apiKey:       apiKey,
 		endpoint:     endpoint,
@@ -104,12 +144,29 @@ func DetectBaseURL(configuredBaseURL, apiKey string) string {
 	return DefaultDeepSeekEndpoint
 }
 
+// SubAgentEndpoint returns an API base URL for sub-agents that differs from the main
+// agent's endpoint. This creates a separate prefix cache partition on DeepSeek's server,
+// preventing sub-agent calls from polluting the main agent's cached prefix.
+// The derivation appends a harmless query parameter that changes the cache key without
+// affecting request routing or behavior.
+func SubAgentEndpoint(configuredBaseURL, apiKey string) string {
+	mainEndpoint := DetectBaseURL(configuredBaseURL, apiKey)
+	if strings.Contains(mainEndpoint, "?") {
+		return mainEndpoint + "&sub=1"
+	}
+	return mainEndpoint + "?sub=1"
+}
+
 func (c *DeepSeekClient) Stream(ctx context.Context, req ChatRequest) (<-chan Chunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("stream: %w", classifyContextError(err))
 	}
+	acqStart := time.Now()
 	if err := c.limiter.Acquire(ctx); err != nil {
 		return nil, fmt.Errorf("acquire limiter: %w", err)
+	}
+	if d := time.Since(acqStart); d > 50*time.Millisecond {
+		debugLog.Printf("limiter acquire blocked for %s (slots=%d)", d, c.limiter.Slots())
 	}
 	req.Messages = c.reasoningMgr.ApplyEcho(req.Messages)
 	ch := make(chan Chunk, 16)
@@ -143,16 +200,26 @@ func (c *DeepSeekClient) Complete(ctx context.Context, req ChatRequest) (*ChatRe
 }
 
 func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, ch chan<- Chunk) error {
+	var retryLog []string
 	for attempt := 0; attempt <= c.retry.MaxRetries; attempt++ {
 		if attempt > 0 {
+			backoffStart := time.Now()
 			if err := c.retry.Sleep(ctx, attempt); err != nil {
 				return fmt.Errorf("backoff: %w", classifyContextError(err))
 			}
+			backoffDur := time.Since(backoffStart)
+			debugLog.Printf("retry attempt=%d after backoff=%s", attempt, backoffDur)
+			retryLog = append(retryLog, fmt.Sprintf("retry %d/%d (waited %s)", attempt, c.retry.MaxRetries, backoffDur.Round(time.Millisecond)))
 		}
 		status, err := c.streamOnce(ctx, req, ch)
 		if err == nil {
+			if attempt > 0 {
+				debugLog.Printf("stream succeeded on attempt=%d", attempt)
+			}
 			return nil
 		}
+		debugLog.Printf("streamOnce failed attempt=%d status=%d err=%v", attempt, status, err)
+		retryLog = append(retryLog, fmt.Sprintf("attempt %d: %v", attempt+1, err))
 		// Context errors are not retryable — the caller cancelled or deadline passed
 		if errors.Is(err, ErrContextCanceled) || errors.Is(err, ErrTimeout) {
 			return err
@@ -161,17 +228,49 @@ func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, c
 			c.limiter.Record429()
 		}
 		if !c.retry.ShouldRetry(status) || attempt == c.retry.MaxRetries {
+			if len(retryLog) > 1 {
+				return fmt.Errorf("%w\n\n%s", err, strings.Join(retryLog, "\n"))
+			}
 			return err
 		}
 	}
 	return ErrInvalidResponse
 }
 
-func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch chan<- Chunk) (int, error) {
+func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch chan<- Chunk) (status int, err error) {
+	start := time.Now()
+	var headersAt time.Time
+	var firstTokenAt time.Time
+	var chunkCount int
+	var bodyLen int
+	var doneUsage *Usage
+	defer func() {
+		total := time.Since(start)
+		tHeaders := time.Duration(0)
+		ttft := time.Duration(0)
+		tStream := time.Duration(0)
+		if !headersAt.IsZero() {
+			tHeaders = headersAt.Sub(start)
+		}
+		if !firstTokenAt.IsZero() {
+			ttft = firstTokenAt.Sub(start)
+			tStream = time.Since(firstTokenAt)
+		}
+		usageStr := "n/a"
+		if doneUsage != nil {
+			usageStr = fmt.Sprintf("prompt=%d completion=%d cache_hit=%d cache_miss=%d",
+				doneUsage.PromptTokens, doneUsage.CompletionTokens,
+				doneUsage.PromptCacheHitTokens, doneUsage.PromptCacheMissTokens)
+		}
+		debugLog.Printf("streamOnce: model=%s msgs=%d body_bytes=%d status=%d chunks=%d total=%s t_headers=%s ttft=%s t_stream=%s usage=%s err=%v",
+			req.Model, len(req.Messages), bodyLen, status, chunkCount, total, tHeaders, ttft, tStream, usageStr, err)
+	}()
+
 	body, err := c.buildRequestBody(req)
 	if err != nil {
 		return 0, fmt.Errorf("build request: %w", err)
 	}
+	bodyLen = len(body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
@@ -188,6 +287,7 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 	if err != nil {
 		return 0, fmt.Errorf("send request: %w", classifyContextError(err))
 	}
+	headersAt = time.Now()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -201,6 +301,7 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 	if err := parseSSE(reader, func(payload string) error {
 		if payload == "[DONE]" {
 			if usage := assembler.usage(); usage != nil {
+				doneUsage = usage
 				c.estimator.Calibrate(assembler.promptText(req), *usage)
 			}
 			c.limiter.RecordSuccess()
@@ -215,6 +316,10 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 			return err
 		}
 		if chunk != nil {
+			chunkCount++
+			if firstTokenAt.IsZero() {
+				firstTokenAt = time.Now()
+			}
 			ch <- *chunk
 		}
 		return nil
@@ -288,6 +393,73 @@ func (c *DeepSeekClient) validateAssistantContent(msgs []Message) []Message {
 	return msgs
 }
 
+// validateToolCallResponses ensures every tool_call_id emitted by an assistant
+// message is answered by a subsequent tool message. DeepSeek/OpenAI APIs reject
+// requests where an assistant message with tool_calls is not followed by tool
+// messages responding to each tool_call_id (400 "insufficient tool messages
+// following tool_calls message").
+//
+// This is a defensive backfill: it scans the message list and, for any assistant
+// message whose tool_call_ids are not all answered before the next assistant or
+// user message, inserts placeholder tool messages with the missing ids. This
+// guarantees the request is always schema-valid regardless of how upstream code
+// assembled the history (e.g. read-only calls skipped during plan replay).
+func validateToolCallResponses(msgs []Message) []Message {
+	// First pass: collect the set of tool_call_ids that already have a response.
+	answered := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID != "" {
+			answered[m.ToolCallID] = true
+		}
+	}
+
+	// Second pass: walk forward and backfill unanswered ids in place. We must
+	// insert placeholders immediately after the assistant message that emitted
+	// them (and after any tool messages that already follow it), to preserve the
+	// required ordering.
+	result := make([]Message, 0, len(msgs)+4)
+	for i := 0; i < len(msgs); i++ {
+		result = append(result, msgs[i])
+		if msgs[i].Role != "assistant" || len(msgs[i].ToolCalls) == 0 {
+			continue
+		}
+		// Collect this assistant message's tool_call_ids.
+		var ids []string
+		for _, tc := range msgs[i].ToolCalls {
+			if tc.ID != "" {
+				ids = append(ids, tc.ID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		// Carry forward any tool messages that already follow this assistant msg
+		// (they answer some of the ids). We append them as-is, then backfill the
+		// rest. Stop at the next non-tool message.
+		for i+1 < len(msgs) && msgs[i+1].Role == "tool" {
+			result = append(result, msgs[i+1])
+			i++
+		}
+		// Backfill any ids that still have no response.
+		var missing []string
+		for _, id := range ids {
+			if !answered[id] {
+				missing = append(missing, id)
+			}
+		}
+		for _, id := range missing {
+			debugLog.Printf("pre-flight fix: backfilling missing tool response for tool_call_id=%s", id)
+			result = append(result, Message{
+				Role:       "tool",
+				ToolCallID: id,
+				Content:    "Skipped: no tool result was produced for this call.",
+			})
+			answered[id] = true
+		}
+	}
+	return result
+}
+
 func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// Pre-send validation: ensure assistant messages with tool_calls have reasoning_content.
 	// Uses ReasoningEchoManager for stateful echo instead of scanning the message list.
@@ -303,6 +475,13 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// The API requires one of these to be set; messages with only reasoning_content are invalid.
 	req.Messages = c.validateAssistantContent(req.Messages)
 
+	// Pre-flight check: every tool_call_id in an assistant message must be answered by
+	// a following tool message. If any call went unanswered (e.g. a read-only call was
+	// skipped during plan-confirmation replay), DeepSeek rejects the request with
+	// 400 "insufficient tool messages following tool_calls message". We backfill
+	// placeholder tool messages for any orphaned ids so the request is always valid.
+	req.Messages = validateToolCallResponses(req.Messages)
+
 	payload := requestBody{
 		Model:           req.Model,
 		Messages:        req.Messages,
@@ -311,6 +490,14 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,
 		Stream:          true,
+	}
+	// When tools are present, request parallel tool calls so the model can emit
+	// multiple tool_use blocks (e.g. several reads) in a single response. Without
+	// this, DeepSeek defaults to one tool call per turn, which turns reading N
+	// files into N rapid sequential requests and triggers rate limits.
+	if len(req.Tools) > 0 {
+		t := true
+		payload.ParallelToolCalls = &t
 	}
 	if req.JsonMode {
 		payload.ResponseFormat = &responseFormat{Type: "json_object"}
@@ -345,15 +532,16 @@ func classifyContextError(err error) error {
 }
 
 type requestBody struct {
-	Model           string          `json:"model"`
-	Messages        []Message       `json:"messages"`
-	Tools           []ToolDef       `json:"tools,omitempty"`
-	Temperature     float64         `json:"temperature,omitempty"`
-	MaxTokens       int             `json:"max_tokens,omitempty"`
-	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
-	Stream          bool            `json:"stream"`
-	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
-	ExtraBody       *extraBody      `json:"extra_body,omitempty"`
+	Model              string          `json:"model"`
+	Messages           []Message       `json:"messages"`
+	Tools              []ToolDef       `json:"tools,omitempty"`
+	Temperature        float64         `json:"temperature,omitempty"`
+	MaxTokens          int             `json:"max_tokens,omitempty"`
+	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
+	Stream             bool            `json:"stream"`
+	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
+	ResponseFormat     *responseFormat `json:"response_format,omitempty"`
+	ExtraBody          *extraBody      `json:"extra_body,omitempty"`
 }
 
 type responseFormat struct {
