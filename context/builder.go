@@ -233,18 +233,23 @@ type readRecordVolatile struct {
 	Scope string `json:"scope,omitempty"`
 }
 
-// flattenReadHistory keeps the last 20 read records to bound prompt size; the
-// most recent reads matter most for the agent's current reasoning.
+// flattenReadHistory returns one entry per distinct (path, scope) read, in
+// insertion order. Previously this kept only the last 20 records to bound
+// prompt size, but a read record is just a {path, scope} pair (~40 bytes), so
+// truncation needlessly hid earlier reads from the agent — encouraging
+// re-reads. Dedup keeps the list small without losing any file.
 func flattenReadHistory(records []engine.ReadRecord) []readRecordVolatile {
 	if len(records) == 0 {
 		return nil
 	}
-	start := 0
-	if len(records) > 20 {
-		start = len(records) - 20
-	}
-	out := make([]readRecordVolatile, 0, len(records)-start)
-	for _, r := range records[start:] {
+	seen := make(map[string]struct{}, len(records))
+	out := make([]readRecordVolatile, 0, len(records))
+	for _, r := range records {
+		key := r.Path + "\x00" + r.Scope
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		out = append(out, readRecordVolatile{Path: r.Path, Scope: r.Scope})
 	}
 	return out

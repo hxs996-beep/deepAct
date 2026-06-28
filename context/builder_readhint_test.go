@@ -36,6 +36,33 @@ func TestFormatTaskStateVolatile_IncludesReadHistory(t *testing.T) {
 	}
 }
 
+// TestFlattenReadHistory_NoTruncation confirms the old 20-record cap is gone:
+// all distinct (path, scope) reads are preserved, and duplicates collapse.
+func TestFlattenReadHistory_NoTruncation(t *testing.T) {
+	// 30 distinct reads — would have been truncated to 20 before.
+	recs := make([]engine.ReadRecord, 0, 30)
+	for i := 0; i < 30; i++ {
+		recs = append(recs, engine.ReadRecord{Path: fmt.Sprintf("file%02d.go", i), Scope: ""})
+	}
+	// Plus a duplicate that should collapse.
+	recs = append(recs, engine.ReadRecord{Path: "file00.go", Scope: ""})
+
+	out := flattenReadHistory(recs)
+	if len(out) != 30 {
+		t.Errorf("expected 30 distinct records (no truncation, dedup of 1 dup), got %d", len(out))
+	}
+	// file00.go should appear exactly once.
+	count := 0
+	for _, r := range out {
+		if r.Path == "file00.go" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected file00.go once after dedup, got %d", count)
+	}
+}
+
 func TestBuildReadHistoryHint(t *testing.T) {
 	records := []engine.ReadRecord{
 		{Path: "a.go", Scope: "symbol:Run"},
