@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,7 +270,7 @@ func TestParseSSE(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(input))
 
 	var payloads []string
-	err := parseSSE(reader, func(payload string) error {
+	err := parseSSE(reader, 0, func(payload string) error {
 		payloads = append(payloads, payload)
 		if payload == "[DONE]" {
 			return errSSEDone
@@ -286,6 +288,92 @@ func TestParseSSE(t *testing.T) {
 	}
 	if payloads[2] != "[DONE]" {
 		t.Errorf("payload[2] = %q, want %q", payloads[2], "[DONE]")
+	}
+}
+
+// blockingReader never produces data and never returns EOF — it models a
+// stalled connection where the server accepted the request but sends nothing.
+type blockingReader struct{}
+
+func (blockingReader) Read(p []byte) (int, error) {
+	// Block forever; the test relies on parseSSE's idle watchdog to abort.
+	select {}
+}
+
+// TestParseSSE_IdleTimeout verifies a stalled stream (no data line arrives)
+// is aborted with ErrStreamIdle within ~idleTimeout, instead of blocking
+// forever. This is the regression guard for the "hangs indefinitely when the
+// API connection goes silent" bug.
+func TestParseSSE_IdleTimeout(t *testing.T) {
+	reader := bufio.NewReader(blockingReader{})
+	start := time.Now()
+	err := parseSSE(reader, 50*time.Millisecond, func(payload string) error {
+		t.Fatalf("handler should not be called on a stalled stream")
+		return nil
+	})
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("parseSSE error = %v, want ErrStreamIdle", err)
+	}
+	// Should trip shortly after the idle timeout, not hang.
+	if elapsed > 2*time.Second {
+		t.Fatalf("idle timeout took %s, want < 2s", elapsed)
+	}
+}
+
+// TestParseSSE_IdleTimeoutDisabled verifies that idleTimeout=0 keeps the
+// legacy unbounded behavior (no watchdog). We feed a normal stream and confirm
+// it completes without timing out.
+func TestParseSSE_IdleTimeoutDisabled(t *testing.T) {
+	input := "data: {\"x\":1}\n\ndata: [DONE]\n\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+	var n int
+	err := parseSSE(reader, 0, func(payload string) error {
+		n++
+		if payload == "[DONE]" {
+			return errSSEDone
+		}
+		return nil
+	})
+	if err != errSSEDone {
+		t.Fatalf("parseSSE error = %v, want errSSEDone", err)
+	}
+	if n != 2 {
+		t.Fatalf("payload count = %d, want 2", n)
+	}
+}
+
+// TestParseSSE_IdleTimeoutResetsOnData verifies the watchdog resets on each
+// successful read — a slow-but-alive stream (a line every < idleTimeout) must
+// not trip the timeout even if its total duration exceeds idleTimeout.
+func TestParseSSE_IdleTimeoutResetsOnData(t *testing.T) {
+	// Emit 3 SSE events spaced 30ms apart, with an 80ms idle timeout. Each
+	// gap (30ms) is under the timeout, but the total (~90ms) exceeds it —
+	// a non-resetting watchdog would falsely trip. The watchdog must reset
+	// per line and let the stream complete.
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		frames := []string{"data: a\n\n", "data: b\n\n", "data: [DONE]\n\n"}
+		for _, f := range frames {
+			time.Sleep(30 * time.Millisecond)
+			pw.Write([]byte(f))
+		}
+	}()
+	reader := bufio.NewReader(pr)
+	var n int
+	err := parseSSE(reader, 80*time.Millisecond, func(payload string) error {
+		n++
+		if payload == "[DONE]" {
+			return errSSEDone
+		}
+		return nil
+	})
+	if err != errSSEDone {
+		t.Fatalf("parseSSE error = %v, want errSSEDone (stream was alive)", err)
+	}
+	if n != 3 {
+		t.Fatalf("payload count = %d, want 3", n)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,26 @@ const (
 	// The "/chat/completions" path is appended by chatCompletionsURL at request time.
 	DefaultDeepSeekEndpoint = "https://api.deepseek.com"
 	DefaultOpenRouterURL    = "https://openrouter.ai/api/v1"
+
+	// DefaultIdleTimeout caps how long a streaming response may stay silent
+	// (no SSE data line) before the read is aborted as a stalled connection.
+	// Generous enough to never trip on a slow-but-alive model (reasoning
+	// pauses, long ttft after headers), short enough that a truly hung
+	// connection fails in ~1 minute instead of blocking forever. Override per
+	// client via SetIdleTimeout; 0 disables.
+	DefaultIdleTimeout = 60 * time.Second
+	// DefaultResponseHeaderTimeout caps how long the client waits for the
+	// response headers (HTTP status line + headers) after sending the request.
+	// This is the TTFT-before-any-bytes phase; a server that accepts the TCP
+	// connection but never responds with headers hangs here indefinitely
+	// without it. Streaming bodies are NOT bounded by this (the idleTimeout
+	// watchdog handles mid-stream stalls).
+	DefaultResponseHeaderTimeout = 120 * time.Second
+	// DefaultDialTimeout caps the TCP connection establishment phase. Without
+	// it, a server that is reachable but never completes the handshake (or a
+	// black-holed route) hangs the very first byte indefinitely. Generous
+	// enough for slow mobile/satellite links, short enough to fail fast.
+	DefaultDialTimeout = 30 * time.Second
 )
 
 // chatCompletionsURL normalizes an API base URL into a full chat completions
@@ -57,6 +78,13 @@ type DeepSeekClient struct {
 	retry        RetryPolicy
 	estimator    *TokenEstimator
 	reasoningMgr *ReasoningEchoManager
+	// idleTimeout is the max time allowed between two SSE data lines during a
+	// streaming response. Streaming LLM output can legitimately pause between
+	// tokens, but a connection that goes silent for this long is almost
+	// certainly stalled (server hung, connection half-open). Tripping it
+	// returns ErrTimeout so the caller can retry instead of waiting forever.
+	// 0 disables the watchdog (legacy behavior). See streamOnce/parseSSE.
+	idleTimeout time.Duration
 }
 
 // Fork creates a new DeepSeekClient sharing the same HTTP client, limiter, retry policy,
@@ -72,6 +100,7 @@ func (c *DeepSeekClient) Fork() *DeepSeekClient {
 		retry:        c.retry,
 		estimator:    c.estimator,
 		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
+		idleTimeout:  c.idleTimeout,
 	}
 }
 
@@ -89,6 +118,7 @@ func (c *DeepSeekClient) ForkWithEndpoint(endpoint string) *DeepSeekClient {
 		retry:        c.retry,
 		estimator:    c.estimator,
 		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
+		idleTimeout:  c.idleTimeout,
 	}
 }
 
@@ -101,10 +131,36 @@ func NewDeepSeekClient(apiKey string, httpClient *http.Client, limiter *Adaptive
 // default DeepSeek endpoint and configures OpenRouter-specific headers.
 func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Client, limiter *AdaptiveLimiter, retry RetryPolicy, estimator *TokenEstimator) *DeepSeekClient {
 	if httpClient == nil {
-		// No hard timeout on the HTTP client — streaming LLM responses can take
-		// several minutes (thinking + generation). Context cancellation from the
-		// caller (user cancel, turn boundary) is the correct timeout mechanism.
-		httpClient = &http.Client{Timeout: 0}
+		// No whole-request Timeout on the HTTP client — streaming LLM responses
+		// can legitimately take minutes (thinking + generation), and a hard
+		// http.Client.Timeout would abort healthy long streams. Instead, two
+		// narrower guards bound stalls without killing slow-but-alive streams:
+		//   1. ResponseHeaderTimeout — headers must arrive within this after
+		//      the request is sent (covers a server that accepts the TCP
+		//      connection but never responds).
+		//   2. idleTimeout (per-client, enforced in parseSSE) — no SSE data line
+		//      may be silent for longer than this mid-stream.
+		// Context cancellation from the caller (user cancel, turn boundary)
+		// remains the primary control.
+		httpClient = &http.Client{
+			Timeout: 0,
+			Transport: &http.Transport{
+				// DialContext bounds TCP connection establishment + TLS
+				// handshake. A black-holed route or a server that never
+				// completes the handshake would otherwise hang the request
+				// before any timeout can fire.
+				DialContext: (&net.Dialer{
+					Timeout:   DefaultDialTimeout,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   DefaultDialTimeout,
+				ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
+				// IdleConnTimeout recycles pooled connections that have gone
+				// stale (server closed without notice) so a reused half-open
+				// connection doesn't silently hang the next request.
+				IdleConnTimeout: 90 * time.Second,
+			},
+		}
 	}
 	if limiter == nil {
 		limiter = NewAdaptiveLimiter(5, 10, 1, 10, 5)
@@ -124,7 +180,18 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 		retry:        retry,
 		estimator:    estimator,
 		reasoningMgr: NewReasoningEchoManager(),
+		idleTimeout:  DefaultIdleTimeout,
 	}
+}
+
+// SetIdleTimeout overrides the per-client SSE idle timeout. Pass 0 to disable
+// the watchdog entirely (restores legacy block-forever behavior). Must be set
+// before the first request; changes do not affect in-flight streams.
+func (c *DeepSeekClient) SetIdleTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.idleTimeout = d
 }
 
 // isOpenRouterKey returns true if the API key is an OpenRouter key (starts with "sk-or-v1-")
@@ -210,6 +277,11 @@ func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, c
 			backoffDur := time.Since(backoffStart)
 			debugLog.Printf("retry attempt=%d after backoff=%s", attempt, backoffDur)
 			retryLog = append(retryLog, fmt.Sprintf("retry %d/%d (waited %s)", attempt, c.retry.MaxRetries, backoffDur.Round(time.Millisecond)))
+			// Send retry progress to the caller so the UI can show it in real time.
+			select {
+			case ch <- Chunk{RetryProgress: fmt.Sprintf("Retrying %d/%d after %s...", attempt, c.retry.MaxRetries, backoffDur.Round(time.Millisecond))}:
+			default:
+			}
 		}
 		status, err := c.streamOnce(ctx, req, ch)
 		if err == nil {
@@ -298,7 +370,7 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 	}
 	reader := bufio.NewReader(resp.Body)
 	assembler := newStreamAssembler()
-	if err := parseSSE(reader, func(payload string) error {
+	if err := parseSSE(reader, c.idleTimeout, func(payload string) error {
 		if payload == "[DONE]" {
 			if usage := assembler.usage(); usage != nil {
 				doneUsage = usage
@@ -335,6 +407,13 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 		}
 		if errors.Is(err, io.EOF) {
 			return http.StatusOK, fmt.Errorf("stream closed: %w", ErrInvalidResponse)
+		}
+		// Idle timeout (stream went silent) — report status 0 so the retry
+		// layer treats it as a transient network error and re-attempts, rather
+		// than surfacing a hang to the user. Distinguished from ErrTimeout
+		// (a hard deadline, not retried) by the ErrStreamIdle sentinel.
+		if errors.Is(err, ErrStreamIdle) {
+			return 0, fmt.Errorf("stream idle: %w", ErrStreamIdle)
 		}
 		return http.StatusOK, err
 	}
@@ -731,7 +810,41 @@ func (s *streamAssembler) observeMessage() *Message {
 	}
 }
 
-func parseSSE(reader *bufio.Reader, handle func(payload string) error) error {
+// parseSSE reads an SSE stream line by line, invoking handle for each
+// "data: " payload. idleTimeout bounds how long a read may block without
+// producing a line: if no line arrives within idleTimeout, the read is
+// aborted (ErrTimeout) so a stalled connection fails fast instead of hanging
+// forever. Pass 0 to disable the watchdog. The timeout is reset on every
+// successful read, so it measures inter-line silence, not total stream time —
+// a slow-but-alive stream that emits a line every few seconds never trips it.
+func parseSSE(reader *bufio.Reader, idleTimeout time.Duration, handle func(payload string) error) error {
+	if idleTimeout <= 0 {
+		return parseSSEUnbounded(reader, handle)
+	}
+	for {
+		line, err := readLineWithIdleTimeout(reader, idleTimeout)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return io.EOF
+			}
+			return err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if err := handle(payload); err != nil {
+			return err
+		}
+	}
+}
+
+// parseSSEUnbounded is the legacy no-timeout path (idleTimeout disabled).
+func parseSSEUnbounded(reader *bufio.Reader, handle func(payload string) error) error {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -751,5 +864,35 @@ func parseSSE(reader *bufio.Reader, handle func(payload string) error) error {
 		if err := handle(payload); err != nil {
 			return err
 		}
+	}
+}
+
+// readLineWithIdleTimeout reads one line, aborting with ErrTimeout if no data
+// arrives within idleTimeout. Implementation: a watchdog goroutine sleeps for
+// idleTimeout; each call starts a fresh watchdog and the previous one is
+// cancelled via its own context when this function returns (success or EOF).
+// Because reader.ReadString blocks in a syscall, we cannot interrupt it
+// directly — instead we run the read in a goroutine and select between the
+// read result and the watchdog timer, cancelling the read's context on
+// timeout. The spawned reader goroutine leaks until the underlying connection
+// eventually unblocks (caller closes resp.Body on return), which is acceptable
+// for a stalled connection that we are abandoning anyway.
+func readLineWithIdleTimeout(reader *bufio.Reader, idleTimeout time.Duration) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		resCh <- result{line, err}
+	}()
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-resCh:
+		return r.line, r.err
+	case <-timer.C:
+		return "", ErrStreamIdle
 	}
 }
