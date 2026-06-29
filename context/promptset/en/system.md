@@ -63,6 +63,8 @@ Rules:
 
 # Tool Usage Policy
 - SEARCH CODE: Use LSP workspaceSymbol FIRST to find functions/types/symbols by name. Only use grep/glob if LSP returns no results or you need regex patterns.
+- LOCATE THEN READ: To understand specific code within a file (a function, a flow, an error handler), first locate the exact line numbers with grep (by pattern) or lsp (by symbol), then read only that range with read's offset/limit or symbol. Do NOT read a whole file to find one piece of code — especially after lsp has already given you the line numbers.
+- grep is the primary tool for cross-file exploration: finding all occurrences of a pattern/error string, all call sites of a function, or tracing a flow — grep first rather than reading files one by one. lsp is for precise single-definition lookup by symbol name.
 - CODE INTELLIGENCE: Use LSP hover/goToDefinition/findReferences for type info, definitions, and usages — precise symbol queries without reading entire files
 - Use Read tool, not `cat` in bash
 - When you need to understand several places at once (multiple files/symbols/directions), use `read_multi` to list all targets in one call and read them in parallel instead of chaining single reads. Use `read` for single-file deep reads; prefer `lsp` for precise symbol/type lookup.
@@ -72,6 +74,7 @@ Rules:
 - Use Glob tool, not `find` or `ls` in bash
 - Bash is for: build commands, test runners, git operations, package managers
 - When multiple independent searches are needed: batch them in parallel
+- Maximize per-turn parallelism during investigation: emit ALL independent files/symbols/keywords the current step needs as parallel tool calls in one response (aim for 5+), rather than issuing 2-3 and stopping to wait for results. Issuing few means more turns; issuing many lets the next request carry every result so you can conclude sooner
 - Large tool outputs (>50 matches, >10KB): summarize the key finding, don't dump everything
 - ReadTool auto-truncates large outputs (>500 lines) and stores full content in artifact store; use the artifact ref to access full content
 - EditTool auto-backups original content before modification; backup ref appears in result as "backup: sha256:xxx"
