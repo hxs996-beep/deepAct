@@ -595,9 +595,16 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 
 		case tea.KeyBackspace:
 			if len(ib.pasteSuffix) > 0 {
-				// Pop the last user-typed char from suffix and PasteContent.
-				ib.pasteSuffix = ib.pasteSuffix[:len(ib.pasteSuffix)-1]
-				ib.PasteContent = ib.PasteContent[:len(ib.PasteContent)-1]
+				// Pop the last user-typed character from suffix and PasteContent.
+				// Use rune slices to correctly handle multi-byte CJK characters:
+				// byte-level slicing (e.g. s[:len(s)-1]) corrupts multi-byte
+				// runes, causing garbled text on the first press (Bug #2).
+				sufRunes := []rune(ib.pasteSuffix)
+				sufRunes = sufRunes[:len(sufRunes)-1]
+				ib.pasteSuffix = string(sufRunes)
+				pcRunes := []rune(ib.PasteContent)
+				pcRunes = pcRunes[:len(pcRunes)-1]
+				ib.PasteContent = string(pcRunes)
 				ib.rebuildPasteText()
 				ib.lastEventTime = now
 				return ActionBackspace
@@ -641,8 +648,28 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			ib.lastEventTime = now
 			return ActionRuneInserted
 
+		case tea.KeyDelete:
+			// Bug #2: Delete in PasteMode deletes the last user-typed character
+			// from the suffix (same as Backspace). Since cursor is always at end
+			// in PasteMode, Forward-Delete and Backspace are semantically identical.
+			if len(ib.pasteSuffix) > 0 {
+				sufRunes := []rune(ib.pasteSuffix)
+				sufRunes = sufRunes[:len(sufRunes)-1]
+				ib.pasteSuffix = string(sufRunes)
+				pcRunes := []rune(ib.PasteContent)
+				pcRunes = pcRunes[:len(pcRunes)-1]
+				ib.PasteContent = string(pcRunes)
+				ib.rebuildPasteText()
+				ib.lastEventTime = now
+				return ActionDelete
+			}
+			// No suffix — cancel the paste entirely (clear input).
+			ib.cancelPaste()
+			ib.lastEventTime = time.Time{}
+			return ActionDelete
+
 		default:
-			// Left/Right/Home/End/Delete are no-ops in PasteMode — the
+			// Left/Right/Home/End are no-ops in PasteMode — the
 			// indicator + suffix display is append-only.
 			return ActionNone
 		}
@@ -670,6 +697,12 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			ib.insertAtCursor('\n')
 			nlCount := strings.Count(string(ib.text), "\n")
 			if nlCount >= pasteThresholdNewlines {
+				// Bug #1: Correct burstStartLen when the first paste event
+				// wasn't fast (gap > 100ms from user typing).
+				origLen := len(ib.text) - 1
+				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
+					ib.burstStartLen = origLen
+				}
 				ib.enterPasteMode(string(ib.text), nlCount)
 			}
 			ib.lastEventTime = now
@@ -754,10 +787,14 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		}
 
 		// (pendingSubmit was removed.)
-		// Mark the burst boundary on the first fast event: everything in
-		// text[:burstStartLen] is pre-burst typing (the prefix shown before
-		// the indicator when we later enter PasteMode).
-		if fast && ib.burstStartLen == 0 {
+		// Mark the burst boundary on the first fast event or bracketed paste:
+		// everything in text[:burstStartLen] is pre-burst typing (the prefix
+		// shown before the indicator when we later enter PasteMode).
+		// For bracketed paste (msg.Paste), the paste arrives as a single event
+		// regardless of typing speed — we must always capture burstStartLen
+		// before inserting, otherwise the user's pre-existing text is swallowed
+		// into PasteContent without a visible prefix (Bug #1).
+		if (msg.Paste || fast) && ib.burstStartLen == 0 {
 			ib.burstStartLen = len(ib.text)
 		}
 
@@ -771,12 +808,23 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		if msg.Paste {
 			nlCount := strings.Count(string(ib.text), "\n")
 			if nlCount >= pasteThresholdNewlines || len(filtered) >= pasteThresholdRunes {
+				// Bug #1: When the first paste event arrives not-fast (gap > 100ms),
+				// burstStartLen is set AFTER that event's characters have already been
+				// inserted. Correct it by using the actual pre-insertion length.
+				origLen := len(ib.text) - len(filtered)
+				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
+					ib.burstStartLen = origLen
+				}
 				ib.enterPasteMode(string(ib.text), nlCount)
 				enteredPaste = true
 			}
 		} else if fast {
 			nlCount := strings.Count(string(ib.text), "\n")
 			if nlCount >= pasteThresholdNewlines {
+				origLen := len(ib.text) - len(filtered)
+				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
+					ib.burstStartLen = origLen
+				}
 				ib.enterPasteMode(string(ib.text), nlCount)
 				enteredPaste = true
 			}

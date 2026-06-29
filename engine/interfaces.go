@@ -26,6 +26,7 @@ type ContextBuilder interface {
 type Compressor interface {
 	ShouldCompress(currentTokens int, maxTokens int) (CompressionLayer, bool)
 	Compress(layer CompressionLayer, state *TaskState, history []Message) ([]Message, error)
+	SetUserLang(lang string)
 }
 
 type SessionStore interface {

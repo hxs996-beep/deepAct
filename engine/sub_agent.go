@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/deepact/deepact/context/promptset"
 )
 
 const (
@@ -24,8 +26,10 @@ type SubAgentRunner struct {
 	modelName        string // default (Pro) model
 	flashModelName   string // Flash model for cheaper agents
 	maxContextTokens int    // context window limit; 0 = use defaultSubAgentContext
+	maxOutputTokens  int    // per-turn completion cap; 0 = use DefaultMaxOutputTokens
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
+	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -69,10 +73,29 @@ func (r *SubAgentRunner) SetMaxContextTokens(tokens int) {
 	r.maxContextTokens = tokens
 }
 
+// SetMaxOutputTokens overrides the per-turn completion cap for sub-agents.
+func (r *SubAgentRunner) SetMaxOutputTokens(tokens int) {
+	r.maxOutputTokens = tokens
+}
+
+func (r *SubAgentRunner) outputTokenCap() int {
+	if r.maxOutputTokens > 0 {
+		return r.maxOutputTokens
+	}
+	return DefaultMaxOutputTokens
+}
+
 // SetCompressor sets the CompressionOrchestrator for layered compression (same as main agent).
 // When set, replaces the simple compressSubHistory with the full 4-layer strategy.
 func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
 	r.compressor = c
+}
+
+// SetSubAgentBaseURL sets a separate API base URL for sub-agents. When set, sub-agents
+// use this URL instead of the main agent's, giving them their own DeepSeek prefix cache
+// partition. Empty string (default) means sub-agents share the main agent's endpoint.
+func (r *SubAgentRunner) SetSubAgentBaseURL(url string) {
+	r.subAgentBaseURL = url
 }
 
 // contextLimit returns the effective context window limit.
@@ -124,12 +147,20 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
 		model = f.Fork()
 	}
+	// If a separate sub-agent base URL is configured, fork again with a different
+	// endpoint for cache isolation. This gives sub-agents their own DeepSeek prefix
+	// cache partition so their calls don't pollute the main agent's cached prefix.
+	if r.subAgentBaseURL != "" {
+		if f, ok := model.(interface{ ForkWithBaseURL(string) ModelClient }); ok {
+			model = f.ForkWithBaseURL(r.subAgentBaseURL)
+		}
+	}
 
 	// Stable system message — identical across all sub-agent calls → prefix cache hit
 	// Stable agent-type instructions (extraPrompt) — identical per agent type → prefix cache hit
 	// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
 	history := []ModelMessage{
-		{Role: "system", Content: r.stableSystemPrompt()},
+		{Role: "system", Content: r.stableSystemPrompt(input.UserLanguage)},
 	}
 	if extraPrompt != "" {
 		history = append(history, ModelMessage{Role: "user", Content: extraPrompt})
@@ -196,7 +227,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Model:           modelName,
 			Messages:        history,
 			Tools:           filteredTools,
-			MaxTokens:       4096,
+			MaxTokens:       r.outputTokenCap(),
 			ThinkingEnabled: false, // sub-agents do structured tasks, don't need open-ended thinking
 		}
 
@@ -317,7 +348,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}
 
 		// Per-file loop detection: same tool+file repeated N consecutive turns → block
-		opKey := firstOpKey(calls)
+		opKey := firstOpKey(calls, r.workDir)
 		if opKey != "" {
 			if opKey == lastOpKey {
 				sameOpCount++
@@ -333,19 +364,21 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		for _, call := range calls {
 			if r.onProgress != nil {
-				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, r.workDir)})
 			}
 			if call.Name == HandoffToolName && input.Depth < maxSubAgentDepth {
 				// Execute sub-sub-agent
-				result := r.executeSubHandoff(ctx, call, input.Depth+1)
+				result := r.executeSubHandoff(ctx, call, input.Depth+1, input.UserLanguage)
 				if r.onProgress != nil {
 					r.onProgress(ProgressEvent{Type: "tool_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 				}
-				history = append(history, ModelMessage{
-					Role:       "tool",
-					ToolCallID: call.ID,
-					Content:    result.Digest,
-				})
+				if result.Status != "cancelled" {
+					history = append(history, ModelMessage{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    result.Digest,
+					})
+				}
 			} else if call.Name == HandoffToolName {
 				history = append(history, ModelMessage{
 					Role:       "tool",
@@ -380,12 +413,12 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 // summarizeHistory extracts the last meaningful assistant output from history
 // when the sub-agent runs out of iterations. Falls back to listing tool outputs.
 // firstOpKey extracts "toolName:path" from the first path-bearing call for loop detection.
-func firstOpKey(calls []ToolCallRequest) string {
+func firstOpKey(calls []ToolCallRequest, workDir string) string {
 	for _, c := range calls {
 		if c.Name != "edit" && c.Name != "write" {
 			continue
 		}
-		if path := extractPathFromArgs(c.Input); path != "" {
+		if path := extractPathFromArgs(c.Input, workDir); path != "" {
 			return c.Name + ":" + path
 		}
 	}
@@ -436,31 +469,23 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 
 // stableSystemPrompt returns the fixed system identity shared by all sub-agents.
 // Identical across every sub-agent call in the session → enables prefix cache hits.
-func (r *SubAgentRunner) stableSystemPrompt() string {
-	return `You are a sub-agent executing a delegated task. Complete the goal and report your findings.
-
-## Search Methodology (Code Reading Protocol)
-- **Intent first**: use grep/glob with task-relevant keywords to narrow scope. Do NOT glob all files.
-- **LSP before read**: use 'lsp workspaceSymbol' to find function/type definitions by name; use 'lsp hover'/'goToDefinition' for type info. More precise than grep+Read.
-- **Read precisely**: once you know which file you need, read only the relevant symbol/region.
-- **Summarize large outputs**: if a tool returns >50 matches or >10KB, summarize key findings rather than dumping everything.
-- **Batch parallel reads**: when multiple independent files need checking, batch them in a single turn.
-- **Trace through code**: follow function calls and type references to build understanding, not file listing.
-
-When you complete the task, provide a summary of what you did and list key findings/conclusions.
-You can delegate sub-tasks using the '` + HandoffToolName + `' tool.`
+// Uses promptset.Get to load the language version matching userLang.
+func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
+	prompts := promptset.Get(userLang)
+	return prompts.SubAgent
 }
 
 // buildVolatilePrompt assembles the per-call variable content (goal, context, constraints).
 // This is appended as the last user message, after stable system + agent-specific prompts.
 func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
+	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
+	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
 	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
 	}
 	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
+		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
 	}
 	return sb.String()
 }
@@ -468,13 +493,14 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // buildVariablePrompt assembles the per-call variable content (goal, context, constraints, extra).
 // This is appended as the first user message, after the stable system message.
 func (r *SubAgentRunner) buildVariablePrompt(input Handoff, extraPrompt string) string {
+	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
+	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
 	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
 	}
 	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
+		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
 	}
 	if extraPrompt != "" {
 		sb.WriteString(extraPrompt + "\n\n")
@@ -506,7 +532,7 @@ func (r *SubAgentRunner) filterTools(allowList []string) []ModelTool {
 }
 
 // executeSubHandoff handles a handoff_to_agent call from within a sub-agent.
-func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallRequest, depth int) ToolResult {
+func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallRequest, depth int, userLang string) ToolResult {
 	var params HandoffToAgentParams
 	if err := json.Unmarshal(call.Input, &params); err != nil {
 		return ToolResult{
@@ -528,12 +554,13 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 	}
 
 	handoff := Handoff{
-		Agent:       AgentID(params.Agent),
-		Goal:        params.Goal,
-		Context:     params.Context,
-		Tools:       params.Tools,
-		Constraints: params.Constraints,
-		Depth:       depth,
+		Agent:        AgentID(params.Agent),
+		Goal:         params.Goal,
+		Context:      params.Context,
+		Tools:        params.Tools,
+		Constraints:  params.Constraints,
+		Depth:        depth,
+		UserLanguage: userLang,
 	}
 
 	result, err := agent.Run(ctx, handoff)
@@ -546,11 +573,15 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 		}
 	}
 
-	digest := formatHandoffResult(result)
+	status := "ok"
+	if result.BlockedBy == "cancelled" {
+		status = "cancelled"
+	}
+	digest := formatHandoffResult(result, zhFromLang(userLang))
 	return ToolResult{
 		ToolCallID: call.ID,
 		ToolName:   HandoffToolName,
-		Status:     "ok",
+		Status:     status,
 		Digest:     digest,
 	}
 }

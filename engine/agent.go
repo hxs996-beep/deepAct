@@ -32,6 +32,9 @@ type Handoff struct {
 	Depth         int      `json:"depth"`
 	NoNudge       bool     `json:"no_nudge,omitempty"`
 	MaxIterations int      `json:"max_iterations,omitempty"`
+	// UserLanguage is the detected user language ("中文" etc.), set by the engine
+	// before delegating. Used to inject language directives into sub-agent context.
+	UserLanguage string `json:"-"`
 }
 
 // HandoffResult is returned by a sub-agent after execution.
@@ -84,7 +87,7 @@ func activateSkillToolSpec() ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        ActivateSkillToolName,
-			Description: "Suggest activating a skill (e.g., writing-plans after brainstorming). The engine will ask the user for confirmation before activating.",
+			Description: "Activate a skill to guide the agent's methodology for the current task. The skill's instructions will override general rules and become the governing framework.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -144,23 +147,23 @@ func handoffToolSpec() ModelTool {
 }
 
 // formatHandoffResult serializes a HandoffResult into a digest string for injection into tool result history.
-func formatHandoffResult(result *HandoffResult) string {
+func formatHandoffResult(result *HandoffResult, zh bool) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Agent completed: %s\n", result.Summary))
+	sb.WriteString(fmt.Sprintf("%s %s\n", pickPrompt(zh, "Agent completed:", "代理完成："), result.Summary))
 	if len(result.Conclusions) > 0 {
-		sb.WriteString("Key findings:\n")
+		sb.WriteString(pickPrompt(zh, "Key findings:\n", "关键发现：\n"))
 		for _, c := range result.Conclusions {
 			sb.WriteString(fmt.Sprintf("- %s\n", c))
 		}
 	}
 	if len(result.Artifacts) > 0 {
-		sb.WriteString("Artifacts:\n")
+		sb.WriteString(pickPrompt(zh, "Artifacts:\n", "产出物：\n"))
 		for _, a := range result.Artifacts {
 			sb.WriteString(fmt.Sprintf("  %s\n", a))
 		}
 	}
 	if result.Blocked {
-		sb.WriteString(fmt.Sprintf("Blocked: %s\n", result.BlockedBy))
+		sb.WriteString(fmt.Sprintf("%s %s\n", pickPrompt(zh, "Blocked:", "受阻："), result.BlockedBy))
 	}
 	return sb.String()
 }

@@ -2,8 +2,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/deepact/deepact/engine"
@@ -21,10 +24,11 @@ type File struct {
 }
 
 type modelConfig struct {
-	Default    string `toml:"default"`
-	Escalation string `toml:"escalation"`
-	Provider   string `toml:"provider"`   // "deepseek" or "openrouter"
-	BaseURL    string `toml:"base_url"`   // overrides provider if set
+	Default        string `toml:"default"`
+	Escalation     string `toml:"escalation"`
+	BaseURL        string `toml:"base_url"`      // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
+	SubAgentURL    string `toml:"sub_agent_url"` // separate endpoint for sub-agents (cache isolation)
+	APIKey         string `toml:"api_key"`       // DeepSeek/OpenRouter API key
 }
 
 type routingConfig struct {
@@ -33,6 +37,11 @@ type routingConfig struct {
 
 type contextConfig struct {
 	MaxBudgetTokens int `toml:"max_budget_tokens"`
+	// MaxOutputTokens caps the LLM completion length per turn (max_tokens).
+	// 0 = use the engine default. DeepSeek's 1M context window supports large
+	// completions; a generous budget lets the model emit full code edits in one
+	// turn instead of being cut off and forced to continue piecemeal.
+	MaxOutputTokens int `toml:"max_output_tokens"`
 }
 
 type guardsConfig struct {
@@ -79,6 +88,74 @@ func LoadProject(workDir string) *File {
 	return nil
 }
 
+// LoadAPIKey resolves the API key. The DEEPSEEK_API_KEY environment variable
+// takes priority; otherwise the api_key field is read from .deepact/config.toml
+// (project-level first, then user-level). Returns "" if not set.
+func LoadAPIKey(workDir string) string {
+	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
+		return key
+	}
+	if f := LoadProject(workDir); f != nil {
+		return f.Model.APIKey
+	}
+	return ""
+}
+
+// UserConfigPath returns the path to the user-level config file (~/.deepact/config.toml).
+func UserConfigPath() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".deepact", "config.toml")
+	}
+	return filepath.Join(os.TempDir(), "deepact", "config.toml")
+}
+
+// SaveAPIKey writes the api_key field into the user-level config file
+// (~/.deepact/config.toml), preserving any existing content. The file is
+// created with restrictive permissions since it holds a secret.
+func SaveAPIKey(key string) error {
+	return saveAPIKeyAtPath(UserConfigPath(), key)
+}
+
+var (
+	// existingAPIKeyLine matches an `api_key = ...` line (quoted or bare).
+	existingAPIKeyLine = regexp.MustCompile(`(?m)^\s*api_key\s*=\s*.*$`)
+	// modelSectionHeader matches a `[model]` table header on its own line.
+	modelSectionHeader = regexp.MustCompile(`(?m)^(\s*\[model\]\s*)$`)
+)
+
+func saveAPIKeyAtPath(path, key string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	content := string(data)
+	quoted := fmt.Sprintf("%q", key)
+
+	var updated string
+	switch {
+	case existingAPIKeyLine.MatchString(content):
+		// Replace the existing api_key value in place.
+		updated = existingAPIKeyLine.ReplaceAllString(content, "api_key = "+quoted)
+	case modelSectionHeader.MatchString(content):
+		// Insert api_key right after the [model] header.
+		updated = modelSectionHeader.ReplaceAllString(content, "${1}\napi_key = "+quoted)
+	default:
+		// No [model] section yet — append one.
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		updated = content + "[model]\napi_key = " + quoted + "\n"
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
+
 // Apply overwrites engine config fields that are explicitly set in the TOML file.
 // Fields not present in the file keep their default values.
 func Apply(cfg *engine.EngineConfig, f *File) {
@@ -91,14 +168,20 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	if f.Model.Escalation != "" {
 		cfg.ModelName = f.Model.Escalation
 	}
-	if f.Model.Provider != "" && f.Model.BaseURL == "" {
-		cfg.BaseURL = resolveProviderURL(f.Model.Provider)
-	}
+	// base_url is authoritative; if unset, the engine default (DeepSeek official)
+	// is used. There is no provider→URL mapping — users point at any OpenAI-
+	// compatible endpoint explicitly.
 	if f.Model.BaseURL != "" {
 		cfg.BaseURL = f.Model.BaseURL
 	}
+	if f.Model.SubAgentURL != "" {
+		cfg.SubAgentBaseURL = f.Model.SubAgentURL
+	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens
+	}
+	if f.Context.MaxOutputTokens > 0 {
+		cfg.MaxOutputTokens = f.Context.MaxOutputTokens
 	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
@@ -111,15 +194,4 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 
 type uiConfig struct {
 	// Placeholder for future UI configuration (e.g., theme, font size).
-}
-
-func resolveProviderURL(provider string) string {
-	switch provider {
-	case "openrouter":
-		return "https://openrouter.ai/api/v1"
-	case "deepseek":
-		return "https://api.deepseek.com/chat/completions"
-	default:
-		return ""
-	}
 }

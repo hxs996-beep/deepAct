@@ -17,6 +17,7 @@ type CompressionOrchestrator struct {
 	estimator      TokenEstimator
 	modelName      string
 	flashModelName string
+	userLang       string // session-locked user language, used to pick prompt language
 }
 
 func NewCompressionOrchestrator(model ModelClient, estimator TokenEstimator, modelName string) *CompressionOrchestrator {
@@ -30,6 +31,13 @@ func NewCompressionOrchestrator(model ModelClient, estimator TokenEstimator, mod
 
 func (c *CompressionOrchestrator) SetFlashModelName(name string) {
 	c.flashModelName = name
+}
+
+// SetUserLang sets the session-locked user language used for prompt selection.
+// The same CompressionOrchestrator instance is shared by the engine and the
+// sub-agent runner, so setting it once covers both compression paths.
+func (c *CompressionOrchestrator) SetUserLang(lang string) {
+	c.userLang = lang
 }
 
 const (
@@ -124,7 +132,7 @@ func containsDecisionText(decisions []Decision, text string) bool {
 }
 
 func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, history []Message) (string, error) {
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, zhFromLang(c.userLang))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -132,7 +140,7 @@ func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, histo
 	req := ModelRequest{
 		Model: c.flashModelName,
 		Messages: []ModelMessage{
-			{Role: "system", Content: archiveSystemPrompt},
+			{Role: "system", Content: pickPrompt(zhFromLang(c.userLang), archiveSystemPromptEn, archiveSystemPromptZh)},
 			{Role: "user", Content: prompt},
 		},
 		Temperature: 0,
@@ -146,7 +154,11 @@ func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, histo
 	return resp.Message.Content, nil
 }
 
-const archiveSystemPrompt = `You are a context compressor for a coding agent session.
+// archiveSystemPromptEn / archiveSystemPromptZh are the two language variants of
+// the compressor system prompt. The JSON structure and field names MUST stay
+// identical across both (ParseArchiveSummary decodes by key) — only the
+// descriptive prose is translated.
+const archiveSystemPromptEn = `You are a context compressor for a coding agent session.
 Extract ONLY actionable information. Output JSON with this exact structure:
 {
   "goal": "what the user wants to achieve",
@@ -164,18 +176,36 @@ Rules:
 - Be terse: each string should be 1 short sentence max
 - Total output must be under 10000 tokens`
 
-func buildArchivePrompt(state *TaskState, history []Message) string {
+const archiveSystemPromptZh = `你是一个编码代理会话的上下文压缩器。
+只提取可操作的信息。输出具有以下精确结构的 JSON：
+{
+  "goal": "用户想要实现的目标",
+  "decisions": ["已确认的决策 1", "已确认的决策 2"],
+  "files_read": ["path1", "path2"],
+  "files_modified": ["path1: 改动了什么"],
+  "key_findings": ["重要发现 1", "重要发现 2"],
+  "open_issues": ["未解决的问题 1"]
+}
+规则：
+- 文件路径保持精确
+- decisions = 用户明确确认或选择的事项
+- key_findings = 重新发现成本较高的信息
+- 省略空数组
+- 简洁：每个字符串最多 1 个短句
+- 总输出必须少于 10000 token`
+
+func buildArchivePrompt(state *TaskState, history []Message, zh bool) string {
 	var b strings.Builder
-	b.WriteString("Compress this coding session segment:\n\n")
+	b.WriteString(pickPrompt(zh, "Compress this coding session segment:\n\n", "压缩以下编码会话片段：\n\n"))
 
 	if state != nil && state.Goal != "" {
-		b.WriteString("Task goal: " + state.Goal + "\n\n")
+		b.WriteString(pickPrompt(zh, "Task goal: ", "任务目标：") + state.Goal + "\n\n")
 	}
 
 	// Include accumulated blocks as additional context for the archive.
 	// These contain per-turn findings that should be distilled into the summary.
 	if state != nil && len(state.MemoryMarkers) > 0 {
-		b.WriteString("Memory markers (include these in the summary):\n")
+		b.WriteString(pickPrompt(zh, "Memory markers (include these in the summary):\n", "记忆标记（需纳入摘要）：\n"))
 		for _, m := range state.MemoryMarkers {
 			b.WriteString("  - " + m + "\n")
 		}
@@ -185,11 +215,11 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 	// Progressive summarization: extract previous archive from history and include it
 	prevArchive := extractPreviousArchive(history)
 	if prevArchive != "" {
-		b.WriteString("Previous archive summary (extend this, do NOT repeat):\n")
+		b.WriteString(pickPrompt(zh, "Previous archive summary (extend this, do NOT repeat):\n", "先前的归档摘要（在此基础上扩展，不要重复）：\n"))
 		b.WriteString(prevArchive + "\n\n")
 	}
 
-	b.WriteString("New conversation to compress:\n")
+	b.WriteString(pickPrompt(zh, "New conversation to compress:\n", "待压缩的新对话：\n"))
 	for _, msg := range history {
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
@@ -198,13 +228,13 @@ func buildArchivePrompt(state *TaskState, history []Message) string {
 	}
 
 	if state != nil && len(state.Decisions) > 0 {
-		b.WriteString("\nPreviously recorded decisions:\n")
+		b.WriteString(pickPrompt(zh, "\nPreviously recorded decisions:\n", "\n先前记录的决策：\n"))
 		for _, d := range state.Decisions {
 			b.WriteString("- " + d.Text + "\n")
 		}
 	}
 	if state != nil && len(state.OpenQuestions) > 0 {
-		b.WriteString("\nPreviously recorded open issues:\n")
+		b.WriteString(pickPrompt(zh, "\nPreviously recorded open issues:\n", "\n先前记录的待解决问题：\n"))
 		for _, q := range state.OpenQuestions {
 			b.WriteString("- " + q + "\n")
 		}
@@ -314,14 +344,14 @@ func (c *CompressionOrchestrator) compressModelArchive(goal string, history []Mo
 }
 
 func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, history []ModelMessage) (string, error) {
-	prompt := buildModelArchivePrompt(goal, history)
+	prompt := buildModelArchivePrompt(goal, history, zhFromLang(c.userLang))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	req := ModelRequest{
 		Model: c.flashModelName,
 		Messages: []ModelMessage{
-			{Role: "system", Content: archiveSystemPrompt},
+			{Role: "system", Content: pickPrompt(zhFromLang(c.userLang), archiveSystemPromptEn, archiveSystemPromptZh)},
 			{Role: "user", Content: prompt},
 		},
 		Temperature: 0,
@@ -334,11 +364,11 @@ func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, histo
 	return resp.Message.Content, nil
 }
 
-func buildModelArchivePrompt(goal string, history []ModelMessage) string {
+func buildModelArchivePrompt(goal string, history []ModelMessage, zh bool) string {
 	var b strings.Builder
-	b.WriteString("Compress this coding session segment:\n\n")
+	b.WriteString(pickPrompt(zh, "Compress this coding session segment:\n\n", "压缩以下编码会话片段：\n\n"))
 	if goal != "" {
-		b.WriteString("Task goal: " + goal + "\n\n")
+		b.WriteString(pickPrompt(zh, "Task goal: ", "任务目标：") + goal + "\n\n")
 	}
 	prevArchive := ""
 	for i := len(history) - 1; i >= 0; i-- {
@@ -349,10 +379,10 @@ func buildModelArchivePrompt(goal string, history []ModelMessage) string {
 		}
 	}
 	if prevArchive != "" {
-		b.WriteString("Previous archive summary (extend this, do NOT repeat):\n")
+		b.WriteString(pickPrompt(zh, "Previous archive summary (extend this, do NOT repeat):\n", "先前的归档摘要（在此基础上扩展，不要重复）：\n"))
 		b.WriteString(prevArchive + "\n\n")
 	}
-	b.WriteString("New conversation to compress:\n")
+	b.WriteString(pickPrompt(zh, "New conversation to compress:\n", "待压缩的新对话：\n"))
 	for _, msg := range history {
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue

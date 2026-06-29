@@ -10,6 +10,53 @@ import (
 	"github.com/deepact/deepact/tools"
 )
 
+// TestReadTool_FilePathAlias verifies the read tool accepts `file_path` as an
+// alias for `path`, mirroring the engine's lenient extractPathFromArgs.
+func TestReadTool_FilePathAlias(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	os.WriteFile(path, []byte("line one\nline two\n"), 0o644)
+
+	tool := NewReadTool()
+	input, _ := json.Marshal(map[string]interface{}{"file_path": path})
+
+	result, err := tool.Run(tools.ToolContext{WorkDir: dir}, input)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if result.Status != tools.StatusOK {
+		t.Fatalf("status = %q, digest: %s", result.Status, result.Digest)
+	}
+	if !strings.Contains(result.Digest, "line one") {
+		t.Errorf("expected file content, got: %s", result.Digest)
+	}
+}
+
+// TestWriteTool_FilePathAlias verifies the write tool accepts `file_path` as an
+// alias for `path`.
+func TestWriteTool_FilePathAlias(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alias.txt")
+
+	tool := NewWriteTool()
+	input, _ := json.Marshal(map[string]string{
+		"file_path": path,
+		"content":   "hello alias\n",
+	})
+
+	result, err := tool.Run(tools.ToolContext{WorkDir: dir}, input)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if result.Status != tools.StatusOK {
+		t.Fatalf("status = %q, digest: %s", result.Status, result.Digest)
+	}
+	content, _ := os.ReadFile(path)
+	if string(content) != "hello alias\n" {
+		t.Errorf("file content = %q", content)
+	}
+}
+
 func TestReadTool_BasicFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")

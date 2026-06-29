@@ -96,7 +96,11 @@ func classifyTextLanguage(text string) string {
 			latin++
 		}
 	}
-	if cjk > 0 && cjk >= latin/3 {
+	// Aligned with engine.msgIsChinese: any CJK character → Chinese.
+	// This ensures ContextBuilder and Engine use the same detection threshold,
+	// preventing mixed-language output when the user's message contains both
+	// Chinese and English (e.g., "帮我 fix the bug").
+	if cjk > 0 {
 		return "中文"
 	}
 	runes := []rune(text)

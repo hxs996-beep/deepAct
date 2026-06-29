@@ -8,41 +8,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deepact/deepact/context/promptset"
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 )
 
 type ContextAssembler struct {
-	langPack           string
-	examples           string
-	systemPrompt       string
-	projectRoot        string
-	estimator          *llm.TokenEstimator
-	deepactMD          string // cached deepact.md content, read once at startup
-	envInfo            EnvironmentInfo // session-stable env info, built once at startup
-	userLang           string          // detected once from first user message, locked for the whole session
-	userLangSet        bool            // true once first-user-message language has been determined (even if "")
-	stableSessionBlock string          // built once from deepactMD + envInfo + userLang, cached for cache stability
-	skillsBlock        string          // built once from skill registry, cached for cache stability
+	systemPromptWithLang  string // system prompt in the detected user language, built once and cached
+	projectRoot           string
+	estimator             *llm.TokenEstimator
+	deepactMD             string // cached deepact.md content, read once at startup
+	envInfo               EnvironmentInfo // session-stable env info, built once at startup
+	userLang              string          // detected once from first user message, locked for the whole session
+	userLangSet           bool            // true once first-user-message language has been determined (even if "")
+	stableSessionBlock    string          // built once from deepactMD + envInfo + userLang, cached for cache stability
+	skillsBlock           string          // built once from skill registry, cached for cache stability
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
-	lang := DetectLanguage(projectRoot)
-	langPack := GetLangPack(lang)
-	systemPrompt := SystemPromptBlockA + "\n\n# Language Pack\n" + langPack + "\n\n" + ExamplesBlock
+	// systemPrompt is built lazily once userLang is known (see Build).
+	// We still detect the project language for langPack selection.
+	_ = DetectLanguage(projectRoot)
 
 	if estimator == nil {
 		estimator = llm.NewTokenEstimator()
 	}
 
 	return &ContextAssembler{
-		langPack:     langPack,
-		examples:     ExamplesBlock,
-		systemPrompt: systemPrompt,
-		projectRoot:  projectRoot,
-		estimator:    estimator,
-		deepactMD:    readDeepactMD(),
-		envInfo:      buildEnvironmentInfo(),
+		projectRoot: projectRoot,
+		estimator:   estimator,
+		deepactMD:   readDeepactMD(),
+		envInfo:     buildEnvironmentInfo(),
 	}
 }
 
@@ -58,7 +54,12 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 
 	// === STABLE ZONE (TOP — prefix cache friendly) ===
 	// Message 1: System prompt — identical every turn → cached ✓
-	messages = append(messages, engine.ModelMessage{Role: "system", Content: a.systemPrompt})
+	// Built once from the detected user language's prompt set (see below).
+	prompt := a.systemPromptWithLang
+	if prompt == "" {
+		prompt = "(loading...)"
+	}
+	messages = append(messages, engine.ModelMessage{Role: "system", Content: prompt})
 
 	// Message 2: Session-stable context — language detected from the FIRST
 	// user message and locked for the session (see detectUserLanguage). We only
@@ -70,15 +71,27 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.userLang = detectUserLanguage(history)
 		a.userLangSet = true
 	}
+	// Once userLang is known, build the system prompt from the appropriate
+	// language's prompt set. This is done once and cached, keeping the prefix
+	// stable across turns. No separate language directive is needed — the
+	// prompt itself is already in the correct language.
+	if a.userLangSet && a.userLang != "" && a.systemPromptWithLang == "" {
+		lang := DetectLanguage(a.projectRoot)
+		langPack := GetLangPack(lang, a.userLang)
+		prompts := promptset.Get(a.userLang)
+		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPack + "\n\n" + prompts.Examples
+	}
 	if a.stableSessionBlock == "" && a.userLangSet {
 		a.stableSessionBlock = BuildStableSessionContext(a.deepactMD, a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
 	// Message 3: Available skills — stable across the session → cached ✓
-	// Skip when a skill is active: the model should focus on the active skill's
-	// methodology, not be distracted by other available skills.
-	if a.skillsBlock != "" && (state == nil || state.ActiveSkillName == "") {
+	// Always included, even when a skill is active. Removing it shifts all subsequent
+	// messages (history, Block B) by one position, destroying the prefix cache for the
+	// rest of the session. The active skill's methodology is enforced via the
+	// [SKILL ACTIVATED] pinned message, not by hiding the skills list.
+	if a.skillsBlock != "" {
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
@@ -103,13 +116,18 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 
 	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-	// Block B: minimal task state fields only
-	blockB := BuildBlockB(formatTaskStateVolatile(state))
+	// Block B: minimal task state fields only + language directive at end
+	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
-	reminder := BuildTaskReminder(state)
+	reminder := BuildTaskReminder(state, a.userLang)
 	if reminder != "" {
 		messages = append(messages, engine.ModelMessage{Role: "system", Content: reminder})
+	}
+
+	// Read-history hint: warn the agent against re-reading files already read.
+	if hint := BuildReadHistoryHint(state.ReadHistory, a.userLang); hint != "" {
+		messages = append(messages, engine.ModelMessage{Role: "system", Content: hint})
 	}
 
 	return messages
@@ -192,12 +210,14 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		TurnNumber       int                       `json:"turn_number"`
 		ConsecutiveFails int                       `json:"consecutive_failures"`
 		EditScopeFiles   int                       `json:"edit_scope_files"`
+		ReadHistory      []readRecordVolatile      `json:"read_history,omitempty"`
 		Roundtable       *roundtableVolatile       `json:"roundtable,omitempty"`
 	}{
 		ActiveSkillName:  state.ActiveSkillName,
 		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
+		ReadHistory:      flattenReadHistory(state.ReadHistory),
 		Roundtable:       flattenRoundtable(state.Roundtable),
 	}
 	data, err := json.Marshal(volatile)
@@ -205,6 +225,97 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		return ""
 	}
 	return string(data)
+}
+
+// readRecordVolatile is the compact form of a ReadRecord injected into Block B.
+type readRecordVolatile struct {
+	Path  string `json:"path"`
+	Scope string `json:"scope,omitempty"`
+}
+
+// flattenReadHistory returns one entry per distinct (path, scope) read, in
+// insertion order. Previously this kept only the last 20 records to bound
+// prompt size, but a read record is just a {path, scope} pair (~40 bytes), so
+// truncation needlessly hid earlier reads from the agent — encouraging
+// re-reads. Dedup keeps the list small without losing any file.
+func flattenReadHistory(records []engine.ReadRecord) []readRecordVolatile {
+	if len(records) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(records))
+	out := make([]readRecordVolatile, 0, len(records))
+	for _, r := range records {
+		key := r.Path + "\x00" + r.Scope
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, readRecordVolatile{Path: r.Path, Scope: r.Scope})
+	}
+	return out
+}
+
+// BuildReadHistoryHint renders a system message listing already-read files
+// (aggregated by path) so the agent avoids re-reading them. Returns "" when
+// there is nothing to show.
+func BuildReadHistoryHint(records []engine.ReadRecord, lang string) string {
+	if len(records) == 0 {
+		return ""
+	}
+	zh := lang == "zh" || lang == "chinese"
+	byPath := make(map[string][]string)
+	order := []string{}
+	for _, r := range records {
+		if _, ok := byPath[r.Path]; !ok {
+			order = append(order, r.Path)
+		}
+		byPath[r.Path] = append(byPath[r.Path], describeScopeForHint(r.Scope, zh))
+	}
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("已读文件（内容已在对话历史中，不要重读）：\n")
+	} else {
+		sb.WriteString("Files already read (content is in conversation history — do not re-read):\n")
+	}
+	for _, p := range order {
+		seen := map[string]bool{}
+		uniq := []string{}
+		for _, s := range byPath[p] {
+			if !seen[s] {
+				seen[s] = true
+				uniq = append(uniq, s)
+			}
+		}
+		joined := strings.Join(uniq, ", ")
+		if zh {
+			sb.WriteString("- " + p + "（" + joined + "）\n")
+		} else {
+			sb.WriteString("- " + p + " (" + joined + ")\n")
+		}
+	}
+	if zh {
+		sb.WriteString("需要新信息时：用 lsp 或读取该文件尚未读过的区段。")
+	} else {
+		sb.WriteString("For new info: use lsp or read an un-read section of the file.")
+	}
+	return sb.String()
+}
+
+// describeScopeForHint renders a scope string for the read-history hint.
+func describeScopeForHint(scope string, zh bool) string {
+	if scope == "" {
+		if zh {
+			return "全文"
+		}
+		return "full"
+	}
+	if strings.HasPrefix(scope, "symbol:") {
+		return scope
+	}
+	if zh {
+		return "行 " + scope
+	}
+	return "L " + scope
 }
 
 // roundtableVolatile is a compact representation of roundtable results

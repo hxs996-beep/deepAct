@@ -50,10 +50,28 @@ func TestSummarizeArgs(t *testing.T) {
 			want:     "go test ./...",
 		},
 		{
-			name:     "read with path",
+			name:     "read full file annotated",
 			toolName: "read",
 			input:    map[string]interface{}{"path": "/a/b/c.go"},
-			want:     "b/c.go",
+			want:     "b/c.go (全文)",
+		},
+		{
+			name:         "read with symbol shows scope",
+			toolName:     "read",
+			input:        map[string]interface{}{"path": "/a/b/c.go", "symbol": "Run"},
+			wantContains: "b/c.go (symbol:Run)",
+		},
+		{
+			name:         "read with offset/limit shows end line",
+			toolName:     "read",
+			input:        map[string]interface{}{"path": "/a/b/c.go", "offset": float64(52), "limit": float64(50)},
+			wantContains: "b/c.go (L52-101)",
+		},
+		{
+			name:         "read with offset only shows open-ended range",
+			toolName:     "read",
+			input:        map[string]interface{}{"path": "/a/b/c.go", "offset": float64(200)},
+			wantContains: "b/c.go (L200-)",
 		},
 		{
 			name:         "unknown MCP tool falls back to a labeled string field",
@@ -89,7 +107,7 @@ func TestSummarizeArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			got := summarizeArgs(tt.toolName, raw)
+			got := summarizeArgs(tt.toolName, raw, "")
 
 			if tt.want != "" && got != tt.want {
 				t.Fatalf("summarizeArgs(%q) = %q, want %q", tt.toolName, got, tt.want)
@@ -124,7 +142,7 @@ func TestSummarizeArgsNeverEmpty(t *testing.T) {
 	for _, tool := range tools {
 		for _, in := range inputs {
 			raw, _ := json.Marshal(in)
-			got := summarizeArgs(tool, raw)
+			got := summarizeArgs(tool, raw, "")
 			if got == "" {
 				t.Errorf("summarizeArgs(%q, %v) returned empty — UI would show a bare icon", tool, in)
 			}
