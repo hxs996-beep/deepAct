@@ -106,6 +106,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				FinishReason: "stream_error",
 			}, nil
 		}
+		if chunk.RetryProgress != "" {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "retry", Detail: chunk.RetryProgress})
+			}
+			continue
+		}
 		if chunk.Delta != "" {
 			contentBuilder.WriteString(chunk.Delta)
 		}

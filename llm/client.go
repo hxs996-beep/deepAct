@@ -75,4 +75,5 @@ type Chunk struct {
 	FinishReason   string
 	Usage          *Usage
 	Err            error
+	RetryProgress  string // non-empty when a retry is about to start, e.g. "Retrying 1/3..."
 }

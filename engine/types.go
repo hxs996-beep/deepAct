@@ -171,6 +171,7 @@ type ModelChunk struct {
 	FinishReason   string
 	Usage          *ModelUsage
 	Err            error
+	RetryProgress  string // non-empty when a retry is about to start
 }
 
 type ToolExecContext struct {

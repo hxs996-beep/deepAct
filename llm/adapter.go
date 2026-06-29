@@ -33,6 +33,7 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 				ReasoningDelta: chunk.ReasoningDelta,
 				FinishReason:   chunk.FinishReason,
 				Err:            chunk.Err,
+				RetryProgress:  chunk.RetryProgress,
 			}
 			if len(chunk.ToolCalls) > 0 {
 				engineChunk.ToolCalls = make([]engine.ModelToolCall, 0, len(chunk.ToolCalls))
