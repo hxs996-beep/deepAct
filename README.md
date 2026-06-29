@@ -1,7 +1,7 @@
 <p align="center">
   <a href="https://github.com/hxs996-beep/deepAct/releases"><img src="https://img.shields.io/github/v/release/hxs996-beep/deepAct?style=flat-square" alt="Release"></a>
-  <a href="https://goreportcard.com/report/github.com/deepact/deepact"><img src="https://goreportcard.com/badge/github.com/deepact/deepact?style=flat-square" alt="Go Report Card"></a>
-  <a href="https://github.com/deepact/deepact/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  <a href="https://goreportcard.com/report/github.com/hxs996-beep/deepAct"><img src="https://goreportcard.com/badge/github.com/hxs996-beep/deepAct?style=flat-square" alt="Go Report Card"></a>
+  <a href="https://github.com/hxs996-beep/deepAct/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go 1.24+"></a>
 </p>
 
