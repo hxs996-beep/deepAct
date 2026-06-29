@@ -13,21 +13,6 @@
 
 ---
 
-## 30 秒验证
-
-```bash
-# 安装
-brew install hxs996-beep/homebrew-tap/deepact
-
-# 配置 API Key
-deepact set api-key
-
-# 跑一条命令
-deepact exec "在 cmd/ 目录下找到入口文件并解释它的启动流程"
-```
-
----
-
 ## 为什么选 DeepAct
 
 **问题：** 市面上的 AI 编码工具都是为 GPT/Claude 优化的。换一个 DeepSeek 模型上去，缓存策略失效、工具调用格式错位、`reasoning_content` 被丢弃——你付了 API 费却没拿到该有的效果。
@@ -38,7 +23,6 @@ deepact exec "在 cmd/ 目录下找到入口文件并解释它的启动流程"
 |------|------|------|
 | **提示工程** | 系统提示分层构建，稳定部分命中前缀缓存，仅 volatile tail 每次重建 | ~98% 缓存命中率，token 消耗锐减 |
 | **安全执行** | 每次破坏性操作经过三道闸门：模糊检测 → 设计审查 → 范围守卫 | 不会因为一句含糊指令删错文件 |
-| **方法论内置** | 15+ 技能模板（TDD、调试、代码审查等）可链式激活，形成完整工作流 | 不是"聊天"，是"工程流程" |
 
 ---
 
@@ -47,7 +31,6 @@ deepact exec "在 cmd/ 目录下找到入口文件并解释它的启动流程"
 | 能力 | 一句话说明 |
 |------|-----------|
 | 🛡️ **三闸防护** | 编辑/Shell 前自动检测歧义、反模式、越权——三道关，缺一不可 |
-| 🧠 **技能系统** | `/brainstorming` → `/writing-plans` → `/executing-plans` 链式推进，从需求到合并一条龙 |
 | 🤖 **子代理并行** | 复杂任务自动拆解为独立子代理并行执行，结果汇聚回主循环 |
 | 👥 **团队协作** | `/team` 激活架构师/安全/质量/维护 4 角色并行分析，经评审→证伪→合成输出 |
 | 💾 **会话分叉与回退** | 所有操作 JSONL 不可变记录，可回退到任意步骤或分叉新分支 |
@@ -140,30 +123,6 @@ content = """
 
 ---
 
-## 技能系统
-
-15+ 内置技能，链式自动激活，形成完整工程工作流：
-
-```
-/brainstorming  →  /writing-plans  →  /executing-plans  →  /finishing-a-development-branch
- 需求探索与设计       生成实现计划          分步执行              合并/PR/清理
-```
-
-| 技能 | 用途 |
-|------|------|
-| `brainstorming` | 需求探索与方案设计 |
-| `writing-plans` | 生成结构化实现计划 |
-| `executing-plans` | 按计划分步执行 |
-| `test-driven-development` | RED-GREEN-REFACTOR 循环 |
-| `systematic-debugging` | 复现→隔离→修复→验证 |
-| `code-review` | 系统化代码审查 |
-| `subagent-driven-development` | 复杂任务分解为并行子代理 |
-| `verification-before-completion` | 完成前自动验证 |
-| `using-git-worktrees` | 隔离工作区开发 |
-| `finishing-a-development-branch` | 合并/PR/清理决策 |
-
----
-
 ## CLI 命令
 
 | 命令 | 说明 |
@@ -219,7 +178,6 @@ Existing AI coding assistants are optimized for GPT/Claude. Swap in a DeepSeek m
 |-------|----------|--------|
 | **Prompt Engineering** | Layered prompt construction — stable sections hit prefix cache, only volatile tail rebuilds | ~98% cache hit rate, drastically lower token cost |
 | **Safety** | Triple-gate system: ambiguity detection → design review → scope enforcement before every destructive operation | No accidental damage from vague instructions |
-| **Methodology** | 15+ skill templates (TDD, debugging, code review, etc.) chainable into complete workflows | Engineering process, not just chat |
 
 ### Quick Start
 
@@ -232,7 +190,6 @@ deepact exec "find the entry point in cmd/ and explain the startup flow"
 ### Core Capabilities
 
 - 🛡️ **Triple-Gate Guard** — Ambiguity detection, anti-pattern review, and scope enforcement before every edit or shell command
-- 🧠 **Skills System** — `/brainstorming` → `/writing-plans` → `/executing-plans` chainable workflows from idea to merge
 - 🤖 **Sub-Agent Parallelism** — Complex tasks auto-decompose into independent sub-agents executing in parallel
 - 👥 **Team Collaboration** — `/team` activates 4 expert roles (architect, security, quality, maintainer) for parallel analysis → review → refutation → synthesis
 - 💾 **Session Fork & Rewind** — Immutable JSONL audit log; rewind to any step or fork a new branch
