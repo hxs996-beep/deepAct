@@ -842,6 +842,33 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 		return fallbackSummary(toolName, m)
 	}
 
+	// Read tool: annotate the scope so a full read is distinguishable from a
+	// targeted read in the UI. Without this every read renders as a bare path,
+	// so repeated full-file reads (a loop symptom) look identical to targeted
+	// reads and can't be diagnosed. Formats:
+	//   full file    -> "path (全文)"
+	//   symbol       -> "path (symbol:Run)"
+	//   offset/limit -> "path (L52-101)"  (end line computed to avoid the
+	//                                       ambiguous "L52-50" offset/limit form)
+	if toolName == "read" && path != "" {
+		if sym, ok := m["symbol"].(string); ok && strings.TrimSpace(sym) != "" {
+			return fmt.Sprintf("%s (symbol:%s)", relPath(path, cwd), strings.TrimSpace(sym))
+		}
+		offset, _ := m["offset"].(float64)
+		limit, _ := m["limit"].(float64)
+		if int(offset) == 0 && int(limit) == 0 {
+			return relPath(path, cwd) + " (全文)"
+		}
+		start := int(offset)
+		if start == 0 {
+			start = 1
+		}
+		if int(limit) == 0 {
+			return fmt.Sprintf("%s (L%d-)", relPath(path, cwd), start)
+		}
+		return fmt.Sprintf("%s (L%d-%d)", relPath(path, cwd), start, start+int(limit)-1)
+	}
+
 	if path == "" {
 		if pattern, ok := m["pattern"].(string); ok && strings.TrimSpace(pattern) != "" {
 			return pattern
