@@ -2,53 +2,21 @@ package skill
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/deepact/deepact/skill/builtin"
 )
 
 // SkillFile represents the TOML structure for an external skill file.
 type SkillFile struct {
-	Name        string   `toml:"name"`
-	Description string   `toml:"description"`
-	Keywords    []string `toml:"keywords"`
-	Content     string   `toml:"content"`
-	NextSkills  []string `toml:"next_skills"`
-}
-
-// LoadEmbeddedSkills loads all skill definitions embedded in the binary.
-// These serve as the built-in default skill set.
-func LoadEmbeddedSkills() ([]*Skill, error) {
-	entries, err := fs.Glob(builtin.SkillsFS, "*.toml")
-	if err != nil {
-		return nil, fmt.Errorf("list embedded skills: %w", err)
-	}
-	var skills []*Skill
-	for _, name := range entries {
-		data, err := fs.ReadFile(builtin.SkillsFS, name)
-		if err != nil {
-			return nil, fmt.Errorf("read embedded skill %s: %w", name, err)
-		}
-		var sf SkillFile
-		if err := toml.Unmarshal(data, &sf); err != nil {
-			return nil, fmt.Errorf("parse embedded skill %s: %w", name, err)
-		}
-		if sf.Name == "" {
-			continue
-		}
-		skills = append(skills, &Skill{
-			Name:        sf.Name,
-			Description: sf.Description,
-			Keywords:    sf.Keywords,
-			Content:     sf.Content,
-			NextSkills:  sf.NextSkills,
-		})
-	}
-	return skills, nil
+	Name                   string   `toml:"name"`
+	Description            string   `toml:"description"`
+	Keywords               []string `toml:"keywords"`
+	Content                string   `toml:"content"`
+	NextSkills             []string `toml:"next_skills"`
+	AutoActivateThreshold  *int     `toml:"auto_activate_threshold"`
 }
 
 // LoadExternalSkills loads skill definitions from TOML files in the given
@@ -81,11 +49,12 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 			continue
 		}
 		skills = append(skills, &Skill{
-			Name:        sf.Name,
-			Description: sf.Description,
-			Keywords:    sf.Keywords,
-			Content:     sf.Content,
-			NextSkills:  sf.NextSkills,
+			Name:                  sf.Name,
+			Description:           sf.Description,
+			Keywords:              sf.Keywords,
+			Content:               sf.Content,
+			NextSkills:            sf.NextSkills,
+			AutoActivateThreshold: sf.AutoActivateThreshold,
 		})
 	}
 	return skills, nil

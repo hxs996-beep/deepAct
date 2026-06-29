@@ -19,6 +19,18 @@ type Skill struct {
 	Content     string   // Full skill instructions injected into prompt
 	Keywords    []string // Keywords used by MatchTopSkills to suggest relevant skills
 	NextSkills  []string // Skill names suggested after this skill completes, enabling auto-activation chains
+
+	// AutoActivateThreshold, when set, enables automatic skill activation
+	// from keyword matching (no user/model confirmation needed).
+	// If keyword match count >= threshold, the engine auto-activates this skill.
+	// nil/0 means never auto-activate from keyword match.
+	AutoActivateThreshold *int
+}
+
+// SkillMatch pairs a matched skill with its keyword match score.
+type SkillMatch struct {
+	Skill *Skill
+	Score int
 }
 
 // Registry holds all available skills.
@@ -88,6 +100,46 @@ func (r *Registry) MatchTopSkills(n int, input string) []*Skill {
 	out := make([]*Skill, len(results))
 	for i, r := range results {
 		out[i] = r.skill
+	}
+	return out
+}
+
+// MatchTopSkillsWithScores returns the top N skills matching the given input,
+// with their keyword match scores. This is used by the engine for auto-activation
+// decisions, since the caller needs the match count to check thresholds.
+func (r *Registry) MatchTopSkillsWithScores(n int, input string) []SkillMatch {
+	if n <= 0 || input == "" {
+		return nil
+	}
+	inputLower := strings.ToLower(input)
+	type scored struct {
+		skill *Skill
+		count int
+	}
+	var results []scored
+	for _, s := range r.skills {
+		count := 0
+		for _, kw := range s.Keywords {
+			if kw == "" {
+				continue
+			}
+			if strings.Contains(inputLower, strings.ToLower(kw)) {
+				count++
+			}
+		}
+		if count > 0 {
+			results = append(results, scored{skill: s, count: count})
+		}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].count > results[j].count
+	})
+	if len(results) > n {
+		results = results[:n]
+	}
+	out := make([]SkillMatch, len(results))
+	for i, r := range results {
+		out[i] = SkillMatch{Skill: r.skill, Score: r.count}
 	}
 	return out
 }

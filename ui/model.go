@@ -82,7 +82,8 @@ type TDDStage struct {
 
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
-	{Command: "/round", Args: "<需求>", Description: "开启多角色圆桌讨论，探索方案并进行多方评审"},
+	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
+	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
 type Model struct {
@@ -250,7 +251,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.autoScrollDir = newDir
 			}
-			return m, nil
+			// Force a full repaint on selection changes. Bubble Tea's default
+			// per-line frame diff mis-repaints rows whose ANSI changed (e.g.
+			// diff rows gaining/losing \x1b[7m reverse video) on iTerm2, leaving
+			// the row showing a neighbour's text. A full repaint bypasses the
+			// incremental diff entirely. (Same mechanism resize uses.)
+			return m, m.repaintCmd()
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -300,7 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoScrollDir = 0
 				m.lastMouseX = msg.X
 				m.lastMouseY = msg.Y
-				return m, nil
+				return m, m.repaintCmd()
 			} else if msg.Action == tea.MouseActionRelease {
 				if m.selection.Active {
 					sel := m.selection
@@ -324,7 +330,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.clipboardFeedback = time.Now()
 					}
 				}
-				return m, nil
+				// Force full repaint on release: the selection highlight is
+				// either finalized (Done) or cleared, both change row ANSI and
+				// can mis-repaint under Bubble Tea's incremental frame diff.
+				return m, m.repaintCmd()
 			}
 		}
 		return m, nil
@@ -420,6 +429,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Type {
 		case "thinking":
+			if len(m.spinners) > 0 {
+				m.spinners[0].Goal = msg.Detail
+			}
+			m.thinkingActivity = msg.Detail
+		case "retry":
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Detail
 			}
@@ -928,14 +942,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
 		} else if m.state == stateReady {
-			if m.showSuggestions {
-				// Dismiss suggestions first, then set pendingEsc as fallback
-				// so the Enter that follows Option+Enter inserts a newline
-				// instead of submitting.
-				m.showSuggestions = false
-				m.suggestions = nil
-				m.escAt = time.Now()
-			}
+			// ESC: clear input buffer, discard current input
+			m.inputBuf.SetValue("")
+			m.showSuggestions = false
+			m.suggestions = nil
 			// ESC byte may be the first half of Option+Enter on macOS terminals.
 			// Record timestamp; a subsequent Enter within escWindow is treated as Alt+Enter.
 			m.escAt = time.Now()
@@ -1414,7 +1424,7 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		return lines, plainLines
 	}
 	if len(m.toolTree) > 0 {
-		toolLines := renderToolTree(m.toolTree, width)
+		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
 	}
 	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
@@ -1646,6 +1656,10 @@ func toolIcon(name string) string {
 		return "[?]"
 	case "lsp":
 		return "[@]"
+	case "skill_install":
+		return "[+]"
+	case "handoff_to_agent":
+		return "[→]"
 	default:
 		return "[*]"
 	}
@@ -1750,9 +1764,9 @@ func parseOutputLines(fullDetail string, maxLines int) []ToolNode {
 	return children
 }
 
-func renderToolTree(toolTree []ToolNode, width int) []string {
+func (m Model) renderToolTree(width int) []string {
 	lines := []string{}
-	if len(toolTree) == 0 {
+	if len(m.toolTree) == 0 {
 		return lines
 	}
 
@@ -1766,7 +1780,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 	var diffItems []ToolNode
 	var otherItems []ToolNode
 
-	for _, node := range toolTree {
+	for _, node := range m.toolTree {
 		switch node.Name {
 		case "grep", "glob", "read", "lsp":
 			searchItems = append(searchItems, node)
@@ -1800,7 +1814,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 		}
 	}
 	if len(doneDiffItems) > 0 {
-		lines = append(lines, renderDiffBlock(doneDiffItems, blockWidth)...)
+		lines = append(lines, m.renderDiffBlock(doneDiffItems, blockWidth)...)
 		lines = append(lines, "")
 	}
 
@@ -1821,7 +1835,7 @@ func renderSearchBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, nodeDetailLabel(node), status))
 		for _, child := range node.Children {
 			detail := child.Detail
 			if len(detail) > width-8 {
@@ -1831,6 +1845,20 @@ func renderSearchBlock(nodes []ToolNode, width int) []string {
 		}
 	}
 	return strings.Split(SearchBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
+}
+
+// nodeDetailLabel returns the text shown after a tool node's icon. When the
+// engine didn't supply a Detail (e.g. for activate_skill / handoff_to_agent /
+// MCP tools whose arg shape isn't recognized), it falls back to the tool name
+// so the node never renders as a bare icon with no context.
+func nodeDetailLabel(node ToolNode) string {
+	if strings.TrimSpace(node.Detail) != "" {
+		return node.Detail
+	}
+	if node.Name != "" {
+		return node.Name
+	}
+	return "—"
 }
 
 func renderExecBlock(nodes []ToolNode, width int) []string {
@@ -1847,7 +1875,7 @@ func renderExecBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		content = append(content, fmt.Sprintf("  %s  %s%s", icon, node.Detail, status))
+		content = append(content, fmt.Sprintf("  %s  %s%s", icon, nodeDetailLabel(node), status))
 		for _, child := range node.Children {
 			detail := child.Detail
 			if len(detail) > width-8 {
@@ -1859,7 +1887,7 @@ func renderExecBlock(nodes []ToolNode, width int) []string {
 	return strings.Split(ExecBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
 }
 
-func renderDiffBlock(nodes []ToolNode, width int) []string {
+func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	var content []string
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
@@ -1879,16 +1907,34 @@ func renderDiffBlock(nodes []ToolNode, width int) []string {
 			}
 		}
 	}
-	// Render each line independently to prevent \033[0m from inner styles (diffDeleteStyle etc.)
-	// from cancelling DiffBlockStyle's background on subsequent lines.
-	// Use DiffBlockLineStyle (no vertical padding) to avoid multi-line entries that break
-	// the height calculation in View(). Add padding rows manually at top/bottom.
-	var result []string
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
-	for _, line := range content {
-		result = append(result, DiffBlockLineStyle.Width(width).Render(line))
+	// Render diff rows as plain foreground-colored text — NO background block.
+	// A background block (DiffBlockLineStyle) stacks bg + fg SGR; when the
+	// selection injects \x1b[7m reverse video on top, the nested overlapping
+	// attributes make iTerm2 repaint the row shifted on the click-induced
+	// frame switch (the diff-row shift bug) and leave residue while scrolling.
+	// Plain foreground rows behave like ordinary message rows. Each row is
+	// padded to the full terminal width so every cell is explicitly written
+	// (no reliance on \x1b[K erase-right, which left stale characters from the
+	// previous frame in short diff rows during scroll — the scroll-ghosting
+	// bug). Padding follows the line's trailing SGR reset so it stays
+	// default-colored; View()'s final ansi.Truncate(…, m.width) keeps it exact.
+	contentWidth := m.width
+	if contentWidth < 1 {
+		contentWidth = width
 	}
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	padLine := func(line string) string {
+		w := lipgloss.Width(line)
+		if w >= contentWidth {
+			return line
+		}
+		return line + strings.Repeat(" ", contentWidth-w)
+	}
+	result := make([]string, 0, len(content)+2)
+	result = append(result, padLine(""))
+	for _, line := range content {
+		result = append(result, padLine(line))
+	}
+	result = append(result, padLine(""))
 	return result
 }
 

@@ -190,10 +190,20 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	toolExecutor.ArtifactDir = defaultArtifactDir()
 
 	runner := engine.NewSubAgentRunner(client, toolExecutor, nil, config.ModelName)
+	// Always give sub-agents their own API endpoint for prefix cache isolation.
+	// If explicitly configured (SubAgentBaseURL), use that; otherwise auto-derive
+	// from the main agent's endpoint by appending a harmless query parameter.
+	if config.SubAgentBaseURL != "" {
+		runner.SetSubAgentBaseURL(config.SubAgentBaseURL)
+	} else {
+		apiKey, _ := loadAPIKey()
+		runner.SetSubAgentBaseURL(llm.SubAgentEndpoint(config.BaseURL, apiKey))
+	}
 	if config.FlashModelName != "" {
 		runner.SetFlashModel(config.FlashModelName)
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
+	runner.SetMaxOutputTokens(config.MaxOutputTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
 
@@ -217,12 +227,8 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 
-	// Initialize skill registry with built-in methodology skills
+	// Initialize skill registry from user-installed skills in ~/.deepact/skills/.
 	skillReg := skill.NewRegistry()
-	skill.RegisterBuiltinSkills(skillReg)
-
-	// Load user-installed skills from ~/.deepact/skills/.
-	// These override embedded skills with the same name.
 	if home, err := os.UserHomeDir(); err == nil {
 		userSkillsDir := filepath.Join(home, ".deepact", "skills")
 		userSkills, err := skill.LoadExternalSkills(userSkillsDir)
@@ -317,6 +323,7 @@ func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.Engin
 
 func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewReadTool())
+	registry.Register(builtin.NewReadMultiTool())
 	registry.Register(builtin.NewWriteTool())
 	registry.Register(builtin.NewEditTool())
 	registry.Register(builtin.NewGrepTool())

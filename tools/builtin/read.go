@@ -22,6 +22,9 @@ const (
 	charsPerToken   = 4       // rough estimate: 4 chars ≈ 1 token for code
 
 	fileUnchangedStub = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
+
+	// lspHint is appended to read results to nudge toward lsp for symbol/type queries.
+	lspHint = "\n\n---\nNeed to find a symbol definition, type info, or references? Use the `lsp` tool instead of reading the whole file (e.g., `lsp operation=hover file_path=<path> line=<line> character=<char>`)."
 )
 
 type ReadTool struct {
@@ -35,16 +38,17 @@ func NewReadTool() *ReadTool {
 func (t *ReadTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "read",
-		Description: "Read a file from the local filesystem. Returns up to ~25000 tokens inline; larger files are truncated with guidance to use offset/limit for specific sections. Use 'symbol' to extract a named Go declaration. If the file hasn't changed since the last read, a stub is returned and you should refer to the earlier content in conversation history. For looking up type info, symbol definitions, or searching symbols by name, prefer `lsp hover`/`lsp goToDefinition`/`lsp workspaceSymbol` — they return targeted results without reading the full file.",
+		Description: "Read a file from the local filesystem. Returns up to ~25000 tokens inline; larger files are truncated with guidance to use offset/limit for specific sections. Use 'symbol' to extract a named Go declaration. If the file hasn't changed since the last read, a stub is returned and you should refer to the earlier content in conversation history. For looking up type info, symbol definitions, or searching symbols by name, prefer `lsp hover`/`lsp goToDefinition`/`lsp workspaceSymbol` — they return targeted results without reading the full file. If you're looking for specific code within a file (a pattern, an error string, a flow), grep for it first to get exact line numbers, then read only that range with offset/limit instead of the whole file.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"symbol":{"type":"string","description":"Name of Go symbol to read (function/type/struct/variable/constant). Works only for .go files. When set, offset/limit are ignored."},"offset":{"type":"integer","description":"Starting line number (1-based)"},"limit":{"type":"integer","description":"Max lines to read"}},"required":["path"]}`),
 	}
 }
 
 type readInput struct {
-	Path   string `json:"path"`
-	Symbol string `json:"symbol"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"` // alias for path (DeepSeek sometimes emits this)
+	Symbol   string `json:"symbol"`
+	Offset   int    `json:"offset"`
+	Limit    int    `json:"limit"`
 }
 
 func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolResultEnvelope, error) {
@@ -52,7 +56,7 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("invalid input: %v", err)}, err
 	}
-	payload.Path = strings.TrimSpace(payload.Path)
+	payload.Path = strings.TrimSpace(applyFilePathAlias(payload.Path, strings.TrimSpace(payload.FilePath)))
 	if payload.Path == "" {
 		err := errors.New("path is required")
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
@@ -73,80 +77,25 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: fmt.Sprintf("symbol %s (%d lines)\n%s", payload.Symbol, lineCount, content)}, nil
 	}
 
-	info, err := os.Stat(safePath)
-	if err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("stat file: %v", err)}, err
-	}
-	if info.Size() > maxReadBytes {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))}, nil
-	}
-
-	// Mtime cache: skip stub return on cache hit — returning a stub instead of content
-	// creates a loop where the agent reads the same file, gets a stub, doesn't know
-	// what to do, and reads again. LoopGuard at the engine level handles read loops.
-	// Update cache now so repeated reads within the same mtime are not penalized.
-
-	file, err := os.Open(safePath)
-	if err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("open file: %v", err)}, err
-	}
-	defer file.Close()
-
-	if err := detectBinary(file); err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
-	}
-
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("seek file: %v", err)}, err
-	}
-
-	// Read lines with numbering, respecting offset + limit
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	var builder strings.Builder
-	lineNum := 0
-	readLimit := payload.Limit
-	offset := payload.Offset
-	if offset < 1 {
-		offset = 1
-	}
-	for scanner.Scan() {
-		lineNum++
-		if lineNum < offset {
-			continue
-		}
-		if readLimit > 0 && lineNum >= offset+readLimit {
-			break
-		}
-		builder.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
-	}
-	if err := scanner.Err(); err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("read file: %v", err)}, err
-	}
-
-	content := builder.String()
-	if content == "" {
-		content = "(empty)"
-	}
-
-	// Update mtime cache only for full reads (no offset/limit)
+	// Full read (no offset/limit): use readFullContent and update mtime cache.
 	if payload.Offset == 0 && payload.Limit == 0 {
-		t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
-	}
-
-	const lspHint = "\n\n---\nNeed to find a symbol definition, type info, or references? Use the `lsp` tool instead of reading the whole file (e.g., `lsp operation=hover file_path=<path> line=<line> character=<char>`)."
-
-	// Token-based truncation: if estimated tokens exceed limit, truncate at last complete line
-	estimatedTokens := len(content) / charsPerToken
-	if estimatedTokens <= maxReadTokens {
+		content, err := readFullContent(safePath)
+		if err != nil {
+			return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
+		}
+		// Update mtime cache only for full reads (no offset/limit).
+		if info, statErr := os.Stat(safePath); statErr == nil {
+			t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
+		}
 		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 	}
 
-	truncated := truncateByChars(content, maxReadTokens*charsPerToken)
-	truncatedLines := strings.Count(truncated, "\n")
-	digest := fmt.Sprintf("%s\n[... truncated at %d lines (~%d tokens out of ~%d estimated). Use offset/limit to read specific sections.]",
-		truncated, truncatedLines, maxReadTokens, estimatedTokens)
-	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest + lspHint}, nil
+	// offset/limit read.
+	content, err := readLinesContent(safePath, payload.Offset, payload.Limit)
+	if err != nil {
+		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
+	}
+	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 }
 
 // truncateByChars returns content up to maxChars, stopping at the last complete line.
@@ -161,6 +110,117 @@ func truncateByChars(content string, maxChars int) string {
 		return ""
 	}
 	return content[:cut]
+}
+
+// truncateContent applies the maxReadTokens cap to numbered file content.
+// If content fits, returns it unchanged; otherwise truncates at the last
+// complete line and appends a hint. Shared by read and read_multi.
+func truncateContent(content string) string {
+	estimatedTokens := len(content) / charsPerToken
+	if estimatedTokens <= maxReadTokens {
+		return content
+	}
+	truncated := truncateByChars(content, maxReadTokens*charsPerToken)
+	truncatedLines := strings.Count(truncated, "\n")
+	return fmt.Sprintf("%s\n[... truncated at %d lines (~%d tokens out of ~%d estimated). Use offset/limit to read specific sections.]",
+		truncated, truncatedLines, maxReadTokens, estimatedTokens)
+}
+
+// readFullContent reads an entire file with line numbers, applying the size
+// and token caps. Returns numbered content (possibly truncated with a hint).
+// Does not append the lspHint — callers decide.
+func readFullContent(safePath string) (string, error) {
+	info, err := os.Stat(safePath)
+	if err != nil {
+		return "", fmt.Errorf("stat file: %w", err)
+	}
+	if info.Size() > maxReadBytes {
+		return "", fmt.Errorf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))
+	}
+
+	file, err := os.Open(safePath)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	if err := detectBinary(file); err != nil {
+		return "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("seek file: %w", err)
+	}
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	var builder strings.Builder
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		builder.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+
+	content := builder.String()
+	if content == "" {
+		content = "(empty)"
+	}
+	return truncateContent(content), nil
+}
+
+// readLinesContent reads a range of lines from a file with numbering.
+// offset is 1-based (clamped to >=1); limit<=0 means read to EOF from offset.
+// Applies the same size and token caps as readFullContent.
+func readLinesContent(safePath string, offset, limit int) (string, error) {
+	info, err := os.Stat(safePath)
+	if err != nil {
+		return "", fmt.Errorf("stat file: %w", err)
+	}
+	if info.Size() > maxReadBytes {
+		return "", fmt.Errorf("file too large (%.1fMB, max 1MB). Use offset/limit to read specific sections.", float64(info.Size())/(1<<20))
+	}
+
+	file, err := os.Open(safePath)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	if err := detectBinary(file); err != nil {
+		return "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("seek file: %w", err)
+	}
+
+	if offset < 1 {
+		offset = 1
+	}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	var builder strings.Builder
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum < offset {
+			continue
+		}
+		if limit > 0 && lineNum >= offset+limit {
+			break
+		}
+		builder.WriteString(fmt.Sprintf("%d: %s\n", lineNum, scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+
+	content := builder.String()
+	if content == "" {
+		content = "(empty)"
+	}
+	return truncateContent(content), nil
 }
 
 func detectBinary(file *os.File) error {
