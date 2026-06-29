@@ -372,11 +372,13 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				if r.onProgress != nil {
 					r.onProgress(ProgressEvent{Type: "tool_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 				}
-				history = append(history, ModelMessage{
-					Role:       "tool",
-					ToolCallID: call.ID,
-					Content:    result.Digest,
-				})
+				if result.Status != "cancelled" {
+					history = append(history, ModelMessage{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    result.Digest,
+					})
+				}
 			} else if call.Name == HandoffToolName {
 				history = append(history, ModelMessage{
 					Role:       "tool",
@@ -571,11 +573,15 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 		}
 	}
 
+	status := "ok"
+	if result.BlockedBy == "cancelled" {
+		status = "cancelled"
+	}
 	digest := formatHandoffResult(result, zhFromLang(userLang))
 	return ToolResult{
 		ToolCallID: call.ID,
 		ToolName:   HandoffToolName,
-		Status:     "ok",
+		Status:     status,
 		Digest:     digest,
 	}
 }

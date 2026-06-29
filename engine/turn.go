@@ -514,8 +514,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if e.config.OnProgress != nil {
 			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 		}
-		toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
-		e.history = append(e.history, toolMessage)
+		if result.Status != "cancelled" {
+			toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
+			e.history = append(e.history, toolMessage)
+		}
 	}
 
 	// Execute regular tool calls.
@@ -753,11 +755,15 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		e.accumulateUsage(result.Usage)
 	}
 
+	status := "ok"
+	if result.BlockedBy == "cancelled" {
+		status = "cancelled"
+	}
 	digest := formatHandoffResult(result, e.isChinese)
 	return ToolResult{
 		ToolCallID: call.ID,
 		ToolName:   HandoffToolName,
-		Status:     "ok",
+		Status:     status,
 		Digest:     digest,
 	}
 }
