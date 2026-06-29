@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 )
 
 // applyFilePathAlias returns the path a file-oriented tool should act on when
@@ -24,30 +23,63 @@ func applyFilePathAlias(primary, alias string) string {
 	return alias
 }
 
-// resolveSafePath resolves targetPath relative to workDir and ensures it
-// does not escape the workspace (prevents path traversal attacks).
-// Returns the safe absolute path or an error.
+// resolveSafePath resolves targetPath relative to workDir to an absolute path.
+//
+// The agent is intentionally allowed to operate on ANY path the user/model
+// supplies — this is an AI coding agent whose whole purpose is to read/edit
+// files across multiple projects and directories, not just the launch
+// directory. Workspace-range confinement made legitimate multi-project edits
+// fail with "escapes workspace" (e.g. editing files under a sibling project
+// the agent was asked to work on), which silently broke edit/write/glob/grep
+// and left the Done history without a diff.
+//
+// Dangerous operations are intercepted by the Guards layer (ScopeGuard /
+// risk thresholds), not by folder-range confinement here. Only the most
+// destructive absolute paths are rejected as a backstop.
 func resolveSafePath(workDir, targetPath string) (string, error) {
-	if workDir == "" {
-		return "", errors.New("work directory not configured")
-	}
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve work directory: %w", err)
+	if targetPath == "" {
+		return "", errors.New("path is required")
 	}
 
 	var absTarget string
 	if filepath.IsAbs(targetPath) {
 		absTarget = filepath.Clean(targetPath)
 	} else {
+		if workDir == "" {
+			return "", errors.New("work directory not configured")
+		}
+		absWorkDir, err := filepath.Abs(workDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve work directory: %w", err)
+		}
 		absTarget = filepath.Join(absWorkDir, targetPath)
 	}
 
-	// Ensure resolved path is within workdir
-	workDirPrefix := absWorkDir + string(filepath.Separator)
-	if absTarget != absWorkDir && !strings.HasPrefix(absTarget, workDirPrefix) {
-		return "", fmt.Errorf("path %q escapes workspace (resolved to %q)", targetPath, absTarget)
+	// Backstop: refuse a handful of catastrophic system paths. The Guards
+	// layer handles risk-threshold-based interception for everything else.
+	if isCatastrophicPath(absTarget) {
+		return "", fmt.Errorf("refusing to operate on system path %q", absTarget)
 	}
 
 	return absTarget, nil
+}
+
+// isCatastrophicPath returns true for paths where a write/delete would be
+// unrecoverable at the OS level. Deliberately tiny — the Guards layer is the
+// real safety net; this is just a backstop against trivial mistakes.
+func isCatastrophicPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	// Resolve symlinks/.. so "/etc/../etc" is still caught.
+	clean := filepath.Clean(p)
+	switch clean {
+	case "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library":
+		return true
+	}
+	// Windows drive roots.
+	if len(clean) == 3 && clean[1] == ':' && (clean[2] == '/' || clean[2] == '\\') {
+		return true
+	}
+	return false
 }

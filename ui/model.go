@@ -140,13 +140,6 @@ type Model struct {
 
 	// TDD (test-driven-development) phase tracking
 	tddStages []TDDStage
-
-	// Collapsed-by-default diff file blocks. Maps file path (ToolNode.Detail)
-	// to expanded state. Clicking a diff file header toggles expansion so the
-	// full diff is shown on demand; by default only the modified file list is
-	// rendered, which keeps scrolling/selection glitch-free (diff content rows
-	// are not rendered at all when collapsed).
-	expandedDiffs map[string]bool
 }
 
 type messageRenderCache struct {
@@ -183,7 +176,6 @@ func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
 		state:    stateInit,
 		messages: []DisplayMessage{},
 		inputBuf: NewInputBuffer(),
-		expandedDiffs: map[string]bool{},
 		status: StatusInfo{
 			Model:       "pro",
 			TokensIn:    0,
@@ -259,7 +251,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.autoScrollDir = newDir
 			}
-			return m, nil
+			// Force a full repaint on selection changes. Bubble Tea's default
+			// per-line frame diff mis-repaints rows whose ANSI changed (e.g.
+			// diff rows gaining/losing \x1b[7m reverse video) on iTerm2, leaving
+			// the row showing a neighbour's text. A full repaint bypasses the
+			// incremental diff entirely. (Same mechanism resize uses.)
+			return m, m.repaintCmd()
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -296,18 +293,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					scroll = 0
 				}
 				pt := screenToLine(msg.Y, msg.X, scroll, bodyHeight, totalLines)
-				// Click on a diff file header toggles its expansion instead of
-				// starting a text selection. Default-collapsed diff blocks keep
-				// scrolling/selection glitch-free; the user expands on demand.
-				if file, ok := diffHeaderAt(m, pt.Line, plain); ok {
-					if m.expandedDiffs == nil {
-						m.expandedDiffs = map[string]bool{}
-					}
-					m.expandedDiffs[file] = !m.expandedDiffs[file]
-					m.selection = SelectionState{}
-					m.autoScrollDir = 0
-					return m, m.repaintCmd()
-				}
 				m.selection = SelectionState{
 					Active:     true,
 					Done:       false,
@@ -321,7 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoScrollDir = 0
 				m.lastMouseX = msg.X
 				m.lastMouseY = msg.Y
-				return m, nil
+				return m, m.repaintCmd()
 			} else if msg.Action == tea.MouseActionRelease {
 				if m.selection.Active {
 					sel := m.selection
@@ -345,7 +330,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.clipboardFeedback = time.Now()
 					}
 				}
-				return m, nil
+				// Force full repaint on release: the selection highlight is
+				// either finalized (Done) or cleared, both change row ANSI and
+				// can mis-repaint under Bubble Tea's incremental frame diff.
+				return m, m.repaintCmd()
 			}
 		}
 		return m, nil
@@ -441,6 +429,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Type {
 		case "thinking":
+			if len(m.spinners) > 0 {
+				m.spinners[0].Goal = msg.Detail
+			}
+			m.thinkingActivity = msg.Detail
+		case "retry":
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Detail
 			}
@@ -1904,21 +1897,8 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 		if node.Done {
 			status = " " + SpinnerDoneStyle.Render("✓")
 		}
-		expanded := m.expandedDiffs[node.Detail]
-		indicator := "[+]"
-		if expanded {
-			indicator = "[-]"
-		}
-		// Collapsed: show a one-line summary with add/remove counts so the user
-		// knows the change size without expanding. Expanded: just the header,
-		// hunks follow.
-		fileLine := fmt.Sprintf("  %s :: %s%s", indicator, node.Detail, status)
-		if !expanded && node.Done && len(node.Children) > 0 {
-			added, removed := diffStats(node)
-			fileLine += DimStyle.Render(fmt.Sprintf("  (+%d -%d)", added, removed))
-		}
-		content = append(content, fileLine)
-		if expanded && node.Done && len(node.Children) > 0 {
+		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
+		if node.Done && len(node.Children) > 0 {
 			for _, child := range node.Children {
 				if child.DetailFull != "" {
 					diffLines := renderDiffHunkBlock(child.DetailFull, width-6)
@@ -1927,62 +1907,35 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 			}
 		}
 	}
-	// Render each line independently to prevent \033[0m from inner styles (diffDeleteStyle etc.)
-	// from cancelling DiffBlockStyle's background on subsequent lines.
-	// Use DiffBlockLineStyle (no vertical padding) to avoid multi-line entries that break
-	// the height calculation in View(). Add padding rows manually at top/bottom.
-	var result []string
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	// Render diff rows as plain foreground-colored text — NO background block.
+	// A background block (DiffBlockLineStyle) stacks bg + fg SGR; when the
+	// selection injects \x1b[7m reverse video on top, the nested overlapping
+	// attributes make iTerm2 repaint the row shifted on the click-induced
+	// frame switch (the diff-row shift bug) and leave residue while scrolling.
+	// Plain foreground rows behave like ordinary message rows. Each row is
+	// padded to the full terminal width so every cell is explicitly written
+	// (no reliance on \x1b[K erase-right, which left stale characters from the
+	// previous frame in short diff rows during scroll — the scroll-ghosting
+	// bug). Padding follows the line's trailing SGR reset so it stays
+	// default-colored; View()'s final ansi.Truncate(…, m.width) keeps it exact.
+	contentWidth := m.width
+	if contentWidth < 1 {
+		contentWidth = width
+	}
+	padLine := func(line string) string {
+		w := lipgloss.Width(line)
+		if w >= contentWidth {
+			return line
+		}
+		return line + strings.Repeat(" ", contentWidth-w)
+	}
+	result := make([]string, 0, len(content)+2)
+	result = append(result, padLine(""))
 	for _, line := range content {
-		result = append(result, DiffBlockLineStyle.Width(width).Render(line))
+		result = append(result, padLine(line))
 	}
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	result = append(result, padLine(""))
 	return result
-}
-
-// diffHeaderAt checks whether plain-line index `idx` is a diff file header row
-// (the clickable `  [+] :: file` / `  [-] :: file` line). Returns the matched
-// file path and true if so. Used by the mouse handler to toggle expansion
-// instead of starting a selection.
-func diffHeaderAt(m Model, idx int, plain []string) (string, bool) {
-	if idx < 0 || idx >= len(plain) {
-		return "", false
-	}
-	line := plain[idx]
-	if !strings.Contains(line, ":: ") {
-		return "", false
-	}
-	for _, node := range m.toolTree {
-		if !node.Done || node.Detail == "" {
-			continue
-		}
-		if node.Name != "edit" && node.Name != "write" {
-			continue
-		}
-		if strings.Contains(line, ":: "+node.Detail) {
-			return node.Detail, true
-		}
-	}
-	return "", false
-}
-
-// diffStats counts added/removed lines across a diff tool node's hunks for the
-// collapsed summary. Lines starting with "+" (but not "+++") count as added,
-// "-" (but not "---") as removed.
-func diffStats(node ToolNode) (added, removed int) {
-	for _, child := range node.Children {
-		for _, line := range strings.Split(child.DetailFull, "\n") {
-			if strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
-				continue
-			}
-			if strings.HasPrefix(line, "+") {
-				added++
-			} else if strings.HasPrefix(line, "-") {
-				removed++
-			}
-		}
-	}
-	return added, removed
 }
 
 func renderToolSummary(toolTree []ToolNode) string {
