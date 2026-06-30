@@ -2119,7 +2119,7 @@ func renderDiffHunkFlat(hunkContent string) string {
 			newNum++
 		}
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	return buf.String()
 }
 
 // isDiffContent checks if a string contains unified diff content.

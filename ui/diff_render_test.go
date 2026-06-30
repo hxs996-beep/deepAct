@@ -16,8 +16,8 @@ func buildHunk() string {
 func TestRenderDiffHunkFlat_PreservesEmptyLines(t *testing.T) {
 	hunk := "@@ -1,3 +1,3 @@\n ctx\n\n-old\n+new"
 	got := renderDiffHunkFlat(hunk)
-	// flat 版按 \n 分隔，空行应保留为 "    "（4 空格占位）
-	gotLines := strings.Split(got, "\n")
+	// flat 版每行末尾带 \n（含最后一行），先去尾再 split
+	gotLines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	inputLines := strings.Split(hunk, "\n")
 	if len(gotLines) != len(inputLines) {
 		t.Errorf("flat 空行被丢弃: input %d, output %d", len(inputLines), len(gotLines))
