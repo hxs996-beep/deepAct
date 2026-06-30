@@ -2074,8 +2074,11 @@ func renderDiffHunkFlat(hunkContent string) string {
 	var buf strings.Builder
 	oldNum, newNum := 1, 1
 
-	for _, hl := range lines {
+	for _, raw := range lines {
+		hl := strings.TrimRight(raw, "\r")
 		if hl == "" {
+			// R1: 空行占位，保持行数一致
+			buf.WriteString("    \n")
 			continue
 		}
 		if strings.HasPrefix(hl, "@@") {
@@ -2097,9 +2100,6 @@ func renderDiffHunkFlat(hunkContent string) string {
 			continue
 		}
 
-		if len(hl) == 0 {
-			continue
-		}
 		prefix := hl[0:1]
 		content := hl[1:]
 
@@ -2119,7 +2119,7 @@ func renderDiffHunkFlat(hunkContent string) string {
 			newNum++
 		}
 	}
-	return buf.String()
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // isDiffContent checks if a string contains unified diff content.

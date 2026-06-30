@@ -13,6 +13,25 @@ func buildHunk() string {
 	return "@@ -1,4 +1,4 @@\n line1\n\n-old\n+new\n line4"
 }
 
+func TestRenderDiffHunkFlat_PreservesEmptyLines(t *testing.T) {
+	hunk := "@@ -1,3 +1,3 @@\n ctx\n\n-old\n+new"
+	got := renderDiffHunkFlat(hunk)
+	// flat 版按 \n 分隔，空行应保留为 "    "（4 空格占位）
+	gotLines := strings.Split(got, "\n")
+	inputLines := strings.Split(hunk, "\n")
+	if len(gotLines) != len(inputLines) {
+		t.Errorf("flat 空行被丢弃: input %d, output %d", len(inputLines), len(gotLines))
+	}
+}
+
+func TestRenderDiffHunkFlat_StripsCR(t *testing.T) {
+	hunk := "@@ -1,2 +1,2 @@\n ctx\r\n-old\r\n+new\r"
+	got := renderDiffHunkFlat(hunk)
+	if strings.Contains(got, "\r") {
+		t.Errorf("flat 输出仍含 \\r: %q", got)
+	}
+}
+
 func TestRenderDiffHunkBlock_PreservesEmptyLines(t *testing.T) {
 	hunk := buildHunk()
 	// 输入按 \n 分割后的行数（含空行）
