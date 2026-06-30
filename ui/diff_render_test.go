@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	"github.com/muesli/reflow/ansi"
 )
 
 // buildHunk 构造一个含空 context 行的 hunk 内容用于测试。
@@ -52,5 +54,37 @@ func TestRenderDiffHunkBlock_LineNumbersAligned(t *testing.T) {
 	plainIns := stripAnsi(got[3])
 	if !strings.Contains(plainIns, "+new") {
 		t.Errorf("insert 内容错: %q", plainIns)
+	}
+}
+
+func TestRenderDiffHunkBlock_HardTruncatesLongLine(t *testing.T) {
+	// 一行超长 insert，maxWidth=20
+	long := strings.Repeat("x", 80)
+	hunk := "@@ -1,1 +1,1 @@\n+" + long
+	got := renderDiffHunkBlock(hunk, 20)
+	if len(got) != 2 {
+		t.Fatalf("want 2 行 (header+insert), got %d", len(got))
+	}
+	insertLine := got[1]
+	if w := ansi.PrintableWidth(stripAnsi(insertLine)); w > 20 {
+		t.Errorf("insert 行显示宽度 %d 超过 maxWidth 20: %q", w, insertLine)
+	}
+	if !strings.HasSuffix(stripAnsi(insertLine), "…") {
+		t.Errorf("长行末尾应有 … 截断提示: %q", stripAnsi(insertLine))
+	}
+}
+
+func TestRenderDiffHunkBlock_WideCharWidth(t *testing.T) {
+	// 含中文的超长行，截断后显示宽度 <= maxWidth
+	long := strings.Repeat("你好", 40) // 每字宽2，共 160 宽
+	hunk := "@@ -1,1 +1,1 @@\n+" + long
+	got := renderDiffHunkBlock(hunk, 20)
+	if len(got) < 2 {
+		t.Fatalf("want >=2 行, got %d", len(got))
+	}
+	for i, line := range got {
+		if w := ansi.PrintableWidth(stripAnsi(line)); w > 20 {
+			t.Errorf("第 %d 行显示宽度 %d 超过 20: %q", i, w, line)
+		}
 	}
 }
