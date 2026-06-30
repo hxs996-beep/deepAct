@@ -513,3 +513,47 @@ func TestTruncateVisual_EmptyAndZero(t *testing.T) {
 		t.Errorf("maxW=0: want %q, got %q", "", got)
 	}
 }
+
+// ---- R1/R2 regression tests ----
+
+func TestScreenToLine_AfterEmptyLineFix(t *testing.T) {
+	// 含空行的 plain 数组（模拟 R1 修复后的 1:1 行映射）
+	// 10 行，bodyHeight=5，scrollOffset=0（底对齐）
+	// firstVisibleLine = 10 - 0 - 5 = 5
+	totalLines := 10
+	bodyHeight := 5
+	scroll := 0
+	// 屏幕 row 0 → 数据行 5
+	pt0 := screenToLine(0, 0, scroll, bodyHeight, totalLines)
+	if pt0.Line != 5 {
+		t.Errorf("row 0: want line 5, got %d", pt0.Line)
+	}
+	// 屏幕 row 1 → 数据行 6
+	pt1 := screenToLine(1, 0, scroll, bodyHeight, totalLines)
+	if pt1.Line != 6 {
+		t.Errorf("row 1: want line 6, got %d", pt1.Line)
+	}
+	// 屏幕 row 2 → 数据行 7
+	pt2 := screenToLine(2, 0, scroll, bodyHeight, totalLines)
+	if pt2.Line != 7 {
+		t.Errorf("row 2: want line 7, got %d", pt2.Line)
+	}
+}
+
+func TestExtractSelectionText_NoCRInOutput(t *testing.T) {
+	// R2: 渲染层已剥 \r，故 plain 快照不含 \r。验证选区文本无 \r 且整行复制正确。
+	plain := []string{"+new", "-old", " ctx"}
+	sel := SelectionState{
+		Done:  true,
+		Start: selPoint{Line: 0, Col: 0},
+		End:   selPoint{Line: 2, Col: -1},
+	}
+	got := extractSelectionText(plain, sel)
+	if strings.Contains(got, "\r") {
+		t.Errorf("选区文本含 \\r: %q", got)
+	}
+	want := "+new\n-old\n ctx"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}

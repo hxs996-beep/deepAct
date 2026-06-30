@@ -1915,6 +1915,7 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	result = append(result, content...)
 	result = append(result, "")
 	return result
+}
 
 func renderToolSummary(toolTree []ToolNode) string {
 	var b strings.Builder
