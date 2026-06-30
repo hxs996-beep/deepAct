@@ -2002,8 +2002,10 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 	var result []string
 	oldNum, newNum := 1, 1
 
-	for _, hl := range lines {
+	for _, raw := range lines {
+		hl := strings.TrimRight(raw, "\r")
 		if hl == "" {
+			result = append(result, "    "+diffContextStyle.Render(""))
 			continue
 		}
 		if strings.HasPrefix(hl, "@@") {
@@ -2025,9 +2027,6 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 			continue
 		}
 
-		if len(hl) == 0 {
-			continue
-		}
 		prefix := hl[0:1]
 		content := hl[1:]
 
