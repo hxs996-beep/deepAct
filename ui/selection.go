@@ -332,6 +332,42 @@ func sliceByVisualCol(s string, colStart, colEnd int) string {
 	return sb.String()
 }
 
+// truncateVisual truncates s to fit within maxW display columns, preserving
+// ANSI escape sequences (never splits a sequence mid-way) and wide runes
+// (CJK/emoji counted as width-2 via lipgloss.Width). Trailing ANSI sequences
+// that appear after the visual truncation point are preserved so that closing
+// sequences like \x1b[0m are not lost. It does NOT append a trailing marker —
+// callers decide whether to add "…" etc. Returns s unchanged if its visual
+// width <= maxW. maxW <= 0 yields "".
+func truncateVisual(s string, maxW int) string {
+	if maxW <= 0 || s == "" {
+		return ""
+	}
+	var sb strings.Builder
+	visualCol := 0
+	i := 0
+	truncated := false
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			seqEnd := findAnsiSeqEnd(s, i)
+			sb.WriteString(s[i:seqEnd])
+			i = seqEnd
+			continue
+		}
+		r, size := decodeRuneAt(s, i)
+		rw := lipgloss.Width(string(r))
+		if truncated || visualCol+rw > maxW {
+			truncated = true
+			i += size
+			continue
+		}
+		sb.WriteString(s[i : i+size])
+		i += size
+		visualCol += rw
+	}
+	return sb.String()
+}
+
 // ---- Clipboard ----
 
 // copySelection extracts selected text and copies it to the clipboard.

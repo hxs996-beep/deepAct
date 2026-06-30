@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/deepact/deepact/engine"
 )
 
@@ -454,4 +456,60 @@ func TestAutoScrollEdgeDetection(t *testing.T) {
 
 func containsSeq(s, seq string) bool {
 	return strings.Contains(s, seq)
+}
+
+// ---- truncateVisual tests ----
+
+func TestTruncateVisual_PlainASCII(t *testing.T) {
+	// maxW=5, 输入 10 字符 → 截到显示宽度 5，无尾标记
+	got := truncateVisual("abcdefghij", 5)
+	if w := lipgloss.Width(got); w != 5 {
+		t.Errorf("width: want 5, got %d (%q)", w, got)
+	}
+	if got != "abcde" {
+		t.Errorf("want %q, got %q", "abcde", got)
+	}
+}
+
+func TestTruncateVisual_WideChar(t *testing.T) {
+	// 中文每字宽 2，maxW=5 → 保留 2 字（宽 4），第 3 字会超宽故丢弃
+	got := truncateVisual("你好世界测试", 5)
+	if w := lipgloss.Width(got); w > 5 {
+		t.Errorf("width: want <=5, got %d (%q)", w, got)
+	}
+	if w := lipgloss.Width(got); w != 4 {
+		t.Errorf("width: want 4 (2 CJK chars), got %d (%q)", w, got)
+	}
+}
+
+func TestTruncateVisual_PreservesANSI(t *testing.T) {
+	// 含 ANSI 序列：截断后不切断转义序列，且 stripAnsi 后宽度 <= maxW
+	styled := "\x1b[31mabcdefghij\x1b[0m"
+	got := truncateVisual(styled, 5)
+	if strings.Contains(got, "\x1b[31m") == false {
+		t.Errorf("ANSI seq lost: %q", got)
+	}
+	// 不应出现被切断的残缺转义（如 \x1b[31 但无 m）
+	if strings.Contains(got, "\x1b[0m") == false {
+		t.Errorf("reset seq lost: %q", got)
+	}
+	if w := lipgloss.Width(stripAnsi(got)); w > 5 {
+		t.Errorf("visual width: want <=5, got %d (%q)", w, got)
+	}
+}
+
+func TestTruncateVisual_NoTruncationNeeded(t *testing.T) {
+	got := truncateVisual("abc", 10)
+	if got != "abc" {
+		t.Errorf("want %q, got %q", "abc", got)
+	}
+}
+
+func TestTruncateVisual_EmptyAndZero(t *testing.T) {
+	if got := truncateVisual("", 5); got != "" {
+		t.Errorf("empty input: want %q, got %q", "", got)
+	}
+	if got := truncateVisual("abc", 0); got != "" {
+		t.Errorf("maxW=0: want %q, got %q", "", got)
+	}
 }
