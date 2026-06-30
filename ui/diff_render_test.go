@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -104,6 +105,25 @@ func TestRenderDiffHunkBlock_WideCharWidth(t *testing.T) {
 	for i, line := range got {
 		if w := ansi.StringWidth(stripAnsi(line)); w > 20 {
 			t.Errorf("第 %d 行显示宽度 %d 超过 20: %q", i, w, line)
+		}
+	}
+}
+
+func TestRenderDiffBlock_NoPadToTerminalWidth(t *testing.T) {
+	// R3: renderDiffBlock 不应再 pad 到 m.width，宽度交由 View 统一 Truncate。
+	// 构造一个已 Done 的 edit 节点带 hunk
+	m := Model{width: 200} // 故意设很大的 width
+	nodes := []ToolNode{{
+		Name:     "edit",
+		Done:     true,
+		Detail:   "foo.go",
+		Children: []ToolNode{{Name: "hunk", DetailFull: "@@ -1,1 +1,1 @@\n-old\n+new"}},
+	}}
+	got := m.renderDiffBlock(nodes, 80)
+	// 每行显示宽度不应被 pad 到 200；短行应保持短（<= 80）
+	for i, line := range got {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Errorf("第 %d 行被 pad 到 %d 宽 (>80): %q", i, w, line)
 		}
 	}
 }

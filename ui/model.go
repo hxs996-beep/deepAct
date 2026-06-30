@@ -1907,36 +1907,14 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 			}
 		}
 	}
-	// Render diff rows as plain foreground-colored text — NO background block.
-	// A background block (DiffBlockLineStyle) stacks bg + fg SGR; when the
-	// selection injects \x1b[7m reverse video on top, the nested overlapping
-	// attributes make iTerm2 repaint the row shifted on the click-induced
-	// frame switch (the diff-row shift bug) and leave residue while scrolling.
-	// Plain foreground rows behave like ordinary message rows. Each row is
-	// padded to the full terminal width so every cell is explicitly written
-	// (no reliance on \x1b[K erase-right, which left stale characters from the
-	// previous frame in short diff rows during scroll — the scroll-ghosting
-	// bug). Padding follows the line's trailing SGR reset so it stays
-	// default-colored; View()'s final ansi.Truncate(…, m.width) keeps it exact.
-	contentWidth := m.width
-	if contentWidth < 1 {
-		contentWidth = width
-	}
-	padLine := func(line string) string {
-		w := lipgloss.Width(line)
-		if w >= contentWidth {
-			return line
-		}
-		return line + strings.Repeat(" ", contentWidth-w)
-	}
+	// R3: 不再 pad 到终端全宽。View() 已对全 body 统一 ansi.Truncate 到
+	// contentWidth，diff 行单独 pad 会引入 m.width/contentWidth/scrollContentWidth
+	// 三宽度不一致，导致滚动残留/花屏。保留首尾空行作为视觉间隔即可。
 	result := make([]string, 0, len(content)+2)
-	result = append(result, padLine(""))
-	for _, line := range content {
-		result = append(result, padLine(line))
-	}
-	result = append(result, padLine(""))
+	result = append(result, "")
+	result = append(result, content...)
+	result = append(result, "")
 	return result
-}
 
 func renderToolSummary(toolTree []ToolNode) string {
 	var b strings.Builder
