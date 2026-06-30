@@ -1998,11 +1998,21 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 	if len(lines) == 0 {
 		return nil
 	}
+	if maxWidth < 1 {
+		maxWidth = 80
+	}
 
 	var result []string
 	oldNum, newNum := 1, 1
 
 	for _, raw := range lines {
+		renderTruncatedDiffLine := func(styled string) string {
+			if w := ansi.StringWidth(styled); w > maxWidth {
+				return truncateVisual(styled, maxWidth-1) + "…"
+			}
+			return styled
+		}
+
 		hl := strings.TrimRight(raw, "\r")
 		if hl == "" {
 			result = append(result, "    "+diffContextStyle.Render(""))
@@ -2023,7 +2033,7 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 				fmt.Sscanf(oldStartStr, "%d", &oldNum)
 				fmt.Sscanf(newStartStr, "%d", &newNum)
 			}
-			result = append(result, "    "+diffHunkHeaderStyle.Render(hl))
+			result = append(result, renderTruncatedDiffLine("    "+diffHunkHeaderStyle.Render(hl)))
 			continue
 		}
 
@@ -2033,15 +2043,18 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 		switch prefix {
 		case "-":
 			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
-			result = append(result, "    "+lineNum+diffDeleteStyle.Render(prefix+content))
+			line := renderTruncatedDiffLine("    " + lineNum + diffDeleteStyle.Render(prefix+content))
+			result = append(result, line)
 			oldNum++
 		case "+":
 			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
-			result = append(result, "    "+lineNum+diffInsertStyle.Render(prefix+content))
+			line := renderTruncatedDiffLine("    " + lineNum + diffInsertStyle.Render(prefix+content))
+			result = append(result, line)
 			newNum++
 		default:
 			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
-			result = append(result, "    "+lineNum+content)
+			line := renderTruncatedDiffLine("    " + lineNum + content)
+			result = append(result, line)
 			oldNum++
 			newNum++
 		}

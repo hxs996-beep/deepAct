@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/muesli/reflow/ansi"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // buildHunk 构造一个含空 context 行的 hunk 内容用于测试。
@@ -66,7 +66,7 @@ func TestRenderDiffHunkBlock_HardTruncatesLongLine(t *testing.T) {
 		t.Fatalf("want 2 行 (header+insert), got %d", len(got))
 	}
 	insertLine := got[1]
-	if w := ansi.PrintableWidth(stripAnsi(insertLine)); w > 20 {
+	if w := ansi.StringWidth(stripAnsi(insertLine)); w > 20 {
 		t.Errorf("insert 行显示宽度 %d 超过 maxWidth 20: %q", w, insertLine)
 	}
 	if !strings.HasSuffix(stripAnsi(insertLine), "…") {
@@ -83,7 +83,7 @@ func TestRenderDiffHunkBlock_WideCharWidth(t *testing.T) {
 		t.Fatalf("want >=2 行, got %d", len(got))
 	}
 	for i, line := range got {
-		if w := ansi.PrintableWidth(stripAnsi(line)); w > 20 {
+		if w := ansi.StringWidth(stripAnsi(line)); w > 20 {
 			t.Errorf("第 %d 行显示宽度 %d 超过 20: %q", i, w, line)
 		}
 	}
