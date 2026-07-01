@@ -135,6 +135,10 @@ type Model struct {
 	lastMouseX        int      // last mouse X during drag (screen coords, for auto-scroll)
 	lastMouseY        int      // last mouse Y during drag (screen coords, for auto-scroll)
 
+	// Diff hunk collapse viewer
+	diffViewerActive bool    // full-screen hunk viewer is open
+	diffViewerHunk   hunkHit // which hunk is shown full-screen
+
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
 
@@ -223,6 +227,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
+		// Full-screen diff viewer: only wheel scroll, no drag-select.
+		if m.diffViewerActive {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.scrollOffset += m.height / 3
+				return m, m.repaintCmd()
+			case tea.MouseButtonWheelDown:
+				m.scrollOffset -= m.height / 3
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, m.repaintCmd()
+			}
+			return m, nil
+		}
 		// Handle motion events (drag) — they have Button=MouseButtonNone
 		if msg.Action == tea.MouseActionMotion {
 			if m.selection.Active {
@@ -314,6 +333,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					sel.Active = false
 					m.autoScrollDir = 0
 					if sel.Start == sel.End {
+						// Single click: if it lands on a hunk summary line, open
+						// the full-screen diff viewer for that hunk.
+						if hit, ok := m.hitTestHunk(sel.End.Line, sel.Plain); ok {
+							m.diffViewerActive = true
+							m.diffViewerHunk = hit
+							m.scrollOffset = 0
+							m.selection = SelectionState{}
+							return m, m.repaintCmd()
+						}
 						m.selection = SelectionState{}
 					} else {
 						sel.Done = true
@@ -732,7 +760,28 @@ func (m Model) View() string {
 	maxScroll := 0
 	scrollOff := 0
 	frozen := (m.selection.Active || m.selection.Done) && m.selection.Rendered != nil
-	if frozen {
+	if m.diffViewerActive {
+		// Full-screen diff viewer: render the selected hunk, scrollable.
+		lines = m.renderDiffViewer(scrollContentWidth)
+		total = len(lines)
+		scrollOff = m.scrollOffset
+		if total > bodyHeight {
+			needScrollbar = true
+			maxScroll = total - bodyHeight
+			if scrollOff > maxScroll {
+				scrollOff = maxScroll
+			}
+			if scrollOff < 0 {
+				scrollOff = 0
+			}
+			end := total - scrollOff
+			start := end - bodyHeight
+			if start < 0 {
+				start = 0
+			}
+			lines = lines[start:end]
+		}
+	} else if frozen {
 		// Selection freeze: display the body snapshot captured at mouse-down
 		// so the highlight and copy target stay aligned with what the user
 		// clicked, even while streaming output appends lines and shifts the
@@ -929,6 +978,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Esc: cancel if running; in ready state, mark as potential Alt+Enter
 	// prefix (macOS terminals send ESC byte before Enter when Option is held).
 	if msg.Type == tea.KeyEsc {
+		// Diff viewer: ESC exits to collapsed view first.
+		if m.diffViewerActive {
+			m.diffViewerActive = false
+			m.scrollOffset = 0
+			return m, nil
+		}
 		if m.state == stateRunning {
 			if m.engine != nil {
 				m.engine.Cancel()
@@ -1315,13 +1370,15 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	m.spinners = nil
 	if msg.Err != nil {
 		runnerLog.Printf("finishStreaming err: %v", msg.Err)
-		// Don't show expected cancellation/timeout errors to the user
 		errStr := msg.Err.Error()
-		if !strings.Contains(errStr, "context canceled") &&
-			!strings.Contains(errStr, "context deadline exceeded") &&
-			!strings.Contains(errStr, "connection reset") {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: msg.Err.Error()})
+		// Suppress only expected cancellation/timeout — these are user-initiated
+		// and the "已中断" message is already shown via the Esc handler.
+		if strings.Contains(errStr, "context canceled") ||
+			strings.Contains(errStr, "context deadline exceeded") {
+			m.streaming = ""
+			return
 		}
+		m.messages = append(m.messages, DisplayMessage{Role: "system", Content: msg.Err.Error()})
 		m.streaming = ""
 		return
 	}
@@ -1582,7 +1639,7 @@ func renderMessage(msg DisplayMessage, width int) []string {
 				// Line already has ANSI color codes, render as-is
 				styled[i] = line
 			} else {
-				styled[i] = ToolTreeStyle.Render(line)
+				styled[i] = DimStyle.Render(line)
 			}
 		}
 		return wrapLines(styled, width)
@@ -1899,17 +1956,16 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 		}
 		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
 		if node.Done && len(node.Children) > 0 {
-			for _, child := range node.Children {
-				if child.DetailFull != "" {
-					diffLines := renderDiffHunkBlock(child.DetailFull, width-6)
-					content = append(content, diffLines...)
+			for childIdx, child := range node.Children {
+				if child.DetailFull == "" {
+					continue
 				}
+				adds, deletes := countHunkAddsDeletes(child.DetailFull)
+				content = append(content, hunkSummaryLine(childIdx, child.Detail, adds, deletes))
 			}
 		}
 	}
-	// R3: 不再 pad 到终端全宽。View() 已对全 body 统一 ansi.Truncate 到
-	// contentWidth，diff 行单独 pad 会引入 m.width/contentWidth/scrollContentWidth
-	// 三宽度不一致，导致滚动残留/花屏。保留首尾空行作为视觉间隔即可。
+	// R3: 保留首尾空行作为视觉间隔，不 pad 全宽（View 统一 ansi.Truncate）。
 	result := make([]string, 0, len(content)+2)
 	result = append(result, "")
 	result = append(result, content...)
@@ -1925,7 +1981,7 @@ func renderToolSummary(toolTree []ToolNode) string {
 			modified++
 		}
 	}
-	b.WriteString(fmt.Sprintf("● Done (%d tools, %d files modified)\n", len(toolTree), modified))
+	b.WriteString(fmt.Sprintf("● %d tools executed, %d files modified\n", len(toolTree), modified))
 
 	for _, node := range toolTree {
 		icon := node.Icon
