@@ -298,9 +298,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			e.state.ActiveSkillName = s.Name
 			e.state.ActiveSkillContent = s.Content
 
+			// Inject skill methodology into stable zone (persistent across turns)
+			e.context.SetActiveSkill(s.Name, s.Content)
+
+			// Brief one-time notification for this turn only
 			skillMsg := fmt.Sprintf(
-				"[SKILL ACTIVATED: %s]\n\nThe following methodology has been activated per user request. Follow it precisely.\n\n%s",
-				s.Name, s.Content,
+				"✅ Skill `%s` activated: %s. Full methodology now in stable zone.",
+				s.Name, s.Description,
 			)
 			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
 			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
@@ -348,9 +352,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			e.lastActivatedSkill = autoActivated.Name
 			e.state.ActiveSkillName = autoActivated.Name
 			e.state.ActiveSkillContent = autoActivated.Content
+
+			// Inject skill methodology into stable zone (persistent across turns)
+			e.context.SetActiveSkill(autoActivated.Name, autoActivated.Content)
+
 			skillMsg := fmt.Sprintf(
-				"[SKILL ACTIVATED: %s] (auto, keyword score %d)\n\nThe following methodology has been automatically activated based on your input. Follow it precisely.\n\n%s",
-				autoActivated.Name, matches[0].Score, autoActivated.Content,
+				"✅ Skill `%s` auto-activated (keyword score %d). Full methodology now in stable zone.",
+				autoActivated.Name, matches[0].Score,
 			)
 			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
 			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", autoActivated.Name, autoActivated.Content)
@@ -760,25 +768,122 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Record efficiency eval at end of Run()
 	e.recordRunEval(zh)
 
-	summary := ""
-	for i := len(e.history) - 1; i >= 0; i-- {
-		if e.history[i].Role == "assistant" && e.history[i].Content != "" {
-			summary = e.history[i].Content
-			break
-		}
-	}
-	summary = stripDSMLTokens(summary)
-	if summary == "" {
-		summary = "Done"
-		if zh {
-			summary = "完成"
-		}
-	}
+	summary := buildRunSummary(e.history, e.runToolCallCount, zh)
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
 		e.runUsageAccum.CacheHitTokens, e.runUsageAccum.CacheMissTokens)
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
+}
+
+// buildRunSummary produces the user-facing summary for a Run() by walking the
+// history backwards. It falls back through three levels so that an agent which
+// never produced a visible text reply is never falsely reported as "Done/完成":
+//
+//  1. Last assistant message with non-empty Content (the normal case).
+//  2. Last assistant message with non-empty ReasoningContent (thinking counts
+//     as output — better than a fake "Done").
+//  3. A diagnostic string naming the tool-call count, so the user can see the
+//     agent stalled instead of being told it "completed".
+func buildRunSummary(history []Message, toolCallCount int, zh bool) string {
+	summary := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && history[i].Content != "" {
+			summary = history[i].Content
+			break
+		}
+	}
+	if summary == "" {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == "assistant" && history[i].ReasoningContent != "" {
+				summary = history[i].ReasoningContent
+				break
+			}
+		}
+	}
+	summary = stripDSMLTokens(summary)
+	if summary != "" && !isSubstantiveSummary(summary) {
+		summary = ""
+	}
+	if summary != "" {
+		return summary
+	}
+	// No textual output of any kind. Report honestly instead of claiming "Done".
+	if zh {
+		return fmt.Sprintf("（本轮未生成回复文本，已执行 %d 次工具调用）", toolCallCount)
+	}
+	return fmt.Sprintf("(no text reply generated; %d tool calls executed this run)", toolCallCount)
+}
+
+// isSubstantiveSummary checks whether a summary string contains meaningful
+// analysis content, as opposed to a bare "Done"/"完成" or an echo of the
+// internal read_history block. Returns false for empty-shell summaries that
+// should be replaced by the diagnostic fallback.
+func isSubstantiveSummary(summary string) bool {
+	if summary == "" {
+		return true // empty is not "unsubstantive" — caller decides fallback
+	}
+
+	trimmed := strings.TrimSpace(summary)
+
+	// Rule 1: length threshold.
+	// English text under 20 chars with no CJK → too short to be meaningful.
+	// Chinese text under 10 chars → too short.
+	hasCJK := false
+	for _, r := range trimmed {
+		if unicode.Is(unicode.Han, r) {
+			hasCJK = true
+			break
+		}
+	}
+	if hasCJK {
+		if len([]rune(trimmed)) < 10 {
+			return false
+		}
+	} else {
+		if len(trimmed) < 20 {
+			return false
+		}
+	}
+
+	// Rule 2: bare shell words — exact or nearly exact match.
+	shellWords := []string{"done", "完成", "ok", "好的", "i'm done", "im done", "done."}
+	lower := strings.ToLower(trimmed)
+	for _, w := range shellWords {
+		if lower == w {
+			return false
+		}
+	}
+
+	// Rule 3: file-list echo detection.
+	// If ≥50% of non-empty lines start with a path-like pattern, treat as echo.
+	lines := strings.Split(trimmed, "\n")
+	pathLike := 0
+	total := 0
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		total++
+		// Match lines starting with common path/icon patterns:
+		//   - /path/to/file
+		//   [<>] path
+		//   [@] path
+		//   [?] path
+		//   [~] path
+		//   [>_] path
+		if strings.HasPrefix(t, "- /") || strings.HasPrefix(t, "[<>]") ||
+			strings.HasPrefix(t, "[@]") || strings.HasPrefix(t, "[?]") ||
+			strings.HasPrefix(t, "[~]") || strings.HasPrefix(t, "[>_]") {
+			pathLike++
+		}
+	}
+	if total > 0 && pathLike*2 >= total {
+		return false
+	}
+
+	return true
 }
 
 // isDangerousConfirmation is a narrow safety gate for dangerous command approval.
@@ -1027,6 +1132,7 @@ func (e *Engine) deactivateSkill() {
 	e.state.ActiveSkillName = ""
 	e.state.ActiveSkillContent = ""
 	e.matchedSkillsContent = ""
+	e.context.SetActiveSkill("", "")
 	// Keep lastActivatedSkill for chain tracking purposes
 	// Keep activatedSkills map for deduplication purposes
 	// Reset TDD-specific phase tracking
