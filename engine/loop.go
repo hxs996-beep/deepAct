@@ -837,7 +837,7 @@ func isSubstantiveSummary(summary string) bool {
 		}
 	}
 	if hasCJK {
-		if len([]rune(trimmed)) < 10 {
+		if len([]rune(trimmed)) < 6 {
 			return false
 		}
 	} else {
