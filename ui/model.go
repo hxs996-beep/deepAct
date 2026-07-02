@@ -81,6 +81,15 @@ type TDDStage struct {
 	Detail string // human-readable detail shown in status bar
 }
 
+// SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
+type SubAgentStatus struct {
+	ID      string // unique key for tracking (agent type + index)
+	Agent   string // agent type e.g. "sub", "critic", "searcher"
+	Goal    string // what the sub-agent is dispatched to do
+	Status  string // "running", "done", "error"
+	Summary string // result summary when done
+}
+
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
@@ -145,6 +154,9 @@ type Model struct {
 
 	// TDD (test-driven-development) phase tracking
 	tddStages []TDDStage
+
+	// Sub-agent parallel execution tracking
+	subAgents []SubAgentStatus
 }
 
 type messageRenderCache struct {
@@ -228,8 +240,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
-		// Full-screen diff viewer: only wheel scroll, no drag-select.
+		// Full-screen diff viewer: support wheel scroll + drag-to-select + copy.
 		if m.diffViewerActive {
+			// Mouse motion during drag: extend selection in diff viewer.
+			if msg.Action == tea.MouseActionMotion {
+				if m.selection.Active {
+					sel := m.selection
+					sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
+					m.lastMouseX = msg.X
+					m.lastMouseY = msg.Y
+					scrollEdge := 2
+					newDir := 0
+					if msg.Y < scrollEdge {
+						newDir = -1
+					} else if msg.Y >= sel.BodyHeight-scrollEdge {
+						newDir = 1
+					}
+					m.selection = sel
+					if newDir != 0 && m.autoScrollDir == 0 {
+						m.autoScrollDir = newDir
+						return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+							return autoScrollTickMsg{}
+						})
+					}
+					m.autoScrollDir = newDir
+				}
+				return m, m.repaintCmd()
+			}
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
 				m.scrollOffset += m.height / 3
@@ -240,6 +277,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollOffset = 0
 				}
 				return m, m.repaintCmd()
+			case tea.MouseButtonLeft:
+				if msg.Action == tea.MouseActionPress {
+					totalLines, bodyHeight, rendered, plain := m.computeDiffViewerLayout()
+					maxScroll := 0
+					if totalLines > bodyHeight {
+						maxScroll = totalLines - bodyHeight
+					}
+					scroll := m.scrollOffset
+					if scroll > maxScroll {
+						scroll = maxScroll
+					}
+					if scroll < 0 {
+						scroll = 0
+					}
+					pt := screenToLine(msg.Y, msg.X, scroll, bodyHeight, totalLines)
+					m.selection = SelectionState{
+						Active:     true,
+						Done:       false,
+						Start:      pt,
+						End:        pt,
+						Rendered:   rendered,
+						Plain:      plain,
+						BodyHeight: bodyHeight,
+						Scroll:     scroll,
+					}
+					m.autoScrollDir = 0
+					m.lastMouseX = msg.X
+					m.lastMouseY = msg.Y
+					return m, m.repaintCmd()
+				} else if msg.Action == tea.MouseActionRelease {
+					if m.selection.Active {
+						sel := m.selection
+						sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
+						sel.Active = false
+						m.autoScrollDir = 0
+						if sel.Start == sel.End {
+							m.selection = SelectionState{}
+						} else {
+							sel.Done = true
+							m.selection = sel
+							_, err := copySelection(nil, m.selection)
+							if err != nil {
+								m.clipboardError = err.Error()
+							} else {
+								m.clipboardError = ""
+							}
+							m.clipboardFeedback = time.Now()
+						}
+					}
+					return m, m.repaintCmd()
+				}
 			}
 			return m, nil
 		}
@@ -451,6 +539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingContent = ""
 		m.thinkingActivity = ""
 		m.memberStatuses = nil // roundtable phase done, clear member cards
+		m.subAgents = nil      // sub-agent panel done, clear
 		m.tddStages = nil      // TDD phase done, clear stage cards
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
@@ -526,6 +615,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " running..."
 			}
+			// Track sub-agent in the dedicated panel
+			m.subAgents = append(m.subAgents, SubAgentStatus{
+				ID:     fmt.Sprintf("%s-%d", displayName, len(m.subAgents)),
+				Agent:  displayName,
+				Goal:   msg.Detail,
+				Status: "running",
+			})
 		case "agent_done":
 			displayName := msg.Name
 			for i := range m.toolTree {
@@ -541,6 +637,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " ✓"
+			}
+			// Update sub-agent panel status
+			for i := range m.subAgents {
+				if m.subAgents[i].Agent == displayName && m.subAgents[i].Status == "running" {
+					m.subAgents[i].Status = "done"
+					m.subAgents[i].Summary = msg.Detail
+					break
+				}
 			}
 		case "tool_start":
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
@@ -697,6 +801,21 @@ func (m Model) computeLayoutFull() (totalLines, bodyHeight int, rendered, plain 
 	return len(plain), bh, rendered, plain
 }
 
+// computeDiffViewerLayout returns the diff viewer's rendered content for
+// mouse coordinate mapping and selection snapshots.
+func (m Model) computeDiffViewerLayout() (totalLines, bodyHeight int, rendered, plain []string) {
+	bh := m.height - m.footerHeight()
+	if bh < 1 {
+		bh = 1
+	}
+	rendered = m.renderDiffViewer(m.renderBodyWidth())
+	plain = make([]string, len(rendered))
+	for i, l := range rendered {
+		plain[i] = stripAnsi(l)
+	}
+	return len(plain), bh, rendered, plain
+}
+
 // renderBodyWidth returns the content width used by renderBody.
 func (m Model) renderBodyWidth() int {
 	w := m.width - 1
@@ -767,7 +886,32 @@ func (m Model) View() string {
 	frozen := (m.selection.Active || m.selection.Done) && m.selection.Rendered != nil
 	if m.diffViewerActive {
 		// Full-screen diff viewer: render the selected hunk, scrollable.
-		lines = m.renderDiffViewer(scrollContentWidth)
+		// When a selection is active, show the frozen snapshot with highlight
+		// so the user sees exactly what they're dragging over.
+		if frozen {
+			sel := m.selection
+			lines = append([]string(nil), sel.Rendered...)
+			lines = m.applySelectionHighlight(lines)
+			total = len(lines)
+			scrollOff = sel.Scroll
+			if total > bodyHeight {
+				needScrollbar = true
+				maxScroll = total - bodyHeight
+				if scrollOff > maxScroll {
+					scrollOff = maxScroll
+				}
+				if scrollOff < 0 {
+					scrollOff = 0
+				}
+				end := total - scrollOff
+				start := end - bodyHeight
+				if start < 0 {
+					start = 0
+				}
+				lines = lines[start:end]
+			}
+		} else {
+			lines = m.renderDiffViewer(scrollContentWidth)
 		total = len(lines)
 		scrollOff = m.scrollOffset
 		if total > bodyHeight {
@@ -785,6 +929,7 @@ func (m Model) View() string {
 				start = 0
 			}
 			lines = lines[start:end]
+		}
 		}
 	} else if frozen {
 		// Selection freeze: display the body snapshot captured at mouse-down
@@ -860,9 +1005,14 @@ func (m Model) View() string {
 		lines = lines[excess:]
 	}
 
-	// ---- Step 7: Truncate all body lines to terminal width ----
+	// ---- Step 7: Truncate all body lines to terminal width, then pad ----
+	// Padding prevents Bubble Tea's incremental frame diff from leaving
+	// stale characters from the previous frame in blank positions.
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], contentWidth, "")
+		if w := ansi.StringWidth(lines[i]); w < contentWidth {
+			lines[i] += strings.Repeat(" ", contentWidth-w)
+		}
 	}
 
 	// ---- Step 8: Visual scrollbar (removed per user request — was adding │/▐ to right side) ----
@@ -987,7 +1137,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.diffViewerActive {
 			m.diffViewerActive = false
 			m.scrollOffset = 0
-			return m, nil
+			m.selection = SelectionState{}
+			return m, m.repaintCmd()
 		}
 		if m.state == stateRunning {
 			if m.engine != nil {
@@ -1343,6 +1494,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.toolTree = nil
 	m.spinners = nil
 	m.memberStatuses = nil
+	m.subAgents = nil
 	m.streaming = ""
 
 	// Handle local slash commands without invoking the engine
@@ -1499,6 +1651,12 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 	if len(m.toolTree) > 0 {
 		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
+	}
+	if len(m.subAgents) > 0 {
+		// Sub-agent parallel execution panel: shows which sub-agents are
+		// dispatched and their current status (running/done).
+		subAgentLines := renderSubAgentPanel(m.subAgents, width)
+		lines = append(lines, subAgentLines...)
 	}
 	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
 		// Overlay status area: render TDD phases (left) and/or member
@@ -2172,6 +2330,58 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 		}
 	}
 	return wrapLines(lines, width)
+}
+
+// renderSubAgentPanel renders the sub-agent parallel execution panel above the input.
+// Shows each dispatched sub-agent with its type icon, goal, and status
+// (spinner for running, checkmark for done). This is the primary visual
+// indicator when multiple sub-agents are working in parallel.
+func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
+	if len(agents) == 0 {
+		return nil
+	}
+	var content []string
+	content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
+	content = append(content, "")
+	for _, a := range agents {
+		icon := agentIcon(a.Agent)
+		goal := a.Goal
+		if len(goal) > 60 {
+			goal = goal[:60] + "..."
+		}
+		switch a.Status {
+		case "running":
+			frame := spinnerFrames[0]
+			line := fmt.Sprintf("  %s %s %s  %s", frame, icon, a.Agent, SpinnerStyle.Render(goal))
+			content = append(content, line)
+		case "done":
+			summary := a.Summary
+			if len(summary) > 60 {
+				summary = summary[:60] + "..."
+			}
+			line := fmt.Sprintf("  ✓ %s %s  %s", icon, a.Agent, SpinnerDoneStyle.Render(summary))
+			content = append(content, line)
+		case "error":
+			line := fmt.Sprintf("  ✗ %s %s  ❌", icon, a.Agent)
+			content = append(content, ErrorStyle.Render(line))
+		}
+	}
+	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
+	return strings.Split(rendered, "\n")
+}
+
+// agentIcon returns a default emoji for known agent types.
+func agentIcon(agent string) string {
+	switch agent {
+	case "sub":
+		return "🔍"
+	case "critic":
+		return "🔎"
+	case "team-lead":
+		return "👑"
+	default:
+		return "🤖"
+	}
 }
 
 // renderMemberProgress renders roundtable member status cards above the input.
