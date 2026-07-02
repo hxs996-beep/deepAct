@@ -25,8 +25,9 @@ const (
 )
 
 type DisplayMessage struct {
-	Role    string
-	Content string
+	Role     string
+	Content  string
+	ToolTree []ToolNode // toolsummary only: toolTree snapshot at completion, for click-to-expand
 }
 
 type AgentSpinner struct {
@@ -335,12 +336,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if sel.Start == sel.End {
 						// Single click: if it lands on a hunk summary line, open
 						// the full-screen diff viewer for that hunk.
-						if hit, ok := m.hitTestHunk(sel.End.Line, sel.Plain); ok {
-							m.diffViewerActive = true
-							m.diffViewerHunk = hit
-							m.scrollOffset = 0
-							m.selection = SelectionState{}
-							return m, m.repaintCmd()
+						for _, e := range m.buildHunkLineMap(sel.Plain) {
+							if e.lineIdx == sel.End.Line {
+								hit := e.hit
+								hit.msgIdx = e.msgIdx
+								m.diffViewerActive = true
+								m.diffViewerHunk = hit
+								m.scrollOffset = 0
+								m.selection = SelectionState{}
+								return m, m.repaintCmd()
+							}
 						}
 						m.selection = SelectionState{}
 					} else {
@@ -1364,7 +1369,18 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 
 func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	if len(m.toolTree) > 0 {
-		m.messages = append(m.messages, DisplayMessage{Role: "toolsummary", Content: renderToolSummary(m.toolTree)})
+		// Snapshot toolTree into the message so click-to-expand works after
+		// completion (m.toolTree is cleared below). Deep-copy: ToolNode is a
+		// value, but Children is a slice that must not alias the live tree.
+		snapshot := append([]ToolNode(nil), m.toolTree...)
+		for i := range snapshot {
+			snapshot[i].Children = append([]ToolNode(nil), snapshot[i].Children...)
+		}
+		m.messages = append(m.messages, DisplayMessage{
+			Role:     "toolsummary",
+			Content:  renderToolSummary(m.toolTree),
+			ToolTree: snapshot,
+		})
 		m.toolTree = nil
 	}
 	m.spinners = nil
@@ -1949,6 +1965,7 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
 	content = append(content, "")
+	hunkSeq := 0 // global 1-based hunk number across all files (matches hitTestHunk)
 	for _, node := range nodes {
 		status := ""
 		if node.Done {
@@ -1956,12 +1973,13 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 		}
 		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
 		if node.Done && len(node.Children) > 0 {
-			for childIdx, child := range node.Children {
+			for _, child := range node.Children {
 				if child.DetailFull == "" {
 					continue
 				}
+				hunkSeq++
 				adds, deletes := countHunkAddsDeletes(child.DetailFull)
-				content = append(content, hunkSummaryLine(childIdx, child.Detail, adds, deletes))
+				content = append(content, hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes))
 			}
 		}
 	}
@@ -1983,6 +2001,7 @@ func renderToolSummary(toolTree []ToolNode) string {
 	}
 	b.WriteString(fmt.Sprintf("● %d tools executed, %d files modified\n", len(toolTree), modified))
 
+	hunkSeq := 0 // global 1-based hunk number across all files (matches hitTestHunk)
 	for _, node := range toolTree {
 		icon := node.Icon
 		if icon == "" {
@@ -1993,7 +2012,9 @@ func renderToolSummary(toolTree []ToolNode) string {
 			if node.Name == "edit" || node.Name == "write" {
 				hunkContent := child.DetailFull
 				if hunkContent != "" {
-					b.WriteString(renderDiffHunkFlat(hunkContent))
+					hunkSeq++
+					adds, deletes := countHunkAddsDeletes(hunkContent)
+					b.WriteString(hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes) + "\n")
 				}
 			} else {
 				b.WriteString(fmt.Sprintf("    %s\n", child.Detail))
@@ -2097,66 +2118,6 @@ func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
 	return result
 }
 
-// renderDiffHunkFlat renders a diff hunk as a flat string for tool summary messages.
-func renderDiffHunkFlat(hunkContent string) string {
-	diffStylesOnce.Do(initDiffStyles)
-
-	lines := strings.Split(hunkContent, "\n")
-	if len(lines) == 0 {
-		return ""
-	}
-
-	var buf strings.Builder
-	oldNum, newNum := 1, 1
-
-	for _, raw := range lines {
-		hl := strings.TrimRight(raw, "\r")
-		if hl == "" {
-			// R1: 空行占位，保持行数一致
-			buf.WriteString("    \n")
-			continue
-		}
-		if strings.HasPrefix(hl, "@@") {
-			if parts := strings.Split(hl, " "); len(parts) >= 4 {
-				oldPart := strings.TrimPrefix(parts[1], "-")
-				newPart := strings.TrimPrefix(parts[2], "+")
-				oldStartStr := oldPart
-				newStartStr := newPart
-				if idx := strings.Index(oldPart, ","); idx > 0 {
-					oldStartStr = oldPart[:idx]
-				}
-				if idx := strings.Index(newPart, ","); idx > 0 {
-					newStartStr = newPart[:idx]
-				}
-				fmt.Sscanf(oldStartStr, "%d", &oldNum)
-				fmt.Sscanf(newStartStr, "%d", &newNum)
-			}
-			buf.WriteString("    " + diffHunkHeaderStyle.Render(hl) + "\n")
-			continue
-		}
-
-		prefix := hl[0:1]
-		content := hl[1:]
-
-		switch prefix {
-		case "-":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
-			buf.WriteString("    " + lineNum + diffDeleteStyle.Render(prefix+content) + "\n")
-			oldNum++
-		case "+":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
-			buf.WriteString("    " + lineNum + diffInsertStyle.Render(prefix+content) + "\n")
-			newNum++
-		default:
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
-			buf.WriteString("    " + lineNum + content + "\n")
-			oldNum++
-			newNum++
-		}
-	}
-	return buf.String()
-}
-
 // isDiffContent checks if a string contains unified diff content.
 func isDiffContent(s string) bool {
 	return strings.Contains(s, "\n--- a/") && strings.Contains(s, "\n+++ b/")
@@ -2185,7 +2146,14 @@ func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
 	}
-	return wrapText(AssistantMsgStyle.Render(streaming), width)
+	// Collapse 3+ consecutive newlines to \n\n: raw LLM markdown often
+	// contains excessive blank lines that glamour (used for final display)
+	// normalizes, but wrapText renders literally — producing visual gaps.
+	normalized := streaming
+	for strings.Contains(normalized, "\n\n\n") {
+		normalized = strings.ReplaceAll(normalized, "\n\n\n", "\n\n")
+	}
+	return wrapText(AssistantMsgStyle.Render(normalized), width)
 }
 
 func renderSpinners(spinners []AgentSpinner, width int) []string {
@@ -2432,14 +2400,10 @@ func renderThinkingBox(activity string, width int) []string {
 		switch name {
 		case "deepact":
 			icon = ""
-		case "sub", "searcher":
+		case "sub":
 			icon = "🔍"
-		case "planner":
-			icon = "📋"
 		case "critic":
 			icon = "🔎"
-		case "tester":
-			icon = "🧪"
 		}
 		display = icon + " " + name + ": " + task
 	} else {

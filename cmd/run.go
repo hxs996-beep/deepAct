@@ -142,8 +142,9 @@ func buildSkillsBlock(all []*skill.Skill) string {
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
-	b.WriteString("\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. ")
+	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state. ")
+	b.WriteString("Relevant skills for your task are suggested below.\n\n")
 	for _, s := range all {
 		b.WriteString("- **")
 		b.WriteString(s.Name)
@@ -153,6 +154,27 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		} else {
 			b.WriteString("(no description)")
 		}
+		b.WriteString("\n")
+
+		// Keywords — what triggers this skill
+		if len(s.Keywords) > 0 {
+			b.WriteString("  Keywords: ")
+			b.WriteString(strings.Join(s.Keywords, ", "))
+			b.WriteString("\n")
+		}
+
+		// Next skills in chain — LLM uses this to know what to activate next
+		if len(s.NextSkills) > 0 && !(len(s.NextSkills) == 1 && s.NextSkills[0] == "") {
+			b.WriteString("  → Next: ")
+			b.WriteString(strings.Join(s.NextSkills, ", "))
+			b.WriteString("\n")
+		}
+
+		// Auto-activation threshold
+		if s.AutoActivateThreshold != nil {
+			b.WriteString(fmt.Sprintf("  Auto-activate: ≥%d keyword matches\n", *s.AutoActivateThreshold))
+		}
+
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -206,6 +228,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetMaxOutputTokens(config.MaxOutputTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
+
+	// Pre-compute language packs for sub-agent system prompt (zh + en).
+	// User language is detected per-session, so both variants are cached here.
+	projLang := context.DetectLanguage(workDir)
+	runner.SetLangPacks(context.GetLangPack(projLang, "中文"), context.GetLangPack(projLang, ""))
 
 	contextAssembler := context.NewContextAssembler(workDir, estimator)
 

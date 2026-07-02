@@ -198,18 +198,12 @@ func newTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	reg := NewAgentRegistry()
 
-	// Register mock sub agent
+	// Register mock sub agent — used for both team explore (RunWithPrompt) and synthesis (Run)
 	reg.Register(&mockPromptRunner{
 		mockSimpleAgent: mockSimpleAgent{
 			id:       AgentSub,
-			response: "# 分析结果\n从架构角度看，建议采用微服务架构。\nSUMMARY: 建议采用微服务架构",
+			response: "# 统一方案\n1. 采用微服务架构\n2. 做好权限控制\nSUMMARY: 统一方案",
 		},
-	})
-
-	// Register mock planner agent
-	reg.Register(&mockSimpleAgent{
-		id:       AgentPlanner,
-		response: "# 统一方案\n1. 采用微服务架构\n2. 做好权限控制\nSUMMARY: 统一方案",
 	})
 
 	e := &Engine{
@@ -355,14 +349,12 @@ func TestSynthesizeTeamOutput_WithPlanner(t *testing.T) {
 	}
 }
 
-func TestSynthesizeTeamOutput_FallbackWhenNoPlanner(t *testing.T) {
-	// Engine with only a sub agent, no planner
+func TestSynthesizeTeamOutput_FallbackWhenNoSub(t *testing.T) {
+	// Engine with no sub agent registered — tests defensive fallback path
 	reg := NewAgentRegistry()
-	reg.Register(&mockPromptRunner{
-		mockSimpleAgent: mockSimpleAgent{
-			id:       AgentSub,
-			response: "mock response",
-		},
+	reg.Register(&mockSimpleAgent{
+		id:       AgentCritic,
+		response: "critic response",
 	})
 	e := &Engine{
 		agents:          reg,
@@ -383,9 +375,9 @@ func TestSynthesizeTeamOutput_FallbackWhenNoPlanner(t *testing.T) {
 
 	plan := e.roundtableHall.synthesizeTeamOutput(context.Background(), "测试需求", thoughts, true)
 
-	// Fallback should concatenate summaries
+	// Fallback should concatenate summaries since AgentSub is not available
 	if plan == "" {
-		t.Fatal("expected non-empty plan even without planner")
+		t.Fatal("expected non-empty plan from fallback")
 	}
 	if !strings.Contains(plan, "架构方案") || !strings.Contains(plan, "安全方案") {
 		t.Errorf("fallback plan should contain member summaries, got: %s", plan[:min(60, len(plan))])

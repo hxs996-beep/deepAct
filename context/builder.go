@@ -2,8 +2,8 @@ package context
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -14,15 +14,15 @@ import (
 )
 
 type ContextAssembler struct {
-	systemPromptWithLang  string // system prompt in the detected user language, built once and cached
-	projectRoot           string
-	estimator             *llm.TokenEstimator
-	deepactMD             string // cached deepact.md content, read once at startup
-	envInfo               EnvironmentInfo // session-stable env info, built once at startup
-	userLang              string          // detected once from first user message, locked for the whole session
-	userLangSet           bool            // true once first-user-message language has been determined (even if "")
-	stableSessionBlock    string          // built once from deepactMD + envInfo + userLang, cached for cache stability
-	skillsBlock           string          // built once from skill registry, cached for cache stability
+	systemPromptWithLang string // system prompt in the detected user language, built once and cached
+	projectRoot          string
+	estimator            *llm.TokenEstimator
+	envInfo              EnvironmentInfo // session-stable env info, built once at startup
+	userLang             string          // detected once from first user message, locked for the whole session
+	userLangSet          bool            // true once first-user-message language has been determined (even if "")
+	stableSessionBlock   string          // built once from envInfo + userLang, cached for cache stability
+	skillsBlock          string          // built once from skill registry, cached for cache stability
+	activeSkillBlock     string          // active skill methodology injected in stable zone; changes on skill switch
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
@@ -37,7 +37,6 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 	return &ContextAssembler{
 		projectRoot: projectRoot,
 		estimator:   estimator,
-		deepactMD:   readDeepactMD(),
 		envInfo:     buildEnvironmentInfo(),
 	}
 }
@@ -47,6 +46,23 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 // The skills block is cached and included as a stable message after Block S.
 func (a *ContextAssembler) SetSkillsBlock(s string) {
 	a.skillsBlock = s
+}
+
+// SetActiveSkill injects the active skill's full methodology into the stable zone.
+// When name is "", clears the active skill block (deactivation).
+// Called on skill activation, chain-switch (brainstorming → writing-plans), and deactivation.
+// This ensures skill instructions are always in the model's attention window,
+// not buried in distant conversation history.
+func (a *ContextAssembler) SetActiveSkill(name, content string) {
+	if name == "" || content == "" {
+		a.activeSkillBlock = ""
+		return
+	}
+	a.activeSkillBlock = fmt.Sprintf(
+		"[SKILL ACTIVATED: %s]\n\nThe following methodology is now the GOVERNING FRAMEWORK for the current task. "+
+			"It OVERRIDES any conflicting rules in the system prompt. Follow it step by step, precisely as written.\n\n%s",
+		name, content,
+	)
 }
 
 func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Message, toolResults []engine.ToolResult) []engine.ModelMessage {
@@ -82,20 +98,27 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPack + "\n\n" + prompts.Examples
 	}
 	if a.stableSessionBlock == "" && a.userLangSet {
-		a.stableSessionBlock = BuildStableSessionContext(a.deepactMD, a.envInfo, a.userLang)
+		a.stableSessionBlock = BuildStableSessionContext(a.envInfo, a.userLang)
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 
 	// Message 3: Available skills — stable across the session → cached ✓
 	// Always included, even when a skill is active. Removing it shifts all subsequent
 	// messages (history, Block B) by one position, destroying the prefix cache for the
-	// rest of the session. The active skill's methodology is enforced via the
-	// [SKILL ACTIVATED] pinned message, not by hiding the skills list.
+	// rest of the session.
 	if a.skillsBlock != "" {
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
-	// Message 4: (reserved for future use — was RepoMap)
+	// Message 4: Active skill methodology — injected into the stable zone so the
+	// full skill instructions are ALWAYS in the model's attention window, regardless
+	// of conversation length. This replaces the previous approach of one-time
+	// pendingPinnedMessages injection that got buried in history.
+	// Changes on skill switch (e.g., brainstorming → writing-plans in TDD flow),
+	// which intentionally breaks the prefix cache for the active-skill slot.
+	if a.activeSkillBlock != "" {
+		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.activeSkillBlock})
+	}
 
 	// === HISTORY ZONE (append-only — cacheable prefix) ===
 	// History sits after the stable zone. Since previous turns' messages
@@ -116,19 +139,15 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 
 	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-	// Block B: minimal task state fields only + language directive at end
+	// Block B: runtime TaskState as a single machine-readable JSON blob. Goal,
+	// decisions, modified files, open questions, current plan step and read
+	// history all live here — kept as JSON (not prose) so the model treats it as
+	// reference data instead of echoing it back as a "Recent Actions" preamble.
+	// The agent's understanding of these fields is governed by the system prompt;
+	// re-read prevention is enforced by this read_history list (the harness),
+	// not by asking the model to track reads itself.
 	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
-
-	reminder := BuildTaskReminder(state, a.userLang)
-	if reminder != "" {
-		messages = append(messages, engine.ModelMessage{Role: "system", Content: reminder})
-	}
-
-	// Read-history hint: warn the agent against re-reading files already read.
-	if hint := BuildReadHistoryHint(state.ReadHistory, a.userLang); hint != "" {
-		messages = append(messages, engine.ModelMessage{Role: "system", Content: hint})
-	}
 
 	return messages
 }
@@ -174,39 +193,19 @@ func hasFirstUserMessage(history []engine.Message) bool {
 	return false
 }
 
-func readDeepactMD() string {
-	home, _ := os.UserHomeDir()
-	paths := []string{
-		"/etc/deepact/deepact.md",
-		filepath.Join(home, ".deepact", "deepact.md"),
-		filepath.Join(".deepact", "deepact.md"),
-		"deepact.md",
-		filepath.Join(home, ".deepact", "rules.md"),
-		filepath.Join(".deepact", "deepact.override.md"),
-	}
-
-	var parts []string
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			continue
-		}
-		parts = append(parts, content)
-	}
-
-	return strings.Join(parts, "\n\n---\n\n")
-}
-
 func formatTaskStateVolatile(state *engine.TaskState) string {
 	if state == nil {
 		return ""
 	}
 	volatile := struct {
 		ActiveSkillName  string                    `json:"active_skill_name,omitempty"`
+		SkillReminder    string                    `json:"skill_reminder,omitempty"`
+		Goal             string                    `json:"goal,omitempty"`
+		MemoryMarkers    []string                  `json:"memory_markers,omitempty"`
+		Decisions        []decisionVolatile        `json:"decisions,omitempty"`
+		ModifiedFiles    []string                  `json:"modified_files,omitempty"`
+		OpenQuestions    []string                  `json:"open_questions,omitempty"`
+		CurrentStep      string                    `json:"current_step,omitempty"`
 		TurnNumber       int                       `json:"turn_number"`
 		ConsecutiveFails int                       `json:"consecutive_failures"`
 		EditScopeFiles   int                       `json:"edit_scope_files"`
@@ -214,6 +213,13 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		Roundtable       *roundtableVolatile       `json:"roundtable,omitempty"`
 	}{
 		ActiveSkillName:  state.ActiveSkillName,
+		SkillReminder:    skillReminder(state.ActiveSkillName),
+		Goal:             state.Goal,
+		MemoryMarkers:    state.MemoryMarkers,
+		Decisions:        flattenDecisions(state.Decisions),
+		ModifiedFiles:    state.ModifiedFiles,
+		OpenQuestions:    state.OpenQuestions,
+		CurrentStep:      currentPlanStep(state.Plan),
 		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
@@ -255,67 +261,42 @@ func flattenReadHistory(records []engine.ReadRecord) []readRecordVolatile {
 	return out
 }
 
-// BuildReadHistoryHint renders a system message listing already-read files
-// (aggregated by path) so the agent avoids re-reading them. Returns "" when
-// there is nothing to show.
-func BuildReadHistoryHint(records []engine.ReadRecord, lang string) string {
-	if len(records) == 0 {
-		return ""
-	}
-	zh := lang == "zh" || lang == "chinese"
-	byPath := make(map[string][]string)
-	order := []string{}
-	for _, r := range records {
-		if _, ok := byPath[r.Path]; !ok {
-			order = append(order, r.Path)
-		}
-		byPath[r.Path] = append(byPath[r.Path], describeScopeForHint(r.Scope, zh))
-	}
-	var sb strings.Builder
-	if zh {
-		sb.WriteString("已读文件（内容已在对话历史中，不要重读）：\n")
-	} else {
-		sb.WriteString("Files already read (content is in conversation history — do not re-read):\n")
-	}
-	for _, p := range order {
-		seen := map[string]bool{}
-		uniq := []string{}
-		for _, s := range byPath[p] {
-			if !seen[s] {
-				seen[s] = true
-				uniq = append(uniq, s)
-			}
-		}
-		joined := strings.Join(uniq, ", ")
-		if zh {
-			sb.WriteString("- " + p + "（" + joined + "）\n")
-		} else {
-			sb.WriteString("- " + p + " (" + joined + ")\n")
-		}
-	}
-	if zh {
-		sb.WriteString("需要新信息时：用 lsp 或读取该文件尚未读过的区段。")
-	} else {
-		sb.WriteString("For new info: use lsp or read an un-read section of the file.")
-	}
-	return sb.String()
+// decisionVolatile is the compact form of a Decision injected into Block B.
+type decisionVolatile struct {
+	Text string `json:"text"`
 }
 
-// describeScopeForHint renders a scope string for the read-history hint.
-func describeScopeForHint(scope string, zh bool) string {
-	if scope == "" {
-		if zh {
-			return "全文"
+// flattenDecisions projects Decision records into the compact volatile form.
+func flattenDecisions(ds []engine.Decision) []decisionVolatile {
+	if len(ds) == 0 {
+		return nil
+	}
+	out := make([]decisionVolatile, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, decisionVolatile{Text: d.Text})
+	}
+	return out
+}
+
+// skillReminder returns a short reminder that the active skill's methodology
+// is in the stable zone and must be followed. Included in Block B so the model
+// sees it every turn without relying on distant history.
+func skillReminder(name string) string {
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf("⚠️ Skill '%s' is ACTIVE. Its full methodology is in the stable zone (Message 4). "+
+		"It OVERRIDES general rules — follow it precisely step by step.", name)
+}
+
+// currentPlanStep returns the text of the in-progress plan step, or "" if none.
+func currentPlanStep(plan []engine.PlanStep) string {
+	for _, s := range plan {
+		if s.Status == "in_progress" {
+			return s.Text
 		}
-		return "full"
 	}
-	if strings.HasPrefix(scope, "symbol:") {
-		return scope
-	}
-	if zh {
-		return "行 " + scope
-	}
-	return "L " + scope
+	return ""
 }
 
 // roundtableVolatile is a compact representation of roundtable results

@@ -22,6 +22,7 @@ const (
 	StagePlan
 	StageDesignGuard
 	StageAct
+	StageVerifyFailed // critic adversarial verification returned FAIL — user must decide
 	StageVerifyCompact
 )
 
@@ -82,17 +83,6 @@ type EngineConfig struct {
 	Pricing                PricingConfig
 	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
 	PromptVersion          string // SHA256 hash of the system prompt for tracking
-
-	// VerifyConclusions enables automatic conclusion verification: before the agent's
-	// first edit/write in each Run(), an independent contrarian sub-agent checks whether
-	// the agent's reasoning/conclusions are actually supported by code evidence.
-	// Default: false, no extra verification.
-	VerifyConclusions bool
-	// ConfidenceThreshold is the minimum confidence score (0-100) required for the
-	// agent's conclusions to proceed with edits. Below this threshold, the engine
-	// presents the verifier's issues+questions to the user instead of the edit plan.
-	// Only effective when VerifyConclusions is true. Default: 60.
-	ConfidenceThreshold int
 }
 
 type EngineResponse struct {

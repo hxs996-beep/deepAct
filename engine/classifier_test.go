@@ -87,6 +87,11 @@ func TestIsIntermediateText(t *testing.T) {
 		{"chinese first i will", "我先读取文件", true},
 		{"normal content", "The file contains a bug at line 42", false},
 		{"code output", "package main\nfunc main() {}", false},
+		// Long text with a leading "让我" but carrying a real conclusion must
+		// NOT be discarded — this is the bug that produced empty "完成" output.
+		{"long text with conclusion", "让我读取文件后，发现 bug 在第 42 行，建议在 turn.go 中修复该问题", false},
+		// Marker not at start → keep (not pure intent).
+		{"marker mid-sentence", "文件已读取。让我看看下一步。", false},
 	}
 	for _, tt := range tests {
 		if got := isIntermediateText(tt.text); got != tt.want {

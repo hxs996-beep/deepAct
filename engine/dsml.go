@@ -84,6 +84,92 @@ func hasDSMLToolCalls(content string) bool {
 	return dsmlDetectRe.MatchString(content)
 }
 
+// internalPromptBlockPrefixes lists the leading markers of context/prompt blocks
+// that DeepAct injects into the model's input (Block B, Block S, TASK REMINDER,
+// read-history hint, language pack, ...). DeepSeek sometimes echoes these back
+// in its content. Such echoes must never reach the user or be written back into
+// history (they pollute subsequent turns and surface as a fake "完成" summary).
+//
+// These markers are structural and unambiguous — prefix matching is safe because
+// they don't appear in natural conversation (e.g. "# Block B:", "## Environment").
+var internalPromptBlockPrefixes = []string{
+	"# Block B: Runtime Context",
+	"# Block B：运行时上下文",
+	"# Block S: Session Context",
+	"# Block S：会话上下文",
+	"## Task State",
+	"## 任务状态",
+	"## Environment",
+	"## 环境",
+	"# Language Pack",
+	"[TASK REMINDER]",
+	"<TASK REMINDER>",
+	"</TASK REMINDER>",
+	"## Recent Actions",
+	"## Reminder on tool usage",
+}
+
+// internalPromptExactHeaders lists natural-language section headers that are
+// common enough to appear in the model's legitimate answers. These MUST match
+// the entire trimmed line (or line followed by "：" / ":") — prefix matching
+// would strip real answers like "已读文件显示代码结构如下…".
+var internalPromptExactHeaders = []string{
+	"Files already read",
+	"已读文件",
+}
+
+func isInternalPromptHeader(line string) bool {
+	trimmed := strings.TrimSpace(line)
+
+	// Exact-match headers: natural-language phrases that could appear in answers.
+	for _, p := range internalPromptExactHeaders {
+		if trimmed == p {
+			return true
+		}
+		if strings.HasPrefix(trimmed, p+"：") {
+			return true
+		}
+		if strings.HasPrefix(trimmed, p+":") {
+			return true
+		}
+	}
+
+	// Prefix-match headers: structural markers safe to prefix-match.
+	for _, p := range internalPromptBlockPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripInternalPromptEcho removes echoed internal prompt/context blocks from
+// model content. A block is a header line (matching internalPromptBlockPrefixes)
+// plus all following lines up to and including the next blank line (or EOF).
+// Text outside these blocks is preserved verbatim.
+func stripInternalPromptEcho(content string) string {
+	if content == "" {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	for _, line := range lines {
+		if skipping {
+			if strings.TrimSpace(line) == "" {
+				skipping = false
+			}
+			continue
+		}
+		if isInternalPromptHeader(line) {
+			skipping = true
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
 func hasValidToolCalls(calls []ModelToolCall) bool {
 	for _, call := range calls {
 		if call.Function.Name != "" {

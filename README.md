@@ -62,10 +62,6 @@ go install github.com/deepact/deepact@latest
 
 ## 用户扩展点
 
-### `deepact.md` — 项目级规则
-
-在项目根目录放置 `deepact.md`，定义编码规范、架构约束、设计原则。DeepAct 启动时自动加载。支持按语言包定制（Go、Python、Rust、TypeScript 等）。
-
 ### `.deepact/config.toml` — 项目级配置
 
 ```toml
@@ -198,8 +194,6 @@ deepact exec "find the entry point in cmd/ and explain the startup flow"
 - 📋 **Cross-Platform** — macOS, Linux, Windows; statically compiled Go binary, zero runtime dependencies
 
 ### Extension Points
-
-**`deepact.md`** — Project-level rules file defining code standards, architecture constraints, and design principles. Auto-loaded on startup. Language packs available for Go, Python, Rust, TypeScript, and more.
 
 **`.deepact/config.toml`** — Per-project configuration for model routing, permissions, context budget, and UI preferences.
 

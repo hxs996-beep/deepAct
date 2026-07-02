@@ -32,8 +32,17 @@ func extractRememberMarkers(content string) []string {
 // Used as a guard when tool calls exist alongside content text:
 // the model sometimes outputs intent ("Let me...", "让我...") even when
 // it also emits tool calls. This text is noise — tool results provide context.
+//
+// Only a PURE intent utterance is discarded: a single clause that LEADS with
+// an intent marker and contains no sentence break (comma/period/newline).
+// Anything with a break usually carries a real conclusion, which must not be
+// dropped — clearing it produced empty assistant content surfaced as a fake
+// "完成" summary.
 func isIntermediateText(text string) bool {
 	if text == "" || text == "..." {
+		return false
+	}
+	if strings.ContainsAny(text, ",，。;；\n") {
 		return false
 	}
 	patterns := []string{
@@ -45,7 +54,7 @@ func isIntermediateText(text string) bool {
 		"我先",     // "first I'll..."
 	}
 	for _, p := range patterns {
-		if strings.Contains(text, p) {
+		if strings.HasPrefix(text, p) {
 			return true
 		}
 	}

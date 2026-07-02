@@ -454,7 +454,7 @@ func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, 
 	}
 
 	handoff := Handoff{
-		Agent:        AgentPlanner,
+		Agent:        AgentSub,
 		Goal: pickPrompt(zh,
 			"Based on the member analyses above, produce a unified, actionable implementation plan. Consider all perspectives and output a structured plan.",
 			"基于以上各角色的分析结果，生成一个统一的、可执行的实现方案。请综合考虑所有视角，输出一个结构化的方案。",
@@ -467,7 +467,7 @@ func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, 
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
-	agent, err := h.engine.agents.Get(AgentPlanner)
+	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
 		// Fallback: concatenate all thoughts
 		var sb strings.Builder

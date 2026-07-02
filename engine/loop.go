@@ -89,11 +89,6 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
-	// verificationPassed is set to true once the conclusion verifier has checked
-	// the current turn's reasoning and found it sufficiently supported. Reset each
-	// Run(). Only used when config.VerifyConclusions is true.
-	verificationPassed bool
-
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
@@ -223,7 +218,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.matchedSkillsContent = ""
 	e.tddPhase = ""
 	e.tddPhaseDetail = ""
-	e.verificationPassed = false
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
@@ -517,6 +511,17 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if e.config.OnProgress != nil {
 				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 			}
+
+			// Hard gate: if critic returns FAIL, intercept and present to user.
+			if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+				zh := e.isChinese
+				return &EngineResponse{
+					Summary: buildCriticFailSummary(result.Digest, zh),
+					Stage:   StageVerifyFailed,
+				}, nil
+			}
+
 			e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 		}
 
@@ -678,6 +683,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			loopLog.Printf("executeTurn failed (turn=%d): %v", turns, err)
 			e.runErrorCount++
 			return nil, err
+		}
+		if turnResult.VerifyFailedSummary != "" {
+			return &EngineResponse{
+				Summary: turnResult.VerifyFailedSummary,
+				Stage:   StageVerifyFailed,
+			}, nil
 		}
 		if turnResult.Blocked {
 			e.runErrorCount++

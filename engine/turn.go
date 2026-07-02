@@ -25,6 +25,9 @@ type TurnResult struct {
 	// error status this turn. Used by ErrorLoopState to detect repeated
 	// failing operations that defeat the content-hash-based loop guards.
 	LastOpError bool
+	// VerifyFailedSummary is set when a critic handoff returns FAIL verdict.
+	// The caller (Engine.Run) must present this to the user and pause the agent loop.
+	VerifyFailedSummary string
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
@@ -85,7 +88,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		return TurnResult{
 			Blocked:      true,
 			BlockedBy:    "model_error",
-			Questions:    []string{fmt.Sprintf("LLM API error: %v. Please check your connection and API key, then try again.", err)},
+			Questions:    []string{fmt.Sprintf("API 请求失败，请检查网络连接和 API Key 后重试。\n\nAPI request failed. Please check your connection and API key, then try again.")},
 			FinishReason: "model_error",
 		}, nil
 	}
@@ -102,7 +105,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "stream_error",
-				Questions:    []string{fmt.Sprintf("Stream error: %v. The connection was interrupted. Please try again.", chunk.Err)},
+				Questions:    []string{fmt.Sprintf("网络连接中断，请检查网络后重试。\n\nConnection interrupted. Please check your network and try again.")},
 				FinishReason: "stream_error",
 			}, nil
 		}
@@ -173,6 +176,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Even if structured tool_calls exist, DSML must never reach the user.
 	content = stripDSMLTokens(content)
 
+	// Layer 2b: Strip echoed internal prompt/context blocks (Block B, TASK
+	// REMINDER, Environment, read-history hint, ...). DeepSeek sometimes echoes
+	// these back; they must never reach the user or be written into history.
+	content = stripInternalPromptEcho(content)
+
 	// Layer 3: When tool calls exist, strip intermediate thinking text from content.
 	// The model sometimes outputs intent text ("Let me...", "让我...") alongside
 	// DSML tool calls. This text is noise — tool results provide execution context.
@@ -239,93 +247,68 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Conclusion verification gate: before presenting any edit plan, run an
-	// independent contrarian sub-agent to verify the agent's reasoning is
-	// actually supported by code evidence. Only triggers on the first edit
-	// proposal in each Run() and only when VerifyConclusions is enabled.
-	if e.config.VerifyConclusions && !e.verificationPassed && !e.state.PlanConfirmed {
-		var hasEditCall bool
+	// Design-phase skill guard: when a design/planning skill (brainstorming,
+	// writing-plans) is active, the agent should NOT emit edit/write tool calls
+	// — its methodology requires presenting a design first. If the LLM ignores
+	// the HARD-GATE, this code-level backstop blocks edits and reminds both the
+	// user and the agent of the current phase.
+	if e.state.ActiveSkillName == "brainstorming" || e.state.ActiveSkillName == "writing-plans" {
+		var editCalls []ToolCallRequest
 		for _, call := range calls {
 			if call.Name == "edit" || call.Name == "write" {
-				hasEditCall = true
-				break
+				editCalls = append(editCalls, call)
 			}
 		}
-		if hasEditCall && mergedReasoning != "" {
-			vr := e.runConclusionVerification(ctx, mergedReasoning)
-			if vr != nil && vr.Confidence < e.confidenceThreshold() {
-				// Block: conclusions lack sufficient code evidence.
-				// Present verifier findings + questions to the user instead of edits.
-				e.verificationPassed = false
+		if len(editCalls) > 0 {
+			zh := e.isChinese
+			skillName := e.state.ActiveSkillName
 
-				verdict := "不支持"
-				verdictIcon := "❌"
-				if vr.Supported {
-					verdict = "部分支持"
-					verdictIcon = "⚠️"
-				}
-
-				zh := e.isChinese
-				var msg strings.Builder
-				if zh {
-					msg.WriteString(fmt.Sprintf("## 🔍 结论验证未通过\n\n"))
-					msg.WriteString(fmt.Sprintf("系统检测到 AI 的分析结论缺乏充分的代码依据（置信度: %d/100, 结论%s）。\n\n", vr.Confidence, verdict))
-					msg.WriteString(fmt.Sprintf("%s **结论验证报告**\n\n", verdictIcon))
-					if len(vr.Issues) > 0 {
-						msg.WriteString("**未找到代码依据的结论：**\n")
-						for _, issue := range vr.Issues {
-							msg.WriteString(fmt.Sprintf("- %s\n", issue))
-						}
-						msg.WriteString("\n")
-					}
-					if len(vr.Questions) > 0 {
-						msg.WriteString("**需要你澄清的问题：**\n")
-						for _, q := range vr.Questions {
-							msg.WriteString(fmt.Sprintf("- %s\n", q))
-						}
-						msg.WriteString("\n")
-					}
-					msg.WriteString("请回答以上问题或提供更多信息，AI 将基于更完整的信息重新分析。")
-				} else {
-					msg.WriteString(fmt.Sprintf("## 🔍 Conclusion Verification Failed\n\n"))
-					msg.WriteString(fmt.Sprintf("The AI's conclusions lack sufficient code evidence (confidence: %d/100, conclusion %s).\n\n", vr.Confidence, verdict))
-					msg.WriteString(fmt.Sprintf("%s **Verification Report**\n\n", verdictIcon))
-					if len(vr.Issues) > 0 {
-						msg.WriteString("**Unsupported claims:**\n")
-						for _, issue := range vr.Issues {
-							msg.WriteString(fmt.Sprintf("- %s\n", issue))
-						}
-						msg.WriteString("\n")
-					}
-					if len(vr.Questions) > 0 {
-						msg.WriteString("**Clarifying questions:**\n")
-						for _, q := range vr.Questions {
-							msg.WriteString(fmt.Sprintf("- %s\n", q))
-						}
-						msg.WriteString("\n")
-					}
-					msg.WriteString("Please answer the questions or provide more context. The AI will re-analyze with better information.")
-				}
-
-				// Add assistant message then tool messages to close IDs.
-				e.history = append(e.history, assistant)
-				for _, c := range calls {
-					e.history = append(e.history, Message{
-						Role:       "tool",
-						ToolCallID: c.ID,
-						Content:    "Blocked: conclusions insufficiently supported by code evidence.",
-						Timestamp:  time.Now(),
-					})
-				}
-				return TurnResult{
-					Blocked:      true,
-					BlockedBy:    "verification_failed",
-					Questions:    []string{msg.String()},
-					FinishReason: finish,
-				}, nil
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: design-phase skill is active",
+					Timestamp:  time.Now(),
+				})
 			}
-			// Verification passed (or degraded to pass on error).
-			e.verificationPassed = true
+
+			// Inject a reminder into history so the LLM re-evaluates its
+			// approach on the next turn instead of re-emitting the same edits.
+			if zh {
+				e.history = append(e.history, Message{
+					Role: "user",
+					Content: fmt.Sprintf(
+						"你当前激活了 `%s` skill，其方法论要求在编写任何代码之前先完成设计提案。请按照 skill 的步骤执行：分析问题、提出方案、让用户确认方案，而不是直接修改代码。",
+						skillName,
+					),
+				})
+			} else {
+				e.history = append(e.history, Message{
+					Role: "user",
+					Content: fmt.Sprintf(
+						"The `%s` skill is active. Its methodology requires completing a design proposal before writing any code. Follow the skill steps: analyze the problem, propose approaches, present a design for user approval — do NOT edit code directly.",
+						skillName,
+					),
+				})
+			}
+
+			blockMsg := fmt.Sprintf(
+				"⚠️ `%s` skill 处于激活状态，请先完成设计提案再修改代码。AI 已收到提醒，将在下一轮按方法论执行。",
+				skillName,
+			)
+			if !zh {
+				blockMsg = fmt.Sprintf(
+					"⚠️ `%s` skill is active — design proposal must be completed before editing. The AI has been reminded and will follow the methodology next turn.",
+					skillName,
+				)
+			}
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "design_phase_skill",
+				Questions:    []string{blockMsg},
+				FinishReason: finish,
+			}, nil
 		}
 	}
 
@@ -460,13 +443,17 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.lastActivatedSkill = s.Name
 			e.state.ActiveSkillName = s.Name
 			e.state.ActiveSkillContent = s.Content
+
+			// Inject skill methodology into stable zone (persistent across turns)
+			e.context.SetActiveSkill(s.Name, s.Content)
+
 			chainInfo := ""
 			if prevSkill != "" {
 				chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
 			}
 			skillMsg := fmt.Sprintf(
-				"[SKILL ACTIVATED: %s]%s\n\n%s",
-				s.Name, chainInfo, s.Content,
+				"✅ Skill `%s` activated%s. Full methodology now in stable zone.",
+				s.Name, chainInfo,
 			)
 			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
 			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
@@ -514,6 +501,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if e.config.OnProgress != nil {
 			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 		}
+
+		// Hard gate: if critic returns FAIL, intercept and present to user.
+		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+			e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+			return TurnResult{
+				Done:                 true,
+				VerifyFailedSummary:  buildCriticFailSummary(result.Digest, e.isChinese),
+			}, nil
+		}
+
 		if result.Status != "cancelled" {
 			toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
 			e.history = append(e.history, toolMessage)
@@ -644,6 +641,60 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, handoffToolSpec())
 	specs = append(specs, activateSkillToolSpec())
 	return specs
+}
+
+// buildCriticFailSummary formats the critic FAIL report for user presentation.
+func buildCriticFailSummary(digest string, zh bool) string {
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("## ⚠️ 对抗验证未通过\n\n")
+		sb.WriteString("Critic 代理对当前实现进行了对抗性验证，发现以下问题：\n\n")
+		sb.WriteString("---\n\n")
+		sb.WriteString(digest)
+		sb.WriteString("\n\n---\n\n")
+		sb.WriteString("### 请选择下一步操作\n\n")
+		sb.WriteString("- **修复**: 根据反馈继续修改代码，修改后重新验证\n")
+		sb.WriteString("- **说明/澄清**: 如果你认为某条反馈是误报或需要补充上下文，请直接回复\n")
+		sb.WriteString("- **跳过**: 忽略此验证结果，继续原方案\n")
+		sb.WriteString("- **放弃**: 放弃当前方案，重新考虑")
+	} else {
+		sb.WriteString("## ⚠️ Adversarial Verification Failed\n\n")
+		sb.WriteString("The critic agent performed adversarial verification on the current implementation and found issues:\n\n")
+		sb.WriteString("---\n\n")
+		sb.WriteString(digest)
+		sb.WriteString("\n\n---\n\n")
+		sb.WriteString("### Choose Next Action\n\n")
+		sb.WriteString("- **Fix**: Continue modifying code based on feedback, then re-verify\n")
+		sb.WriteString("- **Clarify**: If you think a finding is a false positive or needs context, reply directly\n")
+		sb.WriteString("- **Skip**: Ignore this verification result and continue with the original plan\n")
+		sb.WriteString("- **Abandon**: Abandon the current approach and reconsider")
+	}
+	return sb.String()
+}
+
+// parseCriticVerdict extracts the VERDICT line from a critic agent's output.
+// Returns "PASS", "FAIL", "PARTIAL", or "" if no verdict found.
+func parseCriticVerdict(digest string) string {
+	for _, line := range strings.Split(digest, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "VERDICT:") {
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "VERDICT:"))
+			switch v {
+			case "PASS", "FAIL", "PARTIAL":
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// isCriticHandoff checks whether a handoff_to_agent call targets the critic agent.
+func isCriticHandoff(input json.RawMessage) bool {
+	var params HandoffToAgentParams
+	if err := json.Unmarshal(input, &params); err != nil {
+		return false
+	}
+	return params.Agent == string(AgentCritic)
 }
 
 // executeHandoff processes a handoff_to_agent tool call from the main agent loop.

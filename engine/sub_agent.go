@@ -30,6 +30,8 @@ type SubAgentRunner struct {
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
 	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
+	langPackZh       string // Chinese language pack (Go/Python rules in zh)
+	langPackEn       string // English language pack (Go/Python rules in en)
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -96,6 +98,13 @@ func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
 // partition. Empty string (default) means sub-agents share the main agent's endpoint.
 func (r *SubAgentRunner) SetSubAgentBaseURL(url string) {
 	r.subAgentBaseURL = url
+}
+
+// SetLangPacks sets both language variants of the language-specific rules.
+// Called once at startup from cmd/run.go after language detection.
+func (r *SubAgentRunner) SetLangPacks(zh, en string) {
+	r.langPackZh = zh
+	r.langPackEn = en
 }
 
 // contextLimit returns the effective context window limit.
@@ -467,12 +476,20 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 	return sb.String()
 }
 
-// stableSystemPrompt returns the fixed system identity shared by all sub-agents.
+// stableSystemPrompt returns the full system prompt shared by all sub-agents.
+// Combines the main system prompt (rules, examples, language pack) with the sub-agent role suffix.
 // Identical across every sub-agent call in the session → enables prefix cache hits.
-// Uses promptset.Get to load the language version matching userLang.
 func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
 	prompts := promptset.Get(userLang)
-	return prompts.SubAgent
+	langPack := r.langPackEn
+	if userLang == "中文" {
+		langPack = r.langPackZh
+	}
+	base := prompts.System + "\n\n" + prompts.Examples
+	if langPack != "" {
+		base += "\n\n# Language Pack\n" + langPack
+	}
+	return base + "\n\n" + prompts.SubAgent
 }
 
 // buildVolatilePrompt assembles the per-call variable content (goal, context, constraints).

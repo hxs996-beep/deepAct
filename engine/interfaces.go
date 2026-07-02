@@ -21,6 +21,10 @@ type PolicyChecker interface {
 type ContextBuilder interface {
 	Build(state *TaskState, history []Message, toolResults []ToolResult) []ModelMessage
 	EstimateTokens(messages []ModelMessage) int
+	// SetActiveSkill injects the active skill's methodology into the stable zone.
+	// Called on skill activation, chain-switch, and deactivation (empty strings).
+	// This ensures skill instructions remain visible regardless of conversation length.
+	SetActiveSkill(name, content string)
 }
 
 type Compressor interface {

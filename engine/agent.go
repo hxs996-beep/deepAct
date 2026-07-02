@@ -13,9 +13,6 @@ type AgentID string
 const (
 	AgentSub          AgentID = "sub"
 	AgentCritic       AgentID = "critic"
-	AgentSearcher     AgentID = "searcher"
-	AgentPlanner      AgentID = "planner"
-	AgentTester       AgentID = "tester"
 	AgentTeamLead     AgentID = "team-lead"
 
 	HandoffToolName    = "handoff_to_agent"
@@ -118,8 +115,8 @@ func handoffToolSpec() ModelTool {
 				"properties": {
 					"agent": {
 						"type": "string",
-						"enum": ["sub", "searcher", "planner", "critic", "tester"],
-						"description": "Target agent: sub (generic), searcher (find code), planner (plan), critic (review), tester (verify code)"
+						"enum": ["sub", "critic"],
+						"description": "Target agent: sub (generic), critic (adversarial verifier)"
 					},
 					"goal": {
 						"type": "string",
