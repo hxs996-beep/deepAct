@@ -224,19 +224,25 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runErrorCount = 0
 
 	// Team command handling — /team <goal>
-	// Uses the roundtable infrastructure to run parallel multi-perspective brainstorming.
-	// Unlike /round, /team immediately runs all members and synthesizes a unified plan.
+	// Activates the debate arena: 4-round structured debate → user verdict.
 	if tc := parseTeamCommand(userMsg); tc != nil {
 		e.state.Roundtable = &RoundtableState{
 			Goal:  tc.Goal,
-			Phase: RoundtableTeamExplore,
+			Phase: RoundtableProposal,
+		}
+		// Resolve members: command-line > config > defaults
+		if len(tc.MemberIDs) > 0 {
+			resolved := resolveMembers(tc.MemberIDs, DefaultDebateMembers)
+			if len(resolved) > 0 {
+				e.state.Roundtable.Members = resolved
+			}
 		}
 		// Replace raw "/team <goal>" so the main agent loop sees a proper prompt
 		if len(e.history) > 0 {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"团队协作模式已启动：%s\n\n请等待团队成员完成分析并生成统一方案。",
+				"辩论模式已启动：%s\n\n请等待团队成员完成辩论。",
 				tc.Goal)
-			userMsg = fmt.Sprintf("团队协作模式已启动：%s\n\n请等待团队成员完成分析并生成统一方案。", tc.Goal)
+			userMsg = fmt.Sprintf("辩论模式已启动：%s\n\n请等待团队成员完成辩论。", tc.Goal)
 		}
 	}
 
@@ -395,26 +401,32 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 	}
 
-	// Roundtable Review phase — still supported for programmatic flow
-	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableReview {
-		response, err := e.roundtableHall.Advance(ctx, userMsg)
-		if err != nil {
-			return nil, fmt.Errorf("roundtable advance: %w", err)
-		}
-		if response != nil {
-			return response, nil
-		}
-	}
-
-	// Team Explore phase — run all team members, synthesize, inject plan, then
-	// let the main agent continue with the team's output in context.
-	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableTeamExplore {
-		response, err := e.roundtableHall.handleTeamFlow(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("team flow: %w", err)
-		}
-		if response != nil {
-			return response, nil
+	// Debate Arena phase — execute the current debate round, then return
+	// the round result to the user. The engine continues to the next round
+	// on the next Run() call until AwaitingVerdict.
+	if e.state.Roundtable != nil {
+		phase := e.state.Roundtable.Phase
+		switch phase {
+		case RoundtableProposal, RoundtableChallenge, RoundtableRebuttal, RoundtableFinal:
+			response, err := e.roundtableHall.handleDebateArena(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("debate arena: %w", err)
+			}
+			if response != nil {
+				return response, nil
+			}
+		case RoundtableAwaitingVerdict:
+			response, err := e.roundtableHall.Advance(ctx, userMsg)
+			if err != nil {
+				return nil, fmt.Errorf("verdict: %w", err)
+			}
+			if response != nil {
+				return response, nil
+			}
+		case RoundtableDone:
+			// Debate complete — clear roundtable state so normal flow resumes.
+			// The verdict was already injected as a pinned message.
+			e.state.Roundtable = nil
 		}
 	}
 
@@ -502,27 +514,24 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}
 		}
 
-		// Execute handoff calls
-		for _, call := range handoffCalls {
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input, e.config.WorkDir)})
-			}
-			result := e.executeHandoff(ctx, call)
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
-			}
+		// Execute handoff calls — parallel when multiple, sequential when single.
+		if len(handoffCalls) > 0 {
+			results := e.executeHandoffsParallel(ctx, handoffCalls)
+			for i, call := range handoffCalls {
+				result := results[i]
 
-			// Hard gate: if critic returns FAIL, intercept and present to user.
-			if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+				// Hard gate: if critic returns FAIL, intercept and present to user.
+				if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+					zh := e.isChinese
+					return &EngineResponse{
+						Summary: buildCriticFailSummary(result.Digest, zh),
+						Stage:   StageVerifyFailed,
+					}, nil
+				}
+
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-				zh := e.isChinese
-				return &EngineResponse{
-					Summary: buildCriticFailSummary(result.Digest, zh),
-					Stage:   StageVerifyFailed,
-				}, nil
 			}
-
-			e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 		}
 
 		// Execute regular calls with progressive UI (read-only batched, destructive sequential)
@@ -1138,8 +1147,27 @@ func (e *Engine) accumulateUsage(usage *ModelUsage) {
 }
 
 // deactivateSkill clears the active skill state, releasing the agent from
-// the skill's methodology constraints.
+// the skill's methodology constraints. If the current skill has NextSkills,
+// the first next skill in the chain is auto-activated, ensuring the skill
+// chain (e.g., brainstorming → writing-plans → TDD) is followed without
+// requiring the model to manually call activate_skill.
 func (e *Engine) deactivateSkill() {
+	currentName := e.state.ActiveSkillName
+	if currentName == "" {
+		return
+	}
+
+	// Look up current skill's NextSkills for chain auto-activation
+	var nextSkill *skill.Skill
+	if e.skills != nil {
+		if current := e.skills.Get(currentName); current != nil && len(current.NextSkills) > 0 {
+			nextName := current.NextSkills[0]
+			if nextName != "" && nextName != currentName {
+				nextSkill = e.skills.Get(nextName)
+			}
+		}
+	}
+
 	e.state.ActiveSkillName = ""
 	e.state.ActiveSkillContent = ""
 	e.matchedSkillsContent = ""
@@ -1149,6 +1177,34 @@ func (e *Engine) deactivateSkill() {
 	// Reset TDD-specific phase tracking
 	e.tddPhase = ""
 	e.tddPhaseDetail = ""
+
+	// Auto-activate next skill in chain
+	if nextSkill != nil {
+		e.activatedSkills[nextSkill.Name] = true
+		e.lastActivatedSkill = nextSkill.Name
+		e.state.ActiveSkillName = nextSkill.Name
+		e.state.ActiveSkillContent = nextSkill.Content
+		e.context.SetActiveSkill(nextSkill.Name, nextSkill.Content)
+		e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", nextSkill.Name, nextSkill.Content)
+
+		chainInfo := fmt.Sprintf(" (chain: %s → %s)", currentName, nextSkill.Name)
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "skill_activated",
+				Name:   nextSkill.Name,
+				Detail: nextSkill.Description + chainInfo,
+			})
+		}
+
+		zh := e.isChinese
+		msg := fmt.Sprintf("✅ Skill `%s` auto-activated%s. Full methodology now in stable zone.", nextSkill.Name, chainInfo)
+		if zh {
+			msg = fmt.Sprintf("✅ 已自动激活 skill `%s`%s。方法论已注入稳定区。", nextSkill.Name, chainInfo)
+		}
+		e.pendingPinnedMessages = append(e.pendingPinnedMessages, msg)
+
+		loopLog.Printf("skill chain: %s → %s auto-activated", currentName, nextSkill.Name)
+	}
 }
 
 func msgIsChinese(msg string) bool {
@@ -1189,6 +1245,12 @@ func parseSkillCommand(userMsg string) *skillCommand {
 		return nil
 	}
 	cmd := strings.ToLower(parts[0])
+
+	// Reserved commands that are handled elsewhere.
+	if cmd == "clear" {
+		return nil
+	}
+
 	switch cmd {
 	case "skills":
 		return &skillCommand{action: "list"}
