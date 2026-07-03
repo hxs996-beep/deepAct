@@ -320,20 +320,65 @@ type ScopeResult struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
-// ReviewContextLevel describes how rich the context is for a code review.
-type ReviewContextLevel int
+// DebateRoundPhase labels the phase of a single debate round.
+type DebateRoundPhase string
 
 const (
-	ReviewLevelFull    ReviewContextLevel = iota // L1: Goal + Plan + Diffs available in conference
-	ReviewLevelPartial                           // L2: user describes functionality + workspace code exists
-	ReviewLevelMinimal                           // L3: only user description, no clear code target
+	DebateProposal  DebateRoundPhase = "proposal"
+	DebateChallenge DebateRoundPhase = "challenge"
+	DebateRebuttal  DebateRoundPhase = "rebuttal"
+	DebateFinal     DebateRoundPhase = "final"
 )
 
-// ReviewContext carries all information needed for a unified code review.
-type ReviewContext struct {
-	Level     ReviewContextLevel
-	Goal      string   // original goal or user's functional description
-	PlanSteps string   // plan steps (only for L1)
-	CodeFiles []string // files relevant to the review
-	UserDesc  string   // user's original description (for L2/L3)
+// DebateRound captures one round of the debate arena.
+type DebateRound struct {
+	Phase   DebateRoundPhase `json:"phase"`
+	Outputs []DebateOutput   `json:"outputs"`
+}
+
+// DebateOutput is one member's contribution in a debate round.
+type DebateOutput struct {
+	MemberID string   `json:"member_id"`
+	Content  string   `json:"content"`
+	Targets  []string `json:"targets"` // member IDs this output targets (challenge/rebuttal)
+}
+
+// RoundtablePhase describes which stage of the roundtable we are in.
+type RoundtablePhase int
+
+const (
+	RoundtableIdle           RoundtablePhase = iota
+	RoundtableProposal                        // 提案轮
+	RoundtableChallenge                       // 质询轮
+	RoundtableRebuttal                        // 反驳轮
+	RoundtableFinal                           // 终陈轮
+	RoundtableAwaitingVerdict                 // 等待用户裁决
+	RoundtableDone                            // 完成
+)
+
+func (p RoundtablePhase) String() string {
+	switch p {
+	case RoundtableProposal:
+		return "proposal"
+	case RoundtableChallenge:
+		return "challenge"
+	case RoundtableRebuttal:
+		return "rebuttal"
+	case RoundtableFinal:
+		return "final"
+	case RoundtableAwaitingVerdict:
+		return "awaiting_verdict"
+	case RoundtableDone:
+		return "done"
+	default:
+		return "idle"
+	}
+}
+
+// RoundtableState tracks the current roundtable session within TaskState.
+type RoundtableState struct {
+	Goal         string             `json:"goal"`
+	Phase        RoundtablePhase    `json:"phase"`
+	Members      []RoundtableMember `json:"members"`
+	DebateRounds []DebateRound      `json:"debate_rounds"` // 替代 Proposals + Reviews
 }

@@ -8,44 +8,6 @@ import (
 	"time"
 )
 
-// RoundtablePhase describes which stage of the roundtable we are in.
-type RoundtablePhase int
-
-const (
-	RoundtableIdle           RoundtablePhase = iota
-	RoundtableExplore                        // brainstorming proposals
-	RoundtableReview                         // parallel multi-stance review
-	RoundtableTeamExplore                    // team brainstorm: members generate ideas in parallel
-	RoundtableTeamSynthesize                 // team synthesis: merge all perspectives into a plan
-	RoundtableDone                           // finished, awaiting normal flow
-)
-
-func (p RoundtablePhase) String() string {
-	switch p {
-	case RoundtableExplore:
-		return "explore"
-	case RoundtableReview:
-		return "review"
-	case RoundtableTeamExplore:
-		return "team_explore"
-	case RoundtableTeamSynthesize:
-		return "team_synthesize"
-	case RoundtableDone:
-		return "done"
-	default:
-		return "idle"
-	}
-}
-
-// RoundtableState tracks the current roundtable session within TaskState.
-type RoundtableState struct {
-	Goal      string             `json:"goal"`
-	Proposals []string           `json:"proposals"`
-	Phase     RoundtablePhase    `json:"phase"`
-	Members   []RoundtableMember `json:"members,omitempty"`
-	Reviews   []MemberReview     `json:"reviews,omitempty"`
-}
-
 // RoundtableMember defines a single reviewer's identity and stance.
 // Name/Stance/Prompt hold the Chinese values (the historical defaults);
 // NameEn/StanceEn/PromptEn hold the English variants. The live value is picked
@@ -83,69 +45,6 @@ func (m RoundtableMember) displayPrompt(zh bool) string {
 		return m.Prompt
 	}
 	return m.PromptEn
-}
-
-// MemberReview is the result from one roundtable member's review.
-type MemberReview struct {
-	MemberID      string        `json:"member_id"`
-	ProposalIndex int           `json:"proposal_index"` // which proposal this review targets
-	Verdict       ReviewVerdict `json:"verdict"`
-	Score         int           `json:"score"` // 0-100
-	Findings      []Finding     `json:"findings,omitempty"`
-	Summary       string        `json:"summary"`
-	Elapsed       string        `json:"elapsed,omitempty"` // human-readable duration
-	Error         string        `json:"error,omitempty"`   // non-empty if agent failed
-}
-
-// ReviewVerdict is the member's overall assessment.
-type ReviewVerdict string
-
-const (
-	VerdictApprove     ReviewVerdict = "approve"
-	VerdictConditional ReviewVerdict = "conditional"
-	VerdictReject      ReviewVerdict = "reject"
-)
-
-// TeamThought is the output from one team member during team exploration.
-type TeamThought struct {
-	MemberID string `json:"member_id"`
-	Content  string `json:"content"`
-	Summary  string `json:"summary"` // extracted from SUMMARY: marker
-}
-
-// Finding is a single issue discovered by a reviewer.
-type Finding struct {
-	Severity   string `json:"severity"`   // critical / high / medium / low
-	Category   string `json:"category"`   // security / design / performance / correctness
-	Content    string `json:"content"`    // what the problem is
-	Suggestion string `json:"suggestion"` // how to fix it
-}
-
-// RefuteOutcome is the verdict of the refute stage on a single finding.
-type RefuteOutcome string
-
-const (
-	RefuteConfirmed RefuteOutcome = "confirmed" // 代码中找到具体证据,finding 真实
-	RefuteRefuted   RefuteOutcome = "refuted"   // 未能找到证据,判为误报/幻觉
-)
-
-// RefuteResult captures the refute stage's verdict on one finding.
-type RefuteResult struct {
-	Outcome RefuteOutcome `json:"outcome"`
-	Reason  string        `json:"reason,omitempty"` // 证伪/确认的依据
-}
-
-// refuteTarget pairs a finding with its origin (proposal + reviewer) so the
-// refute stage can report results back by stable key.
-type refuteTarget struct {
-	ProposalIndex int
-	MemberID      string
-	Finding       Finding
-}
-
-// findingKey builds a stable key for a finding across the review->refute pipeline.
-func findingKey(proposalIndex int, memberID, content string) string {
-	return fmt.Sprintf("%d:%s:%s", proposalIndex, memberID, content)
 }
 
 // RoundtableCommand represents a parsed /round command.
@@ -251,7 +150,7 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 			name = member.displayName(zh)
 		}
 		sb.WriteString(fmt.Sprintf("%s**%s**\n\n", avatar, name))
-		sb.WriteString(t.Content)
+		sb.WriteString(strings.TrimSpace(t.Content))
 		sb.WriteString("\n\n---\n\n")
 	}
 
@@ -417,13 +316,14 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 }
 
 // emitThoughtDone emits a member_done progress event for team exploration.
+// Uses "✓" instead of "✅" to avoid the UI incorrectly interpreting it as a review verdict.
 func (h *RoundtableHall) emitThoughtDone(member RoundtableMember, summary string) {
 	if h.engine.config.OnProgress == nil {
 		return
 	}
-	status := "✅"
+	status := "✓"
 	if summary == "error" || summary == "" {
-		status = "❌"
+		status = "✗"
 	}
 	h.engine.config.OnProgress(ProgressEvent{
 		Type:   "member_done",
