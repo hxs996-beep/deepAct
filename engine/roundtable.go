@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 )
 
 // RoundtableMember defines a single reviewer's identity and stance.
@@ -19,8 +18,8 @@ type RoundtableMember struct {
 	Avatar   string `json:"avatar"`
 	Stance   string `json:"stance"`
 	StanceEn string `json:"stance_en,omitempty"`
-	Prompt   string `json:"prompt"`     // Chinese system-level instruction injected as extraPrompt
-	PromptEn string `json:"prompt_en,omitempty"` // English variant
+	Prompt   string `json:"prompt"`               // Chinese system-level instruction injected as extraPrompt
+	PromptEn string `json:"prompt_en,omitempty"`   // English variant
 }
 
 // displayName returns the member's name in the language matching zh.
@@ -47,34 +46,62 @@ func (m RoundtableMember) displayPrompt(zh bool) string {
 	return m.PromptEn
 }
 
-// RoundtableCommand represents a parsed /round command.
-type RoundtableCommand struct {
-	Goal string
+// TeamCommand represents a parsed /team command.
+type TeamCommand struct {
+	Goal          string
+	MemberIDs     []string // from --members flag
+	AddMemberPath string   // from --add flag
 }
 
-// parseRoundtableCommand checks if userMsg is a /round command.
-func parseRoundtableCommand(userMsg string) *RoundtableCommand {
+// parseTeamCommand checks if userMsg is a /team command.
+func parseTeamCommand(userMsg string) *TeamCommand {
 	trimmed := strings.TrimSpace(userMsg)
-	if !strings.HasPrefix(trimmed, "/") {
+	if trimmed == "" {
 		return nil
 	}
-	rest := trimmed[1:]
-	parts := strings.SplitN(rest, " ", 2)
+	lines := strings.SplitN(trimmed, "\n", 2)
+	firstLine := strings.TrimSpace(lines[0])
+	if !strings.HasPrefix(firstLine, "/") {
+		return nil
+	}
+	rest := firstLine[1:]
+	parts := strings.Fields(rest)
 	if len(parts) == 0 {
 		return nil
 	}
 	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
-	if cmd != "round" {
+	if cmd != "team" {
 		return nil
 	}
-	args := ""
-	if len(parts) > 1 {
-		args = strings.TrimSpace(parts[1])
+
+	tc := &TeamCommand{}
+	i := 1
+	for i < len(parts) {
+		switch parts[i] {
+		case "--members":
+			if i+1 < len(parts) {
+				tc.MemberIDs = strings.Split(parts[i+1], ",")
+				i += 2
+			} else {
+				i++
+			}
+		case "--add":
+			if i+1 < len(parts) {
+				tc.AddMemberPath = parts[i+1]
+				i += 2
+			} else {
+				i++
+			}
+		default:
+			tc.Goal = strings.Join(parts[i:], " ")
+			i = len(parts)
+		}
 	}
-	if args == "" {
+
+	if tc.Goal == "" {
 		return nil
 	}
-	return &RoundtableCommand{Goal: args}
+	return tc
 }
 
 // RoundtableHall orchestrates the roundtable flow.
@@ -86,11 +113,8 @@ func NewRoundtableHall(e *Engine) *RoundtableHall {
 	return &RoundtableHall{engine: e}
 }
 
-// handleTeamFlow orchestrates the full agent team workflow:
-// 1. Runs all team members in parallel to generate ideas
-// 2. Synthesizes all perspectives into a unified plan
-// 3. Returns the team output as an EngineResponse
-func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, error) {
+// handleDebateArena orchestrates the full 4-round debate arena.
+func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse, error) {
 	state := h.engine.state
 	if state.Roundtable == nil {
 		return nil, nil
@@ -100,123 +124,66 @@ func (h *RoundtableHall) handleTeamFlow(ctx context.Context) (*EngineResponse, e
 	goal := state.Roundtable.Goal
 	members := state.Roundtable.Members
 	if len(members) == 0 {
-		members = DefaultRoundtableMembers
+		members = DefaultDebateMembers
 	}
 
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "team_explore",
-			Detail: fmt.Sprintf(pickPrompt(zh, "Team collaboration: %d members analyzing in parallel...", "团队协作：%d 位角色并行分析..."), len(members)),
-		})
-	}
-
-	// Step 1: Run all members in parallel
-	thoughts := h.runTeamExplore(ctx, goal, members, zh)
-
-	// Step 2: Synthesize all perspectives into a unified plan
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "team_synthesize",
-			Detail: pickPrompt(zh, "Merging member perspectives into a unified plan...", "合并各角色视角，生成统一方案..."),
-		})
-	}
-
-	plan := h.synthesizeTeamOutput(ctx, goal, thoughts, zh)
-
-	// Step 3: Build the output report
-	var sb strings.Builder
-	if zh {
-		sb.WriteString("## 🤝 团队协作方案\n\n")
-	} else {
-		sb.WriteString("## 🤝 Team Collaboration Plan\n\n")
-	}
-
-	// Show each member's contribution
-	if zh {
-		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", goal))
-		sb.WriteString("### 各角色分析\n\n")
-	} else {
-		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", goal))
-		sb.WriteString("### Member Perspectives\n\n")
-	}
-	for _, t := range thoughts {
-		member := findMember(members, t.MemberID)
-		avatar := ""
-		name := t.MemberID
-		if member != nil {
-			avatar = member.Avatar + " "
-			name = member.displayName(zh)
+	// Resolve members from config if TeamMembers is set
+	if len(h.engine.config.TeamMembers) > 0 {
+		resolved := resolveMembers(h.engine.config.TeamMembers, DefaultDebateMembers)
+		if len(resolved) > 0 {
+			members = resolved
 		}
-		sb.WriteString(fmt.Sprintf("%s**%s**\n\n", avatar, name))
-		sb.WriteString(strings.TrimSpace(t.Content))
-		sb.WriteString("\n\n---\n\n")
 	}
+	state.Roundtable.Members = members
 
-	// Show the synthesized plan
-	if plan != "" {
-		if zh {
-			sb.WriteString("### 📋 统一方案\n\n")
-		} else {
-			sb.WriteString("### 📋 Unified Plan\n\n")
-		}
-		sb.WriteString(plan)
-		sb.WriteString("\n\n")
+	// Round 1: Proposal — each member proposes independently
+	if err := h.runDebateRound(ctx, DebateProposal, goal, members, zh); err != nil {
+		return nil, fmt.Errorf("proposal round: %w", err)
 	}
+	state.Roundtable.Phase = RoundtableChallenge
 
-	if zh {
-		sb.WriteString("\n💡 团队协作完成。以上方案已注入上下文，后续交互将基于团队方案执行。")
-	} else {
-		sb.WriteString("\n💡 Team collaboration complete. The plan above has been injected into context for subsequent execution.")
+	// Round 2: Challenge — each member challenges others' proposals
+	if err := h.runDebateRound(ctx, DebateChallenge, goal, members, zh); err != nil {
+		return nil, fmt.Errorf("challenge round: %w", err)
 	}
+	state.Roundtable.Phase = RoundtableRebuttal
 
-	// Step 4: Inject the synthesized plan as a pinned message for the main agent
-	if plan != "" {
-		pinned := fmt.Sprintf("[TEAM PLAN: %s]\n\n%s", goal, plan)
-		h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
-	} else {
-		// Fallback: inject all member thoughts
-		var fallback strings.Builder
-		fallback.WriteString(fmt.Sprintf("[TEAM THOUGHTS: %s]\n\n", goal))
-		for _, t := range thoughts {
-			member := findMember(members, t.MemberID)
-			name := t.MemberID
-			if member != nil {
-				name = member.displayName(zh)
-			}
-			fallback.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
-		}
-		h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, fallback.String())
+	// Round 3: Rebuttal — each member responds to challenges against them
+	if err := h.runDebateRound(ctx, DebateRebuttal, goal, members, zh); err != nil {
+		return nil, fmt.Errorf("rebuttal round: %w", err)
 	}
+	state.Roundtable.Phase = RoundtableFinal
 
-	// Step 5: Mark phase as done
-	state.Roundtable.Phase = RoundtableDone
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "team_done",
-			Detail: fmt.Sprintf(pickPrompt(zh, "%d members finished collaboration", "%d 位角色协作完成"), len(members)),
-		})
+	// Round 4: Final — each member summarizes final position with scores
+	if err := h.runDebateRound(ctx, DebateFinal, goal, members, zh); err != nil {
+		return nil, fmt.Errorf("final round: %w", err)
 	}
+	state.Roundtable.Phase = RoundtableAwaitingVerdict
 
-	return &EngineResponse{Summary: sb.String(), Stage: StageAct}, nil
+	return h.buildVerdictPrompt(goal, members, zh), nil
 }
 
-// runTeamExplore runs all team members in parallel to generate ideas from their
-// respective professional perspectives. Returns a slice of TeamThought results.
-func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, members []RoundtableMember, zh bool) []TeamThought {
+// runDebateRound executes one round of the debate: all members run in parallel,
+// each with visibility scoped to the current debate phase.
+func (h *RoundtableHall) runDebateRound(ctx context.Context, phase DebateRoundPhase, goal string, members []RoundtableMember, zh bool) error {
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "debate_phase",
+			Name:   string(phase),
+			Detail: phaseLabel(phase, zh),
+		})
+	}
+
 	type task struct {
 		Member RoundtableMember
 		Index  int
 	}
-	var tasks []task
+	tasks := make([]task, len(members))
 	for i, m := range members {
-		tasks = append(tasks, task{Member: m, Index: i})
+		tasks[i] = task{Member: m, Index: i}
 	}
 
-	results := make([]TeamThought, len(tasks))
+	outputs := make([]DebateOutput, len(tasks))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -224,22 +191,27 @@ func (h *RoundtableHall) runTeamExplore(ctx context.Context, goal string, member
 		wg.Add(1)
 		go func(t task) {
 			defer wg.Done()
-			thought := h.runMemberThought(ctx, t.Member, goal, zh)
+			output := h.runMemberDebateTurn(ctx, t.Member, goal, phase, members, zh)
 			mu.Lock()
-			results[t.Index] = thought
+			outputs[t.Index] = output
 			mu.Unlock()
 		}(t)
 	}
 	wg.Wait()
 
-	return results
+	state := h.engine.state
+	state.Roundtable.DebateRounds = append(state.Roundtable.DebateRounds, DebateRound{
+		Phase:   phase,
+		Outputs: outputs,
+	})
+
+	return nil
 }
 
-// runMemberThought executes a single team member's exploration as a sub-agent.
-// Each member receives a role-specific prompt to analyze the goal from their perspective.
-func (h *RoundtableHall) runMemberThought(ctx context.Context, member RoundtableMember, goal string, zh bool) TeamThought {
-	start := time.Now()
-
+// runMemberDebateTurn executes a single member's turn in a debate round.
+// Visibility is scoped by phase: proposal sees only goal; challenge sees all proposals;
+// rebuttal sees only challenges targeting this member; final sees the full record.
+func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member RoundtableMember, goal string, phase DebateRoundPhase, allMembers []RoundtableMember, zh bool) DebateOutput {
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "member_start",
@@ -248,7 +220,8 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 		})
 	}
 
-	taskGoal := buildTeamExploreGoal(goal, member, zh)
+	taskGoal := buildDebateGoal(goal, member, phase, allMembers, h.engine.state.Roundtable.DebateRounds, zh)
+	targets := determineTargets(member.ID, phase, allMembers)
 
 	handoff := Handoff{
 		Agent:         AgentSub,
@@ -262,138 +235,270 @@ func (h *RoundtableHall) runMemberThought(ctx context.Context, member Roundtable
 
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
-		h.emitThoughtDone(member, "error")
-		return TeamThought{
-			MemberID: member.ID,
-			Content:  fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err),
-			Summary:  "error",
+		if h.engine.config.OnProgress != nil {
+			h.engine.config.OnProgress(ProgressEvent{
+				Type:   "member_done",
+				Name:   member.ID,
+				Detail: fmt.Sprintf("%s ❌", member.displayName(zh)),
+			})
 		}
+		return DebateOutput{MemberID: member.ID, Content: fmt.Sprintf("analysis failed: %v", err)}
 	}
 
-	// Type-assert to get the SubAgentRunner for RunWithPrompt
 	type promptRunner interface {
 		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
 	}
-	pr, ok := agent.(promptRunner)
-	if !ok {
-		result, err := agent.Run(ctx, handoff)
-		if result != nil {
-			h.engine.accumulateUsage(result.Usage)
-		}
+
+	var content string
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, member.displayPrompt(zh))
 		if err != nil {
-			h.emitThoughtDone(member, "error")
-			return TeamThought{MemberID: member.ID, Content: fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err), Summary: "error"}
+			content = fmt.Sprintf("analysis failed: %v", err)
+		} else if result != nil {
+			h.engine.accumulateUsage(result.Usage)
+			content = result.Summary
 		}
-		summary := extractTeamSummary(result.Summary)
-		h.emitThoughtDone(member, summary)
-		return TeamThought{
-			MemberID: member.ID,
-			Content:  result.Summary,
-			Summary:  summary,
+	} else {
+		result, err := agent.Run(ctx, handoff)
+		if err != nil {
+			content = fmt.Sprintf("analysis failed: %v", err)
+		} else if result != nil {
+			h.engine.accumulateUsage(result.Usage)
+			content = result.Summary
 		}
 	}
 
-	result, err := pr.RunWithPrompt(ctx, handoff, member.displayPrompt(zh))
-	if result != nil {
-		h.engine.accumulateUsage(result.Usage)
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "member_done",
+			Name:   member.ID,
+			Detail: fmt.Sprintf("%s ✓", member.displayName(zh)),
+		})
 	}
-	if err != nil {
-		h.emitThoughtDone(member, "error")
-		return TeamThought{MemberID: member.ID, Content: fmt.Sprintf(pickPrompt(zh, "analysis failed: %v", "分析失败: %v"), err), Summary: "error"}
-	}
 
-	summary := extractTeamSummary(result.Summary)
-	h.emitThoughtDone(member, summary)
-
-	elapsed := time.Since(start).Round(time.Millisecond).String()
-	_ = elapsed // available for logging if needed
-
-	return TeamThought{
+	return DebateOutput{
 		MemberID: member.ID,
-		Content:  result.Summary,
-		Summary:  summary,
+		Content:  content,
+		Targets:  targets,
 	}
 }
 
-// emitThoughtDone emits a member_done progress event for team exploration.
-// Uses "✓" instead of "✅" to avoid the UI incorrectly interpreting it as a review verdict.
-func (h *RoundtableHall) emitThoughtDone(member RoundtableMember, summary string) {
-	if h.engine.config.OnProgress == nil {
-		return
-	}
-	status := "✓"
-	if summary == "error" || summary == "" {
-		status = "✗"
-	}
-	h.engine.config.OnProgress(ProgressEvent{
-		Type:   "member_done",
-		Name:   member.ID,
-		Detail: fmt.Sprintf("%s %s %s", member.Avatar, member.displayName(h.engine.isChinese), status),
-	})
-}
+// buildDebateGoal constructs the task prompt for a member in a specific debate phase.
+func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhase, allMembers []RoundtableMember, rounds []DebateRound, zh bool) string {
+	var sb strings.Builder
 
-// synthesizeTeamOutput uses the planner agent to merge all member thoughts
-// into a unified, actionable implementation plan.
-func (h *RoundtableHall) synthesizeTeamOutput(ctx context.Context, goal string, thoughts []TeamThought, zh bool) string {
-	members := h.engine.state.Roundtable.Members
-	if len(members) == 0 {
-		members = DefaultRoundtableMembers
-	}
+	switch phase {
+	case DebateProposal:
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Task\nPropose your technical solution for the following requirement. You are working independently — other members will propose their own solutions.\n\n## Requirement\n%s\n\n## Your Role\n%s — %s\n\n## Output\nProvide a structured proposal: your approach, key design decisions, implementation path, and why it's the right choice.",
+			"## 任务\n为以下需求提出你的技术方案。你独立工作——其他成员会提出他们自己的方案。\n\n## 需求\n%s\n\n## 你的角色\n%s — %s\n\n## 输出\n提供结构化方案：你的方法、关键设计决策、实现路径，以及为什么这是正确的选择。",
+		), goal, member.displayName(zh), member.displayStance(zh)))
 
-	// Build the synthesis context from all member thoughts
-	var ctxBuilder strings.Builder
-	ctxBuilder.WriteString(fmt.Sprintf(pickPrompt(zh, "## Original Requirement\n%s\n\n", "## 原始需求\n%s\n\n"), goal))
-	ctxBuilder.WriteString(pickPrompt(zh, "## Member Analyses\n\n", "## 各角色分析结果\n\n"))
-	for _, t := range thoughts {
-		member := findMember(members, t.MemberID)
-		name := t.MemberID
-		if member != nil {
-			name = member.displayName(zh)
-		}
-		ctxBuilder.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, t.Content))
-	}
-
-	handoff := Handoff{
-		Agent:        AgentSub,
-		Goal: pickPrompt(zh,
-			"Based on the member analyses above, produce a unified, actionable implementation plan. Consider all perspectives and output a structured plan.",
-			"基于以上各角色的分析结果，生成一个统一的、可执行的实现方案。请综合考虑所有视角，输出一个结构化的方案。",
-		),
-		Context:       ctxBuilder.String(),
-		Tools:         []string{"read", "grep", "glob"},
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 15,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		// Fallback: concatenate all thoughts
-		var sb strings.Builder
-		for _, t := range thoughts {
-			member := findMember(members, t.MemberID)
-			name := t.MemberID
-			if member != nil {
-				name = member.displayName(zh)
+	case DebateChallenge:
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Task\nReview ALL proposals below and challenge the ones you disagree with. From your perspective, point out flaws, risks, or missed considerations.\n\n## Requirement\n%s\n\n## All Proposals\n",
+			"## 任务\n审阅以下所有方案，从你的立场挑战你不同意的方案。指出缺陷、风险或遗漏的考量。\n\n## 需求\n%s\n\n## 所有方案\n",
+		), goal))
+		if len(rounds) > 0 {
+			for _, out := range rounds[0].Outputs {
+				if out.MemberID == member.ID {
+					continue
+				}
+				m := findMember(allMembers, out.MemberID)
+				name := out.MemberID
+				if m != nil {
+					name = m.displayName(zh)
+				}
+				sb.WriteString(fmt.Sprintf("### %s's proposal\n%s\n\n", name, out.Content))
 			}
-			sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", name, t.Summary))
 		}
-		return sb.String()
+		sb.WriteString(pickPrompt(zh,
+			"\n## Output\nFor each proposal you challenge, clearly state: which proposal, what the problem is, why it matters. Be specific — reference code or architectural facts when possible.",
+			"\n## 输出\n对你挑战的每个方案，清晰说明：哪个方案、什么问题、为什么重要。尽量具体——引用代码或架构事实。",
+		))
+
+	case DebateRebuttal:
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Task\nRespond to the challenges raised against YOUR proposal. Defend valid points, concede where appropriate, and revise your proposal if needed.\n\n## Requirement\n%s\n\n## Your Original Proposal\n%s\n\n## Challenges Against Your Proposal\n",
+			"## 任务\n回应针对你方案提出的质疑。为合理的观点辩护，适当让步，必要时修正你的方案。\n\n## 需求\n%s\n\n## 你的原始方案\n%s\n\n## 针对你方案的质疑\n",
+		), goal, getOwnProposal(member.ID, rounds)))
+		if len(rounds) > 1 {
+			for _, out := range rounds[1].Outputs {
+				for _, target := range out.Targets {
+					if target == member.ID {
+						challenger := findMember(allMembers, out.MemberID)
+						name := out.MemberID
+						if challenger != nil {
+							name = challenger.displayName(zh)
+						}
+						sb.WriteString(fmt.Sprintf("### From %s\n%s\n\n", name, out.Content))
+					}
+				}
+			}
+		}
+		sb.WriteString(pickPrompt(zh,
+			"\n## Output\nRespond to each challenge. If the challenge is valid, acknowledge it and revise your proposal. If invalid, explain why with evidence.",
+			"\n## 输出\n回应每个质疑。如果质疑合理，承认并修正方案。如果不合理，用证据解释为什么。",
+		))
+
+	case DebateFinal:
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Task\nReview the complete debate record. State your final position, and score every proposal (including your own) on a 0-100 scale.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\n1. Your final position summary\n2. Score each proposal:\n   SCORE: <member_id> = <0-100>\n   REASON: <one-line reason>\nEnd with: VERDICT: <your preferred proposal member_id>",
+			"## 任务\n审阅完整辩论记录。陈述你的最终立场，给每个方案（含自己的）打分（0-100）。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n1. 你的最终立场总结\n2. 给每个方案打分:\n   SCORE: <member_id> = <0-100>\n   REASON: <一句话理由>\n以: VERDICT: <你支持的方案 member_id> 结尾",
+		), goal, formatDebateRecord(rounds, allMembers, zh)))
 	}
 
-	result, err := agent.Run(ctx, handoff)
-	if err != nil || result == nil {
-		return ""
-	}
-
-	h.engine.accumulateUsage(result.Usage)
-	return result.Summary
+	return sb.String()
 }
 
-// Advance steps through the roundtable phases given the current user message.
-// Returns an EngineResponse to send back to the user, or nil if the roundtable
-// is done and normal flow should resume.
+// determineTargets returns which member IDs this member should target in a given phase.
+func determineTargets(memberID string, phase DebateRoundPhase, allMembers []RoundtableMember) []string {
+	switch phase {
+	case DebateChallenge:
+		var targets []string
+		for _, m := range allMembers {
+			if m.ID != memberID {
+				targets = append(targets, m.ID)
+			}
+		}
+		return targets
+	default:
+		return nil
+	}
+}
+
+// getOwnProposal retrieves a member's own proposal from round 0.
+func getOwnProposal(memberID string, rounds []DebateRound) string {
+	if len(rounds) == 0 {
+		return "(proposal not found)"
+	}
+	for _, out := range rounds[0].Outputs {
+		if out.MemberID == memberID {
+			return out.Content
+		}
+	}
+	return "(proposal not found)"
+}
+
+// formatDebateRecord renders the full debate record for the final round.
+func formatDebateRecord(rounds []DebateRound, members []RoundtableMember, zh bool) string {
+	var sb strings.Builder
+	for i, round := range rounds {
+		sb.WriteString(fmt.Sprintf("## Round %d: %s\n\n", i+1, phaseLabel(round.Phase, zh)))
+		for _, out := range round.Outputs {
+			m := findMember(members, out.MemberID)
+			name := out.MemberID
+			if m != nil {
+				name = fmt.Sprintf("%s %s", m.Avatar, m.displayName(zh))
+			}
+			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, out.Content))
+		}
+	}
+	return sb.String()
+}
+
+// phaseLabel returns a human-readable label for a debate phase.
+func phaseLabel(phase DebateRoundPhase, zh bool) string {
+	switch phase {
+	case DebateProposal:
+		return pickPrompt(zh, "Proposals", "提案轮")
+	case DebateChallenge:
+		return pickPrompt(zh, "Challenges", "质询轮")
+	case DebateRebuttal:
+		return pickPrompt(zh, "Rebuttals", "反驳轮")
+	case DebateFinal:
+		return pickPrompt(zh, "Final Statements", "终陈轮")
+	default:
+		return string(phase)
+	}
+}
+
+// resolveMembers resolves member IDs from config against the defaults.
+// Returns nil if no valid members found (caller should fall back to defaults).
+func resolveMembers(ids []string, defaults []RoundtableMember) []RoundtableMember {
+	var result []RoundtableMember
+	for _, id := range ids {
+		for _, d := range defaults {
+			if d.ID == id {
+				result = append(result, d)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
+func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool) *EngineResponse {
+	var sb strings.Builder
+
+	if zh {
+		sb.WriteString("## 🤝 辩论完成 — 请裁决\n\n")
+		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", goal))
+	} else {
+		sb.WriteString("## 🤝 Debate Complete — Your Verdict\n\n")
+		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", goal))
+	}
+
+	state := h.engine.state
+	rounds := state.Roundtable.DebateRounds
+
+	if len(rounds) > 0 {
+		for _, out := range rounds[0].Outputs {
+			m := findMember(members, out.MemberID)
+			avatar := ""
+			name := out.MemberID
+			if m != nil {
+				avatar = m.Avatar
+				name = m.displayName(zh)
+			}
+
+			sb.WriteString(fmt.Sprintf("### 方案: %s %s\n\n", avatar, name))
+			sb.WriteString(truncateString(out.Content, 500))
+			sb.WriteString("\n\n")
+
+			if len(rounds) >= 4 {
+				sb.WriteString(pickPrompt(zh, "**评分**: ", "**Scores**: "))
+				scores := extractScores(rounds[3].Outputs, members, zh)
+				sb.WriteString(scores)
+				sb.WriteString("\n\n")
+			}
+		}
+	}
+
+	if zh {
+		sb.WriteString("---\n\n")
+		sb.WriteString("**你的裁决**: 输入 `支持方案<角色名>`、`方案<角色名>但要<条件>`、`都不行，应该<你的方案>`、或 `再辩一轮`\n")
+	} else {
+		sb.WriteString("---\n\n")
+		sb.WriteString("**Your verdict**: Type `support <role>`, `<role> but <condition>`, `none, should <your approach>`, or `debate again`\n")
+	}
+
+	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
+}
+
+// extractScores extracts SCORE lines from final round outputs.
+func extractScores(outputs []DebateOutput, members []RoundtableMember, zh bool) string {
+	var parts []string
+	for _, out := range outputs {
+		m := findMember(members, out.MemberID)
+		name := out.MemberID
+		avatar := ""
+		if m != nil {
+			avatar = m.Avatar
+			name = m.displayName(zh)
+		}
+		for _, line := range strings.Split(out.Content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(trimmed), "score:") {
+				parts = append(parts, fmt.Sprintf("%s%s: %s", avatar, name, strings.TrimSpace(trimmed[len("score:"):])))
+			}
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+// Advance handles user input during the debate phases.
 func (h *RoundtableHall) Advance(ctx context.Context, userMsg string) (*EngineResponse, error) {
 	state := h.engine.state
 	if state.Roundtable == nil {
@@ -405,815 +510,47 @@ func (h *RoundtableHall) Advance(ctx context.Context, userMsg string) (*EngineRe
 		zh = msgIsChinese(state.Roundtable.Goal)
 	}
 
+	lower := strings.ToLower(strings.TrimSpace(userMsg))
+
 	switch state.Roundtable.Phase {
-	case RoundtableReview:
-		return h.handleReview(ctx, userMsg, zh)
+	case RoundtableAwaitingVerdict:
+		return h.handleVerdict(userMsg, lower, zh), nil
 	case RoundtableDone:
-		// Don't clear state here — Engine.Run() handles cleanup AFTER the
-		// normal agent loop runs, so Block B can include roundtable results.
 		return nil, nil
 	default:
 		return nil, nil
 	}
 }
 
-// handleReview runs all member agents in parallel to review one or all proposals,
-// then presents a structured proposal×member matrix.
-func (h *RoundtableHall) handleReview(ctx context.Context, userMsg string, zh bool) (*EngineResponse, error) {
+// handleVerdict processes the user's verdict after the debate.
+func (h *RoundtableHall) handleVerdict(userMsg, lower string, zh bool) *EngineResponse {
 	state := h.engine.state
-	proposals := state.Roundtable.Proposals
-	if len(proposals) == 0 {
-		return nil, fmt.Errorf("no proposals to review")
-	}
 
-	members := state.Roundtable.Members
-	if len(members) == 0 {
-		members = DefaultRoundtableMembers
-	}
-
-	// Determine which proposals to review
-	indices := parseReviewTarget(userMsg, len(proposals))
-	if len(indices) == 0 {
-		// User didn't ask for a review — let the normal agent handle this message
-		return nil, nil
-	}
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "review",
-			Detail: fmt.Sprintf("评审 %d 个方案 × %d 位角色...", len(indices), len(members)),
-		})
-	}
-
-	// Build review tasks: proposal × member
-	type reviewTask struct {
-		ProposalIdx int
-		Member      RoundtableMember
-	}
-	var tasks []reviewTask
-	for _, pi := range indices {
-		for _, m := range members {
-			tasks = append(tasks, reviewTask{ProposalIdx: pi, Member: m})
+	// "再辩一轮" / "debate again" / "继续"
+	if strings.Contains(lower, "再辩") || strings.Contains(lower, "继续") ||
+		strings.Contains(lower, "debate again") || lower == "again" {
+		state.Roundtable.Phase = RoundtableProposal
+		return &EngineResponse{
+			Summary: pickPrompt(zh, "Starting another debate round...", "开始新一轮辩论..."),
+			Stage:   StageAct,
 		}
 	}
 
-	// Run all in parallel
-	var mu sync.Mutex
-	reviews := make([]MemberReview, len(tasks))
-	var wg sync.WaitGroup
-
-	for i, task := range tasks {
-		wg.Add(1)
-		go func(idx int, t reviewTask) {
-			defer wg.Done()
-			review := h.runMemberReview(ctx, t.Member, state.Roundtable.Goal, proposals[t.ProposalIdx], t.ProposalIdx, zh)
-			mu.Lock()
-			reviews[idx] = review
-			mu.Unlock()
-		}(i, task)
-	}
-	wg.Wait()
-
-	// Refute stage: 用反向偏见 sub-agent 逐条证伪,剔除假阳性 finding。
-	// 失败/解析不出时默认 confirmed(降级保留,不丢真问题)。
-	refutedCount := 0
-	if targets := collectAllFindings(reviews); len(targets) > 0 {
-		refuteMap := h.refuteFindings(ctx, state.Roundtable.Goal, proposals, targets, zh)
-		for i := range reviews {
-			kept := reviews[i].Findings[:0]
-			for _, f := range reviews[i].Findings {
-				key := findingKey(reviews[i].ProposalIndex, reviews[i].MemberID, f.Content)
-				if r, ok := refuteMap[key]; ok && r.Outcome == RefuteRefuted {
-					refutedCount++
-					continue
-				}
-				kept = append(kept, f)
-			}
-			reviews[i].Findings = kept
-		}
-	}
-
-	state.Roundtable.Reviews = reviews
+	// User picks a proposal or provides their own
+	pinned := fmt.Sprintf("[TEAM PLAN: %s]\n\n%s", state.Roundtable.Goal, userMsg)
+	h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
 	state.Roundtable.Phase = RoundtableDone
 
-	// Build output: organized by proposal
-	var sb strings.Builder
-	if zh {
-		sb.WriteString("## 📋 多角色评审汇总\n\n")
-		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", state.Roundtable.Goal))
-	} else {
-		sb.WriteString("## 📋 Multi-Stance Review Summary\n\n")
-		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", state.Roundtable.Goal))
+	return &EngineResponse{
+		Summary: pickPrompt(zh,
+			fmt.Sprintf("✅ Verdict recorded. Proceeding with: %s", userMsg),
+			fmt.Sprintf("✅ 裁决已记录。将按以下方向执行: %s", userMsg),
+		),
+		Stage: StageAct,
 	}
-
-	for _, pi := range indices {
-		proposalText := proposals[pi]
-		firstLine := strings.SplitN(proposalText, "\n", 2)[0]
-		if zh {
-			sb.WriteString(fmt.Sprintf("### 方案%d: %s\n\n", pi+1, firstLine))
-		} else {
-			sb.WriteString(fmt.Sprintf("### Approach %d: %s\n\n", pi+1, firstLine))
-		}
-		sb.WriteString(proposalText)
-		sb.WriteString("\n\n")
-
-		for _, r := range reviews {
-			if r.ProposalIndex != pi {
-				continue
-			}
-			member := findMember(members, r.MemberID)
-			avatar := ""
-			name := r.MemberID
-			if member != nil {
-				avatar = member.Avatar + " "
-				name = member.displayName(zh)
-			}
-
-			verdictIcon := "✅"
-			switch r.Verdict {
-			case VerdictConditional:
-				verdictIcon = "⚠️"
-			case VerdictReject:
-				verdictIcon = "❌"
-			}
-
-			sb.WriteString(fmt.Sprintf("%s%s  %s (%s: %d/100)\n", avatar, name, verdictIcon, pickPrompt(zh, "score", "评分"), r.Score))
-			if r.Elapsed != "" {
-				sb.WriteString(fmt.Sprintf("⏱ %s\n", r.Elapsed))
-			}
-			if r.Error != "" {
-				sb.WriteString(fmt.Sprintf(pickPrompt(zh, "⚠️ review error: %s\n", "⚠️ 评审出错: %s\n"), r.Error))
-			} else {
-				sb.WriteString(fmt.Sprintf(pickPrompt(zh, "**Verdict**: %s\n\n", "**结论**: %s\n\n"), r.Summary))
-				if len(r.Findings) > 0 {
-					for _, f := range r.Findings {
-						sevIcon := "🔴"
-						switch f.Severity {
-						case "high":
-							sevIcon = "🟠"
-						case "medium":
-							sevIcon = "🟡"
-						case "low":
-							sevIcon = "🔵"
-						}
-						sb.WriteString(fmt.Sprintf("- %s [%s/%s] %s", sevIcon, f.Severity, f.Category, f.Content))
-						if f.Suggestion != "" {
-							sb.WriteString(fmt.Sprintf(pickPrompt(zh, "\n  → suggestion: %s", "\n  → 建议: %s"), f.Suggestion))
-						}
-						sb.WriteString("\n")
-					}
-				}
-			}
-			sb.WriteString("\n")
-		}
-		sb.WriteString("---\n\n")
-	}
-
-	// Conflict detection
-	conflicts := detectConflicts(reviews, members, zh)
-	if len(conflicts) > 0 {
-		if zh {
-			sb.WriteString("## ⚡ 需要关注的问题\n\n")
-		} else {
-			sb.WriteString("## ⚡ Items to Note\n\n")
-		}
-		for _, c := range conflicts {
-			sb.WriteString(c)
-			sb.WriteString("\n")
-		}
-	}
-
-	// Refute stage transparency: report how many false-positive findings were filtered.
-	if refutedCount > 0 {
-		if zh {
-			sb.WriteString(fmt.Sprintf("\n🛡 证伪检验:已剔除 %d 条疑似误报 finding(经独立 sub-agent 复核代码后判定无据)\n", refutedCount))
-		} else {
-			sb.WriteString(fmt.Sprintf("\n🛡 Refute check: filtered %d likely false-positive findings (independently verified against the code)\n", refutedCount))
-		}
-	}
-
-	// Check if any member timed out
-	hasTimedOut := false
-	timedOutMembers := ""
-	for _, r := range reviews {
-		if r.Error != "" && strings.Contains(r.Summary, "超时") {
-			hasTimedOut = true
-			if m := findMember(members, r.MemberID); m != nil {
-				if timedOutMembers != "" {
-					timedOutMembers += pickPrompt(zh, ", ", "、")
-				}
-				timedOutMembers += m.displayName(zh)
-			}
-		}
-	}
-
-	if hasTimedOut {
-		if zh {
-			sb.WriteString(fmt.Sprintf("\n⚠️ %s 分析超时，以上发现仅供参考。\n", timedOutMembers))
-		} else {
-			sb.WriteString(fmt.Sprintf("\n⚠️ %s timed out. Findings above are partial.\n", timedOutMembers))
-		}
-	}
-
-	if zh {
-		sb.WriteString("\n💡 评审完成。你可以根据以上意见选择方案，或继续讨论。")
-	} else {
-		sb.WriteString("\n💡 Review complete. You can choose a proposal based on feedback or continue discussion.")
-	}
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "roundtable_phase",
-			Name:   "review_done",
-			Detail: fmt.Sprintf(pickPrompt(zh, "%d proposals × %d members reviewed", "%d 个方案 × %d 位角色评审完成"), len(indices), len(members)),
-		})
-	}
-
-	return &EngineResponse{Summary: sb.String(), Stage: StageAct}, nil
 }
 
-// runMemberReview executes a single roundtable member's review as a sub-agent.
-// It emits member_start / member_done progress events so the UI can show
-// each member's status without displaying the LLM's raw thinking.
-func (h *RoundtableHall) runMemberReview(ctx context.Context, member RoundtableMember, goal, proposalText string, proposalIndex int, zh bool) MemberReview {
-	start := time.Now()
-
-	// Emit member start progress
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "member_start",
-			Name:   member.ID,
-			Detail: member.displayName(zh),
-		})
-	}
-
-	// Build the review goal: target a specific proposal.
-	// VERDICT/SCORE/SUMMARY prefixes are parsed by parseMemberReview and MUST
-	// be preserved verbatim in both languages.
-	var reviewGoal string
-	if zh {
-		reviewGoal = fmt.Sprintf(`请以「%s」的立场评审以下方案。
-
-## 你的立场
-%s
-
-## 待评审的需求
-%s
-
-## 待评审的方案
-%s
-
-## 评审要求
-- 基于代码库实际情况进行评审（如果需要，请使用 read/grep/glob 工具查看相关代码）
-- 指出具体问题并给出改进建议
-- 每个问题标注严重程度（critical/high/medium/low）和分类（security/design/performance/correctness/other）
-- 最终给出总体评分（0-100）和结论（approve/conditional/reject）
-- 评分 >= 80 为 approve，60-79 为 conditional，< 60 为 reject
-
-## 输出格式
-在最后输出以下三行用于解析：
-VERDICT: <approve|conditional|reject>
-SCORE: <0-100>
-SUMMARY: <一句话总结>`,
-			member.displayName(zh), member.displayStance(zh), goal, proposalText)
-	} else {
-		reviewGoal = fmt.Sprintf(`Review the following proposal from the perspective of "%s".
-
-## Your Stance
-%s
-
-## Requirement Under Review
-%s
-
-## Proposal Under Review
-%s
-
-## Review Requirements
-- Review against the actual codebase (use read/grep/glob tools to inspect code if needed)
-- Point out specific issues and suggest improvements
-- Tag each issue with severity (critical/high/medium/low) and category (security/design/performance/correctness/other)
-- Finally give an overall score (0-100) and verdict (approve/conditional/reject)
-- Score >= 80 = approve, 60-79 = conditional, < 60 = reject
-
-## Output Format
-At the end, output exactly these three lines for parsing:
-VERDICT: <approve|conditional|reject>
-SCORE: <0-100>
-SUMMARY: <one-sentence summary>`,
-			member.displayName(zh), member.displayStance(zh), goal, proposalText)
-	}
-
-	// Use the generic sub-agent with the member's role prompt injected
-	// via RunWithPrompt. The member's Prompt serves as the system-level
-	// instruction (extraPrompt), shaping the agent's persona.
-	handoff := Handoff{
-		Agent:         AgentSub,
-		Goal:          reviewGoal,
-		Tools:         []string{"read", "grep", "glob", "lsp"},
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 50,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		return h.memberError(member.ID, proposalIndex, fmt.Sprintf(pickPrompt(zh, "review failed: %v", "评审失败: %v"), err), err, start)
-	}
-
-	// Type-assert to get the SubAgentRunner for RunWithPrompt
-	type promptRunner interface {
-		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
-	}
-	pr, ok := agent.(promptRunner)
-	if !ok {
-		// Fallback: use regular Run without prompt injection
-		result, err := agent.Run(ctx, handoff)
-		if result != nil {
-			h.engine.accumulateUsage(result.Usage)
-		}
-		review := parseMemberReview(member.ID, proposalIndex, result, err, start)
-		h.emitMemberDone(member, review)
-		return review
-	}
-
-	result, err := pr.RunWithPrompt(ctx, handoff, member.displayPrompt(zh))
-	if result != nil {
-		h.engine.accumulateUsage(result.Usage)
-	}
-	review := parseMemberReview(member.ID, proposalIndex, result, err, start)
-	h.emitMemberDone(member, review)
-	return review
-}
-
-// collectAllFindings flattens all findings across reviews into refute targets.
-func collectAllFindings(reviews []MemberReview) []refuteTarget {
-	var targets []refuteTarget
-	for _, r := range reviews {
-		for _, f := range r.Findings {
-			targets = append(targets, refuteTarget{
-				ProposalIndex: r.ProposalIndex,
-				MemberID:      r.MemberID,
-				Finding:       f,
-			})
-		}
-	}
-	return targets
-}
-
-// refuteFindings runs the refute stage: for each finding, an independent
-// sub-agent with a refute-biased prompt tries to disprove it. Returns a map
-// keyed by findingKey. On sub-agent error or unparseable output, the finding
-// defaults to RefuteConfirmed (degrade-safe: never drop a real finding).
-//
-// Refute bias (mirrors claude-code AGENTIC_REFUTE_SYSTEM): default assumption
-// is that the finding is a false positive; only concrete code evidence flips
-// it to confirmed. The agent MUST read/grep the code, not judge from the
-// proposal text alone.
-func (h *RoundtableHall) refuteFindings(ctx context.Context, goal string, proposals []string, targets []refuteTarget, zh bool) map[string]RefuteResult {
-	results := make(map[string]RefuteResult, len(targets))
-	if len(targets) == 0 {
-		return results
-	}
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	for _, t := range targets {
-		wg.Add(1)
-		go func(t refuteTarget) {
-			defer wg.Done()
-			key := findingKey(t.ProposalIndex, t.MemberID, t.Finding.Content)
-			verdict := h.refuteOne(ctx, goal, proposals, t, zh)
-			mu.Lock()
-			results[key] = verdict
-			mu.Unlock()
-		}(t)
-	}
-	wg.Wait()
-	return results
-}
-
-// refuteOne drives a single refute sub-agent for one finding.
-func (h *RoundtableHall) refuteOne(ctx context.Context, goal string, proposals []string, t refuteTarget, zh bool) RefuteResult {
-	proposalText := ""
-	if t.ProposalIndex >= 0 && t.ProposalIndex < len(proposals) {
-		proposalText = proposals[t.ProposalIndex]
-	}
-	f := t.Finding
-
-	// VERDICT/REASON prefixes are parsed by parseRefuteVerdict and MUST be
-	// preserved verbatim in both languages.
-	var refuteGoal string
-	if zh {
-		refuteGoal = fmt.Sprintf(`请证伪以下评审 finding。你的默认立场是：该 finding 是误报/幻觉，除非你在代码中找到具体证据证明它真实存在。
-
-## 原始需求
-%s
-
-## 被评审的方案
-%s
-
-## 待证伪的 finding
-- 内容: %s
-- 严重程度: %s
-- 分类: %s
-
-## 证伪要求
-- 必须使用 read/grep/glob/lsp 工具查看相关代码，不得仅凭方案文本下结论
-- 只有在代码中找到具体证据（确有该问题）才判定 confirmed
-- 找不到证据、或代码显示实际已处理/不适用，判定 refuted
-- 不信任注释中的安全声明，以代码为准
-
-## 输出格式
-在最后输出以下两行用于解析：
-VERDICT: <confirmed|refuted>
-REASON: <一句话依据>`,
-			goal, proposalText, f.Content, f.Severity, f.Category)
-	} else {
-		refuteGoal = fmt.Sprintf(`Try to refute the following review finding. Your default stance is: the finding is a false positive / hallucination, unless you find concrete evidence in the code proving it actually exists.
-
-## Original Requirement
-%s
-
-## Proposal Under Review
-%s
-
-## Finding to Refute
-- Content: %s
-- Severity: %s
-- Category: %s
-
-## Refute Requirements
-- You MUST use read/grep/glob/lsp to inspect the actual code — do not judge from the proposal text alone
-- Only confirm (confirmed) if you find concrete evidence in the code that the problem exists
-- If no evidence is found, or the code shows it is already handled / not applicable, mark as refuted
-- Do not trust security claims in comments — the code is authoritative
-
-## Output Format
-At the end, output exactly these two lines for parsing:
-VERDICT: <confirmed|refuted>
-REASON: <one-sentence rationale>`,
-			goal, proposalText, f.Content, f.Severity, f.Category)
-	}
-
-	handoff := Handoff{
-		Agent:         AgentSub,
-		Goal:          refuteGoal,
-		Tools:         []string{"read", "grep", "glob", "lsp"},
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 50,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		// Degrade-safe: keep the finding.
-		return RefuteResult{Outcome: RefuteConfirmed, Reason: fmt.Sprintf("refute agent unavailable: %v", err)}
-	}
-
-	type promptRunner interface {
-		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
-	}
-
-	var content string
-	if pr, ok := agent.(promptRunner); ok {
-		result, err := pr.RunWithPrompt(ctx, handoff, "")
-		if err != nil || result == nil {
-			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
-		}
-		h.engine.accumulateUsage(result.Usage)
-		content = result.Summary
-	} else {
-		// Fallback: regular Run.
-		result, err := agent.Run(ctx, handoff)
-		if err != nil || result == nil {
-			return RefuteResult{Outcome: RefuteConfirmed, Reason: "refute sub-agent error, kept by default"}
-		}
-		h.engine.accumulateUsage(result.Usage)
-		content = result.Summary
-	}
-
-	return parseRefuteResult(content)
-}
-
-// memberError creates a MemberReview for a failed review and emits completion.
-func (h *RoundtableHall) memberError(memberID string, proposalIndex int, summary string, err error, start time.Time) MemberReview {
-	review := MemberReview{
-		MemberID:      memberID,
-		ProposalIndex: proposalIndex,
-		Verdict:       VerdictConditional,
-		Score:         0,
-		Summary:       summary,
-		Error:         err.Error(),
-		Elapsed:       time.Since(start).Round(time.Millisecond).String(),
-	}
-	// Emit member done so UI knows this member finished (even if failed)
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "member_done",
-			Name:   memberID,
-			Detail: fmt.Sprintf("%s ❌ 评审出错", summary),
-		})
-	}
-	return review
-}
-
-// emitMemberDone emits a member_done progress event after review completes.
-func (h *RoundtableHall) emitMemberDone(member RoundtableMember, review MemberReview) {
-	if h.engine.config.OnProgress == nil {
-		return
-	}
-	verdictIcon := "✅"
-	switch review.Verdict {
-	case VerdictConditional:
-		verdictIcon = "⚠️"
-	case VerdictReject:
-		verdictIcon = "❌"
-	}
-	h.engine.config.OnProgress(ProgressEvent{
-		Type:   "member_done",
-		Name:   member.ID,
-		Detail: fmt.Sprintf("%s %s %s (%s: %d)", member.Avatar, member.displayName(h.engine.isChinese), verdictIcon, pickPrompt(h.engine.isChinese, "score", "评分"), review.Score),
-	})
-}
-
-// parseMemberReview extracts structured review data from a sub-agent result.
-func parseMemberReview(memberID string, proposalIndex int, result *HandoffResult, err error, start time.Time) MemberReview {
-	elapsed := time.Since(start).Round(time.Millisecond).String()
-	if err != nil {
-		return MemberReview{
-			MemberID:      memberID,
-			ProposalIndex: proposalIndex,
-			Verdict:       VerdictConditional,
-			Score:         0,
-			Summary:       fmt.Sprintf("评审出错: %v", err),
-			Error:         err.Error(),
-			Elapsed:       elapsed,
-		}
-	}
-	if result == nil {
-		return MemberReview{
-			MemberID:      memberID,
-			ProposalIndex: proposalIndex,
-			Verdict:       VerdictConditional,
-			Score:         0,
-			Summary:       "评审未返回结果",
-			Elapsed:       elapsed,
-		}
-	}
-
-	content := result.Summary
-
-	// Check if the sub-agent timed out (max iterations reached)
-	if result.TimedOut {
-		return MemberReview{
-			MemberID:      memberID,
-			ProposalIndex: proposalIndex,
-			Verdict:       VerdictConditional,
-			Score:         0,
-			Summary:       "⚠️ 该角色分析超时，以下为部分发现（仅供参考）",
-			Findings:      nil,
-			Elapsed:       elapsed,
-			Error:         content,
-		}
-	}
-
-	// Extract structured fields from the result
-	review := MemberReview{
-		MemberID:      memberID,
-		ProposalIndex: proposalIndex,
-		Verdict:       parseVerdict(content),
-		Score:         parseScore(content),
-		Summary:       parseSummaryLine(content),
-		Elapsed:       elapsed,
-		Findings:      parseFindings(content),
-	}
-
-	// Fallback: use conclusions from the HandoffResult
-	if len(review.Findings) == 0 && len(result.Conclusions) > 0 {
-		for _, c := range result.Conclusions {
-			review.Findings = append(review.Findings, Finding{
-				Severity: "medium",
-				Category: "other",
-				Content:  c,
-			})
-		}
-	}
-
-	if review.Summary == "" {
-		review.Summary = truncateString(content, 200)
-	}
-
-	return review
-}
-
-// --- Parsing helpers ---
-
-func parseVerdict(content string) ReviewVerdict {
-	lower := strings.ToLower(content)
-	if strings.Contains(lower, "verdict: approve") || strings.Contains(lower, "verdict:approve") {
-		return VerdictApprove
-	}
-	if strings.Contains(lower, "verdict: conditional") || strings.Contains(lower, "verdict:conditional") ||
-		strings.Contains(lower, "verdict: conditional approve") {
-		return VerdictConditional
-	}
-	if strings.Contains(lower, "verdict: reject") || strings.Contains(lower, "verdict:reject") {
-		return VerdictReject
-	}
-	// Fuzzy: look for approve/reject in the last 500 chars
-	tail := lower
-	if len(tail) > 500 {
-		tail = tail[len(tail)-500:]
-	}
-	if strings.Contains(tail, "approve") {
-		return VerdictApprove
-	}
-	if strings.Contains(tail, "reject") {
-		return VerdictReject
-	}
-	if strings.Contains(tail, "conditional") {
-		return VerdictConditional
-	}
-	return VerdictConditional // safe default
-}
-
-func parseScore(content string) int {
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "score:") {
-			var score int
-			if _, err := fmt.Sscanf(trimmed, "SCORE: %d", &score); err == nil {
-				return clampScore(score)
-			}
-			if _, err := fmt.Sscanf(trimmed, "score: %d", &score); err == nil {
-				return clampScore(score)
-			}
-		}
-	}
-	return 50 // default middle score if unparseable
-}
-
-func clampScore(score int) int {
-	if score < 0 {
-		return 0
-	}
-	if score > 100 {
-		return 100
-	}
-	return score
-}
-
-// parseRefuteResult extracts the refute stage's verdict from a sub-agent result.
-// Format expected at the end of the content:
-//
-//	VERDICT: <confirmed|refuted>
-//	REASON: <一句话依据>
-//
-// Unparseable output defaults to RefuteConfirmed — failure to refute must never
-// silently drop a real finding (宁可保留假阳性,不可漏掉真问题).
-func parseRefuteResult(content string) RefuteResult {
-	result := RefuteResult{Outcome: RefuteConfirmed}
-
-	lower := strings.ToLower(content)
-	if strings.Contains(lower, "verdict: refuted") || strings.Contains(lower, "verdict:refuted") {
-		result.Outcome = RefuteRefuted
-	} else if strings.Contains(lower, "verdict: confirmed") || strings.Contains(lower, "verdict:confirmed") {
-		result.Outcome = RefuteConfirmed
-	} else {
-		// Fuzzy: scan the last 500 chars for a bare refuted/confirmed keyword.
-		tail := lower
-		if len(tail) > 500 {
-			tail = tail[len(tail)-500:]
-		}
-		if strings.Contains(tail, "refuted") {
-			result.Outcome = RefuteRefuted
-		} else if !strings.Contains(tail, "confirmed") {
-			// No verdict signal at all -> default confirmed (degrade-safe).
-			return result
-		}
-	}
-
-	// Extract REASON line (case-insensitive).
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "reason:") {
-			result.Reason = strings.TrimSpace(trimmed[len("reason:"):])
-			break
-		}
-	}
-	return result
-}
-
-func parseSummaryLine(content string) string {
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "summary:") {
-			rest := strings.TrimSpace(trimmed[len("summary:"):])
-			// Also handle "SUMMARY:"
-			if rest == "" {
-				rest = strings.TrimSpace(trimmed[len("SUMMARY:"):])
-			}
-			return rest
-		}
-	}
-	return ""
-}
-
-func parseFindings(content string) []Finding {
-	var findings []Finding
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Look for bullet points with findings
-		if !strings.HasPrefix(trimmed, "- ") && !strings.HasPrefix(trimmed, "* ") {
-			continue
-		}
-		// Check if it looks like a finding with severity/category markers
-		// e.g. "- [high/security] some text" or "- 🔴 some text"
-		text := trimmed[2:]
-		if strings.Contains(text, "/") || strings.HasPrefix(text, "🔴") ||
-			strings.HasPrefix(text, "🟠") || strings.HasPrefix(text, "🟡") || strings.HasPrefix(text, "🔵") {
-			finding := Finding{
-				Severity: "medium",
-				Category: "other",
-				Content:  text,
-			}
-			// Try to extract severity from emoji
-			if strings.HasPrefix(text, "🔴") {
-				finding.Severity = "critical"
-				text = strings.TrimSpace(text[2:])
-			} else if strings.HasPrefix(text, "🟠") {
-				finding.Severity = "high"
-				text = strings.TrimSpace(text[2:])
-			} else if strings.HasPrefix(text, "🟡") {
-				finding.Severity = "medium"
-				text = strings.TrimSpace(text[2:])
-			} else if strings.HasPrefix(text, "🔵") {
-				finding.Severity = "low"
-				text = strings.TrimSpace(text[2:])
-			}
-			// Try to extract [severity/category] pattern
-			if idx := strings.Index(text, "]"); idx > 0 && strings.HasPrefix(text, "[") {
-				tag := text[1:idx]
-				parts := strings.SplitN(tag, "/", 2)
-				if len(parts) == 2 {
-					finding.Severity = strings.TrimSpace(parts[0])
-					finding.Category = strings.TrimSpace(parts[1])
-				}
-				text = strings.TrimSpace(text[idx+1:])
-			}
-			finding.Content = text
-			findings = append(findings, finding)
-		}
-	}
-	return findings
-}
-
-// extractProposals splits brainstorm output into individual proposals.
-func extractProposals(summary string) []string {
-	if summary == "" {
-		return nil
-	}
-	// Try to split by "## 方案 N:" or "## Approach N:" headers
-	var proposals []string
-	lines := strings.Split(summary, "\n")
-	var current strings.Builder
-	inProposal := false
-	proposalIdx := 0
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## 方案 ") || strings.HasPrefix(trimmed, "## Approach ") ||
-			strings.HasPrefix(trimmed, "## 方案") || strings.HasPrefix(trimmed, "## Approach") {
-			if inProposal && current.Len() > 0 {
-				proposals = append(proposals, strings.TrimSpace(current.String()))
-			}
-			current.Reset()
-			inProposal = true
-			proposalIdx++
-			current.WriteString(trimmed)
-			current.WriteString("\n")
-		} else if inProposal {
-			current.WriteString(trimmed)
-			current.WriteString("\n")
-		}
-	}
-	if inProposal && current.Len() > 0 {
-		proposals = append(proposals, strings.TrimSpace(current.String()))
-	}
-
-	return proposals
-}
-
+// findMember returns the member with the given ID, or nil.
 func findMember(members []RoundtableMember, id string) *RoundtableMember {
 	for i := range members {
 		if members[i].ID == id {
@@ -1223,239 +560,11 @@ func findMember(members []RoundtableMember, id string) *RoundtableMember {
 	return nil
 }
 
-// detectConflicts finds disagreements between member reviews.
-// Returns a list of formatted conflict descriptions, each highlighting
-// which members disagree and what the disagreement is about.
-func detectConflicts(reviews []MemberReview, members []RoundtableMember, zh bool) []string {
-	var conflicts []string
-
-	// 1. Verdict conflicts: one approve, another reject
-	for i, a := range reviews {
-		for j, b := range reviews {
-			if j <= i {
-				continue
-			}
-			if a.Error != "" || b.Error != "" {
-				continue
-			}
-			// Opposite verdicts: approve vs reject
-			if (a.Verdict == VerdictApprove && b.Verdict == VerdictReject) ||
-				(a.Verdict == VerdictReject && b.Verdict == VerdictApprove) {
-				aName := memberName(members, a.MemberID, zh)
-				bName := memberName(members, b.MemberID, zh)
-				if zh {
-					conflicts = append(conflicts, fmt.Sprintf(
-						"🔴 **%s** ✅ 通过  vs  **%s** ❌ 拒绝\n  → 两人结论完全相反，需要你判断谁的分析更合理。",
-						aName, bName))
-				} else {
-					conflicts = append(conflicts, fmt.Sprintf(
-						"🔴 **%s** ✅ approve  vs  **%s** ❌ reject\n  → Opposite verdicts. You need to decide which analysis is more convincing.",
-						aName, bName))
-				}
-			}
-		}
-	}
-
-	// 2. Score divergence: >40 point gap
-	for i, a := range reviews {
-		for j, b := range reviews {
-			if j <= i {
-				continue
-			}
-			if a.Error != "" || b.Error != "" {
-				continue
-			}
-			diff := a.Score - b.Score
-			if diff < 0 {
-				diff = -diff
-			}
-			if diff > 40 {
-				aName := memberName(members, a.MemberID, zh)
-				bName := memberName(members, b.MemberID, zh)
-				if zh {
-					conflicts = append(conflicts, fmt.Sprintf(
-						"🟠 **%s** (%d分)  vs  **%s** (%d分)  — 评分差距 %d 分\n  → 双方对方案质量判断差异较大，需要你权衡。",
-						aName, a.Score, bName, b.Score, diff))
-				} else {
-					conflicts = append(conflicts, fmt.Sprintf(
-						"🟠 **%s** (%d)  vs  **%s** (%d)  — score gap of %d points\n  → Large quality assessment gap, requires your judgment.",
-						aName, a.Score, bName, b.Score, diff))
-				}
-			}
-		}
-	}
-
-	// 3. Critical issues: if any member found a critical finding, flag it
-	var criticalFindings []string
-	for _, r := range reviews {
-		for _, f := range r.Findings {
-			if f.Severity == "critical" {
-				m := memberName(members, r.MemberID, zh)
-				criticalFindings = append(criticalFindings, fmt.Sprintf("%s: %s", m, f.Content))
-			}
-		}
-	}
-	if len(criticalFindings) > 0 {
-		var cb strings.Builder
-		if zh {
-			cb.WriteString("🔴 **严重问题（必须处理）**\n\n")
-		} else {
-			cb.WriteString("🔴 **Critical Issues (must address)**\n\n")
-		}
-		for _, cf := range criticalFindings {
-			cb.WriteString(fmt.Sprintf("- %s\n", cf))
-		}
-		conflicts = append(conflicts, cb.String())
-	}
-
-	return conflicts
-}
-
-func memberName(members []RoundtableMember, id string, zh bool) string {
-	if m := findMember(members, id); m != nil {
-		return m.displayName(zh)
-	}
-	return id
-}
-
+// truncateString truncates s to maxLen runes, appending "..." if truncated.
 func truncateString(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
-}
-
-// parseReviewTarget determines which proposal indices to review
-// based on the user's message. Returns nil if no review was requested.
-func parseReviewTarget(userMsg string, numProposals int) []int {
-	trimmed := strings.TrimSpace(userMsg)
-	lower := strings.ToLower(trimmed)
-
-	// "都评一下" / "全部" / "review all" → all proposals
-	if strings.Contains(lower, "都评") || strings.Contains(lower, "全部") ||
-		strings.Contains(lower, "review all") || lower == "all" {
-		indices := make([]int, numProposals)
-		for i := 0; i < numProposals; i++ {
-			indices[i] = i
-		}
-		return indices
-	}
-
-	// "评方案2" / "方案2" / "review approach 2" / "approach 2"
-	var num int
-	if _, err := fmt.Sscanf(trimmed, "评方案%d", &num); err == nil {
-		if num >= 1 && num <= numProposals {
-			return []int{num - 1}
-		}
-	}
-	if _, err := fmt.Sscanf(trimmed, "方案%d", &num); err == nil {
-		if num >= 1 && num <= numProposals {
-			return []int{num - 1}
-		}
-	}
-	if _, err := fmt.Sscanf(lower, "review approach %d", &num); err == nil {
-		if num >= 1 && num <= numProposals {
-			return []int{num - 1}
-		}
-	}
-	if _, err := fmt.Sscanf(lower, "approach %d", &num); err == nil {
-		if num >= 1 && num <= numProposals {
-			return []int{num - 1}
-		}
-	}
-
-	// Not a review command
-	return nil
-}
-
-// TeamCommand represents a parsed /team command.
-type TeamCommand struct {
-	Goal string
-}
-
-// parseTeamCommand checks if userMsg is a /team command.
-func parseTeamCommand(userMsg string) *TeamCommand {
-	trimmed := strings.TrimSpace(userMsg)
-	if trimmed == "" {
-		return nil
-	}
-	// Handle leading newlines in userMsg: find the first non-empty line
-	lines := strings.SplitN(trimmed, "\n", 2)
-	firstLine := strings.TrimSpace(lines[0])
-	if !strings.HasPrefix(firstLine, "/") {
-		return nil
-	}
-	rest := firstLine[1:]
-	parts := strings.SplitN(rest, " ", 2)
-	if len(parts) == 0 {
-		return nil
-	}
-	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
-	if cmd != "team" {
-		return nil
-	}
-	args := ""
-	if len(parts) > 1 {
-		args = strings.TrimSpace(parts[1])
-	}
-	if args == "" {
-		return nil
-	}
-	return &TeamCommand{Goal: args}
-}
-
-// buildTeamExploreGoal creates the task prompt for a roundtable member during team exploration.
-// Each member receives the shared goal plus their unique role and stance.
-// The SUMMARY: prefix is parsed by extractTeamSummary and MUST be preserved in both languages.
-func buildTeamExploreGoal(goal string, member RoundtableMember, zh bool) string {
-	if zh {
-		return fmt.Sprintf(`## 任务
-从你的专业角度分析以下需求，输出你的专业意见和建议。
-
-## 你的角色
-%s - %s
-
-## 需求
-%s
-
-## 输出要求
-- 分析需求的关键点和潜在风险
-- 给出你的专业建议和实现思路
-- 列出你认为需要特别注意的事项
-- 最后用一行 SUMMARY: <总结> 概括你的核心观点`, member.displayName(zh), member.displayStance(zh), goal)
-	}
-	return fmt.Sprintf(`## Task
-Analyze the following requirement from your professional perspective and provide your expert opinion and suggestions.
-
-## Your Role
-%s - %s
-
-## Requirement
-%s
-
-## Output Requirements
-- Analyze the key points and potential risks of the requirement
-- Provide your expert advice and implementation ideas
-- List anything that needs special attention
-- End with one line SUMMARY: <summary> capturing your core viewpoint`, member.displayName(zh), member.displayStance(zh), goal)
-}
-
-// extractTeamSummary extracts the SUMMARY: line from a member's output.
-// Returns the summary text or empty string if not found.
-func extractTeamSummary(content string) string {
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "summary:") {
-			rest := strings.TrimSpace(trimmed[len("summary:"):])
-			// Also handle "SUMMARY:"
-			if rest == "" {
-				rest = strings.TrimSpace(trimmed[len("SUMMARY:"):])
-			}
-			return rest
-		}
-	}
-	return ""
 }
