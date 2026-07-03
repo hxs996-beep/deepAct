@@ -458,7 +458,7 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 			sb.WriteString("\n\n")
 
 			if len(rounds) >= 4 {
-				sb.WriteString(pickPrompt(zh, "**评分**: ", "**Scores**: "))
+				sb.WriteString(pickPrompt(zh, "**Scores**: ", "**评分**: "))
 				scores := extractScores(rounds[3].Outputs, members, zh)
 				sb.WriteString(scores)
 				sb.WriteString("\n\n")
