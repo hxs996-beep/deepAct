@@ -302,37 +302,26 @@ func currentPlanStep(plan []engine.PlanStep) string {
 // roundtableVolatile is a compact representation of roundtable results
 // injected into Block B for the main agent to make informed decisions.
 type roundtableVolatile struct {
-	Phase   string          `json:"phase"`
-	Goal    string          `json:"goal,omitempty"`
-	Reviews []reviewSummary `json:"reviews,omitempty"`
-}
-
-type reviewSummary struct {
-	Member  string `json:"member"`
-	Score   int    `json:"score"`
-	Verdict string `json:"verdict"`
-	Summary string `json:"summary,omitempty"`
+	Phase        string   `json:"phase"`
+	Goal         string   `json:"goal,omitempty"`
+	DebateRounds int      `json:"debate_rounds,omitempty"`
+	MemberIDs    []string `json:"member_ids,omitempty"`
 }
 
 // flattenRoundtable converts engine.RoundtableState to the compact volatile form.
-// Only includes Reviews when the roundtable is done and reviews exist.
 func flattenRoundtable(rt *engine.RoundtableState) *roundtableVolatile {
 	if rt == nil {
 		return nil
 	}
 	v := &roundtableVolatile{
-		Phase: rt.Phase.String(),
-		Goal:  truncString(rt.Goal, 120),
+		Phase:        rt.Phase.String(),
+		Goal:         truncString(rt.Goal, 120),
+		DebateRounds: len(rt.DebateRounds),
 	}
-	if len(rt.Reviews) > 0 {
-		v.Reviews = make([]reviewSummary, 0, len(rt.Reviews))
-		for _, r := range rt.Reviews {
-			v.Reviews = append(v.Reviews, reviewSummary{
-				Member:  r.MemberID,
-				Score:   r.Score,
-				Verdict: string(r.Verdict),
-				Summary: truncString(r.Summary, 150),
-			})
+	if len(rt.Members) > 0 {
+		v.MemberIDs = make([]string, len(rt.Members))
+		for i, m := range rt.Members {
+			v.MemberIDs[i] = m.ID
 		}
 	}
 	return v
