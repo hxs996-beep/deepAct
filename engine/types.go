@@ -83,6 +83,9 @@ type EngineConfig struct {
 	Pricing                PricingConfig
 	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
 	PromptVersion          string // SHA256 hash of the system prompt for tracking
+	// TeamMembers is the ordered list of member IDs to use in /team debate mode.
+	// Empty = use DefaultDebateMembers.
+	TeamMembers []string
 }
 
 type EngineResponse struct {

@@ -20,6 +20,7 @@ type File struct {
 	Guards     guardsConfig     `toml:"guards"`
 	// Conference field removed — ConferenceEnabled was dead code (never read by engine).
 	// Conference state is managed via TaskState.Conference in the engine package.
+	Team       teamConfig       `toml:"team"`
 	UI         uiConfig         `toml:"ui"`
 }
 
@@ -190,8 +191,15 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	cfg.AutoConfirmScope = !f.Guards.ScopeGuard
 	// ConferenceEnabled was removed (dead code - Conference state is managed
 	// via TaskState.Conference field in the engine, not via EngineConfig).
+	if len(f.Team.Members) > 0 {
+		cfg.TeamMembers = f.Team.Members
+	}
 }
 
 type uiConfig struct {
 	// Placeholder for future UI configuration (e.g., theme, font size).
+}
+
+type teamConfig struct {
+	Members []string `toml:"members"` // member IDs to use (default: radical,defender,pragmatic,advocate)
 }
