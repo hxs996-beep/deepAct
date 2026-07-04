@@ -35,8 +35,9 @@ type EngineDeps struct {
 	Compressor  Compressor
 	Session     SessionStore
 	Agents      *AgentRegistry
-	Skills      *skill.Registry
-	Router      ModelRouter
+	Skills       *skill.Registry
+	SkillMatcher skill.SkillMatcher
+	Router       ModelRouter
 	MCPManagers []io.Closer // MCP server connections to close on shutdown
 }
 
@@ -48,8 +49,9 @@ type Engine struct {
 	compressor Compressor
 	session    SessionStore
 	agents     *AgentRegistry
-	skills     *skill.Registry
-	router     ModelRouter
+	skills       *skill.Registry
+	skillMatcher skill.SkillMatcher
+	router       ModelRouter
 	config     EngineConfig
 	state      *TaskState
 	history    []Message
@@ -138,8 +140,9 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		compressor: deps.Compressor,
 		session:    deps.Session,
 		agents:     deps.Agents,
-		skills:    deps.Skills,
-		router:    deps.Router,
+		skills:       deps.Skills,
+		skillMatcher: deps.SkillMatcher,
+		router:       deps.Router,
 		config:     cfg,
 		state:           &TaskState{TaskID: cfg.SessionID},
 		history:         make([]Message, 0),
@@ -231,10 +234,24 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			Phase: RoundtableProposal,
 		}
 		// Resolve members: command-line > config > defaults
+		// Priority: 1) --members flag  2) config.toml [team].members  3) DefaultDebateMembers
+		var resolved []RoundtableMember
 		if len(tc.MemberIDs) > 0 {
-			resolved := resolveMembers(tc.MemberIDs, DefaultDebateMembers)
-			if len(resolved) > 0 {
-				e.state.Roundtable.Members = resolved
+			resolved = resolveMembers(tc.MemberIDs, DefaultDebateMembers)
+		}
+		if len(resolved) == 0 && len(e.config.TeamMembers) > 0 {
+			resolved = resolveMembers(e.config.TeamMembers, DefaultDebateMembers)
+		}
+		if len(resolved) > 0 {
+			e.state.Roundtable.Members = resolved
+		}
+		// Load --add member from TOML file
+		if tc.AddMemberPath != "" {
+			added, err := loadMemberFromFile(tc.AddMemberPath)
+			if err != nil {
+				loopLog.Printf("failed to load --add member from %s: %v", tc.AddMemberPath, err)
+			} else if added != nil {
+				e.state.Roundtable.Members = append(e.state.Roundtable.Members, *added)
 			}
 		}
 		// Replace raw "/team <goal>" so the main agent loop sees a proper prompt
@@ -292,30 +309,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				}
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
-			// Mark as explicitly activated to prevent duplicate auto-match
-			e.activatedSkills[s.Name] = true
-			e.lastActivatedSkill = s.Name
-			e.state.ActiveSkillName = s.Name
-			e.state.ActiveSkillContent = s.Content
-
-			// Inject skill methodology into stable zone (persistent across turns)
-			e.context.SetActiveSkill(s.Name, s.Content)
-
-			// Brief one-time notification for this turn only
-			skillMsg := fmt.Sprintf(
-				"✅ Skill `%s` activated: %s. Full methodology now in stable zone.",
-				s.Name, s.Description,
-			)
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
-
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "skill_activated",
-					Name:   s.Name,
-					Detail: s.Description,
-				})
-			}
+			e.activateSkill(s, "explicit /"+s.Name+" command")
 
 			taskText := extractTaskTextAfterSkillCmd(userMsg, sc.name)
 			if taskText == "" {
@@ -331,63 +325,21 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Keyword-based skill matching.
-	// 1. First pass: check for auto-activation (threshold met) — no user/model confirmation.
-	// 2. Second pass: show suggestions so the model can activate_skill manually.
-	if e.state.ActiveSkillName == "" {
-		matches := e.skills.MatchTopSkillsWithScores(3, userMsg)
-
-		// Auto-activation: if a skill's keyword match count >= threshold, activate it directly.
-		var autoActivated *skill.Skill
-		for _, m := range matches {
-			if m.Skill.AutoActivateThreshold != nil && m.Score >= *m.Skill.AutoActivateThreshold {
-				if !e.activatedSkills[m.Skill.Name] {
-					autoActivated = m.Skill
-					break
-				}
+	// Skill matching: keyword-based auto-activation via SkillMatcher interface.
+	// When a matcher is wired (via cmd/run.go), it handles threshold checks and
+	// future semantic fallback. When nil, skill matching is disabled.
+	if e.state.ActiveSkillName == "" && e.skillMatcher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		matched := e.skillMatcher.Match(ctx, userMsg, e.skills.All())
+		cancel()
+		if matched != nil {
+			e.activateSkill(matched, "keyword match")
+		} else {
+			// Show keyword-based suggestions even if no auto-activation.
+			matches := e.skills.MatchTopSkillsWithScores(3, userMsg)
+			if len(matches) > 0 {
+				e.showSkillSuggestions(matches)
 			}
-		}
-		if autoActivated != nil {
-			e.activatedSkills[autoActivated.Name] = true
-			e.lastActivatedSkill = autoActivated.Name
-			e.state.ActiveSkillName = autoActivated.Name
-			e.state.ActiveSkillContent = autoActivated.Content
-
-			// Inject skill methodology into stable zone (persistent across turns)
-			e.context.SetActiveSkill(autoActivated.Name, autoActivated.Content)
-
-			skillMsg := fmt.Sprintf(
-				"✅ Skill `%s` auto-activated (keyword score %d). Full methodology now in stable zone.",
-				autoActivated.Name, matches[0].Score,
-			)
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", autoActivated.Name, autoActivated.Content)
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "skill_activated",
-					Name:   autoActivated.Name,
-					Detail: autoActivated.Description + " (auto, keyword match)",
-				})
-			}
-		}
-
-		// Suggestion: show matched skills as suggestions for model-driven activation.
-		if autoActivated == nil && len(matches) > 0 {
-			var sb strings.Builder
-			if zh {
-				sb.WriteString("## 建议的技能\n以下技能可能适合当前任务：\n\n")
-			} else {
-				sb.WriteString("## Suggested Skills\nSkills that may be relevant:\n\n")
-			}
-			for _, m := range matches {
-				sb.WriteString(fmt.Sprintf("- **%s**: %s\n", m.Skill.Name, m.Skill.Description))
-			}
-			if zh {
-				sb.WriteString("\n使用 `/<skillname>` 激活，或让模型用 `activate_skill` tool 建议。")
-			} else {
-				sb.WriteString("\nUse `/<skillname>` to activate, or ask the model to suggest via `activate_skill` tool.")
-			}
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, sb.String())
 		}
 	}
 
@@ -1630,4 +1582,48 @@ func describeScope(scope string, zh bool) string {
 		return "第 " + scope + " 行区间"
 	}
 	return "lines " + scope
+}
+
+// activateSkill activates a skill and injects its methodology into the stable zone.
+// reason is a human-readable description of why the skill was activated (for logging/progress).
+func (e *Engine) activateSkill(s *skill.Skill, reason string) {
+	e.activatedSkills[s.Name] = true
+	e.lastActivatedSkill = s.Name
+	e.state.ActiveSkillName = s.Name
+	e.state.ActiveSkillContent = s.Content
+	e.context.SetActiveSkill(s.Name, s.Content)
+
+	skillMsg := fmt.Sprintf(
+		"✅ Skill `%s` auto-activated (%s). Full methodology now in stable zone.",
+		s.Name, reason,
+	)
+	e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+	e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+	if e.config.OnProgress != nil {
+		e.config.OnProgress(ProgressEvent{
+			Type:   "skill_activated",
+			Name:   s.Name,
+			Detail: s.Description + " (" + reason + ")",
+		})
+	}
+}
+
+// showSkillSuggestions appends a pinned message with the top matched skills
+// so the model can decide to activate one via activate_skill tool.
+func (e *Engine) showSkillSuggestions(matches []skill.SkillMatch) {
+	var sb strings.Builder
+	if e.isChinese {
+		sb.WriteString("## 建议的技能\n以下技能可能适合当前任务：\n\n")
+	} else {
+		sb.WriteString("## Suggested Skills\nSkills that may be relevant:\n\n")
+	}
+	for _, m := range matches {
+		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", m.Skill.Name, m.Skill.Description))
+	}
+	if e.isChinese {
+		sb.WriteString("\n使用 `/<skillname>` 激活，或让模型用 `activate_skill` tool 建议。")
+	} else {
+		sb.WriteString("\nUse `/<skillname>` to activate, or ask the model to suggest via `activate_skill` tool.")
+	}
+	e.pendingPinnedMessages = append(e.pendingPinnedMessages, sb.String())
 }

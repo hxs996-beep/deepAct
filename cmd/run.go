@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	deeplogconfig "github.com/deepact/deepact/config"
-	"github.com/deepact/deepact/context"
+	deeplogcontext "github.com/deepact/deepact/context"
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/policy"
@@ -231,10 +232,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	// Pre-compute language packs for sub-agent system prompt (zh + en).
 	// User language is detected per-session, so both variants are cached here.
-	projLang := context.DetectLanguage(workDir)
-	runner.SetLangPacks(context.GetLangPack(projLang, "中文"), context.GetLangPack(projLang, ""))
+	projLang := deeplogcontext.DetectLanguage(workDir)
+	runner.SetLangPacks(deeplogcontext.GetLangPack(projLang, "中文"), deeplogcontext.GetLangPack(projLang, ""))
 
-	contextAssembler := context.NewContextAssembler(workDir, estimator)
+	contextAssembler := deeplogcontext.NewContextAssembler(workDir, estimator)
 
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
 	if config.FlashModelName != "" {
@@ -286,6 +287,31 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		routing.FlashModelName = config.FlashModelName
 	}
 
+	// Build skill matcher: keyword-first with LLM semantic fallback.
+	// The semantic matcher wraps the model client for flash-model calls.
+	kwMatcher := skill.NewKeywordMatcher(skillReg)
+	var semMatcher *skill.SemanticMatcher
+	if config.FlashModelName != "" && client != nil {
+		matchFn := func(ctx context.Context, systemMsg, userMsg string) (string, error) {
+			req := engine.ModelRequest{
+				Model: config.FlashModelName,
+				Messages: []engine.ModelMessage{
+					{Role: "system", Content: systemMsg},
+					{Role: "user", Content: userMsg},
+				},
+				Temperature: 0,
+				MaxTokens:   64,
+			}
+			resp, err := client.Complete(ctx, req)
+			if err != nil {
+				return "", err
+			}
+			return resp.Message.Content, nil
+		}
+		semMatcher = skill.NewSemanticMatcher(matchFn, config.FlashModelName)
+	}
+	skillMatcher := skill.NewFallbackMatcher(kwMatcher, semMatcher)
+
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
@@ -295,6 +321,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Agents:     agentReg,
 		Skills:     skillReg,
+		SkillMatcher: skillMatcher,
 		Router:     routing,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown

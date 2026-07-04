@@ -23,7 +23,7 @@ type Skill struct {
 	// AutoActivateThreshold, when set, enables automatic skill activation
 	// from keyword matching (no user/model confirmation needed).
 	// If keyword match count >= threshold, the engine auto-activates this skill.
-	// nil/0 means never auto-activate from keyword match.
+	// nil means never auto-activate from keyword match.
 	AutoActivateThreshold *int
 }
 
