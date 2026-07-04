@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/deepact/deepact/engine"
 )
@@ -307,5 +309,117 @@ func TestModelMouseClickNoDrag(t *testing.T) {
 	m3 := result.(Model)
 	if m3.selection.Done || m3.selection.Active {
 		t.Error("single click should clear selection")
+	}
+}
+
+// ---- wrapLineAnsi tests ----
+
+func TestWrapLineAnsi_PlainASCII(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		width int
+		want  []string
+	}{
+		{name: "short line no wrap", line: "hello", width: 10, want: []string{"hello"}},
+		{name: "exact width no wrap", line: "hello world", width: 11, want: []string{"hello world"}},
+		{name: "wrap at space", line: "hello world foo bar", width: 12, want: []string{"hello world", "foo bar"}},
+		{name: "hard break when no space", line: "abcdefghijklmnop", width: 5, want: []string{"abcde", "fghij", "klmno", "p"}},
+		{name: "empty line", line: "", width: 10, want: []string{""}},
+		{name: "width zero", line: "hello world", width: 0, want: []string{"hello world"}},
+		{name: "width negative", line: "hello world", width: -1, want: []string{"hello world"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapLineAnsi(tt.line, tt.width)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("wrapLineAnsi(%q, %d) = %q, want %q", tt.line, tt.width, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWrapLineAnsi_WithSGR(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		width int
+		want  []string
+	}{
+		{
+			name:  "SGR wrapped at space",
+			line:  "\x1b[31mhello world foo bar\x1b[0m",
+			width: 12,
+			want:  []string{"\x1b[31mhello world\x1b[0m", "\x1b[31mfoo bar\x1b[0m"},
+		},
+		{
+			name:  "SGR hard break no space",
+			line:  "\x1b[31mabcdefghij\x1b[0m",
+			width: 5,
+			want:  []string{"\x1b[31mabcde\x1b[0m", "\x1b[31mfghij\x1b[0m"},
+		},
+		{
+			name:  "short line with SGR no wrap",
+			line:  "\x1b[32mhello\x1b[0m",
+			width: 10,
+			want:  []string{"\x1b[32mhello\x1b[0m"},
+		},
+		{
+			name:  "multiple SGR sequences",
+			line:  "\x1b[1m\x1b[31mbold red text long enough to wrap\x1b[0m",
+			width: 16,
+			want:  []string{"\x1b[1m\x1b[31mbold red text\x1b[0m", "\x1b[1m\x1b[31mlong enough to\x1b[0m", "\x1b[1m\x1b[31mwrap\x1b[0m"},
+		},
+		{
+			name:  "SGR in middle of text",
+			line:  "normal \x1b[31mred text here\x1b[0m normal",
+			width: 14,
+			want:  []string{"normal \x1b[31mred\x1b[0m", "\x1b[31mtext here\x1b[0m", "normal"},
+		},
+		{
+			name:  "non-SGR ANSI not replayed",
+			line:  "\x1b[2Jhello world long text",
+			width: 12,
+			want:  []string{"\x1b[2Jhello world", "long text"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapLineAnsi(tt.line, tt.width)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("wrapLineAnsi(%q, %d) =\n  got:  %q\n  want: %q", tt.line, tt.width, got, tt.want)
+			}
+			for i, l := range got {
+				if w := lipgloss.Width(l); w > tt.width && tt.width > 0 {
+					t.Errorf("line %d visual width %d exceeds limit %d: %q", i, w, tt.width, l)
+				}
+			}
+		})
+	}
+}
+
+func TestWrapLineAnsi_WideChars(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		width int
+		want  []string
+	}{
+		{name: "CJK wrap", line: "你好世界你好世界", width: 8, want: []string{"你好世界", "你好世界"}},
+		{name: "CJK mixed with ASCII", line: "hello你好world世界", width: 10, want: []string{"hello你好w", "orld世界"}},
+		{
+			name:  "CJK with SGR",
+			line:  "\x1b[32m你好世界你好世界\x1b[0m",
+			width: 8,
+			want:  []string{"\x1b[32m你好世界\x1b[0m", "\x1b[32m你好世界\x1b[0m"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapLineAnsi(tt.line, tt.width)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("wrapLineAnsi(%q, %d) =\n  got:  %q\n  want: %q", tt.line, tt.width, got, tt.want)
+			}
+		})
 	}
 }

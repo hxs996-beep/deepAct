@@ -93,7 +93,7 @@ type SubAgentStatus struct {
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
+	{Command: "/team", Args: "<需求> [--members id1,id2] [--add path.toml]", Description: "开启多角色辩论场，结构化辩论后由你裁决"},
 }
 
 type Model struct {
@@ -2401,15 +2401,20 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 			line := fmt.Sprintf("  %s %s %s  %s", frame, m.Avatar, m.Name, SpinnerStyle.Render("reviewing..."))
 			content = append(content, line)
 		case "done":
-			verdictIcon := "✅"
-			switch m.Verdict {
-			case "conditional":
-				verdictIcon = "⚠️"
-			case "reject":
-				verdictIcon = "❌"
+			if m.Verdict != "" {
+				verdictIcon := "✅"
+				switch m.Verdict {
+				case "conditional":
+					verdictIcon = "⚠️"
+				case "reject":
+					verdictIcon = "❌"
+				}
+				line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
+				content = append(content, SpinnerDoneStyle.Render(line))
+			} else {
+				line := fmt.Sprintf("  ✓ %s %s", m.Avatar, m.Name)
+				content = append(content, SpinnerDoneStyle.Render(line))
 			}
-			line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
-			content = append(content, SpinnerDoneStyle.Render(line))
 		case "error":
 			line := fmt.Sprintf("  ✗ %s %s  ❌ error", m.Avatar, m.Name)
 			content = append(content, ErrorStyle.Render(line))
@@ -3014,6 +3019,152 @@ func wrapLine(line string, width int) []string {
 			runes = runes[1:]
 		}
 	}
+	return lines
+}
+
+// isSGR checks whether an ANSI escape sequence is an SGR (Select Graphic
+// Rendition) sequence, i.e. it sets text style attributes like colors.
+// SGR sequences match the pattern \x1b[...m where ... is one or more
+// semicolon-separated numbers, or empty for reset.
+func isSGR(seq string) bool {
+	if len(seq) < 4 || seq[len(seq)-1] != 'm' {
+		return false
+	}
+	params := seq[2 : len(seq)-1]
+	if params == "" {
+		return true // \x1b[m is SGR reset
+	}
+	for _, c := range params {
+		if (c < '0' || c > '9') && c != ';' {
+			return false
+		}
+	}
+	return true
+}
+
+// wrapLineAnsi wraps a line that may contain ANSI escape sequences to fit
+// within the given visual width. It preserves all escape sequences intact,
+// re-emits active SGR sequences at the start of continuation lines, and
+// emits SGR reset at the end of each wrapped line to prevent color bleeding.
+//
+// Word-wrap: prefers breaking at spaces (U+0020, U+3000). Falls back to
+// hard-break at width boundary when no space is found within the segment.
+func wrapLineAnsi(line string, width int) []string {
+	if width <= 0 || line == "" {
+		return []string{line}
+	}
+	if lipgloss.Width(line) <= width {
+		return []string{line}
+	}
+
+	var lines []string
+	var curLine strings.Builder
+	var activeSGRs []string
+	visualCol := 0
+	lastSpaceIdx := -1
+	curLineSinceLastSpace := 0
+
+	flushLine := func() {
+		s := curLine.String()
+		if len(activeSGRs) > 0 {
+			s += "\x1b[0m"
+		}
+		lines = append(lines, s)
+		curLine.Reset()
+		for _, sgr := range activeSGRs {
+			curLine.WriteString(sgr)
+		}
+		visualCol = 0
+		lastSpaceIdx = -1
+		curLineSinceLastSpace = 0
+	}
+
+	runes := []rune(line)
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
+
+		if r == '\x1b' {
+			escBuf := strings.Builder{}
+			escBuf.WriteRune(r)
+			i++
+			for i < len(runes) {
+				r2 := runes[i]
+				escBuf.WriteRune(r2)
+				i++
+				if (r2 >= 'a' && r2 <= 'z') || (r2 >= 'A' && r2 <= 'Z') {
+					break
+				}
+			}
+			seq := escBuf.String()
+			curLine.WriteString(seq)
+
+			if isSGR(seq) {
+				if seq == "\x1b[0m" || seq == "\x1b[m" {
+					activeSGRs = nil
+				} else {
+					activeSGRs = append(activeSGRs, seq)
+				}
+			}
+			continue
+		}
+
+		rw := lipgloss.Width(string(r))
+
+		if visualCol+rw > width {
+			if lastSpaceIdx >= 0 {
+				curLineStr := curLine.String()
+				trimmed := curLineStr[:lastSpaceIdx]
+				overflow := curLineStr[lastSpaceIdx:]
+				if len(overflow) > 0 {
+					if overflow[0] == ' ' {
+						overflow = overflow[1:]
+					} else if strings.HasPrefix(overflow, "　") {
+						overflow = overflow[len("　"):]
+					}
+				}
+				curLine.Reset()
+				curLine.WriteString(trimmed)
+				flushLine()
+				curLine.WriteString(overflow)
+				curLine.WriteRune(r)
+				visualCol = lipgloss.Width(stripAnsi(overflow)) + rw
+				lastSpaceIdx = -1
+				curLineSinceLastSpace = visualCol
+				i++
+				continue
+			}
+			flushLine()
+			curLine.WriteRune(r)
+			visualCol = rw
+			if r == ' ' || r == '　' {
+				lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+				curLineSinceLastSpace = 0
+			} else {
+				curLineSinceLastSpace = rw
+			}
+			i++
+			continue
+		}
+
+		curLine.WriteRune(r)
+		visualCol += rw
+		curLineSinceLastSpace += rw
+		if r == ' ' || r == '　' {
+			lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+			curLineSinceLastSpace = 0
+		}
+		i++
+	}
+
+	if curLine.Len() > 0 {
+		if len(lines) == 0 {
+			lines = append(lines, line)
+		} else {
+			lines = append(lines, curLine.String())
+		}
+	}
+
 	return lines
 }
 
