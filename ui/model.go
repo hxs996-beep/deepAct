@@ -2367,7 +2367,12 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return strings.Split(rendered, "\n")
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, width)...)
+	}
+	return result
 }
 
 // agentIcon returns a default emoji for known agent types.
@@ -2421,7 +2426,12 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return strings.Split(rendered, "\n")
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, width)...)
+	}
+	return result
 }
 
 // tddPhaseMeta maps phase names to their display metadata.
@@ -2494,7 +2504,12 @@ func renderTDDStatus(stages []TDDStage, maxWidth int) []string {
 	}
 
 	rendered := ExecBlockStyle.Width(maxWidth).Render(strings.Join(content, "\n"))
-	return strings.Split(rendered, "\n")
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, maxWidth)...)
+	}
+	return result
 }
 
 // renderOverlayStatus renders both TDD phases and member progress in a single
