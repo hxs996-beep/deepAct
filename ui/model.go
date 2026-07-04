@@ -2982,6 +2982,10 @@ func wrapLine(line string, width int) []string {
 	if lipgloss.Width(line) <= width {
 		return []string{line}
 	}
+	// Delegate ANSI-containing lines to wrapLineAnsi for safe wrapping
+	if strings.Contains(line, "\x1b[") {
+		return wrapLineAnsi(line, width)
+	}
 	runes := []rune(line)
 	var lines []string
 	for len(runes) > 0 {
