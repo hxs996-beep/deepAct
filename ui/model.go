@@ -3180,14 +3180,8 @@ func wrapLines(lines []string, width int) []string {
 	for _, line := range lines {
 		if lipgloss.Width(line) <= width {
 			result = append(result, line)
-			continue
-		}
-		// Lines with ANSI codes cannot be safely word-wrapped (would corrupt
-		// escape sequences). Pass them through — View() handles width enforcement.
-		if strings.Contains(line, "\033[") {
-			result = append(result, line)
 		} else {
-			result = append(result, wrapText(line, width)...)
+			result = append(result, wrapLine(line, width)...)
 		}
 	}
 	return result
