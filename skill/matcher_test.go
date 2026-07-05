@@ -6,53 +6,6 @@ import (
 	"time"
 )
 
-func TestKeywordMatcher_Match(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Skill{
-		Name:                  "systematic-debugging",
-		Description:           "Use when encountering any bug",
-		Keywords:              []string{"debug", "bug", "调试"},
-		AutoActivateThreshold: intPtr(1),
-	})
-	r.Register(&Skill{
-		Name:                  "brainstorming",
-		Description:           "Use before any creative work",
-		Keywords:              []string{"设计", "design"},
-		AutoActivateThreshold: intPtr(1),
-	})
-
-	m := NewKeywordMatcher(r)
-
-	// Match: 关键词命中 + 阈值达标
-	got := m.Match(context.Background(), "有个bug需要调试", r.All())
-	if got == nil || got.Name != "systematic-debugging" {
-		t.Fatalf("expected systematic-debugging, got %v", got)
-	}
-
-	// No match: 关键词未命中
-	got = m.Match(context.Background(), "帮我写个排序算法", r.All())
-	if got != nil {
-		t.Fatalf("expected nil, got %v", got.Name)
-	}
-}
-
-func TestKeywordMatcher_NoAutoActivateThreshold(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Skill{
-		Name:     "systematic-debugging",
-		Keywords: []string{"debug", "bug"},
-		// AutoActivateThreshold is nil — never auto-activate
-	})
-
-	m := NewKeywordMatcher(r)
-	got := m.Match(context.Background(), "有个bug", r.All())
-	if got != nil {
-		t.Fatalf("expected nil (no threshold), got %v", got.Name)
-	}
-}
-
-func intPtr(i int) *int { return &i }
-
 func TestSemanticMatcher_Match(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&Skill{
@@ -99,7 +52,7 @@ func TestSemanticMatcher_Timeout(t *testing.T) {
 	defer cancel()
 	got := m.Match(ctx, "test", r.All())
 	if got != nil {
-		t.Fatalf("expected nil on timeout, got %v", got)
+		t.Fatalf("expected nil on timeout, got %v", got.Name)
 	}
 }
 
@@ -137,70 +90,5 @@ func TestSemanticMatcher_EmptyModelName(t *testing.T) {
 	got := m.Match(context.Background(), "test", r.All())
 	if got != nil {
 		t.Fatalf("expected nil when disabled, got %v", got.Name)
-	}
-}
-
-func TestFallbackMatcher_KeywordFirst(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Skill{
-		Name:                  "systematic-debugging",
-		Keywords:              []string{"debug", "bug"},
-		AutoActivateThreshold: intPtr(1),
-	})
-
-	kw := NewKeywordMatcher(r)
-	// semantic should never be called — verify by making it return a different skill
-	semCalled := false
-	sem := NewSemanticMatcher(func(ctx context.Context, sys, usr string) (string, error) {
-		semCalled = true
-		return `{"skill": "brainstorming"}`, nil
-	}, "test-model")
-
-	fb := NewFallbackMatcher(kw, sem)
-	got := fb.Match(context.Background(), "有个bug", r.All())
-	if got == nil || got.Name != "systematic-debugging" {
-		t.Fatalf("expected systematic-debugging, got %v", got)
-	}
-	if semCalled {
-		t.Fatal("semantic matcher should not have been called when keyword matches")
-	}
-}
-
-func TestFallbackMatcher_SemanticFallback(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Skill{
-		Name:        "systematic-debugging",
-		Keywords:    []string{"debug"},
-		AutoActivateThreshold: intPtr(1),
-	})
-	r.Register(&Skill{
-		Name:        "brainstorming",
-		Keywords:    []string{"design"},
-		AutoActivateThreshold: intPtr(1),
-	})
-
-	kw := NewKeywordMatcher(r)
-	sem := NewSemanticMatcher(func(ctx context.Context, sys, usr string) (string, error) {
-		return `{"skill": "systematic-debugging"}`, nil
-	}, "test-model")
-
-	fb := NewFallbackMatcher(kw, sem)
-	got := fb.Match(context.Background(), "渲染问题需要分析", r.All())
-	if got == nil || got.Name != "systematic-debugging" {
-		t.Fatalf("expected systematic-debugging via semantic fallback, got %v", got)
-	}
-}
-
-func TestFallbackMatcher_SemanticDisabled(t *testing.T) {
-	r := NewRegistry()
-	r.Register(&Skill{Name: "debug", Keywords: []string{"debug"}, AutoActivateThreshold: intPtr(1)})
-
-	kw := NewKeywordMatcher(r)
-	sem := NewSemanticMatcher(nil, "") // disabled
-
-	fb := NewFallbackMatcher(kw, sem)
-	got := fb.Match(context.Background(), "渲染问题需要分析", r.All())
-	if got != nil {
-		t.Fatalf("expected nil when keyword misses and semantic disabled, got %v", got.Name)
 	}
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -304,6 +305,76 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 	}
 	if !strings.Contains(resp.Summary, "评分") {
 		t.Errorf("verdict prompt should contain scores")
+	}
+}
+
+func TestLoadMemberFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	memberPath := tmpDir + "/perf.toml"
+	content := `
+id = "perf-freak"
+name = "性能狂"
+avatar = "⚡"
+stance = "极致性能优先"
+prompt = "你是一个性能偏执狂"
+`
+	if err := os.WriteFile(memberPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadMemberFromFile(memberPath)
+	if err != nil {
+		t.Fatalf("loadMemberFromFile: %v", err)
+	}
+	if m.ID != "perf-freak" {
+		t.Errorf("ID = %q, want perf-freak", m.ID)
+	}
+	if m.Name != "性能狂" {
+		t.Errorf("Name = %q", m.Name)
+	}
+	if m.Avatar != "⚡" {
+		t.Errorf("Avatar = %q", m.Avatar)
+	}
+	if m.Prompt != "你是一个性能偏执狂" {
+		t.Errorf("Prompt = %q", m.Prompt)
+	}
+}
+
+func TestLoadMemberFromFile_MissingID(t *testing.T) {
+	tmpDir := t.TempDir()
+	memberPath := tmpDir + "/bad.toml"
+	if err := os.WriteFile(memberPath, []byte(`name = "no id"`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadMemberFromFile(memberPath)
+	if err == nil {
+		t.Fatal("expected error for missing id")
+	}
+}
+
+func TestLoadMemberFromFile_NotFound(t *testing.T) {
+	_, err := loadMemberFromFile("/nonexistent/path.toml")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestResolveMembers_Priority(t *testing.T) {
+	// Verify resolveMembers returns members in the requested order
+	result := resolveMembers([]string{"defender", "radical"}, DefaultDebateMembers)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(result))
+	}
+	if result[0].ID != "defender" {
+		t.Errorf("first member = %q, want defender", result[0].ID)
+	}
+	if result[1].ID != "radical" {
+		t.Errorf("second member = %q, want radical", result[1].ID)
+	}
+
+	// Unknown IDs are silently skipped
+	result = resolveMembers([]string{"nonexistent"}, DefaultDebateMembers)
+	if len(result) != 0 {
+		t.Errorf("expected 0 members for unknown ID, got %d", len(result))
 	}
 }
 

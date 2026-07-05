@@ -8,31 +8,25 @@ import (
 	"strings"
 )
 
-//go:embed en/system.md en/examples.md en/sub_agent.md
 //go:embed zh/system.md zh/examples.md zh/sub_agent.md
 var promptFS embed.FS
 
-// PromptSet holds all prompt components for a single language.
+// PromptSet holds all prompt components.
 type PromptSet struct {
-	System    string
-	Examples  string
-	SubAgent  string
+	System   string
+	Examples string
+	SubAgent string
 }
 
-// Get returns the prompt set for the given user language.
-// If userLang is "中文", returns the Chinese set; otherwise returns English.
-func Get(userLang string) PromptSet {
-	if userLang == "中文" {
-		return PromptSet{
-			System:   read("zh/system.md"),
-			Examples: read("zh/examples.md"),
-			SubAgent: read("zh/sub_agent.md"),
-		}
-	}
+// Get returns the single canonical (Chinese) prompt set.
+// The system prompt instructs the model to respond in the user's language,
+// so one prompt set suffices regardless of session language — no need to
+// maintain parallel zh/en prompt sets.
+func Get() PromptSet {
 	return PromptSet{
-		System:   read("en/system.md"),
-		Examples: read("en/examples.md"),
-		SubAgent: read("en/sub_agent.md"),
+		System:   read("zh/system.md"),
+		Examples: read("zh/examples.md"),
+		SubAgent: read("zh/sub_agent.md"),
 	}
 }
 

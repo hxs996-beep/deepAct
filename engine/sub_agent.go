@@ -140,6 +140,26 @@ func (r *SubAgentRunner) RunWithPrompt(ctx context.Context, input Handoff, extra
 // extraPrompt is additional system-level instructions injected for specialist agents.
 // maxIterations caps the number of LLM turns for this agent.
 // modelOverride, if non-empty, overrides the runner's default model for this run.
+// subAgentStreamer guards sub-agent stream_delta emission. Sub-agents use
+// non-streaming Complete, so resp.Message.Content is the full response text.
+// Emitting it as a stream_delta on every runLoop iteration causes the UI to
+// accumulate duplicate blocks (m.streaming += ...), producing repeated text
+// and blank-line gaps. maybeEmit emits only the first non-empty content; the
+// final answer is still surfaced by the main engine's Summary at run end.
+type subAgentStreamer struct {
+	streamed bool
+}
+
+// maybeEmit emits content as a stream_delta the first time it is called with
+// non-empty content and a non-nil onProgress; subsequent calls are no-ops.
+func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content string) {
+	if s.streamed || content == "" || onProgress == nil {
+		return
+	}
+	onProgress(ProgressEvent{Type: "stream_delta", Name: agentName, Detail: content})
+	s.streamed = true
+}
+
 func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
 	if input.Depth > maxSubAgentDepth {
 		return &HandoffResult{
@@ -178,7 +198,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 	}
 
-	filteredTools := r.filterTools(input.Tools)
+	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
 
 	modelName := r.modelName
 	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
@@ -202,6 +222,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	lastOpKey := ""
 	sameOpCount := 0
 	maxSameOp := 5
+	streamer := subAgentStreamer{}
 	for iter := 0; iter < maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
@@ -286,8 +307,10 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			} else if resp.Message.Content != "" {
 				preview := firstLine(resp.Message.Content, 60)
 				r.onProgress(ProgressEvent{Type: "thinking", Name: agentName, Detail: fmt.Sprintf("%s: %s", agentName, preview)})
-				// Stream full content for progressive display
-				r.onProgress(ProgressEvent{Type: "stream_delta", Name: agentName, Detail: resp.Message.Content})
+				// Stream full content for progressive display -- but only once
+				// per runLoop. Subsequent text-only rounds re-emit the same
+				// full body; without this guard the UI accumulates duplicates.
+				streamer.maybeEmit(r.onProgress, agentName, resp.Message.Content)
 			}
 		}
 		totalUsage.PromptTokens += resp.Usage.PromptTokens
@@ -480,14 +503,14 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 // Combines the main system prompt (rules, examples, language pack) with the sub-agent role suffix.
 // Identical across every sub-agent call in the session → enables prefix cache hits.
 func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
-	prompts := promptset.Get(userLang)
+	prompts := promptset.Get()
 	langPack := r.langPackEn
 	if userLang == "中文" {
 		langPack = r.langPackZh
 	}
 	base := prompts.System + "\n\n" + prompts.Examples
 	if langPack != "" {
-		base += "\n\n# Language Pack\n" + langPack
+		base += "\n\n" + pickPrompt(userLang == "中文", "# Language Pack\n", "# 语言包\n") + langPack
 	}
 	return base + "\n\n" + prompts.SubAgent
 }
@@ -527,10 +550,11 @@ func (r *SubAgentRunner) buildVariablePrompt(input Handoff, extraPrompt string) 
 
 // filterTools returns a tool spec list filtered to only the allowed tools.
 // If allowList is empty, all tools are allowed.
-func (r *SubAgentRunner) filterTools(allowList []string) []ModelTool {
+// userLang controls the language of the handoff tool description ("中文" = Chinese).
+func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
 	all := r.tools.Specs()
 	// Always include the handoff tool
-	result := []ModelTool{handoffToolSpec()}
+	result := []ModelTool{handoffToolSpec(zhFromLang(userLang))}
 
 	if len(allowList) == 0 {
 		return append(result, all...)

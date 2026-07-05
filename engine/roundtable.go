@@ -3,8 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
+
+	"github.com/BurntSushi/toml"
 )
 
 // RoundtableMember defines a single reviewer's identity and stance.
@@ -114,6 +117,8 @@ func NewRoundtableHall(e *Engine) *RoundtableHall {
 }
 
 // handleDebateArena orchestrates the full 4-round debate arena.
+// It only executes rounds that haven't been completed yet (safe to re-enter
+// after a partial failure).
 func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse, error) {
 	state := h.engine.state
 	if state.Roundtable == nil {
@@ -126,39 +131,41 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 	if len(members) == 0 {
 		members = DefaultDebateMembers
 	}
-
-	// Resolve members from config if TeamMembers is set
-	if len(h.engine.config.TeamMembers) > 0 {
-		resolved := resolveMembers(h.engine.config.TeamMembers, DefaultDebateMembers)
-		if len(resolved) > 0 {
-			members = resolved
-		}
-	}
 	state.Roundtable.Members = members
 
+	phase := state.Roundtable.Phase
+
 	// Round 1: Proposal — each member proposes independently
-	if err := h.runDebateRound(ctx, DebateProposal, goal, members, zh); err != nil {
-		return nil, fmt.Errorf("proposal round: %w", err)
+	if phase <= RoundtableProposal {
+		if err := h.runDebateRound(ctx, DebateProposal, goal, members, zh); err != nil {
+			return nil, fmt.Errorf("proposal round: %w", err)
+		}
+		state.Roundtable.Phase = RoundtableChallenge
 	}
-	state.Roundtable.Phase = RoundtableChallenge
 
 	// Round 2: Challenge — each member challenges others' proposals
-	if err := h.runDebateRound(ctx, DebateChallenge, goal, members, zh); err != nil {
-		return nil, fmt.Errorf("challenge round: %w", err)
+	if state.Roundtable.Phase <= RoundtableChallenge {
+		if err := h.runDebateRound(ctx, DebateChallenge, goal, members, zh); err != nil {
+			return nil, fmt.Errorf("challenge round: %w", err)
+		}
+		state.Roundtable.Phase = RoundtableRebuttal
 	}
-	state.Roundtable.Phase = RoundtableRebuttal
 
 	// Round 3: Rebuttal — each member responds to challenges against them
-	if err := h.runDebateRound(ctx, DebateRebuttal, goal, members, zh); err != nil {
-		return nil, fmt.Errorf("rebuttal round: %w", err)
+	if state.Roundtable.Phase <= RoundtableRebuttal {
+		if err := h.runDebateRound(ctx, DebateRebuttal, goal, members, zh); err != nil {
+			return nil, fmt.Errorf("rebuttal round: %w", err)
+		}
+		state.Roundtable.Phase = RoundtableFinal
 	}
-	state.Roundtable.Phase = RoundtableFinal
 
 	// Round 4: Final — each member summarizes final position with scores
-	if err := h.runDebateRound(ctx, DebateFinal, goal, members, zh); err != nil {
-		return nil, fmt.Errorf("final round: %w", err)
+	if state.Roundtable.Phase <= RoundtableFinal {
+		if err := h.runDebateRound(ctx, DebateFinal, goal, members, zh); err != nil {
+			return nil, fmt.Errorf("final round: %w", err)
+		}
+		state.Roundtable.Phase = RoundtableAwaitingVerdict
 	}
-	state.Roundtable.Phase = RoundtableAwaitingVerdict
 
 	return h.buildVerdictPrompt(goal, members, zh), nil
 }
@@ -426,6 +433,51 @@ func resolveMembers(ids []string, defaults []RoundtableMember) []RoundtableMembe
 		}
 	}
 	return result
+}
+
+// memberFileTOML mirrors the structure of a member definition TOML file.
+// Supports the format documented in the debate arena design:
+//
+//	id = "perf-freak"
+//	name = "性能狂"
+//	avatar = "⚡"
+//	stance = "..."
+//	prompt = """..."""
+type memberFileTOML struct {
+	ID       string `toml:"id"`
+	Name     string `toml:"name"`
+	NameEn   string `toml:"name_en"`
+	Avatar   string `toml:"avatar"`
+	Stance   string `toml:"stance"`
+	StanceEn string `toml:"stance_en"`
+	Prompt   string `toml:"prompt"`
+	PromptEn string `toml:"prompt_en"`
+}
+
+// loadMemberFromFile reads a TOML member definition file and returns a
+// RoundtableMember. Returns an error if the file cannot be read or parsed.
+func loadMemberFromFile(path string) (*RoundtableMember, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read member file %s: %w", path, err)
+	}
+	var mf memberFileTOML
+	if err := toml.Unmarshal(data, &mf); err != nil {
+		return nil, fmt.Errorf("parse member file %s: %w", path, err)
+	}
+	if mf.ID == "" {
+		return nil, fmt.Errorf("member file %s: missing required field 'id'", path)
+	}
+	return &RoundtableMember{
+		ID:       mf.ID,
+		Name:     mf.Name,
+		NameEn:   mf.NameEn,
+		Avatar:   mf.Avatar,
+		Stance:   mf.Stance,
+		StanceEn: mf.StanceEn,
+		Prompt:   mf.Prompt,
+		PromptEn: mf.PromptEn,
+	}, nil
 }
 
 // buildVerdictPrompt generates the verdict prompt shown to the user after the debate.

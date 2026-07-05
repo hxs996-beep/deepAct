@@ -133,19 +133,19 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
-// buildSkillsBlock renders a static skills hint for the stable zone.
-// Each skill is shown as "name: description" so the model knows what each does.
-// Dynamic skill suggestions (matched by keyword per-turn) are injected
-// separately via pendingPinnedMessages in the engine loop.
+// buildSkillsBlock renders a static skills list for the stable zone.
+// Each skill is shown as "name: description". The model uses semantic
+// understanding (not keyword matching) to decide when to call activate_skill.
+// Engine-level auto-activation is handled separately by SemanticMatcher.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. ")
-	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state. ")
-	b.WriteString("Relevant skills for your task are suggested below.\n\n")
+	b.WriteString("BLOCKING REQUIREMENT: when the user's request semantically matches a skill below, call the `activate_skill` tool to activate it BEFORE generating any other response about the task. Do not merely mention a skill by name — invoke it. If no skill matches, respond normally.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill explicitly. ")
+	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state.\n\n")
 	for _, s := range all {
 		b.WriteString("- **")
 		b.WriteString(s.Name)
@@ -157,13 +157,6 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		}
 		b.WriteString("\n")
 
-		// Keywords — what triggers this skill
-		if len(s.Keywords) > 0 {
-			b.WriteString("  Keywords: ")
-			b.WriteString(strings.Join(s.Keywords, ", "))
-			b.WriteString("\n")
-		}
-
 		// Next skills in chain — LLM uses this to know what to activate next
 		if len(s.NextSkills) > 0 && !(len(s.NextSkills) == 1 && s.NextSkills[0] == "") {
 			b.WriteString("  → Next: ")
@@ -171,10 +164,6 @@ func buildSkillsBlock(all []*skill.Skill) string {
 			b.WriteString("\n")
 		}
 
-		// Auto-activation threshold
-		if s.AutoActivateThreshold != nil {
-			b.WriteString(fmt.Sprintf("  Auto-activate: ≥%d keyword matches\n", *s.AutoActivateThreshold))
-		}
 
 		b.WriteString("\n")
 	}
@@ -287,42 +276,44 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		routing.FlashModelName = config.FlashModelName
 	}
 
-	// Build skill matcher: keyword-first with LLM semantic fallback.
-	// The semantic matcher wraps the model client for flash-model calls.
-	kwMatcher := skill.NewKeywordMatcher(skillReg)
-	var semMatcher *skill.SemanticMatcher
-	if config.FlashModelName != "" && client != nil {
-		matchFn := func(ctx context.Context, systemMsg, userMsg string) (string, error) {
-			req := engine.ModelRequest{
-				Model: config.FlashModelName,
-				Messages: []engine.ModelMessage{
-					{Role: "system", Content: systemMsg},
-					{Role: "user", Content: userMsg},
-				},
-				Temperature: 0,
-				MaxTokens:   64,
-			}
-			resp, err := client.Complete(ctx, req)
-			if err != nil {
-				return "", err
-			}
-			return resp.Message.Content, nil
+	// Build skill matcher: semantic-only via the primary model.
+	// Skill matching is a first-class feature that must work whenever the
+	// primary model is configured — it must NOT depend on a separate flash
+	// model setting (which may be unset, misconfigured, or too slow).
+	// The user message + all skill descriptions are sent to the model,
+	// which returns the ONE most relevant skill (or null). Keyword substring
+	// matching was removed — it produced rampant false positives (e.g. "PR"
+	// lowercased to "pr" matched "prefix"). MatchFunc wraps client.Complete so
+	// the skill package stays free of any engine import.
+	matchFn := func(ctx context.Context, systemMsg, userMsg string) (string, error) {
+		req := engine.ModelRequest{
+			Model: config.ModelName,
+			Messages: []engine.ModelMessage{
+				{Role: "system", Content: systemMsg},
+				{Role: "user", Content: userMsg},
+			},
+			Temperature: 0,
+			JsonMode:    true,
 		}
-		semMatcher = skill.NewSemanticMatcher(matchFn, config.FlashModelName)
+		resp, err := client.Complete(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("skill semantic match: %w", err)
+		}
+		return resp.Message.Content, nil
 	}
-	skillMatcher := skill.NewFallbackMatcher(kwMatcher, semMatcher)
+	skillMatcher := skill.NewSemanticMatcher(matchFn, config.ModelName)
 
 	deps := engine.EngineDeps{
-		Model:      client,
-		Tools:      toolExecutor,
-		Policy:     checker,
-		Context:    contextAssembler,
-		Compressor: compressor,
-		Session:    store,
-		Agents:     agentReg,
-		Skills:     skillReg,
+		Model:        client,
+		Tools:        toolExecutor,
+		Policy:       checker,
+		Context:      contextAssembler,
+		Compressor:   compressor,
+		Session:      store,
+		Agents:       agentReg,
+		Skills:       skillReg,
 		SkillMatcher: skillMatcher,
-		Router:     routing,
+		Router:       routing,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown
 	mcpClosers := make([]io.Closer, len(mcpManagers))
@@ -374,7 +365,6 @@ func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.Engin
 	return llm.NewEngineClient(client), nil
 }
 
-
 func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewReadTool())
 	registry.Register(builtin.NewReadMultiTool())
@@ -404,7 +394,7 @@ func defaultEngineConfig() engine.EngineConfig {
 			PlanningThresholdChars: 120,
 			AutoConfirmScope:       false,
 			// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-			RiskThreshold:          0.55,
+			RiskThreshold: 0.55,
 			Pricing: engine.PricingConfig{
 				Models: map[string]engine.ModelPricing{
 					"deepseek/deepseek-chat": {
@@ -433,7 +423,7 @@ func defaultEngineConfig() engine.EngineConfig {
 		PlanningThresholdChars: 120,
 		AutoConfirmScope:       false,
 		// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-		RiskThreshold:          0.55,
+		RiskThreshold: 0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{
 				"deepseek-v4-flash": {

@@ -93,7 +93,7 @@ type SubAgentStatus struct {
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/team", Args: "<需求> [--members id1,id2] [--add path.toml]", Description: "开启多角色辩论场，结构化辩论后由你裁决"},
+	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
 type Model struct {
@@ -144,10 +144,6 @@ type Model struct {
 	autoScrollDir     int      // auto-scroll direction during drag: -1=up, 0=none, +1=down
 	lastMouseX        int      // last mouse X during drag (screen coords, for auto-scroll)
 	lastMouseY        int      // last mouse Y during drag (screen coords, for auto-scroll)
-
-	// Diff hunk collapse viewer
-	diffViewerActive bool    // full-screen hunk viewer is open
-	diffViewerHunk   hunkHit // which hunk is shown full-screen
 
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
@@ -240,97 +236,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
-		// Full-screen diff viewer: support wheel scroll + drag-to-select + copy.
-		if m.diffViewerActive {
-			// Mouse motion during drag: extend selection in diff viewer.
-			if msg.Action == tea.MouseActionMotion {
-				if m.selection.Active {
-					sel := m.selection
-					sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
-					m.lastMouseX = msg.X
-					m.lastMouseY = msg.Y
-					scrollEdge := 2
-					newDir := 0
-					if msg.Y < scrollEdge {
-						newDir = -1
-					} else if msg.Y >= sel.BodyHeight-scrollEdge {
-						newDir = 1
-					}
-					m.selection = sel
-					if newDir != 0 && m.autoScrollDir == 0 {
-						m.autoScrollDir = newDir
-						return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-							return autoScrollTickMsg{}
-						})
-					}
-					m.autoScrollDir = newDir
-				}
-				return m, m.repaintCmd()
-			}
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
-				m.scrollOffset += m.height / 3
-				return m, m.repaintCmd()
-			case tea.MouseButtonWheelDown:
-				m.scrollOffset -= m.height / 3
-				if m.scrollOffset < 0 {
-					m.scrollOffset = 0
-				}
-				return m, m.repaintCmd()
-			case tea.MouseButtonLeft:
-				if msg.Action == tea.MouseActionPress {
-					totalLines, bodyHeight, rendered, plain := m.computeDiffViewerLayout()
-					maxScroll := 0
-					if totalLines > bodyHeight {
-						maxScroll = totalLines - bodyHeight
-					}
-					scroll := m.scrollOffset
-					if scroll > maxScroll {
-						scroll = maxScroll
-					}
-					if scroll < 0 {
-						scroll = 0
-					}
-					pt := screenToLine(msg.Y, msg.X, scroll, bodyHeight, totalLines)
-					m.selection = SelectionState{
-						Active:     true,
-						Done:       false,
-						Start:      pt,
-						End:        pt,
-						Rendered:   rendered,
-						Plain:      plain,
-						BodyHeight: bodyHeight,
-						Scroll:     scroll,
-					}
-					m.autoScrollDir = 0
-					m.lastMouseX = msg.X
-					m.lastMouseY = msg.Y
-					return m, m.repaintCmd()
-				} else if msg.Action == tea.MouseActionRelease {
-					if m.selection.Active {
-						sel := m.selection
-						sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
-						sel.Active = false
-						m.autoScrollDir = 0
-						if sel.Start == sel.End {
-							m.selection = SelectionState{}
-						} else {
-							sel.Done = true
-							m.selection = sel
-							_, err := copySelection(nil, m.selection)
-							if err != nil {
-								m.clipboardError = err.Error()
-							} else {
-								m.clipboardError = ""
-							}
-							m.clipboardFeedback = time.Now()
-						}
-					}
-					return m, m.repaintCmd()
-				}
-			}
-			return m, nil
-		}
 		// Handle motion events (drag) — they have Button=MouseButtonNone
 		if msg.Action == tea.MouseActionMotion {
 			if m.selection.Active {
@@ -422,19 +327,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					sel.Active = false
 					m.autoScrollDir = 0
 					if sel.Start == sel.End {
-						// Single click: if it lands on a hunk summary line, open
-						// the full-screen diff viewer for that hunk.
-						for _, e := range m.buildHunkLineMap(sel.Plain) {
-							if e.lineIdx == sel.End.Line {
-								hit := e.hit
-								hit.msgIdx = e.msgIdx
-								m.diffViewerActive = true
-								m.diffViewerHunk = hit
-								m.scrollOffset = 0
-								m.selection = SelectionState{}
-								return m, m.repaintCmd()
-							}
-						}
 						m.selection = SelectionState{}
 					} else {
 						sel.Done = true
@@ -801,21 +693,6 @@ func (m Model) computeLayoutFull() (totalLines, bodyHeight int, rendered, plain 
 	return len(plain), bh, rendered, plain
 }
 
-// computeDiffViewerLayout returns the diff viewer's rendered content for
-// mouse coordinate mapping and selection snapshots.
-func (m Model) computeDiffViewerLayout() (totalLines, bodyHeight int, rendered, plain []string) {
-	bh := m.height - m.footerHeight()
-	if bh < 1 {
-		bh = 1
-	}
-	rendered = m.renderDiffViewer(m.renderBodyWidth())
-	plain = make([]string, len(rendered))
-	for i, l := range rendered {
-		plain[i] = stripAnsi(l)
-	}
-	return len(plain), bh, rendered, plain
-}
-
 // renderBodyWidth returns the content width used by renderBody.
 func (m Model) renderBodyWidth() int {
 	w := m.width - 1
@@ -884,54 +761,7 @@ func (m Model) View() string {
 	maxScroll := 0
 	scrollOff := 0
 	frozen := (m.selection.Active || m.selection.Done) && m.selection.Rendered != nil
-	if m.diffViewerActive {
-		// Full-screen diff viewer: render the selected hunk, scrollable.
-		// When a selection is active, show the frozen snapshot with highlight
-		// so the user sees exactly what they're dragging over.
-		if frozen {
-			sel := m.selection
-			lines = append([]string(nil), sel.Rendered...)
-			lines = m.applySelectionHighlight(lines)
-			total = len(lines)
-			scrollOff = sel.Scroll
-			if total > bodyHeight {
-				needScrollbar = true
-				maxScroll = total - bodyHeight
-				if scrollOff > maxScroll {
-					scrollOff = maxScroll
-				}
-				if scrollOff < 0 {
-					scrollOff = 0
-				}
-				end := total - scrollOff
-				start := end - bodyHeight
-				if start < 0 {
-					start = 0
-				}
-				lines = lines[start:end]
-			}
-		} else {
-			lines = m.renderDiffViewer(scrollContentWidth)
-		total = len(lines)
-		scrollOff = m.scrollOffset
-		if total > bodyHeight {
-			needScrollbar = true
-			maxScroll = total - bodyHeight
-			if scrollOff > maxScroll {
-				scrollOff = maxScroll
-			}
-			if scrollOff < 0 {
-				scrollOff = 0
-			}
-			end := total - scrollOff
-			start := end - bodyHeight
-			if start < 0 {
-				start = 0
-			}
-			lines = lines[start:end]
-		}
-		}
-	} else if frozen {
+	if frozen {
 		// Selection freeze: display the body snapshot captured at mouse-down
 		// so the highlight and copy target stay aligned with what the user
 		// clicked, even while streaming output appends lines and shifts the
@@ -1133,13 +963,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Esc: cancel if running; in ready state, mark as potential Alt+Enter
 	// prefix (macOS terminals send ESC byte before Enter when Option is held).
 	if msg.Type == tea.KeyEsc {
-		// Diff viewer: ESC exits to collapsed view first.
-		if m.diffViewerActive {
-			m.diffViewerActive = false
-			m.scrollOffset = 0
-			m.selection = SelectionState{}
-			return m, m.repaintCmd()
-		}
 		if m.state == stateRunning {
 			if m.engine != nil {
 				m.engine.Cancel()
@@ -2123,7 +1946,7 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
 	content = append(content, "")
-	hunkSeq := 0 // global 1-based hunk number across all files (matches hitTestHunk)
+	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range nodes {
 		status := ""
 		if node.Done {
@@ -2159,7 +1982,7 @@ func renderToolSummary(toolTree []ToolNode) string {
 	}
 	b.WriteString(fmt.Sprintf("● %d tools executed, %d files modified\n", len(toolTree), modified))
 
-	hunkSeq := 0 // global 1-based hunk number across all files (matches hitTestHunk)
+	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range toolTree {
 		icon := node.Icon
 		if icon == "" {
@@ -2180,100 +2003,6 @@ func renderToolSummary(toolTree []ToolNode) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-// diff styles cached for performance
-var (
-	diffDeleteStyle     lipgloss.Style
-	diffInsertStyle     lipgloss.Style
-	diffContextStyle    lipgloss.Style
-	diffHunkHeaderStyle lipgloss.Style
-	diffLineNumStyle    lipgloss.Style
-	diffStylesOnce      sync.Once
-)
-
-func initDiffStyles() {
-	diffDeleteStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("210")) // light red text, no background
-	diffInsertStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("114")) // light green text, no background
-	diffContextStyle = lipgloss.NewStyle()
-	diffHunkHeaderStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("178")) // yellow
-	diffLineNumStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")) // dim gray
-}
-
-// renderDiffHunkBlock renders a unified diff hunk as flat colored lines for block display.
-func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
-	diffStylesOnce.Do(initDiffStyles)
-
-	lines := strings.Split(hunkContent, "\n")
-	if len(lines) == 0 {
-		return nil
-	}
-	if maxWidth < 1 {
-		maxWidth = 80
-	}
-
-	var result []string
-	oldNum, newNum := 1, 1
-
-	for _, raw := range lines {
-		renderTruncatedDiffLine := func(styled string) string {
-			if w := ansi.StringWidth(styled); w > maxWidth {
-				return truncateVisual(styled, maxWidth-1) + "…"
-			}
-			return styled
-		}
-
-		hl := strings.TrimRight(raw, "\r")
-		if hl == "" {
-			result = append(result, "    "+diffContextStyle.Render(""))
-			continue
-		}
-		if strings.HasPrefix(hl, "@@") {
-			if parts := strings.Split(hl, " "); len(parts) >= 4 {
-				oldPart := strings.TrimPrefix(parts[1], "-")
-				newPart := strings.TrimPrefix(parts[2], "+")
-				oldStartStr := oldPart
-				newStartStr := newPart
-				if idx := strings.Index(oldPart, ","); idx > 0 {
-					oldStartStr = oldPart[:idx]
-				}
-				if idx := strings.Index(newPart, ","); idx > 0 {
-					newStartStr = newPart[:idx]
-				}
-				fmt.Sscanf(oldStartStr, "%d", &oldNum)
-				fmt.Sscanf(newStartStr, "%d", &newNum)
-			}
-			result = append(result, renderTruncatedDiffLine("    "+diffHunkHeaderStyle.Render(hl)))
-			continue
-		}
-
-		prefix := hl[0:1]
-		content := hl[1:]
-
-		switch prefix {
-		case "-":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
-			line := renderTruncatedDiffLine("    " + lineNum + diffDeleteStyle.Render(prefix+content))
-			result = append(result, line)
-			oldNum++
-		case "+":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
-			line := renderTruncatedDiffLine("    " + lineNum + diffInsertStyle.Render(prefix+content))
-			result = append(result, line)
-			newNum++
-		default:
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
-			line := renderTruncatedDiffLine("    " + lineNum + content)
-			result = append(result, line)
-			oldNum++
-			newNum++
-		}
-	}
-	return result
 }
 
 // isDiffContent checks if a string contains unified diff content.
@@ -2406,20 +2135,15 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 			line := fmt.Sprintf("  %s %s %s  %s", frame, m.Avatar, m.Name, SpinnerStyle.Render("reviewing..."))
 			content = append(content, line)
 		case "done":
-			if m.Verdict != "" {
-				verdictIcon := "✅"
-				switch m.Verdict {
-				case "conditional":
-					verdictIcon = "⚠️"
-				case "reject":
-					verdictIcon = "❌"
-				}
-				line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
-				content = append(content, SpinnerDoneStyle.Render(line))
-			} else {
-				line := fmt.Sprintf("  ✓ %s %s", m.Avatar, m.Name)
-				content = append(content, SpinnerDoneStyle.Render(line))
+			verdictIcon := "✅"
+			switch m.Verdict {
+			case "conditional":
+				verdictIcon = "⚠️"
+			case "reject":
+				verdictIcon = "❌"
 			}
+			line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
+			content = append(content, SpinnerDoneStyle.Render(line))
 		case "error":
 			line := fmt.Sprintf("  ✗ %s %s  ❌ error", m.Avatar, m.Name)
 			content = append(content, ErrorStyle.Render(line))
@@ -3046,7 +2770,7 @@ func wrapLine(line string, width int) []string {
 // SGR sequences match the pattern \x1b[...m where ... is one or more
 // semicolon-separated numbers, or empty for reset.
 func isSGR(seq string) bool {
-	if len(seq) < 4 || seq[len(seq)-1] != 'm' {
+	if len(seq) < 3 || seq[len(seq)-1] != 'm' {
 		return false
 	}
 	params := seq[2 : len(seq)-1]
@@ -3081,7 +2805,6 @@ func wrapLineAnsi(line string, width int) []string {
 	var activeSGRs []string
 	visualCol := 0
 	lastSpaceIdx := -1
-	curLineSinceLastSpace := 0
 
 	flushLine := func() {
 		s := curLine.String()
@@ -3095,7 +2818,6 @@ func wrapLineAnsi(line string, width int) []string {
 		}
 		visualCol = 0
 		lastSpaceIdx = -1
-		curLineSinceLastSpace = 0
 	}
 
 	runes := []rune(line)
@@ -3149,7 +2871,6 @@ func wrapLineAnsi(line string, width int) []string {
 				curLine.WriteRune(r)
 				visualCol = lipgloss.Width(stripAnsi(overflow)) + rw
 				lastSpaceIdx = -1
-				curLineSinceLastSpace = visualCol
 				i++
 				continue
 			}
@@ -3158,9 +2879,6 @@ func wrapLineAnsi(line string, width int) []string {
 			visualCol = rw
 			if r == ' ' || r == '　' {
 				lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
-				curLineSinceLastSpace = 0
-			} else {
-				curLineSinceLastSpace = rw
 			}
 			i++
 			continue
@@ -3168,10 +2886,8 @@ func wrapLineAnsi(line string, width int) []string {
 
 		curLine.WriteRune(r)
 		visualCol += rw
-		curLineSinceLastSpace += rw
 		if r == ' ' || r == '　' {
 			lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
-			curLineSinceLastSpace = 0
 		}
 		i++
 	}

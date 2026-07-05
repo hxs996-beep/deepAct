@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/deepact/deepact/skill"
 	dlog "github.com/deepact/deepact/internal/log"
+	"github.com/deepact/deepact/skill"
 )
 
 var loopLog = dlog.New("[loop] ")
@@ -28,37 +28,37 @@ const (
 )
 
 type EngineDeps struct {
-	Model       ModelClient
-	Tools       ToolExecutor
-	Policy      PolicyChecker
-	Context     ContextBuilder
-	Compressor  Compressor
-	Session     SessionStore
-	Agents      *AgentRegistry
+	Model        ModelClient
+	Tools        ToolExecutor
+	Policy       PolicyChecker
+	Context      ContextBuilder
+	Compressor   Compressor
+	Session      SessionStore
+	Agents       *AgentRegistry
 	Skills       *skill.Registry
 	SkillMatcher skill.SkillMatcher
 	Router       ModelRouter
-	MCPManagers []io.Closer // MCP server connections to close on shutdown
+	MCPManagers  []io.Closer // MCP server connections to close on shutdown
 }
 
 type Engine struct {
-	model      ModelClient
-	tools      ToolExecutor
-	policy     PolicyChecker
-	context    ContextBuilder
-	compressor Compressor
-	session    SessionStore
-	agents     *AgentRegistry
+	model        ModelClient
+	tools        ToolExecutor
+	policy       PolicyChecker
+	context      ContextBuilder
+	compressor   Compressor
+	session      SessionStore
+	agents       *AgentRegistry
 	skills       *skill.Registry
 	skillMatcher skill.SkillMatcher
 	router       ModelRouter
-	config     EngineConfig
-	state      *TaskState
-	history    []Message
-	guards     *GuardSystem
-	readLoop   *ReadLoopState
-	errorLoop  *ErrorLoopState
-	evalStore  EvalStore
+	config       EngineConfig
+	state        *TaskState
+	history      []Message
+	guards       *GuardSystem
+	readLoop     *ReadLoopState
+	errorLoop    *ErrorLoopState
+	evalStore    EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
 	// be appended at the END of the assembled messages array for the current
@@ -99,6 +99,12 @@ type Engine struct {
 	runUsageAccum    ModelUsage
 	usageMu          sync.Mutex // protects runUsageAccum from concurrent sub-agent goroutines
 	runToolCallCount int
+	// runStartHistoryLen is the index in e.history where the current Run()'s
+	// turn loop began. buildRunSummary only considers assistant messages at
+	// or after this index, so a stale narration from a prior run cannot leak
+	// into this run's summary when the model emits bare tool calls (empty
+	// Content) and never produces a final text body.
+	runStartHistoryLen int
 	runErrorCount    int
 
 	// isChinese is set once from the first user message in the session.
@@ -112,19 +118,19 @@ type Engine struct {
 // PendingEditPlan captures the agent's proposed changes before execution.
 // The agent's reasoning and planned edits are presented to the user for approval.
 type PendingEditPlan struct {
-	Reasoning string               // agent's explanation of what it understands
-	Edits     []PendingEditAction  // individual file changes proposed
-	Calls     []ToolCallRequest    // stored tool calls to execute on confirmation
-	State     *TaskState           // snapshot of task state at proposal time
+	Reasoning string              // agent's explanation of what it understands
+	Edits     []PendingEditAction // individual file changes proposed
+	Calls     []ToolCallRequest   // stored tool calls to execute on confirmation
+	State     *TaskState          // snapshot of task state at proposal time
 }
 
 // PendingEditAction describes a single proposed file change.
 type PendingEditAction struct {
-	Tool     string `json:"tool"`     // "edit" or "write"
-	Path     string `json:"path"`     // target file
-	Summary  string `json:"summary"`  // human-readable description of the change
-	OldText  string `json:"old,omitempty"`  // for edit: what will be replaced
-	NewText  string `json:"new,omitempty"`  // what will be written
+	Tool    string `json:"tool"`          // "edit" or "write"
+	Path    string `json:"path"`          // target file
+	Summary string `json:"summary"`       // human-readable description of the change
+	OldText string `json:"old,omitempty"` // for edit: what will be replaced
+	NewText string `json:"new,omitempty"` // what will be written
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
@@ -133,17 +139,17 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		loop:  NewLoopGuard(cfg.WorkDir, 6), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
-		model:      deps.Model,
-		tools:      deps.Tools,
-		policy:     deps.Policy,
-		context:    deps.Context,
-		compressor: deps.Compressor,
-		session:    deps.Session,
-		agents:     deps.Agents,
-		skills:       deps.Skills,
-		skillMatcher: deps.SkillMatcher,
-		router:       deps.Router,
-		config:     cfg,
+		model:           deps.Model,
+		tools:           deps.Tools,
+		policy:          deps.Policy,
+		context:         deps.Context,
+		compressor:      deps.Compressor,
+		session:         deps.Session,
+		agents:          deps.Agents,
+		skills:          deps.Skills,
+		skillMatcher:    deps.SkillMatcher,
+		router:          deps.Router,
+		config:          cfg,
 		state:           &TaskState{TaskID: cfg.SessionID},
 		history:         make([]Message, 0),
 		guards:          guard,
@@ -325,21 +331,18 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Skill matching: keyword-based auto-activation via SkillMatcher interface.
-	// When a matcher is wired (via cmd/run.go), it handles threshold checks and
-	// future semantic fallback. When nil, skill matching is disabled.
+	// Skill matching: semantic auto-activation via the SkillMatcher interface.
+	// The matcher (wired in cmd/run.go) sends the user message + all skill
+	// descriptions to the flash model and returns the one best-matching skill,
+	// or nil. When no matcher is wired, skill matching is disabled.
+	skillJustActivated := false
 	if e.state.ActiveSkillName == "" && e.skillMatcher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		matched := e.skillMatcher.Match(ctx, userMsg, e.skills.All())
 		cancel()
 		if matched != nil {
-			e.activateSkill(matched, "keyword match")
-		} else {
-			// Show keyword-based suggestions even if no auto-activation.
-			matches := e.skills.MatchTopSkillsWithScores(3, userMsg)
-			if len(matches) > 0 {
-				e.showSkillSuggestions(matches)
-			}
+			e.activateSkill(matched, "semantic match")
+			skillJustActivated = true
 		}
 	}
 
@@ -585,16 +588,22 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Detect user intent: analysis-only vs new-topic vs continue.
 	// Resets PlanConfirmed when the user starts a new topic or asks for
 	// analysis only, preventing edit-plan-guard bypass across Run() calls.
+	// When a skill was just auto-activated via keyword matching, the skill's
+	// methodology takes priority over analysis-only classification.
 	intent := e.detectUserIntent(userMsg)
 	switch intent {
 	case IntentAnalyze:
-		e.state.PlanConfirmed = false
-		constraint := "[ANALYSIS MODE] 用户要求仅进行分析，不要修改任何代码。你的任务仅限于：阅读代码、分析原因、解释行为。禁止：edit、write、或任何修改文件的操作。"
-		if !zh {
-			constraint = "[ANALYSIS MODE] The user asked for analysis only. Do NOT modify any code. Your task is limited to: reading code, analyzing causes, explaining behavior. FORBIDDEN: edit, write, or any file modification operations."
+		if skillJustActivated {
+			loopLog.Printf("intent: analyze skipped — skill activation takes priority")
+		} else {
+			e.state.PlanConfirmed = false
+			constraint := "[ANALYSIS MODE] 用户要求仅进行分析，不要修改任何代码。你的任务仅限于：阅读代码、分析原因、解释行为。禁止：edit、write、或任何修改文件的操作。"
+			if !zh {
+				constraint = "[ANALYSIS MODE] The user asked for analysis only. Do NOT modify any code. Your task is limited to: reading code, analyzing causes, explaining behavior. FORBIDDEN: edit, write, or any file modification operations."
+			}
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, constraint)
+			loopLog.Printf("intent: analyze-only, reset PlanConfirmed + injected constraint")
 		}
-		e.pendingPinnedMessages = append(e.pendingPinnedMessages, constraint)
-		loopLog.Printf("intent: analyze-only, reset PlanConfirmed + injected constraint")
 	case IntentNewTopic:
 		e.state.PlanConfirmed = false
 		loopLog.Printf("intent: new topic, reset PlanConfirmed (was %q)", e.state.Goal)
@@ -606,6 +615,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
 	}
+
+	// Record the history boundary for this Run() so buildRunSummary only
+	// surfaces assistant text produced THIS run. Without this, a prior run's
+	// narration gets returned every turn when the model only emits tool calls.
+	e.runStartHistoryLen = len(e.history)
 
 	// Continue from the session-level turn counter instead of resetting to 0.
 	// This prevents duplicate turn numbers in AccumulatedBlocks when Run() is
@@ -653,7 +667,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		if turnResult.Blocked {
 			e.runErrorCount++
-			return &EngineResponse{Questions: turnResult.Questions, Stage: StageAct, Blocked: true, BlockedBy: turnResult.BlockedBy, FinishReason: turnResult.FinishReason}, nil
+			return &EngineResponse{
+				Summary:      buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh),
+				Questions:    turnResult.Questions,
+				Stage:        StageAct,
+				Blocked:      true,
+				BlockedBy:    turnResult.BlockedBy,
+				FinishReason: turnResult.FinishReason,
+			}, nil
 		}
 		if turnResult.Done {
 			break
@@ -740,7 +761,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Record efficiency eval at end of Run()
 	e.recordRunEval(zh)
 
-	summary := buildRunSummary(e.history, e.runToolCallCount, zh)
+	summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
@@ -757,16 +778,16 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 //     as output — better than a fake "Done").
 //  3. A diagnostic string naming the tool-call count, so the user can see the
 //     agent stalled instead of being told it "completed".
-func buildRunSummary(history []Message, toolCallCount int, zh bool) string {
+func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool) string {
 	summary := ""
-	for i := len(history) - 1; i >= 0; i-- {
+	for i := len(history) - 1; i >= startIdx; i-- {
 		if history[i].Role == "assistant" && history[i].Content != "" {
 			summary = history[i].Content
 			break
 		}
 	}
 	if summary == "" {
-		for i := len(history) - 1; i >= 0; i-- {
+		for i := len(history) - 1; i >= startIdx; i-- {
 			if history[i].Role == "assistant" && history[i].ReasoningContent != "" {
 				summary = history[i].ReasoningContent
 				break
@@ -965,9 +986,15 @@ func (e *Engine) verifyAndCompact() error {
 	if should {
 		compacted, err := e.compressor.Compress(layer, e.state, e.history)
 		if err != nil {
-			return fmt.Errorf("compress: %w", err)
+			// Compression is best-effort — same as executeTurn (turn.go:53-56).
+			// A failure (e.g. flash model timeout) must NOT suppress the run
+			// summary, which is built next. The UI silently suppresses errors
+			// containing "context deadline exceeded" (model.go:1544-1547), so
+			// returning here would cause the user to see no output at all.
+			loopLog.Printf("compress failed (non-fatal, skipping): %v", err)
+		} else {
+			e.history = compacted
 		}
-		e.history = compacted
 	}
 	if err := e.emitEvent("verify_compact", StageVerifyCompact, nil); err != nil {
 		return err
@@ -1041,8 +1068,8 @@ func (e *Engine) detectIntentShift(userMsg string) bool {
 
 	// Strong shift signals: user wants to apply something to existing work
 	strongShiftPhrases := []string{
-		"用这个",   // "use this..."
-		"拿这个",   // "take this..."
+		"用这个",  // "use this..."
+		"拿这个",  // "take this..."
 		"试试这个", // "try this..."
 		"用这个token",
 		"用这个key",
@@ -1499,6 +1526,7 @@ func (e *Engine) clearSessionState() {
 	e.state.EditScopeFiles = 0
 	e.state.PendingDangerousCmd = ""
 	e.state.TurnNumber = 0
+	e.state.ConsecutiveFailures = 0
 	e.state.ConfirmedScope = false
 
 	e.pendingEditPlan = nil
@@ -1606,24 +1634,4 @@ func (e *Engine) activateSkill(s *skill.Skill, reason string) {
 			Detail: s.Description + " (" + reason + ")",
 		})
 	}
-}
-
-// showSkillSuggestions appends a pinned message with the top matched skills
-// so the model can decide to activate one via activate_skill tool.
-func (e *Engine) showSkillSuggestions(matches []skill.SkillMatch) {
-	var sb strings.Builder
-	if e.isChinese {
-		sb.WriteString("## 建议的技能\n以下技能可能适合当前任务：\n\n")
-	} else {
-		sb.WriteString("## Suggested Skills\nSkills that may be relevant:\n\n")
-	}
-	for _, m := range matches {
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", m.Skill.Name, m.Skill.Description))
-	}
-	if e.isChinese {
-		sb.WriteString("\n使用 `/<skillname>` 激活，或让模型用 `activate_skill` tool 建议。")
-	} else {
-		sb.WriteString("\nUse `/<skillname>` to activate, or ask the model to suggest via `activate_skill` tool.")
-	}
-	e.pendingPinnedMessages = append(e.pendingPinnedMessages, sb.String())
 }

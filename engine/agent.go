@@ -84,7 +84,7 @@ func activateSkillToolSpec() ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        ActivateSkillToolName,
-			Description: "Activate a skill to guide the agent's methodology for the current task. The skill's instructions will override general rules and become the governing framework.",
+			Description: "Activate a skill to guide the agent's methodology for the current task. Call this proactively BEFORE searching code or analyzing, whenever the user's request matches a skill in the Available Skills list. The skill's instructions will override general rules and become the governing framework.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -104,41 +104,59 @@ func activateSkillToolSpec() ModelTool {
 }
 
 // handoffToolSpec returns the tool definition exposed to LLMs for delegating to sub-agents.
-func handoffToolSpec() ModelTool {
-	return ModelTool{
-		Type: "function",
-		Function: ModelToolFunction{
-			Name:        HandoffToolName,
-			Description: "Delegate a sub-task to a specialized agent. Sub-agents can research code, brainstorm solutions, or critically review decisions.",
-			Parameters: json.RawMessage(`{
+// Tool description and parameter descriptions are localized to match the session language,
+// preventing the English tool schema from biasing the LLM toward generating English goals
+// in an otherwise Chinese session.
+func handoffToolSpec(zh bool) ModelTool {
+	desc := "Delegate a sub-task to a specialized agent. Sub-agents can research code, brainstorm solutions, or critically review decisions."
+	agentDesc := "Target agent: sub (generic), critic (adversarial verifier)"
+	goalDesc := "What the agent should accomplish"
+	ctxDesc := "Relevant context for the sub-agent"
+	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
+	constraintsDesc := "Constraints for the sub-agent (optional)"
+	if zh {
+		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
+		agentDesc = "目标代理：sub（通用代理），critic（对抗性验证者）"
+		goalDesc = "代理需要完成的目标"
+		ctxDesc = "提供给子代理的相关上下文"
+		toolsDesc = "允许子代理使用的工具（可选）"
+		constraintsDesc = "对子代理的约束（可选）"
+	}
+	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
 					"agent": {
 						"type": "string",
 						"enum": ["sub", "critic"],
-						"description": "Target agent: sub (generic), critic (adversarial verifier)"
+						"description": %q
 					},
 					"goal": {
 						"type": "string",
-						"description": "What the agent should accomplish"
+						"description": %q
 					},
 					"context": {
 						"type": "string",
-						"description": "Relevant context for the sub-agent"
+						"description": %q
 					},
 					"tools": {
 						"type": "array",
 						"items": {"type": "string"},
-						"description": "Tools the sub-agent is allowed to use (optional)"
+						"description": %q
 					},
 					"constraints": {
 						"type": "array",
 						"items": {"type": "string"},
-						"description": "Constraints for the sub-agent (optional)"
+						"description": %q
 					}
 				},
 				"required": ["agent", "goal"]
-			}`),
+			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        HandoffToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
 		},
 	}
 }

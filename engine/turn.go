@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	dlog "github.com/deepact/deepact/internal/log"
@@ -135,6 +136,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
+	// Reset consecutive failure counter — this LLM call succeeded.
+	e.state.ConsecutiveFailures = 0
+
 	if lastUsage != nil && e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "usage", Usage: lastUsage, ModelName: modelName})
 	}
@@ -236,81 +240,22 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
-	// Merge reasoning from both content and thinking (reasoning_content).
-	// Used by both conclusion verification and the edit plan guard below.
-	mergedReasoning := assistant.Content
-	if assistant.ReasoningContent != "" {
-		if mergedReasoning != "" {
-			mergedReasoning = assistant.ReasoningContent + "\n" + mergedReasoning
-		} else {
-			mergedReasoning = assistant.ReasoningContent
-		}
-	}
+	// 用可见回复作为方案原因展示，不混入内部思考。
+	// ReasoningContent 是模型内部思考（通常是英文），不应展示给用户。
+	// 当 Content 为空（DeepSeek 常裸发 edit/write 工具调用而不带正文）时，
+	// 回退到历史中最近一条实质性 assistant 文本——即用户刚确认过的分析报告，
+	// 避免显示误导性的“AI 未提供修改原因”，让确认闸门连贯。
+	mergedReasoning := reasoningForEditPlan(e.history, assistant.Content)
 
-	// Design-phase skill guard: when a design/planning skill (brainstorming,
-	// writing-plans) is active, the agent should NOT emit edit/write tool calls
-	// — its methodology requires presenting a design first. If the LLM ignores
-	// the HARD-GATE, this code-level backstop blocks edits and reminds both the
-	// user and the agent of the current phase.
-	if e.state.ActiveSkillName == "brainstorming" || e.state.ActiveSkillName == "writing-plans" {
-		var editCalls []ToolCallRequest
-		for _, call := range calls {
-			if call.Name == "edit" || call.Name == "write" {
-				editCalls = append(editCalls, call)
-			}
-		}
-		if len(editCalls) > 0 {
-			zh := e.isChinese
-			skillName := e.state.ActiveSkillName
-
-			e.history = append(e.history, assistant)
-			for _, c := range calls {
-				e.history = append(e.history, Message{
-					Role:       "tool",
-					ToolCallID: c.ID,
-					Content:    "Blocked: design-phase skill is active",
-					Timestamp:  time.Now(),
-				})
-			}
-
-			// Inject a reminder into history so the LLM re-evaluates its
-			// approach on the next turn instead of re-emitting the same edits.
-			if zh {
-				e.history = append(e.history, Message{
-					Role: "user",
-					Content: fmt.Sprintf(
-						"你当前激活了 `%s` skill，其方法论要求在编写任何代码之前先完成设计提案。请按照 skill 的步骤执行：分析问题、提出方案、让用户确认方案，而不是直接修改代码。",
-						skillName,
-					),
-				})
-			} else {
-				e.history = append(e.history, Message{
-					Role: "user",
-					Content: fmt.Sprintf(
-						"The `%s` skill is active. Its methodology requires completing a design proposal before writing any code. Follow the skill steps: analyze the problem, propose approaches, present a design for user approval — do NOT edit code directly.",
-						skillName,
-					),
-				})
-			}
-
-			blockMsg := fmt.Sprintf(
-				"⚠️ `%s` skill 处于激活状态，请先完成设计提案再修改代码。AI 已收到提醒，将在下一轮按方法论执行。",
-				skillName,
-			)
-			if !zh {
-				blockMsg = fmt.Sprintf(
-					"⚠️ `%s` skill is active — design proposal must be completed before editing. The AI has been reminded and will follow the methodology next turn.",
-					skillName,
-				)
-			}
-			return TurnResult{
-				Blocked:      true,
-				BlockedBy:    "design_phase_skill",
-				Questions:    []string{blockMsg},
-				FinishReason: finish,
-			}, nil
-		}
-	}
+	// Design-phase gating is delegated to the active skill's own <HARD-GATE>
+	// text (injected into the stable context zone on activation) — the engine
+	// does NOT add a code-level edit/write block here. A code guard cannot tell
+	// "write implementation code" from "write a design doc", so it bluntly
+	// blocked the skill's own design-doc writes (brainstorming step 6) and, when
+	// mis-conditioned on ActiveSkillName=="", deadlocked every normal edit with
+	// no escape hatch. When no skill is active, the edit-plan guard below is the
+	// interception: it presents proposed edits for user confirmation with a
+	// PlanConfirmed escape hatch — death-loop-safe.
 
 	// Edit plan guard: before executing any edit/write calls for the first time
 	// in this Run(), block and present the agent's understanding + proposed changes
@@ -422,56 +367,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Collect tool messages in a separate slice and add them AFTER the assistant
 	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
 	// followed by tool messages responding to each tool_call_id.
-	var pendingActivateMsgs []Message
-	for _, call := range calls {
-		if call.Name == ActivateSkillToolName {
-			var params ActivateSkillParams
-			if err := json.Unmarshal(call.Input, &params); err != nil {
-				continue
-			}
-			if params.SkillName == "" {
-				continue
-			}
-
-			// Directly activate the skill — no user confirmation needed
-			s := e.skills.Get(params.SkillName)
-			if s == nil {
-				continue
-			}
-			prevSkill := e.lastActivatedSkill
-			e.activatedSkills[s.Name] = true
-			e.lastActivatedSkill = s.Name
-			e.state.ActiveSkillName = s.Name
-			e.state.ActiveSkillContent = s.Content
-
-			// Inject skill methodology into stable zone (persistent across turns)
-			e.context.SetActiveSkill(s.Name, s.Content)
-
-			chainInfo := ""
-			if prevSkill != "" {
-				chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
-			}
-			skillMsg := fmt.Sprintf(
-				"✅ Skill `%s` activated%s. Full methodology now in stable zone.",
-				s.Name, chainInfo,
-			)
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-			e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "skill_activated",
-					Name:   s.Name,
-					Detail: s.Description + chainInfo,
-				})
-			}
-			pendingActivateMsgs = append(pendingActivateMsgs, Message{
-				Role:      "tool",
-				ToolCallID: call.ID,
-				Content:   fmt.Sprintf("✅ Activated skill `%s`%s", s.Name, chainInfo),
-				Timestamp: time.Now(),
-			})
-		}
-	}
+	pendingActivateMsgs := e.processActivateSkillCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -481,39 +377,35 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 
-	// Separate handoff calls from regular tool calls
+	// Separate handoff calls from regular tool calls.
+	// activate_skill is already handled by the intercept block above
+	// (turn.go:363-416) — it must NOT enter regularCalls, or Execute will
+	// produce a duplicate tool message ("tool not found: activate_skill")
+	// with the same tool_call_id, violating the API contract.
 	var handoffCalls []ToolCallRequest
 	var regularCalls []ToolCallRequest
 	for _, call := range calls {
 		if call.Name == HandoffToolName {
 			handoffCalls = append(handoffCalls, call)
+		} else if call.Name == ActivateSkillToolName {
+			continue
 		} else {
 			regularCalls = append(regularCalls, call)
 		}
 	}
 
-	// Execute handoff calls (sub-agents)
-	for _, call := range handoffCalls {
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input, e.config.WorkDir)})
+	// Execute handoff calls (sub-agents) — parallel when multiple, sequential when single.
+	if len(handoffCalls) > 0 {
+		results := e.executeHandoffsParallel(ctx, handoffCalls)
+		msgs, criticFail := e.processHandoffResults(handoffCalls, results, regularCalls)
+		for _, msg := range msgs {
+			e.history = append(e.history, msg)
 		}
-		result := e.executeHandoff(ctx, call)
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
-		}
-
-		// Hard gate: if critic returns FAIL, intercept and present to user.
-		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
-			e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+		if criticFail != "" {
 			return TurnResult{
-				Done:                 true,
-				VerifyFailedSummary:  buildCriticFailSummary(result.Digest, e.isChinese),
+				Done:                true,
+				VerifyFailedSummary: criticFail,
 			}, nil
-		}
-
-		if result.Status != "cancelled" {
-			toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
-			e.history = append(e.history, toolMessage)
 		}
 	}
 
@@ -638,7 +530,7 @@ func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
 // toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and activate_skill tools appended.
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
-	specs = append(specs, handoffToolSpec())
+	specs = append(specs, handoffToolSpec(e.isChinese))
 	specs = append(specs, activateSkillToolSpec())
 	return specs
 }
@@ -817,6 +709,81 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		Status:     status,
 		Digest:     digest,
 	}
+}
+
+// executeHandoffsParallel runs multiple handoff_to_agent calls concurrently.
+// Each sub-agent runs in its own goroutine; results are collected and returned
+// in the original call order. Progress events (agent_start/agent_done) are
+// emitted with the actual agent name and goal, enabling the UI to display
+// multiple sub-agents working simultaneously.
+func (e *Engine) executeHandoffsParallel(ctx context.Context, calls []ToolCallRequest) []ToolResult {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	type indexedResult struct {
+		index  int
+		result ToolResult
+	}
+
+	resultsCh := make(chan indexedResult, len(calls))
+	var wg sync.WaitGroup
+
+	for i, call := range calls {
+		wg.Add(1)
+		go func(idx int, c ToolCallRequest) {
+			defer wg.Done()
+
+			// Parse params for progress display
+			var params HandoffToAgentParams
+			if err := json.Unmarshal(c.Input, &params); err == nil {
+				agentName := params.Agent
+				if agentName == "" {
+					agentName = "sub"
+				}
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "agent_start",
+						Name:   agentName,
+						Detail: params.Goal,
+					})
+				}
+			}
+
+			r := e.executeHandoff(ctx, c)
+
+			// Parse again for agent_done event (use same name)
+			var params2 HandoffToAgentParams
+			if err := json.Unmarshal(c.Input, &params2); err == nil {
+				agentName := params2.Agent
+				if agentName == "" {
+					agentName = "sub"
+				}
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "agent_done",
+						Name:   agentName,
+						Detail: briefDigest(r.Digest),
+					})
+				}
+			}
+
+			resultsCh <- indexedResult{index: idx, result: r}
+		}(i, call)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Collect results in original order
+	ordered := make([]ToolResult, len(calls))
+	for ir := range resultsCh {
+		ordered[ir.index] = ir.result
+	}
+
+	return ordered
 }
 
 func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
@@ -1291,22 +1258,33 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 	return action
 }
 
+// reasoningForEditPlan returns the reasoning text for an edit plan summary.
+// When the current assistant content is non-empty, it is used directly.
+// When empty (e.g. DeepSeek emits bare edit/write tool calls without a body),
+// the function walks history backwards to find the most recent assistant
+// message with non-empty content — typically the analysis report the user
+// just confirmed. This prevents the misleading "AI 未提供修改原因" placeholder.
+func reasoningForEditPlan(history []Message, currentContent string) string {
+	if strings.TrimSpace(currentContent) != "" {
+		return currentContent
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
+			return history[i].Content
+		}
+	}
+	return ""
+}
+
 // formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
-// The summary shows the reasoning (WHY) first, then a file list, then asks
-// the user to confirm. On confirmation, the plan is executed directly
-// with diffs shown progressively during tool execution.
+// The summary shows the reasoning (WHY) first, then asks the user to confirm.
+// On confirmation, the plan is executed directly with diffs shown progressively
+// during tool execution.
 func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 	var sb strings.Builder
 
 	// Step 1: Show the reasoning — WHY these changes are proposed.
-	reasoning := plan.Reasoning
-	if reasoning == "" {
-		if zh {
-			sb.WriteString("（AI 未提供修改原因）\n")
-		} else {
-			sb.WriteString("(No reasoning provided)\n")
-		}
-	} else {
+	if reasoning := plan.Reasoning; reasoning != "" {
 		sb.WriteString(reasoning)
 		sb.WriteString("\n")
 	}
@@ -1525,4 +1503,134 @@ func (e *Engine) inferTDDPhase(calls []ToolCallRequest, results []ToolResult) {
 			})
 		}
 	}
+}
+
+// processActivateSkillCalls intercepts activate_skill tool calls from the
+// assistant's response. For each call, it either activates the skill (success)
+// or produces an error tool message (bad JSON, empty name, unknown skill).
+// Every activate_skill call receives a tool response — this is critical because
+// the DeepSeek API requires that every tool_call_id in an assistant message has
+// a matching tool response. Without it, the next model call would be rejected
+// and the session would be permanently stuck.
+//
+// The returned slice of Messages must be appended to history AFTER the
+// assistant message to satisfy the API ordering:
+// assistant(tool_calls) → tool(responses).
+func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
+	var pendingActivateMsgs []Message
+	for _, call := range calls {
+		if call.Name != ActivateSkillToolName {
+			continue
+		}
+		var params ActivateSkillParams
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid activate_skill arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if params.SkillName == "" {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "Error: activate_skill requires a non-empty skill_name",
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+
+		// Directly activate the skill — no user confirmation needed
+		s := e.skills.Get(params.SkillName)
+		if s == nil {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: skill %q not found", params.SkillName),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		prevSkill := e.lastActivatedSkill
+		e.activatedSkills[s.Name] = true
+		e.lastActivatedSkill = s.Name
+		e.state.ActiveSkillName = s.Name
+		e.state.ActiveSkillContent = s.Content
+
+		// Inject skill methodology into stable zone (persistent across turns)
+		e.context.SetActiveSkill(s.Name, s.Content)
+
+		chainInfo := ""
+		if prevSkill != "" {
+			chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
+		}
+		skillMsg := fmt.Sprintf(
+			"✅ Skill `%s` activated%s. Full methodology now in stable zone.",
+			s.Name, chainInfo,
+		)
+		e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+		e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "skill_activated",
+				Name:   s.Name,
+				Detail: s.Description + chainInfo,
+			})
+		}
+		pendingActivateMsgs = append(pendingActivateMsgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    fmt.Sprintf("✅ Activated skill `%s`%s", s.Name, chainInfo),
+			Timestamp:  time.Now(),
+		})
+	}
+	return pendingActivateMsgs
+}
+
+// processHandoffResults builds tool response messages for handoff call results.
+// Every handoff call receives a response — even cancelled ones — to prevent
+// orphaned tool_call_ids that would cause the DeepSeek API to reject the next
+// request. If a critic sub-agent returns FAIL, responses are also added for
+// all remaining handoff calls and regular calls (which won't execute), and
+// criticFail is set so the caller can return early with the failure summary.
+func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results []ToolResult, regularCalls []ToolCallRequest) (messages []Message, criticFail string) {
+	for i, call := range handoffCalls {
+		result := results[i]
+
+		// Hard gate: if critic returns FAIL, intercept and present to user.
+		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+			messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+
+			// Add tool responses for remaining handoff calls so their
+			// tool_call_ids are not orphaned (API requires every tool_call
+			// to have a matching tool response).
+			for j := i + 1; j < len(handoffCalls); j++ {
+				r := results[j]
+				content := r.Digest
+				if content == "" {
+					content = "Skipped: critic returned FAIL."
+				}
+				messages = append(messages, Message{Role: "tool", ToolCallID: r.ToolCallID, Content: content, Timestamp: time.Now()})
+			}
+			// Add placeholder responses for regular calls that won't execute.
+			for _, rc := range regularCalls {
+				messages = append(messages, Message{Role: "tool", ToolCallID: rc.ID, Content: "Skipped: critic returned FAIL.", Timestamp: time.Now()})
+			}
+
+			criticFail = buildCriticFailSummary(result.Digest, e.isChinese)
+			return messages, criticFail
+		}
+
+		// Always add a tool response — even for cancelled sub-agents.
+		// Without it, the tool_call_id is orphaned and the DeepSeek API
+		// rejects the next request, permanently stalling the session.
+		content := result.Digest
+		if result.Status == "cancelled" {
+			content = "Sub-agent cancelled."
+		}
+		messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})
+	}
+	return messages, ""
 }

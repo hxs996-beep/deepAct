@@ -87,14 +87,14 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		a.userLang = detectUserLanguage(history)
 		a.userLangSet = true
 	}
-	// Once userLang is known, build the system prompt from the appropriate
-	// language's prompt set. This is done once and cached, keeping the prefix
-	// stable across turns. No separate language directive is needed — the
-	// prompt itself is already in the correct language.
+	// Once userLang is known, build the system prompt from the single canonical
+	// prompt set. This is done once and cached, keeping the prefix stable across
+	// turns. The prompt instructs the model to respond in the user's language,
+	// so one set suffices regardless of session language.
 	if a.userLangSet && a.userLang != "" && a.systemPromptWithLang == "" {
 		lang := DetectLanguage(a.projectRoot)
 		langPack := GetLangPack(lang, a.userLang)
-		prompts := promptset.Get(a.userLang)
+		prompts := promptset.Get()
 		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPack + "\n\n" + prompts.Examples
 	}
 	if a.stableSessionBlock == "" && a.userLangSet {
