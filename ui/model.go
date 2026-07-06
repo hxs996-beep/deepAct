@@ -2029,18 +2029,48 @@ func splitDiff(digest string) (summary string, diff string, hasDiff bool) {
 	return summary, diff, true
 }
 
+var (
+	streamRenderCacheMu sync.Mutex
+	streamRenderCache   struct {
+		content string
+		width   int
+		lines   []string
+	}
+)
+
 func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
 	}
-	// Collapse 3+ consecutive newlines to \n\n: raw LLM markdown often
-	// contains excessive blank lines that glamour (used for final display)
-	// normalizes, but wrapText renders literally — producing visual gaps.
+	streamRenderCacheMu.Lock()
+	defer streamRenderCacheMu.Unlock()
+
+	// Cache hit — content and width unchanged since last render.
+	if streamRenderCache.content == streaming && streamRenderCache.width == width {
+		return streamRenderCache.lines
+	}
+
+	// Primary path: glamour markdown rendering (same as final display).
+	rendered := renderMarkdown(streaming, width)
+	if rendered != streaming {
+		// Glamour succeeded — split into lines.
+		lines := strings.Split(rendered, "\n")
+		streamRenderCache.content = streaming
+		streamRenderCache.width = width
+		streamRenderCache.lines = lines
+		return lines
+	}
+
+	// Fallback: glamour unavailable or failed — use legacy plain-text rendering.
 	normalized := streaming
 	for strings.Contains(normalized, "\n\n\n") {
 		normalized = strings.ReplaceAll(normalized, "\n\n\n", "\n\n")
 	}
-	return wrapText(AssistantMsgStyle.Render(normalized), width)
+	lines := wrapText(AssistantMsgStyle.Render(normalized), width)
+	streamRenderCache.content = streaming
+	streamRenderCache.width = width
+	streamRenderCache.lines = lines
+	return lines
 }
 
 func renderSpinners(spinners []AgentSpinner, width int) []string {
