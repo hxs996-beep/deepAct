@@ -50,3 +50,22 @@ func (h *ZeroToolCallHook) Check(ctx StopHookContext) StopHookResult {
 	}
 	return StopHookResult{Block: true, Message: msg, Reason: "zero_tool_calls"}
 }
+
+// SetStopHooks registers stop hooks checked when the model outputs text
+// without tool calls. A blocking hook injects a nudge message and continues
+// the agent loop instead of terminating.
+func (e *Engine) SetStopHooks(hooks []StopHook) {
+	e.stopHooks = hooks
+}
+
+// runStopHooks executes registered stop hooks and returns the first blocking
+// result. If no hook blocks, returns an empty result (loop may terminate).
+func (e *Engine) runStopHooks(ctx StopHookContext) StopHookResult {
+	for _, hook := range e.stopHooks {
+		result := hook.Check(ctx)
+		if result.Block {
+			return result
+		}
+	}
+	return StopHookResult{}
+}

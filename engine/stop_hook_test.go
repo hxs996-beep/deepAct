@@ -88,3 +88,51 @@ func TestZeroToolCallHook_EnglishMessage(t *testing.T) {
 		t.Errorf("expected English message, got Chinese: %q", result.Message)
 	}
 }
+
+func TestRunStopHooks_FirstBlockingResult(t *testing.T) {
+	e := &Engine{
+		stopHooks: []StopHook{
+			&ZeroToolCallHook{MaxRetries: 3},
+		},
+	}
+	result := e.runStopHooks(StopHookContext{
+		RunToolCallCount:   0,
+		StopHookRetryCount: 0,
+		IsChinese:          true,
+	})
+	if !result.Block {
+		t.Errorf("expected Block=true when runToolCallCount=0")
+	}
+}
+
+func TestRunStopHooks_NoHooksRegistered(t *testing.T) {
+	e := &Engine{}
+	result := e.runStopHooks(StopHookContext{
+		RunToolCallCount: 0,
+	})
+	if result.Block {
+		t.Errorf("expected Block=false when no hooks registered")
+	}
+}
+
+func TestRunStopHooks_HookPassesThrough(t *testing.T) {
+	e := &Engine{
+		stopHooks: []StopHook{
+			&ZeroToolCallHook{MaxRetries: 3},
+		},
+	}
+	result := e.runStopHooks(StopHookContext{
+		RunToolCallCount: 5,
+	})
+	if result.Block {
+		t.Errorf("expected Block=false when runToolCallCount>0")
+	}
+}
+
+func TestSetStopHooks(t *testing.T) {
+	e := &Engine{}
+	e.SetStopHooks([]StopHook{&ZeroToolCallHook{MaxRetries: 3}})
+	if len(e.stopHooks) != 1 {
+		t.Errorf("expected 1 hook registered, got %d", len(e.stopHooks))
+	}
+}

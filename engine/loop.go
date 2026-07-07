@@ -99,6 +99,14 @@ type Engine struct {
 	runUsageAccum    ModelUsage
 	usageMu          sync.Mutex // protects runUsageAccum from concurrent sub-agent goroutines
 	runToolCallCount int
+	// stopHookActive is true when the current turn was triggered by a stop
+	// hook blocking the previous turn's exit (mirrors Claude Code's stopHookActive).
+	stopHookActive bool
+	// stopHookRetryCount tracks consecutive stop-hook-triggered continuations.
+	// Reset to 0 when tools are called or at the start of each Run().
+	stopHookRetryCount int
+	// stopHooks are checked when the model outputs text without tool calls.
+	stopHooks []StopHook
 	// runStartHistoryLen is the index in e.history where the current Run()'s
 	// turn loop began. buildRunSummary only considers assistant messages at
 	// or after this index, so a stale narration from a prior run cannot leak
@@ -231,6 +239,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
 	e.runErrorCount = 0
+	e.stopHookActive = false
+	e.stopHookRetryCount = 0
 
 	// Team command handling — /team <goal>
 	// Activates the debate arena: 4-round structured debate → user verdict.
@@ -474,6 +484,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			results := e.executeHandoffsParallel(ctx, handoffCalls)
 			for i, call := range handoffCalls {
 				result := results[i]
+
+				// Critic verification completed — reset the modified-file
+				// counter so the next batch of changes triggers a fresh
+				// verification instead of re-firing on accumulated history.
+				if isCriticHandoff(call.Input) {
+					e.state.ModifiedFiles = nil
+					e.state.EditScopeFiles = 0
+				}
 
 				// Hard gate: if critic returns FAIL, intercept and present to user.
 				if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
