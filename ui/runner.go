@@ -87,6 +87,7 @@ func (r *ProgressEngineRunner) Cancel() {
 func (r *ProgressEngineRunner) getEngine() *engine.Engine {
 	r.once.Do(func() {
 		r.eng = engine.NewEngine(r.Config, r.Deps)
+		r.eng.SetStopHooks([]engine.StopHook{&engine.ZeroToolCallHook{MaxRetries: 3}})
 	})
 	return r.eng
 }
