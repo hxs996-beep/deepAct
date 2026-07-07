@@ -1621,14 +1621,6 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 	for i, call := range handoffCalls {
 		result := results[i]
 
-		// Critic verification completed — reset the modified-file
-		// counter so the next batch of changes triggers a fresh
-		// verification instead of re-firing on accumulated history.
-		if isCriticHandoff(call.Input) {
-			e.state.ModifiedFiles = nil
-			e.state.EditScopeFiles = 0
-		}
-
 		// Hard gate: if critic returns FAIL, intercept and present to user.
 		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
 			messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
