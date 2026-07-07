@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestZeroToolCallHook_BlocksWhenNoToolCalls(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
@@ -56,6 +59,18 @@ func TestZeroToolCallHook_DefaultMaxRetries(t *testing.T) {
 	}
 }
 
+func TestZeroToolCallHook_NegativeMaxRetries(t *testing.T) {
+	hook := &ZeroToolCallHook{MaxRetries: -1} // negative → default 3
+	result := hook.Check(StopHookContext{
+		RunToolCallCount:   0,
+		StopHookRetryCount: 2,
+		IsChinese:          true,
+	})
+	if !result.Block {
+		t.Errorf("expected Block=true when MaxRetries=-1 defaults to 3 and retryCount=2 < 3")
+	}
+}
+
 func TestZeroToolCallHook_EnglishMessage(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
 	result := hook.Check(StopHookContext{
@@ -63,7 +78,13 @@ func TestZeroToolCallHook_EnglishMessage(t *testing.T) {
 		StopHookRetryCount: 0,
 		IsChinese:          false,
 	})
-	if result.Block && result.Message == "" {
+	if !result.Block {
+		t.Errorf("expected Block=true")
+	}
+	if result.Message == "" {
 		t.Errorf("expected non-empty English nudge Message")
+	}
+	if strings.ContainsAny(result.Message, "请完成目标描述") {
+		t.Errorf("expected English message, got Chinese: %q", result.Message)
 	}
 }
