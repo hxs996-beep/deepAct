@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 )
@@ -49,5 +50,89 @@ func TestUpdateTaskStateFromTools_RecordsReadHistory(t *testing.T) {
 		if e.state.ReadHistory[i] != r {
 			t.Errorf("record %d = %+v, want %+v", i, e.state.ReadHistory[i], r)
 		}
+	}
+}
+
+// stubStreamModel emits pre-configured chunks then closes the channel.
+type stubStreamModel struct {
+	chunks []ModelChunk
+}
+
+func (m *stubStreamModel) Stream(_ context.Context, _ ModelRequest) (<-chan ModelChunk, error) {
+	ch := make(chan ModelChunk, len(m.chunks))
+	for _, c := range m.chunks {
+		ch <- c
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *stubStreamModel) Complete(_ context.Context, _ ModelRequest) (*ModelResponse, error) {
+	return &ModelResponse{}, nil
+}
+
+// stubToolExecutor is a minimal ToolExecutor for testing executeTurn.
+type stubToolExecutor struct{}
+
+func (stubToolExecutor) Execute(_ ToolExecContext, _ []ToolCallRequest) []ToolResult { return nil }
+func (stubToolExecutor) Specs() []ModelTool                                           { return nil }
+
+// TestExecuteTurn_ZeroToolCalls_StopHookNudges verifies that when
+// the model emits text without a tool call and runToolCallCount=0,
+// the stop hook injects a nudge and continues the loop.
+func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "查看 buildResult 如何提取 Summary", FinishReason: "stop"},
+		}},
+		context:   &stubContextBuilder{},
+		tools:     stubToolExecutor{},
+		state:     &TaskState{TurnNumber: 0},
+		history:   []Message{{Role: "user", Content: "执行方案"}},
+		config:    EngineConfig{ModelName: "test-model"},
+		stopHooks: []StopHook{&ZeroToolCallHook{MaxRetries: 3}},
+		isChinese: true,
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.Done {
+		t.Errorf("expected Done=false (zero tool calls → stop hook should nudge), got Done=true")
+	}
+	last := e.history[len(e.history)-1]
+	if last.Role != "user" {
+		t.Errorf("expected last message to be user nudge, got role=%q", last.Role)
+	}
+	if result.FinishReason != "stop" {
+		t.Errorf("expected FinishReason='stop', got %q", result.FinishReason)
+	}
+}
+
+// TestExecuteTurn_FinalTextAfterToolCalls_Done verifies that a
+// conclusion after prior tool calls ends the loop (stop hook won't block
+// when runToolCallCount > 0).
+func TestExecuteTurn_FinalTextAfterToolCalls_Done(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "任务已完成，所有文件已修改。", FinishReason: "stop"},
+		}},
+		context:          &stubContextBuilder{},
+		tools:            stubToolExecutor{},
+		state:            &TaskState{TurnNumber: 0},
+		history:          []Message{{Role: "user", Content: "执行方案"}},
+		config:           EngineConfig{ModelName: "test-model"},
+		stopHooks:        []StopHook{&ZeroToolCallHook{MaxRetries: 3}},
+		isChinese:        true,
+		runToolCallCount: 2, // prior tool calls → hook won't block
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Done {
+		t.Errorf("expected Done=true for final conclusion text, got Done=false")
 	}
 }

@@ -218,6 +218,27 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.history = append(e.history, Message{Role: "user", Content: "继续", Timestamp: time.Now()})
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
+		// Run stop hooks — structured checks that decide whether the model's
+		// text-only response should end the loop or be nudged to continue.
+		// Replaces the former isIntermediateText pattern-matching approach
+		// with behavioral signals (e.g. runToolCallCount).
+		hookResult := e.runStopHooks(StopHookContext{
+			RunToolCallCount:   e.runToolCallCount,
+			LastContent:        content,
+			FinishReason:       finish,
+			StopHookActive:     e.stopHookActive,
+			StopHookRetryCount: e.stopHookRetryCount,
+			IsChinese:          e.isChinese,
+		})
+		if hookResult.Block {
+			e.history = append(e.history, Message{
+				Role: "user", Content: hookResult.Message, Timestamp: time.Now(),
+			})
+			e.stopHookActive = true
+			e.stopHookRetryCount++
+			turnLog.Printf("stop hook blocked: reason=%s retry=%d", hookResult.Reason, e.stopHookRetryCount)
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
@@ -467,6 +488,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		e.updateTaskStateFromTools(allCalls, allResults)
 		e.runToolCallCount += len(regularCalls)
+		e.stopHookRetryCount = 0 // reset on tool calls — agent is making progress
 
 		// Infer TDD phase from tool calls when TDD skill is active
 		if e.state != nil && e.state.ActiveSkillName == "test-driven-development" {
@@ -1598,6 +1620,14 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results []ToolResult, regularCalls []ToolCallRequest) (messages []Message, criticFail string) {
 	for i, call := range handoffCalls {
 		result := results[i]
+
+		// Critic verification completed — reset the modified-file
+		// counter so the next batch of changes triggers a fresh
+		// verification instead of re-firing on accumulated history.
+		if isCriticHandoff(call.Input) {
+			e.state.ModifiedFiles = nil
+			e.state.EditScopeFiles = 0
+		}
 
 		// Hard gate: if critic returns FAIL, intercept and present to user.
 		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
