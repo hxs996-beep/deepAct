@@ -222,16 +222,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	e.history = append(e.history, Message{Role: "user", Content: userMsg, Timestamp: time.Now()})
 
-	// Reset per-Run state
-	if e.guards.loop != nil {
-		e.guards.loop.Reset()
-	}
-	if e.readLoop != nil {
-		e.readLoop.Reset()
-	}
-	if e.errorLoop != nil {
-		e.errorLoop.Reset()
-	}
+	// Guard state (LoopGuard, ReadLoopState, ErrorLoopState) persists across
+	// the entire session - no per-Run reset. Each guard has built-in
+	// differentiation (contentHash for edits, scope for reads, success-resets
+	// for errors) that prevents false positives. Resetting on every user
+	// message (including plan confirmation "ok") allowed the agent to re-read
+	// files it already analyzed, losing the detailed understanding from its
+	// initial analysis.
 	e.matchedSkillsContent = ""
 	e.tddPhase = ""
 	e.tddPhaseDetail = ""
@@ -677,8 +674,16 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		if turnResult.Blocked {
 			e.runErrorCount++
+			summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
+			// The edit-plan guard's Questions already contain the full plan
+			// summary (reasoning + confirmation prompt). Setting Summary to
+			// the same reasoning causes the UI to concatenate Summary +
+			// Questions, showing the reasoning twice.
+			if e.pendingEditPlan != nil {
+				summary = ""
+			}
 			return &EngineResponse{
-				Summary:      buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh),
+				Summary:      summary,
 				Questions:    turnResult.Questions,
 				Stage:        StageAct,
 				Blocked:      true,
