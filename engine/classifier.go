@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var rememberRe = regexp.MustCompile(`<!--\s*REMEMBER:\s*(.+?)\s*-->`)
@@ -100,3 +104,70 @@ var conclusionMarkers = []string{
 	"in summary", "in conclusion", "to summarize", "therefore", "root cause",
 	"the issue is", "the problem is", "i've fixed", "i have fixed", "in short",
 }
+
+// ConclusionJudge uses a lightweight LLM call to determine whether the
+// assistant's text is a final conclusion for the user's goal.
+// Interface for testability; *ConclusionClassifier is the production impl.
+type ConclusionJudge interface {
+	IsConclusion(ctx context.Context, goal, text string) (bool, error)
+}
+
+// ConclusionClassifier reuses the compressor's Complete + JsonMode pattern
+// with a flash model to control cost.
+type ConclusionClassifier struct {
+	model          ModelClient
+	flashModelName string
+	isChinese      bool
+}
+
+func NewConclusionClassifier(model ModelClient, flashModelName string, isChinese bool) *ConclusionClassifier {
+	return &ConclusionClassifier{model: model, flashModelName: flashModelName, isChinese: isChinese}
+}
+
+// IsConclusion returns true when text is the final conclusion/summary for goal;
+// false for intermediate process, next-step plans, partial results, or todo
+// statements; err on LLM call or JSON parse failure (caller should fall back
+// conservatively).
+func (c *ConclusionClassifier) IsConclusion(ctx context.Context, goal, text string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var prompt string
+	if c.isChinese {
+		prompt = fmt.Sprintf("目标：%s\n\n助手回复：%s", goal, text)
+	} else {
+		prompt = fmt.Sprintf("Goal: %s\n\nAssistant reply: %s", goal, text)
+	}
+	req := ModelRequest{
+		Model: c.flashModelName,
+		Messages: []ModelMessage{
+			{Role: "system", Content: pickClassifierPrompt(c.isChinese)},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0,
+		MaxTokens:   64,
+		JsonMode:    true,
+	}
+	resp, err := c.model.Complete(ctx, req)
+	if err != nil {
+		return false, fmt.Errorf("conclusion classify: %w", err)
+	}
+	var out struct {
+		Conclusion bool `json:"conclusion"`
+	}
+	if err := json.Unmarshal([]byte(resp.Message.Content), &out); err != nil {
+		return false, fmt.Errorf("parse conclusion response: %w", err)
+	}
+	return out.Conclusion, nil
+}
+
+func pickClassifierPrompt(zh bool) string {
+	if zh {
+		return conclusionClassifierSystemPromptZh
+	}
+	return conclusionClassifierSystemPromptEn
+}
+
+const conclusionClassifierSystemPromptZh = `你是一个编程助手的结论判定器。给定用户目标和助手的最新纯文本回复，判断该回复是否为对目标的最终结论或完成总结。中间过程、下一步计划、部分结果、待办陈述都不是结论。只输出 JSON：{"conclusion": true 或 false}。`
+
+const conclusionClassifierSystemPromptEn = `You are a conclusion classifier for a coding agent. Given the user's goal and the assistant's latest text-only reply, decide whether the reply is the FINAL conclusion or completion summary for the goal. Intermediate process, next-step plans, partial results, or pending todos are NOT conclusions. Output JSON only: {"conclusion": true or false}.`
