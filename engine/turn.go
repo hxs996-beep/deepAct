@@ -239,6 +239,25 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			turnLog.Printf("stop hook blocked: reason=%s retry=%d", hookResult.Reason, e.stopHookRetryCount)
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
+		// If a stop hook returned Exhausted=true, MaxRetries was reached.
+		// The model kept narrating instead of acting. Return Blocked (not
+		// Done) so the user sees a diagnostic message instead of mistaking
+		// the narration for a completed conclusion. When the hook didn't
+		// block because the content is a genuine conclusion (not
+		// exhaustion), Exhausted is false and we correctly return Done.
+		if hookResult.Exhausted {
+			msg := "Agent 在叙述循环中卡住了：已多次引导模型直接执行操作，但模型持续输出中间计划而非调用工具。请提供更具体的指令或缩小任务范围。"
+			if !e.isChinese {
+				msg = "The agent is stuck in a narration loop: guided nudges were tried but the model kept describing steps without executing them. Please provide a more specific instruction or narrow the task scope."
+			}
+			turnLog.Printf("stop hook exhausted after %d retries", e.stopHookRetryCount)
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "stalled_narration_exhausted",
+				Questions:    []string{msg},
+				FinishReason: finish,
+			}, nil
+		}
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
@@ -1231,12 +1250,14 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// truncateStr truncates a string to the given max length, appending "..." if truncated.
+// truncateStr truncates a string to the given max rune count, appending "..." if truncated.
+// Uses rune-based slicing to avoid splitting multi-byte UTF-8 characters.
 func truncateStr(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	return string(runes[:max]) + "..."
 }
 
 func addToWorkingSet(state *TaskState, path string, notes string) {

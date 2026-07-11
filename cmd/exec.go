@@ -23,7 +23,10 @@ func runHeadless(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	agent := engine.NewEngine(config, deps)
-	agent.SetStopHooks([]engine.StopHook{&engine.ZeroToolCallHook{MaxRetries: 3}})
+	agent.SetStopHooks([]engine.StopHook{
+		&engine.ZeroToolCallHook{MaxRetries: 5},
+		&engine.StalledNarrationHook{MaxRetries: 4},
+	})
 
 	prompt := strings.Join(args, " ")
 	response, err := agent.Run(ctx, prompt)

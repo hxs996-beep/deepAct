@@ -60,3 +60,43 @@ func isIntermediateText(text string) bool {
 	}
 	return false
 }
+
+// looksLikeNextStepNarration reports whether text reads as a forward-looking
+// "next step" plan (the model narrating what it is about to do) rather than a
+// substantive conclusion. Unlike isIntermediateText, it tolerates multi-clause
+// text with punctuation — the reported stalls ("查看 X，确认 Y。") carried
+// punctuation and slipped through isIntermediateText's no-break rule.
+func looksLikeNextStepNarration(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || t == "..." {
+		return false
+	}
+	t = strings.TrimLeft(t, " \t\n\r\"'`*_-#>.)]}0123456789")
+	lower := strings.ToLower(t)
+	for _, m := range conclusionMarkers {
+		if strings.Contains(lower, m) {
+			return false
+		}
+	}
+	for _, p := range nextStepPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+var nextStepPrefixes = []string{
+	"查看", "检查", "看看", "看一下", "读取", "阅读", "搜索", "查找", "查询",
+	"继续", "接下来", "接着", "然后", "下一步", "现在", "首先",
+	"让我", "我来", "我先", "我要", "我需要", "我会", "我将", "先看", "先读", "先检查",
+	"let me", "let's", "let us", "i'll", "i will", "i'm going to", "i am going to",
+	"i need to", "i should", "next", "first", "now i", "now let", "going to",
+}
+
+var conclusionMarkers = []string{
+	"综上", "总结", "总的来说", "结论", "因此", "所以", "根因", "根本原因",
+	"问题在于", "问题出在", "已完成", "修复完成", "任务完成", "全部通过", "建议",
+	"in summary", "in conclusion", "to summarize", "therefore", "root cause",
+	"the issue is", "the problem is", "i've fixed", "i have fixed", "in short",
+}
