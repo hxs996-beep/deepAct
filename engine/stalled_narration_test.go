@@ -17,7 +17,7 @@ var reportedStallExamples = []string{
 func TestStalledNarrationHook_BlocksReportedMidTaskExamples(t *testing.T) {
 	hook := &StalledNarrationHook{MaxRetries: 2}
 	for _, c := range reportedStallExamples {
-		result := hook.Check(StopHookContext{
+		result := hook.Check(context.Background(), StopHookContext{
 			RunToolCallCount:   3,
 			StopHookRetryCount: 0,
 			LastContent:        c,
@@ -45,7 +45,7 @@ func TestStalledNarrationHook_PassesGenuineConclusion(t *testing.T) {
 		"文件 a.go 第 42 行有一个空指针 bug。",
 	}
 	for _, c := range conclusions {
-		result := hook.Check(StopHookContext{
+		result := hook.Check(context.Background(), StopHookContext{
 			RunToolCallCount:   3,
 			StopHookRetryCount: 0,
 			LastContent:        c,
@@ -61,7 +61,7 @@ func TestStalledNarrationHook_PassesWhenZeroToolCalls(t *testing.T) {
 	// RunToolCallCount == 0 is ZeroToolCallHook's responsibility; this hook
 	// must stay out so the two compose cleanly (mutually exclusive per turn).
 	hook := &StalledNarrationHook{MaxRetries: 2}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 0,
 		LastContent:        "查看 X 逻辑",
@@ -74,7 +74,7 @@ func TestStalledNarrationHook_PassesWhenZeroToolCalls(t *testing.T) {
 
 func TestStalledNarrationHook_PassesAfterMaxRetries(t *testing.T) {
 	hook := &StalledNarrationHook{MaxRetries: 2}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   3,
 		StopHookRetryCount: 2,
 		LastContent:        "查看 X 逻辑",
@@ -87,7 +87,7 @@ func TestStalledNarrationHook_PassesAfterMaxRetries(t *testing.T) {
 
 func TestStalledNarrationHook_DefaultMaxRetries(t *testing.T) {
 	hook := &StalledNarrationHook{} // MaxRetries=0 → default 2
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   3,
 		StopHookRetryCount: 1,
 		LastContent:        "查看 X 逻辑",
@@ -100,7 +100,7 @@ func TestStalledNarrationHook_DefaultMaxRetries(t *testing.T) {
 
 func TestStalledNarrationHook_EnglishNarration(t *testing.T) {
 	hook := &StalledNarrationHook{MaxRetries: 2}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   3,
 		StopHookRetryCount: 0,
 		LastContent:        "Let me check the finishStreaming logic to confirm truncation.",
@@ -119,7 +119,7 @@ func TestStalledNarrationHook_EnglishNarration(t *testing.T) {
 
 func TestStalledNarrationHook_EnglishConclusion(t *testing.T) {
 	hook := &StalledNarrationHook{MaxRetries: 2}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   3,
 		StopHookRetryCount: 0,
 		LastContent:        "In summary, the root cause is the premature Done=true at turn.go:235.",
@@ -263,7 +263,7 @@ func TestExecuteTurn_StopHookExhausted_ReturnsBlocked(t *testing.T) {
 // model's own words, making the nudge concrete rather than generic.
 func TestStalledNarrationHook_RetryNudgeReferencesLastContent(t *testing.T) {
 	hook := &StalledNarrationHook{MaxRetries: 2}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   3,
 		StopHookRetryCount: 1, // retry -> nudge should reference LastContent
 		LastContent:        "查看 buildResult 如何从子代理内容提取 Summary",
@@ -281,7 +281,7 @@ func TestStalledNarrationHook_RetryNudgeReferencesLastContent(t *testing.T) {
 // retry, ZeroToolCallHook's nudge also includes the model's own words.
 func TestZeroToolCallHook_RetryNudgeReferencesLastContent(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 1,
 		LastContent:        "Let me check the finishStreaming logic.",

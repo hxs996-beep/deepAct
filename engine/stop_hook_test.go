@@ -1,13 +1,14 @@
 package engine
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
 
 func TestZeroToolCallHook_BlocksWhenNoToolCalls(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 0,
 		IsChinese:          true,
@@ -25,7 +26,7 @@ func TestZeroToolCallHook_BlocksWhenNoToolCalls(t *testing.T) {
 
 func TestZeroToolCallHook_PassesWhenToolsCalled(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   1,
 		StopHookRetryCount: 0,
 		IsChinese:          true,
@@ -37,7 +38,7 @@ func TestZeroToolCallHook_PassesWhenToolsCalled(t *testing.T) {
 
 func TestZeroToolCallHook_PassesAfterMaxRetries(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 3,
 		IsChinese:          true,
@@ -49,7 +50,7 @@ func TestZeroToolCallHook_PassesAfterMaxRetries(t *testing.T) {
 
 func TestZeroToolCallHook_DefaultMaxRetries(t *testing.T) {
 	hook := &ZeroToolCallHook{} // MaxRetries=0 → default 3
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 2,
 		IsChinese:          true,
@@ -61,7 +62,7 @@ func TestZeroToolCallHook_DefaultMaxRetries(t *testing.T) {
 
 func TestZeroToolCallHook_NegativeMaxRetries(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: -1} // negative → default 3
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 2,
 		IsChinese:          true,
@@ -73,7 +74,7 @@ func TestZeroToolCallHook_NegativeMaxRetries(t *testing.T) {
 
 func TestZeroToolCallHook_EnglishMessage(t *testing.T) {
 	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(StopHookContext{
+	result := hook.Check(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 0,
 		IsChinese:          false,
@@ -95,7 +96,7 @@ func TestRunStopHooks_FirstBlockingResult(t *testing.T) {
 			&ZeroToolCallHook{MaxRetries: 3},
 		},
 	}
-	result := e.runStopHooks(StopHookContext{
+	result := e.runStopHooks(context.Background(), StopHookContext{
 		RunToolCallCount:   0,
 		StopHookRetryCount: 0,
 		IsChinese:          true,
@@ -107,7 +108,7 @@ func TestRunStopHooks_FirstBlockingResult(t *testing.T) {
 
 func TestRunStopHooks_NoHooksRegistered(t *testing.T) {
 	e := &Engine{}
-	result := e.runStopHooks(StopHookContext{
+	result := e.runStopHooks(context.Background(), StopHookContext{
 		RunToolCallCount: 0,
 	})
 	if result.Block {
@@ -121,7 +122,7 @@ func TestRunStopHooks_HookPassesThrough(t *testing.T) {
 			&ZeroToolCallHook{MaxRetries: 3},
 		},
 	}
-	result := e.runStopHooks(StopHookContext{
+	result := e.runStopHooks(context.Background(), StopHookContext{
 		RunToolCallCount: 5,
 	})
 	if result.Block {

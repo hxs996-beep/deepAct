@@ -1,6 +1,9 @@
 package engine
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // StopHookContext carries the context a stop hook needs to decide whether
 // the model's text-only response should end the loop or be nudged to continue.
@@ -11,6 +14,7 @@ type StopHookContext struct {
 	StopHookActive     bool   // true if this turn was triggered by a prior hook block
 	StopHookRetryCount int    // consecutive hook-triggered continuations
 	IsChinese          bool   // language preference for nudge message
+	Goal               string // current Run's user goal (e.state.Goal) for LLM judgment
 }
 
 // StopHookResult is what a stop hook returns.
@@ -25,36 +29,36 @@ type StopHookResult struct {
 // A blocking hook injects a nudge message and continues the agent loop
 // instead of terminating. Modeled after Claude Code's stop hooks pattern.
 type StopHook interface {
-	Check(ctx StopHookContext) StopHookResult
+	Check(ctx context.Context, sc StopHookContext) StopHookResult
 }
 
 // ZeroToolCallHook blocks loop exit when the model has not called any tools
 // this Run(). A text-only response with zero prior tool calls cannot be a
-// final conclusion — the model is narrating intent without acting.
+// final conclusion - the model is narrating intent without acting.
 // Blocks up to MaxRetries times (default 3), then allows exit.
 type ZeroToolCallHook struct {
 	MaxRetries int
 }
 
-func (h *ZeroToolCallHook) Check(ctx StopHookContext) StopHookResult {
-	if ctx.RunToolCallCount > 0 {
+func (h *ZeroToolCallHook) Check(_ context.Context, sc StopHookContext) StopHookResult {
+	if sc.RunToolCallCount > 0 {
 		return StopHookResult{}
 	}
 	maxRetries := h.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 3
 	}
-	if ctx.StopHookRetryCount >= maxRetries {
+	if sc.StopHookRetryCount >= maxRetries {
 		return StopHookResult{Exhausted: true}
 	}
 	msg := "请直接使用工具执行下一步，完成目标后给出最终结论。不要只描述计划。"
-	if !ctx.IsChinese {
+	if !sc.IsChinese {
 		msg = "Use tools to take the next action. Complete the goal and give your final conclusions. Do not just describe a plan."
 	}
-	if ctx.StopHookRetryCount > 0 && ctx.LastContent != "" {
-		snippet := truncateStr(ctx.LastContent, 60)
+	if sc.StopHookRetryCount > 0 && sc.LastContent != "" {
+		snippet := truncateStr(sc.LastContent, 60)
 		msg = fmt.Sprintf("你刚才说了\"%s\"却没有执行。请立即调用工具执行这个操作，不要再描述计划。", snippet)
-		if !ctx.IsChinese {
+		if !sc.IsChinese {
 			msg = fmt.Sprintf("You said \"%s\" but didn't act on it. Call a tool to perform this now - don't just describe the plan.", snippet)
 		}
 	}
@@ -63,7 +67,7 @@ func (h *ZeroToolCallHook) Check(ctx StopHookContext) StopHookResult {
 
 // StalledNarrationHook blocks loop exit when the model, after already calling
 // tools this Run() (RunToolCallCount > 0), emits a text-only response that
-// reads as a forward-looking next-step plan rather than a final conclusion —
+// reads as a forward-looking next-step plan rather than a final conclusion -
 // the mid-task stall. ZeroToolCallHook covers the RunToolCallCount == 0 case;
 // the two are mutually exclusive per turn. Blocks up to MaxRetries times
 // (default 2), then allows exit, so a misread conclusion costs at most a few
@@ -72,28 +76,28 @@ type StalledNarrationHook struct {
 	MaxRetries int
 }
 
-func (h *StalledNarrationHook) Check(ctx StopHookContext) StopHookResult {
-	if ctx.RunToolCallCount == 0 {
+func (h *StalledNarrationHook) Check(_ context.Context, sc StopHookContext) StopHookResult {
+	if sc.RunToolCallCount == 0 {
 		return StopHookResult{}
 	}
 	maxRetries := h.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 2
 	}
-	if ctx.StopHookRetryCount >= maxRetries {
+	if sc.StopHookRetryCount >= maxRetries {
 		return StopHookResult{Exhausted: true}
 	}
-	if !looksLikeNextStepNarration(ctx.LastContent) {
+	if !looksLikeNextStepNarration(sc.LastContent) {
 		return StopHookResult{}
 	}
 	msg := "你在描述下一步却没有实际执行。请直接调用工具继续执行，不要只描述计划；全部完成后再给出最终结论。"
-	if !ctx.IsChinese {
-		msg = "You described the next step without doing it. Call a tool to perform it now — don't just describe a plan — then give your final conclusions once the goal is complete."
+	if !sc.IsChinese {
+		msg = "You described the next step without doing it. Call a tool to perform it now - don't just describe a plan - then give your final conclusions once the goal is complete."
 	}
-	if ctx.StopHookRetryCount > 0 && ctx.LastContent != "" {
-		snippet := truncateStr(ctx.LastContent, 60)
+	if sc.StopHookRetryCount > 0 && sc.LastContent != "" {
+		snippet := truncateStr(sc.LastContent, 60)
 		msg = fmt.Sprintf("你又描述了下一步\"%s\"却仍未执行。请立即调用工具，不要再叙述计划。", snippet)
-		if !ctx.IsChinese {
+		if !sc.IsChinese {
 			msg = fmt.Sprintf("You again described a step (\"%s\") without doing it. Call a tool now - stop narrating and act.", snippet)
 		}
 	}
@@ -109,10 +113,10 @@ func (e *Engine) SetStopHooks(hooks []StopHook) {
 
 // runStopHooks executes registered stop hooks and returns the first blocking
 // result. If no hook blocks, returns an empty result (loop may terminate).
-func (e *Engine) runStopHooks(ctx StopHookContext) StopHookResult {
+func (e *Engine) runStopHooks(ctx context.Context, sc StopHookContext) StopHookResult {
 	exhausted := false
 	for _, hook := range e.stopHooks {
-		result := hook.Check(ctx)
+		result := hook.Check(ctx, sc)
 		if result.Block {
 			return result
 		}

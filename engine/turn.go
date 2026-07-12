@@ -222,13 +222,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// text-only response should end the loop or be nudged to continue.
 		// Replaces the former isIntermediateText pattern-matching approach
 		// with behavioral signals (e.g. runToolCallCount).
-		hookResult := e.runStopHooks(StopHookContext{
+		hookResult := e.runStopHooks(ctx, StopHookContext{
 			RunToolCallCount:   e.runToolCallCount,
 			LastContent:        content,
 			FinishReason:       finish,
 			StopHookActive:     e.stopHookActive,
 			StopHookRetryCount: e.stopHookRetryCount,
 			IsChinese:          e.isChinese,
+			Goal:               e.state.Goal,
 		})
 		if hookResult.Block {
 			e.history = append(e.history, Message{
