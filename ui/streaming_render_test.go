@@ -49,3 +49,30 @@ func TestRenderStreaming_EmptyInput(t *testing.T) {
 		t.Errorf("empty input should return empty slice, got %d lines", len(lines))
 	}
 }
+
+// TestRenderStreaming_CollapsesBlankLinesInCodeBlock verifies that runs of
+// consecutive blank lines are collapsed to a single blank line. Glamour renders
+// code-block content literally, so blank lines inside a fenced block (e.g. the
+// critic agent's ``` Check blocks, which often contain blank lines between
+// **Command run:** / **Result:** fields) are preserved as-is — producing large
+// visual gaps between paragraphs. The legacy wrapText path collapsed 3+
+// newlines to \n\n; the glamour path must do the same to stay visually
+// consistent with final display.
+func TestRenderStreaming_CollapsesBlankLinesInCodeBlock(t *testing.T) {
+	md := "```\n### Check: Build\n**Command run:**\n  go build\n\n\n**Result: PASS**\n```"
+	lines := renderStreaming(md, 80)
+	maxBlank, cur := 0, 0
+	for _, l := range lines {
+		if strings.TrimSpace(stripAnsi(l)) == "" {
+			cur++
+			if cur > maxBlank {
+				maxBlank = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	if maxBlank > 1 {
+		t.Errorf("expected at most 1 consecutive blank line, got %d", maxBlank)
+	}
+}

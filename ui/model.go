@@ -459,12 +459,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.spinners[0].Goal = "thinking..."
 			}
 		case "member_start":
-			m.memberStatuses = append(m.memberStatuses, MemberStatus{
-				ID:     msg.Name,
-				Name:   msg.Detail,
-				Avatar: memberAvatar(msg.Name),
-				Status: "running",
-			})
+			// Dedup: if member already exists (from a previous debate round),
+			// reset to "running" instead of appending a duplicate entry.
+			found := false
+			for i := range m.memberStatuses {
+				if m.memberStatuses[i].ID == msg.Name {
+					m.memberStatuses[i].Status = "running"
+					m.memberStatuses[i].Score = 0
+					m.memberStatuses[i].Verdict = ""
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.memberStatuses = append(m.memberStatuses, MemberStatus{
+					ID:     msg.Name,
+					Name:   msg.Detail,
+					Avatar: memberAvatar(msg.Name),
+					Status: "running",
+				})
+			}
 		case "member_done":
 			for i := range m.memberStatuses {
 				if m.memberStatuses[i].ID == msg.Name {
@@ -2055,6 +2069,13 @@ func renderStreaming(streaming string, width int) []string {
 	if rendered != streaming {
 		// Glamour succeeded — split into lines.
 		lines := strings.Split(rendered, "\n")
+		// Collapse runs of 2+ consecutive blank lines into one. Glamour renders
+		// fenced code-block content literally, so blank lines inside a block
+		// (e.g. the critic agent's ``` Check blocks, which often contain blank
+		// lines between **Command run:** / **Result:** fields) survive verbatim
+		// and produce large visual gaps. The legacy wrapText path collapsed
+		// \n\n\n -> \n\n; mirror that here so streaming matches final display.
+		lines = collapseBlankLines(lines)
 		streamRenderCache.content = streaming
 		streamRenderCache.width = width
 		streamRenderCache.lines = lines
@@ -2071,6 +2092,23 @@ func renderStreaming(streaming string, width int) []string {
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines
 	return lines
+}
+
+// collapseBlankLines collapses runs of 2+ consecutive blank lines into a single
+// blank line. A line is "blank" if, after stripping ANSI styling, it contains
+// only whitespace — glamour pads every rendered line (including blank ones) to
+// the full width with styled spaces, so a blank line is rarely the empty string.
+func collapseBlankLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(stripAnsi(l)) == "" && len(out) > 0 &&
+			strings.TrimSpace(stripAnsi(out[len(out)-1])) == "" {
+			// Previous kept line is already blank — drop this one.
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 func renderSpinners(spinners []AgentSpinner, width int) []string {
