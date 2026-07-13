@@ -31,7 +31,7 @@ func (m *stubCompleteModel) Complete(_ context.Context, req ModelRequest) (*Mode
 func TestConclusionClassifier_IsConclusion_True(t *testing.T) {
 	m := &stubCompleteModel{resp: `{"conclusion": true}`}
 	c := NewConclusionClassifier(m, "flash-model", true)
-	ok, err := c.IsConclusion(context.Background(), "修复 turn.go 的 bug", "任务已完成，测试全部通过。")
+	ok, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "修复 turn.go 的 bug", Text: "任务已完成，测试全部通过。"})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestConclusionClassifier_IsConclusion_True(t *testing.T) {
 func TestConclusionClassifier_IsConclusion_False(t *testing.T) {
 	m := &stubCompleteModel{resp: `{"conclusion": false}`}
 	c := NewConclusionClassifier(m, "flash-model", true)
-	ok, err := c.IsConclusion(context.Background(), "修复 turn.go 的 bug", "上述修改已写入 turn.go。下面运行测试验证。")
+	ok, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "修复 turn.go 的 bug", Text: "上述修改已写入 turn.go。需要验证测试结果。"})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestConclusionClassifier_IsConclusion_False(t *testing.T) {
 func TestConclusionClassifier_BadJSON_ReturnsError(t *testing.T) {
 	m := &stubCompleteModel{resp: `not json`}
 	c := NewConclusionClassifier(m, "flash-model", true)
-	_, err := c.IsConclusion(context.Background(), "goal", "text")
+	_, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "goal", Text: "text"})
 	if err == nil {
 		t.Fatalf("expected error for non-JSON response, got nil")
 	}
@@ -64,7 +64,7 @@ func TestConclusionClassifier_BadJSON_ReturnsError(t *testing.T) {
 func TestConclusionClassifier_CallError_ReturnsError(t *testing.T) {
 	m := &stubCompleteModel{err: errBoom}
 	c := NewConclusionClassifier(m, "flash-model", true)
-	_, err := c.IsConclusion(context.Background(), "goal", "text")
+	_, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "goal", Text: "text"})
 	if err == nil {
 		t.Fatalf("expected error from Complete, got nil")
 	}
@@ -73,7 +73,7 @@ func TestConclusionClassifier_CallError_ReturnsError(t *testing.T) {
 func TestConclusionClassifier_RequestShape(t *testing.T) {
 	m := &stubCompleteModel{resp: `{"conclusion": true}`}
 	c := NewConclusionClassifier(m, "flash-model", false)
-	_, _ = c.IsConclusion(context.Background(), "fix the bug", "Done, tests pass.")
+	_, _ = c.IsConclusion(context.Background(), ConclusionCheck{Goal: "fix the bug", Text: "Done, tests pass."})
 	req := m.last
 	if req.Model != "flash-model" {
 		t.Errorf("expected Model=flash-model, got %q", req.Model)
@@ -89,6 +89,51 @@ func TestConclusionClassifier_RequestShape(t *testing.T) {
 	}
 	if !strings.Contains(req.Messages[1].Content, "fix the bug") || !strings.Contains(req.Messages[1].Content, "Done, tests pass.") {
 		t.Errorf("expected user message to contain goal and text, got %q", req.Messages[1].Content)
+	}
+}
+
+func TestConclusionClassifier_ToolCallSummaryInPrompt(t *testing.T) {
+	m := &stubCompleteModel{resp: `{"conclusion": false}`}
+	c := NewConclusionClassifier(m, "flash-model", true)
+	_, _ = c.IsConclusion(context.Background(), ConclusionCheck{
+		Goal:            "查找关键字匹配",
+		Text:            "发现了多处可能的关键字匹配。",
+		ToolCallSummary: "grep×3, read×2",
+	})
+	if !strings.Contains(m.last.Messages[1].Content, "grep×3, read×2") {
+		t.Errorf("expected tool call summary in prompt, got %q", m.last.Messages[1].Content)
+	}
+}
+
+// TestConclusionClassifier_ParsesNonPureJSON reproduces the production bug:
+// glm-5.2 ignores JsonMode and wraps the JSON in markdown fences or surrounds
+// it with explanation text. The classifier must extract the {...} and parse it
+// instead of failing with "unexpected end of JSON input" (which degraded the
+// stop hook to a classifier_error block on every text-only turn).
+func TestConclusionClassifier_ParsesNonPureJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		resp string
+		want bool
+	}{
+		{"markdown wrapped true", "```json\n{\"conclusion\": true}\n```", true},
+		{"markdown wrapped false", "```json\n{\"conclusion\": false}\n```", false},
+		{"prefix text then json", "根据分析，结论如下：\n{\"conclusion\": true}", true},
+		{"suffix text after json", "{\"conclusion\": false}\n以上是判定。", false},
+		{"json with leading spaces", "   {\"conclusion\": true}   ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &stubCompleteModel{resp: tt.resp}
+			c := NewConclusionClassifier(m, "flash-model", true)
+			got, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "g", Text: "t"})
+			if err != nil {
+				t.Fatalf("unexpected err for %s: %v (resp=%q)", tt.name, err, tt.resp)
+			}
+			if got != tt.want {
+				t.Errorf("%s: got %v, want %v (resp=%q)", tt.name, got, tt.want, tt.resp)
+			}
+		})
 	}
 }
 

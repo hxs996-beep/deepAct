@@ -230,7 +230,7 @@ func TestProcessHandoffResults_CancelledGetsResponse(t *testing.T) {
 // returns FAIL, tool responses are added for ALL calls — the critic, remaining
 // handoffs, and regular calls — so no tool_call_id is orphaned.
 func TestProcessHandoffResults_CriticFailNoOrphans(t *testing.T) {
-	e := &Engine{config: EngineConfig{}}
+	e := &Engine{config: EngineConfig{}, state: &TaskState{}}
 
 	criticDigest := "VERDICT: FAIL\nIssues found."
 	handoffCalls := []ToolCallRequest{

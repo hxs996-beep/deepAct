@@ -230,6 +230,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			StopHookRetryCount: e.stopHookRetryCount,
 			IsChinese:          e.isChinese,
 			Goal:               e.state.Goal,
+			ToolCallSummary:    buildToolCallSummary(e.history, e.runStartHistoryLen),
 		})
 		if hookResult.Block {
 			e.history = append(e.history, Message{
@@ -276,6 +277,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		args := json.RawMessage(call.Function.Arguments)
 		calls = append(calls, ToolCallRequest{ID: call.ID, Name: call.Function.Name, Input: args})
 	}
+	toolNames := make([]string, 0, len(calls))
+	for _, c := range calls {
+		toolNames = append(toolNames, c.Name)
+	}
+	turnLog.Printf("executeTurn tool branch: tools=%v finish=%s", toolNames, finish)
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
@@ -309,6 +315,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			}
 		}
 		if len(editCalls) > 0 {
+			turnLog.Printf("edit plan guard: blocking on %d edit/write call(s) (runToolCallCount=%d)", len(editCalls), e.runToolCallCount)
 			plan := &PendingEditPlan{
 				Reasoning: mergedReasoning,
 				Calls:     calls, // store ALL calls (read, edit, write, bash, handoff, etc.)
