@@ -12,7 +12,7 @@
 
 - 不修改 `isIntermediateText` 函数本身（Layer 3 仍需要它）
 - 不修改 `finish == "length"` 分支（max_output_tokens 恢复是独立路径）
-- 不修改 `sub_agent.go`（子代理有自己的 3-strike 机制）
+- 不给 `sub_agent.go` 接 stop hook 机制本身（子代理走独立的 `runLoop`，不复用 `runStopHooks`）；但子代理纯文本分支需复用 `looksLikeNextStepNarration` 做结论识别--原 3-strike 计数器在工具调用时归零，critic 裁决被 nudge 后再调工具会空转到 maxIterations（详见 spec 2026-07-08 修订）
 - 不添加外部/用户可配置 hook（接口预留扩展，当前只做内置）
 - nudge 文案采用 `sub_agent.go:745` 的 `getNudgeMessage` 文案
 

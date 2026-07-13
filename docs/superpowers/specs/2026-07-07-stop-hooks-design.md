@@ -221,7 +221,8 @@ engine.SetStopHooks([]engine.StopHook{
 - **不改 `isIntermediateText` 函数本身**——Layer 3 仍需要它
 - **不改 `finish == "length"` 分支**——max_output_tokens 恢复是独立路径，不在本次范围
 - **不加外部/用户可配置 hook**——当前只做内置 hook，接口预留扩展
-- **不改 sub_agent.go**——子代理已有自己的 3-strike 机制，不需要 stop hooks
+- **不给 sub_agent.go 接 stop hook 机制本身**--子代理走 `SubAgentRunner.runLoop`，与主 Engine 的 `executeTurn` 是两套独立循环，不复用 `runStopHooks`
+  - > **修订（2026-07-08）**：原版写"不改 sub_agent.go--子代理已有自己的 3-strike 机制，不需要 stop hooks"，该假设有缺陷。3-strike 的 `consecutiveIntermediate` 在每次工具调用时归零（`sub_agent.go:363`），critic 输出裁决 `结论：失败`（纯文本）后被 nudge"请直接使用工具执行下一步"，听话的 critic 再调一次工具->计数器归零->再输出裁决->再 nudge，空转到 `maxSubAgentIterations=99`（生产观察为"turn 90"）。修复：在 `sub_agent.go` 纯文本分支复用 `looksLikeNextStepNarration`（`engine/classifier.go:69`）--结论立即终止，叙述才走 3-strike nudge。判定逻辑与主 Engine 的 `StalledNarrationHook` 一致，未引入 stop hook 机制本身。回归测试见 `engine/sub_agent_terminate_test.go`。
 
 ## 测试计划
 
