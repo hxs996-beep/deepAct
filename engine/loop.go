@@ -107,6 +107,10 @@ type Engine struct {
 	stopHookRetryCount int
 	// stopHooks are checked when the model outputs text without tool calls.
 	stopHooks []StopHook
+	// intentJudge classifies user messages into analyze/continue/new_topic
+	// via a lightweight LLM call. Replaces the old keyword-based detection
+	// functions. Nil falls back to IntentContinue.
+	intentJudge IntentJudge
 	// runStartHistoryLen is the index in e.history where the current Run()'s
 	// turn loop began. buildRunSummary only considers assistant messages at
 	// or after this index, so a stale narration from a prior run cannot leak
@@ -222,13 +226,21 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	e.history = append(e.history, Message{Role: "user", Content: userMsg, Timestamp: time.Now()})
 
-	// Guard state (LoopGuard, ReadLoopState, ErrorLoopState) persists across
-	// the entire session - no per-Run reset. Each guard has built-in
-	// differentiation (contentHash for edits, scope for reads, success-resets
-	// for errors) that prevents false positives. Resetting on every user
-	// message (including plan confirmation "ok") allowed the agent to re-read
-	// files it already analyzed, losing the detailed understanding from its
-	// initial analysis.
+	// Reset read-loop tracking (LoopGuard + ReadLoopState) on each Run. Read
+	// counts must NOT accumulate across Runs: a user retrying or revisiting a
+	// task legitimately re-reads the same core files, and cross-Run accumulation
+	// falsely blocked normal reads as "loops" (maxRepeats reached across
+	// retries). Within a Run, ReadLoopState still catches true read loops
+	// (4th same-read blocks). Edit/write loop counts also reset per Run -
+	// same-Run repetition is still caught, and the edit-plan guard +
+	// contentHash differentiation cover cross-Run edit cases. ErrorLoopState
+	// persists (error streaks across Runs are meaningful).
+	if e.guards != nil && e.guards.loop != nil {
+		e.guards.loop.Reset()
+	}
+	if e.readLoop != nil {
+		e.readLoop.Reset()
+	}
 	e.matchedSkillsContent = ""
 	e.tddPhase = ""
 	e.tddPhaseDetail = ""
@@ -597,7 +609,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// analysis only, preventing edit-plan-guard bypass across Run() calls.
 	// When a skill was just auto-activated via keyword matching, the skill's
 	// methodology takes priority over analysis-only classification.
-	intent := e.detectUserIntent(userMsg)
+	intent := e.detectUserIntent(ctx, userMsg)
 	switch intent {
 	case IntentAnalyze:
 		if skillJustActivated {
@@ -1201,6 +1213,16 @@ func (e *Engine) deactivateSkill() {
 	}
 }
 
+// SetIntentJudge registers the intent classifier used by detectUserIntent.
+func (e *Engine) SetIntentJudge(j IntentJudge) { e.intentJudge = j }
+
+// NewIntentClassifier constructs an IntentClassifier bound to the engine's
+// model, flash model name, and language preference. Used by callers (e.g.
+// cmd/exec.go) to wire detectUserIntent without exposing e.model.
+func (e *Engine) NewIntentClassifier() *IntentClassifier {
+	return NewIntentClassifier(e.model, e.config.FlashModelName, e.isChinese)
+}
+
 func msgIsChinese(msg string) bool {
 	for _, r := range msg {
 		if unicode.Is(unicode.Han, r) {
@@ -1286,235 +1308,35 @@ func extractTaskTextAfterSkillCmd(userMsg string, skillName string) string {
 	return rest
 }
 
-// detectUserIntent classifies the user's message intent for PlanConfirmed management.
-// Detection order (strongest signal first):
-//  1. Analysis-only: explicit analysis request without modification command → IntentAnalyze
-//  2. Context reference: explicitly continues previous work → IntentContinue
-//  3. Topic continuity: shares key terms with current goal → IntentContinue
-//  4. Default: new topic → IntentNewTopic
-func (e *Engine) detectUserIntent(userMsg string) UserIntent {
-	if e.state == nil {
-		return IntentContinue
-	}
-
-	// If no prior goal, treat as first interaction or post-clear.
-	if e.state.Goal == "" {
+// detectUserIntent classifies the user's message relative to the current goal.
+// isDangerousConfirmation is a deterministic fast-path (safety gate, not fuzzy
+// intent detection). All other messages go through the LLM IntentJudge; nil
+// judge or classify error falls back conservatively to IntentContinue (does not
+// reset PlanConfirmed, avoiding spurious edit-plan re-confirmation).
+func (e *Engine) detectUserIntent(ctx context.Context, userMsg string) UserIntent {
+	if e.state == nil || e.state.Goal == "" {
 		return IntentContinue
 	}
 
 	msg := strings.ToLower(strings.TrimSpace(userMsg))
 
-	// A pure confirmation (e.g. "确认", "确认执行", "yes") continues the current
-	// task. It must NOT be classified as a new topic: otherwise PlanConfirmed is
-	// reset below and the edit-plan guard re-triggers on the next turn, trapping
-	// the user in a "确认执行修改？" loop even after they already approved.
+	// Deterministic safety gate: pure confirmation continues the current task.
 	if isDangerousConfirmation(msg) {
 		return IntentContinue
 	}
 
-	// Signal 1: Analysis-only — user wants explanation, not modification.
-	// Check BEFORE context reference, so "分析一下刚才那个问题" is still analysis-only.
-	if isAnalysisOnly(msg) {
-		return IntentAnalyze
-	}
-
-	// Signal 2: Explicit context reference — user continues previous work.
-	if hasContextReference(msg) {
+	// Wiring bug guard: nil judge falls back to IntentContinue.
+	if e.intentJudge == nil {
+		loopLog.Printf("intentJudge not set (wiring bug), falling back to continue")
 		return IntentContinue
 	}
 
-	// Signal 3: Topic continuity — check if key terms overlap with goal.
-	if isSameTopic(msg, strings.ToLower(e.state.Goal)) {
+	intent, err := e.intentJudge.Classify(ctx, IntentCheck{Goal: e.state.Goal, Message: userMsg})
+	if err != nil {
+		loopLog.Printf("intent classify error: %v (conservative fallback to continue)", err)
 		return IntentContinue
 	}
-
-	return IntentNewTopic
-}
-
-// hasContextReference checks if the message explicitly references previous work.
-// Uses phrase-level patterns to avoid false positives from common deictic words
-// like "这个"/"那个" used in normal description (e.g. "解释一下这个函数").
-func hasContextReference(msg string) bool {
-	refs := []string{
-		// Chinese — explicit continuation of previous work
-		"刚才", "上面", "之前", "刚刚", "继续", "接着",
-		"也加", "也改", "也修", "也做", "也写", "也删", "也弄",
-		"再改", "再修", "再做", "再加", "再删", "再调整",
-		// English
-		"also add", "also fix", "also change", "also update", "also remove",
-		"additionally", "furthermore", "continue",
-		"previous", "above",
-	}
-	for _, r := range refs {
-		if strings.Contains(msg, r) {
-			return true
-		}
-	}
-	return false
-}
-
-// isAnalysisOnly checks if the message is a pure analysis/explanation request
-// without any modification command intent. Uses phrase-level detection to avoid
-// false positives from "修改"/"修复" appearing as descriptive nouns
-// (e.g. "代码修改的diff区域" → analysis, not modification).
-func isAnalysisOnly(msg string) bool {
-	analysisPatterns := []string{
-		// Chinese — question/analysis markers
-		"为什么", "怎么", "如何", "是什么", "怎么回事", "为什么会",
-		"是什么原因", "什么原因", "怎么看",
-		"分析一下", "分析下", "分析",
-		"解释一下", "解释下", "解释",
-		"看看", "看一下", "看一看",
-		"讲讲", "说一下", "讲一下", "说说",
-		"帮我看看", "帮我分析", "帮我解释",
-		// English
-		"analyze", "explain", "why", "how come", "what is",
-		"what are", "what's", "how does", "how do",
-		"check", "look at", "examine", "investigate",
-		"tell me about", "walk me through",
-	}
-
-	hasAnalysis := false
-	for _, p := range analysisPatterns {
-		if strings.Contains(msg, p) {
-			hasAnalysis = true
-			break
-		}
-	}
-	if !hasAnalysis {
-		return false
-	}
-
-	// Modification command phrases — stronger signals than single characters.
-	// These indicate the user wants code CHANGED, not just analyzed.
-	modPhrases := []string{
-		// Chinese imperative modification phrases
-		"改一下", "改下", "改吧", "改掉", "改成", "改为",
-		"修一下", "修复一下", "修掉",
-		"做一下", "弄一下", "搞一下",
-		"加一下", "加一个", "加上", "加个",
-		"删掉", "删除掉", "移除掉", "去掉",
-		"换一下", "换成", "替换成",
-		"然后改", "然后修", "再改", "再修",
-		"并修改", "并更新", "并修复", "并改",
-		"改一改", "修一修",
-		"写一下", "写个", "写一个",
-		// English imperative phrases
-		"fix it", "fix the", "change it", "change the",
-		"modify the", "update the", "replace the",
-		"add a", "add the", "create a", "remove the",
-	}
-	for _, p := range modPhrases {
-		if strings.Contains(msg, p) {
-			return false
-		}
-	}
-
-	// Bare modification characters (改/修/加/删/换/写) are strong signals of
-	// modification intent, but they also appear in descriptive nouns
-	// (e.g. "代码修改" in "为什么点击代码修改的diff区域没反应").
-	// Strategy: if the message has STRONG analysis question words
-	// ("为什么", "怎么", "是什么", "怎么回事"), treat bare chars as descriptive.
-	// Otherwise, treat them as modification intent.
-	bareModChars := []string{"改", "修", "加", "删", "换", "写"}
-	strongAnalysisQuestion := false
-	for _, w := range []string{"为什么", "怎么", "如何", "是什么", "怎么回事", "为什么会"} {
-		if strings.Contains(msg, w) {
-			strongAnalysisQuestion = true
-			break
-		}
-	}
-	if !strongAnalysisQuestion {
-		for _, c := range bareModChars {
-			if strings.Contains(msg, c) {
-				return false
-			}
-		}
-	}
-
-	return true
-}
-
-// isSameTopic checks if the new message shares significant terms with the goal,
-// indicating the user is continuing work on the same topic.
-// Single key term overlap (e.g. "登录") is sufficient for Chinese;
-// English requires 2+ overlaps or >25% goal term coverage.
-func isSameTopic(msg, goal string) bool {
-	msgTerms := extractKeyTerms(msg)
-	goalTerms := extractKeyTerms(goal)
-
-	if len(msgTerms) == 0 || len(goalTerms) == 0 {
-		return false
-	}
-
-	overlap := 0
-	for _, mt := range msgTerms {
-		for _, gt := range goalTerms {
-			if mt == gt || strings.Contains(mt, gt) || strings.Contains(gt, mt) {
-				overlap++
-				break
-			}
-		}
-	}
-
-	// For Chinese: single shared key term is a strong signal.
-	// For English: require 2+ or 25% coverage.
-	return overlap >= 1
-}
-
-// extractKeyTerms extracts key terms from a message for topic comparison.
-// Chinese: extracts character bigrams as terms.
-// English: extracts lowercase words ≥ 3 chars, skipping stop words.
-func extractKeyTerms(text string) []string {
-	stopWords := map[string]bool{
-		"the": true, "and": true, "for": true, "that": true, "this": true,
-		"with": true, "from": true, "have": true, "what": true, "when": true,
-		"where": true, "which": true, "about": true, "does": true,
-		"的": true, "了": true, "是": true, "在": true, "我": true,
-		"有": true, "和": true, "就": true, "不": true, "人": true,
-		"都": true, "一": true, "一个": true, "上": true, "也": true,
-		"很": true, "到": true, "说": true, "要": true, "去": true,
-		"你": true, "会": true, "着": true, "没有": true, "看": true,
-		"好": true, "自己": true, "这": true, "他": true, "她": true,
-		"它": true, "们": true, "那": true, "什么": true, "吗": true,
-		"吧": true, "呢": true, "啊": true, "哦": true, "嗯": true,
-	}
-
-	var terms []string
-	seen := make(map[string]bool)
-
-	// Extract Chinese bigrams (skip single chars and stop words).
-	runes := []rune(text)
-	for i := 0; i < len(runes)-1; i++ {
-		// Check if these are Chinese characters
-		if isCJK(runes[i]) && isCJK(runes[i+1]) {
-			bigram := string(runes[i : i+2])
-			if !stopWords[bigram] && !seen[bigram] {
-				terms = append(terms, bigram)
-				seen[bigram] = true
-			}
-		}
-	}
-
-	// Extract English words ≥ 3 chars.
-	words := strings.FieldsFunc(text, func(r rune) bool {
-		return !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z')
-	})
-	for _, w := range words {
-		w = strings.ToLower(w)
-		if len(w) >= 3 && !stopWords[w] && !seen[w] {
-			terms = append(terms, w)
-			seen[w] = true
-		}
-	}
-
-	return terms
-}
-
-func isCJK(r rune) bool {
-	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-		(r >= 0x3400 && r <= 0x4DBF) || // CJK Unified Ideographs Extension A
-		(r >= 0x20000 && r <= 0x2A6DF) // CJK Unified Ideographs Extension B
+	return intent
 }
 
 // isClearCommand detects the /clear signal that resets all session state.
