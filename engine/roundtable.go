@@ -506,7 +506,7 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 			}
 
 			sb.WriteString(fmt.Sprintf("### 方案: %s %s\n\n", avatar, name))
-			sb.WriteString(truncateString(out.Content, 500))
+			sb.WriteString(out.Content)
 			sb.WriteString("\n\n")
 
 			if len(rounds) >= 4 {
@@ -612,11 +612,4 @@ func findMember(members []RoundtableMember, id string) *RoundtableMember {
 	return nil
 }
 
-// truncateString truncates s to maxLen runes, appending "..." if truncated.
-func truncateString(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen]) + "..."
-}
+
