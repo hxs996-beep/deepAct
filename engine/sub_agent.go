@@ -198,6 +198,15 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 	}
 
+	// Conclusion classifier for the sub-agent's text-only turns: mirrors the
+	// main engine's StalledNarrationHook. Uses the forked model + flash model
+	// name (cheaper) to decide whether a text-only reply is a final conclusion.
+	classifierModelName := r.flashModelName
+	if classifierModelName == "" {
+		classifierModelName = r.modelName
+	}
+	conclusionClassifier := NewConclusionClassifier(model, classifierModelName, zhFromLang(input.UserLanguage))
+
 	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
 
 	modelName := r.modelName
@@ -335,6 +344,34 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				result := r.buildResult(msg.Content, input.Goal)
 				result.Usage = &totalUsage
 				return result, nil
+			}
+			// A text-only response that is a genuine conclusion (not forward-
+			// looking narration) ends the sub-agent. Mirrors the main engine's
+			// StalledNarrationHook: uses the LLM ConclusionClassifier to tell
+			// conclusion from narration. On classifier error, conservatively
+			// treat as narration (nudge) so the sub-agent never ends early on
+			// an uncertain call.
+			if msg.Content != "" {
+				isConc, err := conclusionClassifier.IsConclusion(callCtx, ConclusionCheck{
+				Goal: input.Goal,
+				Text: msg.Content,
+			})
+				if err != nil {
+					turnLog.Printf("sub-agent conclusion classifier error: %v (conservative nudge)", err)
+				} else if isConc && !hasTrailingNextStepIntent(msg.Content) {
+					// Trust the verdict unless the text reads as a forward-looking
+					// next-step plan: the flash classifier can false-positive on
+					// narration leading with an intent marker ("查看 X，确认 Y。").
+					// Genuine conclusions - including critic verdicts like
+					// "结论：失败" - carry no trailing next-step intent and are
+					// trusted. Mirrors the main engine's StalledNarrationHook
+					// heuristic pre-check. Unlike the main engine, NO completion
+					// marker is required here: critic verdicts are legitimate
+					// conclusions without one.
+					result := r.buildResult(msg.Content, input.Goal)
+					result.Usage = &totalUsage
+					return result, nil
+				}
 			}
 			consecutiveIntermediate++
 			if consecutiveIntermediate >= 3 {
