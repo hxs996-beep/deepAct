@@ -50,3 +50,4 @@ retrieval/
 # Build verification artifacts
 BUILD_RESULT.txt
 BUILD_VERIFICATION.md
+*.tgz
