@@ -1390,7 +1390,31 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 		sb.WriteString(reasoning)
 		sb.WriteString("\n")
 	}
-	// Step 2: Ask for confirmation.
+	// Step 2: List the files and changes - WHAT will be modified.
+	if len(plan.Edits) > 0 {
+		if zh {
+			sb.WriteString(fmt.Sprintf("\n### 涉及 %d 个文件的修改：\n", len(plan.Edits)))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n### %d file(s) to modify:\n", len(plan.Edits)))
+		}
+		for i, edit := range plan.Edits {
+			path := relPath(edit.Path, cwd)
+			if edit.Tool == "write" {
+				if zh {
+					sb.WriteString(fmt.Sprintf("%d. **%s** (写入 %d 字符)\n", i+1, path, len(edit.NewText)))
+				} else {
+					sb.WriteString(fmt.Sprintf("%d. **%s** (write %d chars)\n", i+1, path, len(edit.NewText)))
+				}
+			} else {
+				// edit: show brief old -> new preview
+				oldPreview := truncateStr(strings.TrimSpace(edit.OldText), 60)
+				newPreview := truncateStr(strings.TrimSpace(edit.NewText), 60)
+				sb.WriteString(fmt.Sprintf("%d. **%s**\n   `%s` -> `%s`\n", i+1, path, oldPreview, newPreview))
+			}
+		}
+	}
+
+	// Step 3: Ask for confirmation.
 	if zh {
 		sb.WriteString("\n确认执行修改？")
 	} else {

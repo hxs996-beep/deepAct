@@ -108,3 +108,72 @@ func TestFormatEditPlanSummary_WithReasoning(t *testing.T) {
 		t.Errorf("should ask for confirmation, got: %s", got)
 	}
 }
+
+func TestFormatEditPlanSummary_WithEdits(t *testing.T) {
+	plan := &PendingEditPlan{
+		Reasoning: "问题在 X，方案是改 Y",
+		Edits: []PendingEditAction{
+			{
+				Tool:    "edit",
+				Path:    "/cwd/engine/loop.go",
+				OldText: "old code here",
+				NewText: "new code here",
+			},
+			{
+				Tool:    "write",
+				Path:    "/cwd/engine/types.go",
+				NewText: "package engine\n",
+			},
+		},
+	}
+
+	t.Run("zh", func(t *testing.T) {
+		got := formatEditPlanSummary(plan, true, "/cwd")
+		if !strings.Contains(got, "问题在 X，方案是改 Y") {
+			t.Errorf("should contain reasoning, got: %s", got)
+		}
+		if !strings.Contains(got, "涉及 2 个文件的修改") {
+			t.Errorf("should show file count, got: %s", got)
+		}
+		if !strings.Contains(got, "engine/loop.go") {
+			t.Errorf("should show first file path, got: %s", got)
+		}
+		if !strings.Contains(got, "engine/types.go") {
+			t.Errorf("should show second file path, got: %s", got)
+		}
+		if !strings.Contains(got, "old code here") {
+			t.Errorf("should show old text preview, got: %s", got)
+		}
+		if !strings.Contains(got, "new code here") {
+			t.Errorf("should show new text preview, got: %s", got)
+		}
+		if !strings.Contains(got, "确认执行修改？") {
+			t.Errorf("should ask for confirmation, got: %s", got)
+		}
+	})
+
+	t.Run("en", func(t *testing.T) {
+		got := formatEditPlanSummary(plan, false, "/cwd")
+		if !strings.Contains(got, "2 file(s) to modify") {
+			t.Errorf("should show file count in English, got: %s", got)
+		}
+		if !strings.Contains(got, "Proceed with the changes?") {
+			t.Errorf("should ask for confirmation in English, got: %s", got)
+		}
+	})
+}
+
+func TestFormatEditPlanSummary_NoEdits_StillWorks(t *testing.T) {
+	// Existing behavior: plan with no edits should still show reasoning + confirmation
+	plan := &PendingEditPlan{Reasoning: "some reasoning"}
+	got := formatEditPlanSummary(plan, true, "/cwd")
+	if !strings.Contains(got, "some reasoning") {
+		t.Errorf("should contain reasoning, got: %s", got)
+	}
+	if !strings.Contains(got, "确认执行修改？") {
+		t.Errorf("should ask for confirmation, got: %s", got)
+	}
+	if strings.Contains(got, "个文件的修改") {
+		t.Errorf("should NOT show file count when no edits, got: %s", got)
+	}
+}
