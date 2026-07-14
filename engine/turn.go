@@ -355,6 +355,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if e.guards.loop != nil {
 			var loopAction GuardAction
 			if call.Name == "read_multi" {
+				// Default to Allow. Without this, when every sub-target is Allow,
+				// loopAction stays zero-valued (Type=""), and "" != GuardAllow
+				// below would falsely block the call (with an empty message) -
+				// blocking every read_multi on new files.
+				loopAction = GuardAction{Type: GuardAllow}
 				// read_multi bypasses the single-call key (extractToolKey returns ""
 				// for unknown tools); check each sub-target as a synthetic read so
 				// repeated fan-out reads of the same (path, scope) are still caught.
@@ -386,6 +391,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 						Timestamp:  time.Now(),
 					})
 				}
+				turnLog.Printf("LoopGuard block: %s", loopAction.Message)
 				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{loopAction.Message}}, nil
 			}
 		}
