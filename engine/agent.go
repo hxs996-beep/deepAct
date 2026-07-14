@@ -15,8 +15,9 @@ const (
 	AgentCritic       AgentID = "critic"
 	AgentTeamLead     AgentID = "team-lead"
 
-	HandoffToolName    = "handoff_to_agent"
-	ActivateSkillToolName = "activate_skill"
+	HandoffToolName        = "handoff_to_agent"
+	ActivateSkillToolName  = "activate_skill"
+	TaskCompleteToolName   = "task_complete"
 )
 
 // Handoff carries delegation parameters from parent to sub-agent.
@@ -74,6 +75,40 @@ type HandoffToAgentParams struct {
 	Context     string   `json:"context,omitempty"`
 	Tools       []string `json:"tools,omitempty"`
 	Constraints []string `json:"constraints,omitempty"`
+}
+
+// TaskCompleteParams is the JSON schema for the task_complete tool call.
+type TaskCompleteParams struct {
+	Summary string `json:"summary"`
+}
+
+// taskCompleteToolSpec returns the tool definition for signaling task completion.
+// The model calls this to submit its final output to the user.
+func taskCompleteToolSpec(zh bool) ModelTool {
+	desc := "Submit your final conclusion or reply to the user. Call this when the user's goal is fully accomplished. This is the ONLY way to return output to the user."
+	summaryDesc := "Your final conclusion, analysis result, or reply to the user"
+	if zh {
+		desc = "提交最终结论或回复给用户。目标全部完成后调用此工具。这是向用户返回输出的唯一方式。"
+		summaryDesc = "你的最终结论、分析结果或给用户的回复"
+	}
+	params := fmt.Sprintf(`{
+				"type": "object",
+				"properties": {
+					"summary": {
+						"type": "string",
+						"description": %q
+					}
+				},
+				"required": ["summary"]
+			}`, summaryDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        TaskCompleteToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
 }
 
 const maxSubAgentDepth = 2

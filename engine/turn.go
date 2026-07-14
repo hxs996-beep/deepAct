@@ -29,6 +29,9 @@ type TurnResult struct {
 	// VerifyFailedSummary is set when a critic handoff returns FAIL verdict.
 	// The caller (Engine.Run) must present this to the user and pause the agent loop.
 	VerifyFailedSummary string
+	// CompletionSummary holds the summary from the task_complete tool call,
+	// set when the model explicitly signals task completion.
+	CompletionSummary string
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
@@ -632,6 +635,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
 	specs = append(specs, handoffToolSpec(e.isChinese))
 	specs = append(specs, activateSkillToolSpec())
+	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	return specs
 }
 
