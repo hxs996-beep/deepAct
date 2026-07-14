@@ -120,12 +120,15 @@ func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) St
 		Text:            sc.LastContent,
 		ToolCallSummary: sc.ToolCallSummary,
 	})
+	turnLog.Printf("stop hook classifier: conclusion=%v err=%v retry=%d marker=%v content=%.60s",
+		isConclusion, err, sc.StopHookRetryCount, hasCompletionMarker(sc.LastContent), sc.LastContent)
 	if err != nil {
 		turnLog.Printf("conclusion classifier error: %v (falling back to completion-marker check)", err)
 		// Classifier unavailable: fall back to the deterministic completion-marker
 		// check rather than always blocking. A text with a strong completion
 		// marker is allowed to exit; otherwise block conservatively.
 		if hasCompletionMarker(sc.LastContent) {
+			turnLog.Printf("stop hook: allow exit (classifier error + completion marker)")
 			return StopHookResult{}
 		}
 		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "classifier_error"}
@@ -138,7 +141,12 @@ func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) St
 		// once this stall (retry > 0) - giving the model a second chance to
 		// either restate clearly or resume acting. Otherwise block one more
 		// round so a partial answer is not mistaken for completion.
-		if hasCompletionMarker(sc.LastContent) || sc.StopHookRetryCount > 0 {
+		if hasCompletionMarker(sc.LastContent) {
+			turnLog.Printf("stop hook: allow exit (classifier=true + completion marker)")
+			return StopHookResult{}
+		}
+		if sc.StopHookRetryCount > 0 {
+			turnLog.Printf("stop hook: allow exit (classifier=true + retry>0 second chance)")
 			return StopHookResult{}
 		}
 		turnLog.Printf("stop hook: classifier verdict unconfirmed (no completion marker), blocking conservatively")
