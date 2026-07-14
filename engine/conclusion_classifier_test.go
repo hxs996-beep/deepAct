@@ -11,9 +11,10 @@ import (
 // content or error, and captures the last request for assertions. Stream is
 // unused by this test suite.
 type stubCompleteModel struct {
-	resp string
-	err  error
-	last ModelRequest
+	resp      string
+	reasoning string
+	err       error
+	last      ModelRequest
 }
 
 func (m *stubCompleteModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
@@ -25,7 +26,7 @@ func (m *stubCompleteModel) Complete(_ context.Context, req ModelRequest) (*Mode
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &ModelResponse{Message: ModelMessage{Content: m.resp}}, nil
+	return &ModelResponse{Message: ModelMessage{Content: m.resp, ReasoningContent: m.reasoning}}, nil
 }
 
 func TestConclusionClassifier_IsConclusion_True(t *testing.T) {
@@ -138,3 +139,22 @@ func TestConclusionClassifier_ParsesNonPureJSON(t *testing.T) {
 }
 
 var errBoom = errors.New("boom")
+
+// TestConclusionClassifier_FallsBackToReasoningContent reproduces the
+// production bug: glm-5.2 occasionally returns JSON in reasoning_content with
+// empty Content (llm/deepseek.go:460 "model returned only reasoning_content
+// with no visible output"). The classifier only read Content, got "",
+// failed with "no valid JSON in \"\"", and degraded to a classifier_error
+// fallback - causing unstable stop-hook decisions. It must fall back to
+// reasoning_content.
+func TestConclusionClassifier_FallsBackToReasoningContent(t *testing.T) {
+	m := &stubCompleteModel{resp: "", reasoning: "```json\n{\"conclusion\": true}\n```"}
+	c := NewConclusionClassifier(m, "flash-model", true)
+	ok, err := c.IsConclusion(context.Background(), ConclusionCheck{Goal: "g", Text: "t"})
+	if err != nil {
+		t.Fatalf("unexpected err (should fall back to reasoning_content): %v", err)
+	}
+	if !ok {
+		t.Errorf("expected conclusion=true from reasoning_content fallback, got false")
+	}
+}

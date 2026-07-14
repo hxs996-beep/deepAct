@@ -313,7 +313,16 @@ func (c *ConclusionClassifier) IsConclusion(ctx context.Context, check Conclusio
 	if err != nil {
 		return false, fmt.Errorf("conclusion classify: %w", err)
 	}
-	return parseConclusionJSON(resp.Message.Content)
+	// glm-5.2 occasionally returns the JSON in reasoning_content with empty
+	// Content (llm/deepseek.go:460 "model returned only reasoning_content
+	// with no visible output"). Fall back to reasoning_content so the
+	// classifier still works instead of failing with "no valid JSON in \"\""
+	// and degrading to a classifier_error fallback.
+	content := resp.Message.Content
+	if strings.TrimSpace(content) == "" {
+		content = resp.Message.ReasoningContent
+	}
+	return parseConclusionJSON(content)
 }
 
 // parseConclusionJSON extracts the conclusion verdict from the model's
