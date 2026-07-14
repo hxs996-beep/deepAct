@@ -304,6 +304,51 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// interception: it presents proposed edits for user confirmation with a
 	// PlanConfirmed escape hatch — death-loop-safe.
 
+	// Analysis report gate: before allowing edit/write, require the agent to
+	// present a text-only analysis report and get user confirmation. This gate
+	// fires when the agent has done searches (runToolCallCount > 0) and is now
+	// attempting to modify code, but hasn't yet presented its findings to the
+	// user. After 2 blocks, the gate gives up and lets the edit plan guard
+	// take over (degraded mode - better than deadlocking).
+	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
+		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
+		e.analysisNudgeCount < 2 {
+		var editCalls []ToolCallRequest
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				editCalls = append(editCalls, call)
+			}
+		}
+		if len(editCalls) > 0 {
+			e.analysisNudgeCount++
+			turnLog.Printf("analysis report gate: blocking %d edit/write call(s) (nudgeCount=%d, runToolCallCount=%d)",
+				len(editCalls), e.analysisNudgeCount, e.runToolCallCount)
+			nudgeMsg := "在修改代码之前，请先输出完整的分析报告：\n" +
+				"1. 你发现了什么（列出具体位置和代码）\n" +
+				"2. 为什么需要修改\n" +
+				"3. 计划改哪些文件、怎么改\n" +
+				"输出报告后停止，等待用户确认再执行修改。"
+			if !e.isChinese {
+				nudgeMsg = "Before making changes, output a complete analysis report:\n" +
+					"1. What you found (list specific locations and code)\n" +
+					"2. Why changes are needed\n" +
+					"3. Which files you plan to change and how\n" +
+					"Stop after the report and wait for user confirmation before modifying."
+			}
+			e.pendingAnalysisNudge = true
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: " + nudgeMsg,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
+	}
+
 	// Edit plan guard: before executing any edit/write calls for the first time
 	// in this Run(), block and present the agent's understanding + proposed changes
 	// to the user for approval.
