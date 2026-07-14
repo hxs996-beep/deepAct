@@ -91,6 +91,19 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
+	// pendingAnalysisNudge is true when the analysis report gate has blocked
+	// edit/write calls, waiting for the agent to output a text-only analysis
+	// report. Persists across Run() calls (set in one Run, checked in the next
+	// when the user confirms). Cleared on user confirmation, feedback, or
+	// session reset.
+	pendingAnalysisNudge bool
+
+	// analysisNudgeCount tracks how many times the analysis report gate has
+	// blocked within the current Run(). After 2 blocks, the gate stops
+	// intercepting and lets the edit plan guard take over (degraded mode).
+	// Reset to 0 at the start of each Run().
+	analysisNudgeCount int
+
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
@@ -247,6 +260,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
+	e.analysisNudgeCount = 0
 	e.runErrorCount = 0
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
@@ -616,18 +630,22 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			loopLog.Printf("intent: analyze skipped — skill activation takes priority")
 		} else {
 			e.state.PlanConfirmed = false
-			constraint := "[ANALYSIS MODE] 用户要求仅进行分析，不要修改任何代码。你的任务仅限于：阅读代码、分析原因、解释行为。禁止：edit、write、或任何修改文件的操作。"
-			if !zh {
-				constraint = "[ANALYSIS MODE] The user asked for analysis only. Do NOT modify any code. Your task is limited to: reading code, analyzing causes, explaining behavior. FORBIDDEN: edit, write, or any file modification operations."
-			}
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, constraint)
-			loopLog.Printf("intent: analyze-only, reset PlanConfirmed + injected constraint")
+			e.state.AnalysisMode = true
+			e.state.AnalysisReportConfirmed = false
+			loopLog.Printf("intent: analyze-only, set AnalysisMode=true (persistent)")
 		}
 	case IntentNewTopic:
 		e.state.PlanConfirmed = false
-		loopLog.Printf("intent: new topic, reset PlanConfirmed (was %q)", e.state.Goal)
+		e.state.AnalysisMode = false
+		e.state.AnalysisReportConfirmed = false
+		e.pendingAnalysisNudge = false
+		loopLog.Printf("intent: new topic, reset PlanConfirmed + AnalysisMode")
 	default: // IntentContinue
-		loopLog.Printf("intent: continue, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
+		// Clear analysis mode - the user is continuing with implementation.
+		// Keep AnalysisReportConfirmed as-is: if the user confirmed the report,
+		// it stays confirmed; if not, the gate will still fire.
+		e.state.AnalysisMode = false
+		loopLog.Printf("intent: continue, cleared AnalysisMode, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -1367,6 +1385,10 @@ func (e *Engine) clearSessionState() {
 	e.state.ConfirmedScope = false
 
 	e.pendingEditPlan = nil
+	e.pendingAnalysisNudge = false
+	e.analysisNudgeCount = 0
+	e.state.AnalysisMode = false
+	e.state.AnalysisReportConfirmed = false
 
 	e.deactivateSkill()
 	e.activatedSkills = make(map[string]bool)

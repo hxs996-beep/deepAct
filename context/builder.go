@@ -149,6 +149,17 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
+	// Analysis mode constraint: when the user's intent is analysis-only, inject
+	// the constraint on every Build call so it persists across turns. The former
+	// approach used pendingPinnedMessages which was cleared after the first turn.
+	if state != nil && state.AnalysisMode {
+		constraint := "[ANALYSIS MODE] 用户要求仅进行分析，不要修改任何代码。你的任务仅限于：阅读代码、分析原因、解释行为。禁止：edit、write、或任何修改文件的操作。"
+		if a.userLang != "中文" {
+			constraint = "[ANALYSIS MODE] The user asked for analysis only. Do NOT modify any code. Your task is limited to: reading code, analyzing causes, explaining behavior. FORBIDDEN: edit, write, or any file modification operations."
+		}
+		messages = append(messages, engine.ModelMessage{Role: "user", Content: constraint})
+	}
+
 	return messages
 }
 

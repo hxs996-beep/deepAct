@@ -239,6 +239,18 @@ type TaskState struct {
 	// prompt can warn the agent against re-reading, and the loop guard can count
 	// repeated reads of the same (path, scope). Cleared on new user message.
 	ReadHistory []ReadRecord `json:"read_history"`
+
+	// AnalysisMode is set when the user's intent is analysis-only. When true,
+	// the context builder injects a [ANALYSIS MODE] constraint every turn,
+	// persisting across turns (unlike the former pendingPinnedMessages approach
+	// which was cleared after the first turn). Cleared when the user confirms
+	// the analysis report or starts a new topic.
+	AnalysisMode bool `json:"analysis_mode,omitempty"`
+
+	// AnalysisReportConfirmed is set when the user confirms the analysis report
+	// presented by the agent. When true, the analysis report gate is skipped,
+	// allowing the edit plan guard to proceed normally.
+	AnalysisReportConfirmed bool `json:"analysis_report_confirmed,omitempty"`
 }
 
 // ReadRecord captures a single read operation for loop-prevention and prompt
