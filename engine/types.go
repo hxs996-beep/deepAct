@@ -34,7 +34,7 @@ const (
 )
 
 type ProgressEvent struct {
-	Type       string // "tool_start" | "tool_done" | "thinking" | "agent_start" | "agent_done" | "usage"
+	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage"
 	Name       string
 	Detail     string // brief digest for live display
 	FullDetail string // full content (e.g., diff) for final rendering
@@ -250,6 +250,13 @@ type TaskState struct {
 	// AnalysisReportConfirmed is set when the user confirms the analysis report
 	// presented by the agent. When true, the analysis report gate is skipped,
 	// allowing the edit plan guard to proceed normally.
+	//
+	// Scoped to a single Run: it is reset to false at the start of every Run
+	// and only re-set within that Run by handleAnalysisNudgeConfirmation. This
+	// prevents a confirmation from a prior task from leaking into an unrelated
+	// new question (which made the agent skip presenting a fresh report and
+	// falsely claim "analysis report already confirmed"). Later Runs rely on
+	// pendingEditPlan / PlanConfirmed to skip the gate instead.
 	AnalysisReportConfirmed bool `json:"analysis_report_confirmed,omitempty"`
 }
 

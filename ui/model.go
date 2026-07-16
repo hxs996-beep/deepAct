@@ -107,6 +107,7 @@ type Model struct {
 	height              int
 	engine              EngineRunner
 	streaming           string
+	narration           string // accumulated content_delta text for current turn (AI intermediate intent)
 	thinkingContent     string // deprecated: kept for legacy, no longer fed by reasoning_delta
 	thinkingActivity    string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
 	apiKeyInput         string
@@ -553,6 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "tool_start":
+			m.finalizeTurnBlocks()
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Name + ": " + msg.Detail
@@ -578,6 +580,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "stream_delta":
 			// Progressive text output from sub-agents (searcher, brainstorm, etc.)
 			m.streaming += msg.Detail
+		case "content_delta":
+			// AI intermediate narration text streamed from the main engine.
+			m.narration += msg.Detail
 		case "usage":
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
@@ -986,6 +991,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinners = nil
 			m.toolTree = nil
 			m.streaming = ""
+			m.narration = ""
 			m.escAt = time.Time{}
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
@@ -1333,6 +1339,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.memberStatuses = nil
 	m.subAgents = nil
 	m.streaming = ""
+	m.narration = ""
 
 	// Handle local slash commands without invoking the engine
 	if strings.TrimSpace(content) == "/help" {
@@ -1356,11 +1363,19 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	)
 }
 
-func (m *Model) finishStreaming(msg EngineResponseMsg) {
+// finalizeTurnBlocks snapshots the current turn's narration and tool tree into
+// display messages, then clears both. Called at turn boundaries (tool_start)
+// and at finishStreaming to ensure each turn's narration + tools appear as
+// distinct blocks in temporal order.
+func (m *Model) finalizeTurnBlocks() {
+	if strings.TrimSpace(m.narration) != "" {
+		m.messages = append(m.messages, DisplayMessage{
+			Role:    "narration",
+			Content: m.narration,
+		})
+		m.narration = ""
+	}
 	if len(m.toolTree) > 0 {
-		// Snapshot toolTree into the message so click-to-expand works after
-		// completion (m.toolTree is cleared below). Deep-copy: ToolNode is a
-		// value, but Children is a slice that must not alias the live tree.
 		snapshot := append([]ToolNode(nil), m.toolTree...)
 		for i := range snapshot {
 			snapshot[i].Children = append([]ToolNode(nil), snapshot[i].Children...)
@@ -1372,6 +1387,10 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		})
 		m.toolTree = nil
 	}
+}
+
+func (m *Model) finishStreaming(msg EngineResponseMsg) {
+	m.finalizeTurnBlocks()
 	m.spinners = nil
 	if msg.Err != nil {
 		runnerLog.Printf("finishStreaming err: %v", msg.Err)
@@ -1417,6 +1436,10 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		// Clear streaming — the summary contains the complete response text.
 		// Partial stream_delta content from sub-agents is already reflected in Summary.
 		m.streaming = ""
+		m.narration = ""
+	} else if m.narration != "" {
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: m.narration})
+		m.narration = ""
 	} else if m.streaming != "" {
 		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: m.streaming})
 		m.streaming = ""
@@ -1500,6 +1523,9 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		// progress (right) in a single status block above the input.
 		overlayLines := renderOverlayStatus(m.tddStages, m.memberStatuses, width)
 		lines = append(lines, overlayLines...)
+	} else if m.narration != "" {
+		narrationLines := renderStreaming(m.narration, width)
+		lines = append(lines, narrationLines...)
 	} else if m.streaming != "" {
 		streamLines := renderStreaming(m.streaming, width)
 		lines = append(lines, streamLines...)
@@ -1654,6 +1680,9 @@ func renderMessage(msg DisplayMessage, width int) []string {
 			}
 		}
 		return wrapLines(styled, width)
+	case "narration":
+		rendered := renderMarkdown(content, width)
+		return strings.Split(NarrationStyle.Render(rendered), "\n")
 	default:
 		rendered := renderMarkdown(content, width)
 		return strings.Split(rendered, "\n")

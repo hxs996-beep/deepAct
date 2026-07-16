@@ -50,6 +50,7 @@ var (
 	DiffBlockLineStyle lipgloss.Style // per-line diff rendering (no vertical padding)
 	ThinkingBlockStyle lipgloss.Style // LLM thinking/reasoning
 	InputBlockStyle    lipgloss.Style // user input area (replaces bordered InputBoxStyle)
+	NarrationStyle     lipgloss.Style // AI intermediate narration text (per-turn)
 )
 
 func init() {
@@ -101,6 +102,7 @@ func initStyles() {
 		DiffBlockLineStyle = lipgloss.NewStyle().Background(lipgloss.Color("233")).PaddingLeft(2).PaddingRight(1)
 		ThinkingBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("234")).Foreground(lipgloss.Color("245")).PaddingLeft(2).PaddingRight(1)
 		InputBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
+		NarrationStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).PaddingLeft(2).PaddingRight(1)
 	} else {
 		LogoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
 		LogoGradient1 = lipgloss.NewStyle().Foreground(lipgloss.Color("25")).Bold(true)
@@ -139,6 +141,7 @@ func initStyles() {
 		DiffBlockLineStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1)
 		ThinkingBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("254")).Foreground(lipgloss.Color("243")).PaddingLeft(2).PaddingRight(1)
 		InputBlockStyle = lipgloss.NewStyle().Background(lipgloss.Color("255")).Foreground(lipgloss.Color("236"))
+		NarrationStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).PaddingLeft(2).PaddingRight(1)
 	}
 }
 

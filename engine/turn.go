@@ -121,6 +121,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		if chunk.Delta != "" {
 			contentBuilder.WriteString(chunk.Delta)
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "content_delta", Detail: chunk.Delta})
+			}
 		}
 		if chunk.ReasoningDelta != "" {
 			reasoningBuilder.WriteString(chunk.ReasoningDelta)
@@ -918,6 +921,39 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 		return op
 	}
 
+	// read_multi: show per-target paths with scope annotation, comma-joined.
+	// Without this, read_multi falls through to fallbackSummary which returns
+	// just "read_multi" - the user sees the tool name but not which files.
+	if toolName == "read_multi" {
+		targets := parseReadMultiTargets(input)
+		if len(targets) == 0 {
+			return fallbackSummary(toolName, m)
+		}
+		parts := make([]string, 0, len(targets))
+		for _, tgt := range targets {
+			s := relPath(tgt.Path, cwd)
+			if tgt.Symbol != "" {
+				s += " (symbol:" + tgt.Symbol + ")"
+			} else if tgt.Offset > 0 || tgt.Limit > 0 {
+				start := tgt.Offset
+				if start == 0 {
+					start = 1
+				}
+				if tgt.Limit == 0 {
+					s += fmt.Sprintf(" (L%d-)", start)
+				} else {
+					s += fmt.Sprintf(" (L%d-%d)", start, start+tgt.Limit-1)
+				}
+			}
+			parts = append(parts, s)
+		}
+		result := strings.Join(parts, ", ")
+		if len(result) > 100 {
+			result = result[:97] + "..."
+		}
+		return result
+	}
+
 	// Extract path first — all file-oriented tools have it.
 	path := ""
 	if p, ok := m["path"].(string); ok {
@@ -1394,7 +1430,11 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 		sb.WriteString(reasoning)
 		sb.WriteString("\n")
 	}
-	// Step 2: List the files and changes - WHAT will be modified.
+	// Step 2: List the files that will be modified - WHAT will change.
+	// Filename-only: the per-file diff is shown progressively during execution
+	// after confirmation, so the plan summary stays a compact file list. Earlier
+	// versions inlined an old->new preview per edit, which dumped noisy import
+	// blocks and made the confirmation prompt anything but "简单直观".
 	if len(plan.Edits) > 0 {
 		if zh {
 			sb.WriteString(fmt.Sprintf("\n### 涉及 %d 个文件的修改：\n", len(plan.Edits)))
@@ -1402,19 +1442,7 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 			sb.WriteString(fmt.Sprintf("\n### %d file(s) to modify:\n", len(plan.Edits)))
 		}
 		for i, edit := range plan.Edits {
-			path := relPath(edit.Path, cwd)
-			if edit.Tool == "write" {
-				if zh {
-					sb.WriteString(fmt.Sprintf("%d. **%s** (写入 %d 字符)\n", i+1, path, len(edit.NewText)))
-				} else {
-					sb.WriteString(fmt.Sprintf("%d. **%s** (write %d chars)\n", i+1, path, len(edit.NewText)))
-				}
-			} else {
-				// edit: show brief old -> new preview
-				oldPreview := truncateStr(strings.TrimSpace(edit.OldText), 60)
-				newPreview := truncateStr(strings.TrimSpace(edit.NewText), 60)
-				sb.WriteString(fmt.Sprintf("%d. **%s**\n   `%s` -> `%s`\n", i+1, path, oldPreview, newPreview))
-			}
+			sb.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, relPath(edit.Path, cwd)))
 		}
 	}
 
