@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -320,8 +321,8 @@ func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhas
 			}
 		}
 		sb.WriteString(pickPrompt(zh,
-			"\n## Output\nFor each proposal you challenge, clearly state: which proposal, what the problem is, why it matters. Be specific — reference code or architectural facts when possible.",
-			"\n## 输出\n对你挑战的每个方案，清晰说明：哪个方案、什么问题、为什么重要。尽量具体——引用代码或架构事实。",
+			"\n## Output\nFor each proposal you challenge, use this format:\n\n### Challenge: <target role name>\n<what the problem is, why it matters - be specific, reference code or architectural facts>\nCONFIDENCE: <0.0-1.0>\n\nOnly include challenges you're confident about. Use 0.9+ for certain issues, 0.7-0.8 for likely issues, below 0.7 for minor concerns.",
+			"\n## 输出\n对你挑战的每个方案，使用以下格式：\n\n### 挑战: <被挑战角色名>\n<什么问题、为什么重要--尽量具体，引用代码或架构事实>\nCONFIDENCE: <0.0-1.0>\n\n只包含你有把握的挑战。非常有把握设 0.9+，较有把握设 0.7-0.8，不太确定设 0.7 以下。",
 		))
 
 	case DebateRebuttal:
@@ -481,73 +482,294 @@ func loadMemberFromFile(path string) (*RoundtableMember, error) {
 }
 
 // buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
+// Structure: score overview (总) -> member viewpoints (分) -> high-confidence challenges (conditional) -> verdict instructions.
 func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool) *EngineResponse {
 	var sb strings.Builder
 
-	if zh {
-		sb.WriteString("## 🤝 辩论完成 — 请裁决\n\n")
-		sb.WriteString(fmt.Sprintf("**需求**: %s\n\n", goal))
-	} else {
-		sb.WriteString("## 🤝 Debate Complete — Your Verdict\n\n")
-		sb.WriteString(fmt.Sprintf("**Goal**: %s\n\n", goal))
-	}
+	// Header
+	sb.WriteString(pickPrompt(zh,
+		"## 🤝 Debate Complete - Your Verdict\n\n",
+		"## 🤝 辩论完成 - 请裁决\n\n",
+	))
+	sb.WriteString(pickPrompt(zh,
+		fmt.Sprintf("**Goal**: %s\n\n", goal),
+		fmt.Sprintf("**需求**: %s\n\n", goal),
+	))
 
 	state := h.engine.state
 	rounds := state.Roundtable.DebateRounds
 
+	// ── 总: Score overview table ──
+	if len(rounds) >= 4 {
+		table := buildScoreTable(rounds[3].Outputs, members, zh)
+		if table != "" {
+			sb.WriteString(pickPrompt(zh, "### 📊 Score Overview\n\n", "### 📊 评分总览\n\n"))
+			sb.WriteString(table)
+			sb.WriteString("\n")
+		}
+	}
+
+	// ── 分: Each member's viewpoint ──
 	if len(rounds) > 0 {
+		sb.WriteString(pickPrompt(zh, "### 📋 Member Viewpoints\n\n", "### 📋 各角色观点\n\n"))
+
 		for _, out := range rounds[0].Outputs {
 			m := findMember(members, out.MemberID)
 			avatar := ""
 			name := out.MemberID
+			stance := ""
 			if m != nil {
 				avatar = m.Avatar
 				name = m.displayName(zh)
+				stance = m.displayStance(zh)
 			}
 
-			sb.WriteString(fmt.Sprintf("### 方案: %s %s\n\n", avatar, name))
-			sb.WriteString(out.Content)
-			sb.WriteString("\n\n")
+			sb.WriteString(fmt.Sprintf("#### %s %s\n", avatar, name))
+			if stance != "" {
+				sb.WriteString(fmt.Sprintf("*%s*\n\n", stance))
+			}
 
+			// Prefer final position (round 3); fall back to original proposal (round 0)
+			viewpoint := ""
 			if len(rounds) >= 4 {
-				sb.WriteString(pickPrompt(zh, "**Scores**: ", "**评分**: "))
-				scores := extractScores(rounds[3].Outputs, members, zh)
-				sb.WriteString(scores)
-				sb.WriteString("\n\n")
+				finalOut := getMemberOutput(out.MemberID, rounds[3].Outputs)
+				if finalOut != "" {
+					viewpoint = extractFinalPosition(finalOut)
+				}
 			}
+			if viewpoint == "" {
+				viewpoint = out.Content
+			}
+			sb.WriteString(viewpoint)
+			sb.WriteString("\n\n")
 		}
 	}
 
-	if zh {
-		sb.WriteString("---\n\n")
-		sb.WriteString("**你的裁决**: 输入 `支持方案<角色名>`、`方案<角色名>但要<条件>`、`都不行，应该<你的方案>`、或 `再辩一轮`\n")
-	} else {
-		sb.WriteString("---\n\n")
-		sb.WriteString("**Your verdict**: Type `support <role>`, `<role> but <condition>`, `none, should <your approach>`, or `debate again`\n")
+	// ── Conditional: High-confidence challenges ──
+	challenges := extractHighConfidenceChallenges(rounds, members, zh)
+	if len(challenges) > 0 {
+		sb.WriteString(pickPrompt(zh, "### ⚡ High-Confidence Challenges\n\n", "### ⚡ 高置信度挑战\n\n"))
+		for _, c := range challenges {
+			sb.WriteString(fmt.Sprintf("> **%s %s** %s\n\n%s\n\n",
+				c.challengerAvatar, c.challengerName,
+				pickPrompt(zh,
+					fmt.Sprintf("(confidence %.0f%%)", c.confidence*100),
+					fmt.Sprintf("(置信度 %.0f%%)", c.confidence*100),
+				),
+				c.content))
+		}
 	}
+
+	// ── Footer: Verdict instructions ──
+	sb.WriteString("---\n\n")
+	sb.WriteString(pickPrompt(zh,
+		"**Your verdict**: Type `support <role>`, `<role> but <condition>`, `none, should <your approach>`, or `debate again`\n",
+		"**你的裁决**: 输入 `支持方案<角色名>`、`方案<角色名>但要<条件>`、`都不行，应该<你的方案>`、或 `再辩一轮`\n",
+	))
 
 	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
 }
 
-// extractScores extracts SCORE lines from final round outputs.
-func extractScores(outputs []DebateOutput, members []RoundtableMember, zh bool) string {
-	var parts []string
+// buildScoreTable parses SCORE lines from final round outputs and renders a
+// markdown table: rows = proposals, columns = scorers, with an average column.
+func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool) string {
+	type scoreKey struct{ scorer, scored string }
+	scores := make(map[scoreKey]float64)
+	hasAny := false
+
 	for _, out := range outputs {
-		m := findMember(members, out.MemberID)
-		name := out.MemberID
-		avatar := ""
-		if m != nil {
-			avatar = m.Avatar
-			name = m.displayName(zh)
-		}
 		for _, line := range strings.Split(out.Content, "\n") {
 			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(trimmed), "score:") {
-				parts = append(parts, fmt.Sprintf("%s%s: %s", avatar, name, strings.TrimSpace(trimmed[len("score:"):])))
+			lower := strings.ToLower(trimmed)
+			if !strings.HasPrefix(lower, "score:") {
+				continue
+			}
+			rest := strings.TrimSpace(trimmed[len("score:"):])
+			parts := strings.SplitN(rest, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			scoredID := strings.TrimSpace(parts[0])
+			score, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+			if err != nil {
+				continue
+			}
+			scores[scoreKey{out.MemberID, scoredID}] = score
+			hasAny = true
+		}
+	}
+	if !hasAny {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Header row
+	sb.WriteString("| ")
+	sb.WriteString(pickPrompt(zh, "Proposal", "方案"))
+	sb.WriteString(" |")
+	for _, m := range members {
+		sb.WriteString(fmt.Sprintf(" %s |", m.displayName(zh)))
+	}
+	sb.WriteString(pickPrompt(zh, " Avg |\n", " 平均 |\n"))
+
+	// Separator
+	sb.WriteString("|---|")
+	for range members {
+		sb.WriteString("---|")
+	}
+	sb.WriteString("---|\n")
+
+	// Data rows: one per proposal (scored member)
+	for _, scored := range members {
+		sb.WriteString(fmt.Sprintf("| %s%s |", scored.Avatar, scored.displayName(zh)))
+		var sum float64
+		var count int
+		for _, scorer := range members {
+			if s, ok := scores[scoreKey{scorer.ID, scored.ID}]; ok {
+				sb.WriteString(fmt.Sprintf(" %.0f |", s))
+				sum += s
+				count++
+			} else {
+				sb.WriteString(" - |")
+			}
+		}
+		if count > 0 {
+			sb.WriteString(fmt.Sprintf(" %.1f |", sum/float64(count)))
+		} else {
+			sb.WriteString(" - |")
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// challengeBlock represents a single high-confidence challenge from the challenge round.
+type challengeBlock struct {
+	challengerAvatar string
+	challengerName   string
+	confidence       float64
+	content          string
+}
+
+// extractHighConfidenceChallenges parses challenge round (round index 1) outputs
+// for blocks containing CONFIDENCE: markers, returning only those at or above 0.7.
+func extractHighConfidenceChallenges(rounds []DebateRound, members []RoundtableMember, zh bool) []challengeBlock {
+	if len(rounds) < 2 {
+		return nil
+	}
+
+	const threshold = 0.7
+	var result []challengeBlock
+
+	for _, out := range rounds[1].Outputs {
+		challenger := findMember(members, out.MemberID)
+		avatar := ""
+		name := out.MemberID
+		if challenger != nil {
+			avatar = challenger.Avatar
+			name = challenger.displayName(zh)
+		}
+
+		for _, block := range splitChallengeBlocks(out.Content) {
+			conf := extractConfidence(block)
+			if conf < threshold {
+				continue
+			}
+			content := strings.TrimSpace(removeConfidenceLine(block))
+			if content == "" {
+				continue
+			}
+			result = append(result, challengeBlock{
+				challengerAvatar: avatar,
+				challengerName:   name,
+				confidence:       conf,
+				content:          content,
+			})
+		}
+	}
+	return result
+}
+
+// splitChallengeBlocks splits challenge content into blocks delimited by
+// markdown headers (## or ###). Text before the first header forms the first block.
+func splitChallengeBlocks(content string) []string {
+	lines := strings.Split(content, "\n")
+	var blocks []string
+	var current strings.Builder
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		isHeader := strings.HasPrefix(trimmed, "### ") || strings.HasPrefix(trimmed, "## ")
+		if isHeader && current.Len() > 0 {
+			blocks = append(blocks, current.String())
+			current.Reset()
+		}
+		current.WriteString(line)
+		current.WriteString("\n")
+	}
+	if current.Len() > 0 {
+		blocks = append(blocks, current.String())
+	}
+	return blocks
+}
+
+// extractConfidence finds and parses a CONFIDENCE: marker in the text.
+// Returns 0 if no marker is found.
+func extractConfidence(text string) float64 {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "confidence:") {
+			valStr := strings.TrimSpace(trimmed[len("confidence:"):])
+			val, err := strconv.ParseFloat(valStr, 64)
+			if err == nil {
+				return val
 			}
 		}
 	}
-	return strings.Join(parts, " | ")
+	return 0
+}
+
+// removeConfidenceLine removes all lines containing CONFIDENCE: markers.
+func removeConfidenceLine(text string) string {
+	lines := strings.Split(text, "\n")
+	var result []string
+	for _, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "confidence:") {
+			continue
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
+// getMemberOutput returns the content of a specific member's output from a
+// slice of DebateOutputs. Returns empty string if not found.
+func getMemberOutput(memberID string, outputs []DebateOutput) string {
+	for _, out := range outputs {
+		if out.MemberID == memberID {
+			return out.Content
+		}
+	}
+	return ""
+}
+
+// extractFinalPosition extracts the final position text from a final round
+// output, which is everything before the first SCORE: line.
+func extractFinalPosition(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	for _, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "score:") {
+			break
+		}
+		result = append(result, line)
+	}
+	return strings.TrimSpace(strings.Join(result, "\n"))
 }
 
 // Advance handles user input during the debate phases.

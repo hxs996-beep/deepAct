@@ -44,6 +44,42 @@ func TestRun_ResetsLoopGuardOnNewRun(t *testing.T) {
 	}
 }
 
+// TestRun_ResetsAnalysisReportConfirmedOnNewRun reproduces the false-confirmation
+// bug: AnalysisReportConfirmed, once set true when the user confirmed a report
+// in a prior task, leaked across Run() calls via the IntentContinue branch
+// (which kept it as-is). On an unrelated new question the analysis gate then
+// skipped (because !AnalysisReportConfirmed was false), so the agent never
+// presented a fresh report and instead hallucinated "分析报告已在上一轮输出，
+// 用户已确认执行" from the stale "✅ 分析报告已确认" marker left in history.
+//
+// AnalysisReportConfirmed is only meaningful within the single Run where
+// handleAnalysisNudgeConfirmation sets it (so the edit-plan guard can take
+// over); later Runs are covered by pendingEditPlan or PlanConfirmed. It must
+// therefore be reset per Run.
+func TestRun_ResetsAnalysisReportConfirmedOnNewRun(t *testing.T) {
+	e := &Engine{
+		model:    &stubStreamModel{chunks: []ModelChunk{{Delta: "已完成。", FinishReason: "stop"}}},
+		context:  &stubContextBuilder{},
+		tools:    stubToolExecutor{},
+		state:    &TaskState{TurnNumber: 0, Goal: "", AnalysisReportConfirmed: true},
+		history:  []Message{},
+		config:   EngineConfig{ModelName: "test-model"},
+		guards:   &GuardSystem{loop: NewLoopGuard("", 6)},
+		readLoop: NewReadLoopState(),
+	}
+	// No active nudge and a non-confirmation message: this Run is NOT a
+	// report-confirmation flow, so a stale AnalysisReportConfirmed must not
+	// survive into it.
+	e.pendingAnalysisNudge = false
+	if _, err := e.Run(context.Background(), "看下当前输出 能不能更加简单直观"); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if e.state.AnalysisReportConfirmed {
+		t.Errorf("AnalysisReportConfirmed leaked from a prior task: got true, want false. " +
+			"A non-confirmation Run must reset the flag so the analysis gate fires fresh.")
+	}
+}
+
 // TestRun_ResetsReadLoopStateOnNewRun verifies the same reset for
 // ReadLoopState (the per-(path,scope) read counter used in the loop body).
 func TestRun_ResetsReadLoopStateOnNewRun(t *testing.T) {

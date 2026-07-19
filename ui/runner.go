@@ -133,7 +133,7 @@ func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
 				}
 				select {
 				case r.progressCh <- msg:
-				default:
+				case <-time.After(100 * time.Millisecond):
 				}
 			}
 		})

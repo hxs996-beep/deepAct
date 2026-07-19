@@ -141,11 +141,11 @@ func TestFormatEditPlanSummary_WithEdits(t *testing.T) {
 		if !strings.Contains(got, "engine/types.go") {
 			t.Errorf("should show second file path, got: %s", got)
 		}
-		if !strings.Contains(got, "old code here") {
-			t.Errorf("should show old text preview, got: %s", got)
+		if strings.Contains(got, "old code here") {
+			t.Errorf("should NOT show old text preview (filename-only plan), got: %s", got)
 		}
-		if !strings.Contains(got, "new code here") {
-			t.Errorf("should show new text preview, got: %s", got)
+		if strings.Contains(got, "new code here") {
+			t.Errorf("should NOT show new text preview (filename-only plan), got: %s", got)
 		}
 		if !strings.Contains(got, "确认执行修改？") {
 			t.Errorf("should ask for confirmation, got: %s", got)

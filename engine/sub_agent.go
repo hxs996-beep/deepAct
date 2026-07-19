@@ -352,7 +352,16 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			// treat as narration (nudge) so the sub-agent never ends early on
 			// an uncertain call.
 			if msg.Content != "" {
-				isConc, err := conclusionClassifier.IsConclusion(callCtx, ConclusionCheck{
+				// Critic fast-path: a well-formed VERDICT line is a
+				// deterministic terminal signal — trust it and skip the
+				// classifier probe, so a genuine verdict is never nudged
+				// into another tool call (the critic run-on root cause).
+				if input.Agent == AgentCritic && parseCriticVerdict(msg.Content) != "" {
+					result := r.buildResult(msg.Content, input.Goal)
+					result.Usage = &totalUsage
+					return result, nil
+				}
+				isConc, err := conclusionClassifier.IsConclusion(ctx, ConclusionCheck{
 				Goal: input.Goal,
 				Text: msg.Content,
 			})

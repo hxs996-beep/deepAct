@@ -300,22 +300,69 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// 避免显示误导性的“AI 未提供修改原因”，让确认闸门连贯。
 	mergedReasoning := reasoningForEditPlan(e.history, assistant.Content)
 
-	// Design-phase gating is delegated to the active skill's own <HARD-GATE>
-	// text (injected into the stable context zone on activation) — the engine
-	// does NOT add a code-level edit/write block here. A code guard cannot tell
-	// "write implementation code" from "write a design doc", so it bluntly
-	// blocked the skill's own design-doc writes (brainstorming step 6) and, when
-	// mis-conditioned on ActiveSkillName=="", deadlocked every normal edit with
-	// no escape hatch. When no skill is active, the edit-plan guard below is the
-	// interception: it presents proposed edits for user confirmation with a
-	// PlanConfirmed escape hatch — death-loop-safe.
+	// Skill HARD-GATE: when the active skill has a pre-implementation gate
+	// (declared in its TOML [gate] section) and the gate has not been passed,
+	// block edit/write calls according to the gate type:
+	//   - "path_filter": block edits to paths NOT in AllowedPaths
+	//   - "block_all": block ALL edits
+	// SkillGatePassed is set to true when the LLM calls activate_skill for a
+	// NextSkills skill (terminal state) or when the user signals approval
+	// (detected in loop.go's Run).
+	if e.state.ActiveSkillName != "" && e.skills != nil {
+		if currentSkill := e.skills.Get(e.state.ActiveSkillName); currentSkill != nil && currentSkill.Gate != nil && !e.state.SkillGatePassed {
+			var blockedCalls []ToolCallRequest
+			for _, call := range calls {
+				if call.Name == "edit" || call.Name == "write" {
+					path := extractPathFromArgs(call.Input, e.config.WorkDir)
+					relPath := strings.TrimPrefix(path, e.config.WorkDir+"/")
+					allowed := false
+					switch currentSkill.Gate.Type {
+					case "block_all":
+						allowed = false
+					case "path_filter":
+						for _, p := range currentSkill.Gate.AllowedPaths {
+							if strings.HasPrefix(relPath, p) {
+								allowed = true
+								break
+							}
+						}
+					}
+					if !allowed {
+						blockedCalls = append(blockedCalls, call)
+					}
+				}
+			}
+			if len(blockedCalls) > 0 {
+				turnLog.Printf("skill HARD-GATE: blocking %d edit/write call(s) (skill=%s, gate=%s, SkillGatePassed=%v)",
+					len(blockedCalls), e.state.ActiveSkillName, currentSkill.Gate.Type, e.state.SkillGatePassed)
+				nudgeMsg := fmt.Sprintf("[HARD-GATE] skill `%s` 活跃中，前置阶段尚未完成。\n", e.state.ActiveSkillName) +
+					"在完成前置阶段前，不能修改代码。完成调查/设计后，输出报告并等待用户确认。\n" +
+					"或调用 activate_skill 激活下一个 skill 以转入实现阶段。"
+				if !e.isChinese {
+					nudgeMsg = fmt.Sprintf("[HARD-GATE] skill `%s` is active and its pre-implementation phase is not complete.\n", e.state.ActiveSkillName) +
+						"You cannot modify code until the pre-implementation phase is complete. After investigation/design, output a report and wait for user confirmation.\n" +
+						"Or call activate_skill to activate the next skill to transition to implementation."
+				}
+				e.history = append(e.history, assistant)
+				for _, c := range calls {
+					e.history = append(e.history, Message{
+						Role:       "tool",
+						ToolCallID: c.ID,
+						Content:    "Blocked: " + nudgeMsg,
+						Timestamp:  time.Now(),
+					})
+				}
+				return TurnResult{Done: false, FinishReason: finish}, nil
+			}
+		}
+	}
 
 	// Analysis report gate: before allowing edit/write, require the agent to
 	// present a text-only analysis report and get user confirmation. This gate
 	// fires when the agent has done searches (runToolCallCount > 0) and is now
 	// attempting to modify code, but hasn't yet presented its findings to the
 	// user. After 2 blocks, the gate gives up and lets the edit plan guard
-	// take over (degraded mode - better than deadlocking).
+	// take over in degraded mode (see degradation handler below).
 	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
 		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
 		e.analysisNudgeCount < 2 {
@@ -342,6 +389,42 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					"Stop after the report and wait for user confirmation before modifying."
 			}
 			e.pendingAnalysisNudge = true
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: " + nudgeMsg,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
+	}
+
+	// Analysis gate degradation: after 2 blocks without a user-confirmed
+	// analysis report, the gate gives up blocking. Instead of silently
+	// falling through (which leaves the LLM unaware the gate is lifted and
+	// causes it to submit edits one at a time), send a one-time message
+	// telling the LLM to batch ALL planned edits. This ensures the edit plan
+	// guard captures the full change set for a single comprehensive confirmation.
+	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
+		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
+		e.analysisNudgeCount >= 2 {
+		var editCalls []ToolCallRequest
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				editCalls = append(editCalls, call)
+			}
+		}
+		if len(editCalls) > 0 {
+			e.state.AnalysisReportConfirmed = true
+			e.pendingAnalysisNudge = false
+			turnLog.Printf("analysis report gate: degraded after %d blocks, requesting batched resubmission", e.analysisNudgeCount)
+			nudgeMsg := "分析报告要求已自动豁免（已尝试 2 次但未输出报告）。请一次性提交所有计划的修改，以便统一确认后执行。"
+			if !e.isChinese {
+				nudgeMsg = "The analysis report requirement has been automatically waived (2 attempts without a report). Please submit ALL planned edits at once so they can be confirmed together."
+			}
 			e.history = append(e.history, assistant)
 			for _, c := range calls {
 				e.history = append(e.history, Message{
@@ -1711,6 +1794,9 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 			})
 			continue
 		}
+		// Terminal state detection: when transitioning to a skill that's in the
+		// current skill's NextSkills, mark the current skill's gate as passed.
+		e.markSkillGatePassed(s.Name)
 		prevSkill := e.lastActivatedSkill
 		e.activatedSkills[s.Name] = true
 		e.lastActivatedSkill = s.Name

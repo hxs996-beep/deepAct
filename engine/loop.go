@@ -261,6 +261,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
 	e.analysisNudgeCount = 0
+	// AnalysisReportConfirmed is scoped to a single Run: it is set true only by
+	// handleAnalysisNudgeConfirmation (below) when the user confirms a report,
+	// and only needs to skip the analysis gate within that same Run so the
+	// edit-plan guard can take over. After this Run, either pendingEditPlan or
+	// PlanConfirmed independently skips the gate, so the flag must NOT persist -
+	// otherwise a stale confirmation leaks from a prior task and the agent
+	// falsely claims "analysis report already confirmed" on an unrelated new
+	// question (and skips presenting a fresh report).
+	e.state.AnalysisReportConfirmed = false
 	e.runErrorCount = 0
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
@@ -623,6 +632,22 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Skill gate approval detection: when a skill with a pre-implementation
+	// gate is active and the user signals approval, mark the gate as passed
+	// and trigger the skill chain via deactivateSkill (auto-activates NextSkills).
+	if e.state.ActiveSkillName != "" && !strings.HasPrefix(strings.TrimSpace(userMsg), "/") {
+		if e.detectSkillGateApproval(userMsg) {
+			skillName := e.state.ActiveSkillName
+			e.deactivateSkill()
+			msg := fmt.Sprintf("✅ 已确认，自动转入下一个 skill（%s）。", skillName)
+			if !zh {
+				msg = fmt.Sprintf("✅ Confirmed, auto-activating next skill (%s).", skillName)
+			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			loopLog.Printf("skill gate approved: deactivating %s, auto-activating next skill", skillName)
+		}
+	}
+
 	// Detect user intent: analysis-only vs new-topic vs continue.
 	// Resets PlanConfirmed when the user starts a new topic or asks for
 	// analysis only, preventing edit-plan-guard bypass across Run() calls.
@@ -643,12 +668,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.PlanConfirmed = false
 		e.state.AnalysisMode = false
 		e.state.AnalysisReportConfirmed = false
+		e.state.SkillGatePassed = false
 		e.pendingAnalysisNudge = false
 		loopLog.Printf("intent: new topic, reset PlanConfirmed + AnalysisMode")
 	default: // IntentContinue
 		// Clear analysis mode - the user is continuing with implementation.
-		// Keep AnalysisReportConfirmed as-is: if the user confirmed the report,
-		// it stays confirmed; if not, the gate will still fire.
+		// AnalysisReportConfirmed was already reset per-Run above (and is only
+		// re-set this Run by handleAnalysisNudgeConfirmation on a report
+		// confirmation); it no longer leaks across tasks. PlanConfirmed is kept
+		// so the edit-plan guard stays bypassed for the rest of this task.
 		e.state.AnalysisMode = false
 		loopLog.Printf("intent: continue, cleared AnalysisMode, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
 	}
@@ -1160,6 +1188,61 @@ func (e *Engine) detectIntentShift(userMsg string) bool {
 	return hasOp && !hasDev
 }
 
+// markSkillGatePassed marks the skill-specific gate as passed when the LLM
+// transitions to a skill that's in the current skill's NextSkills chain.
+// This indicates the pre-implementation phase is complete and the HARD-GATE
+// should release. Sets SkillGatePassed = true for any skill with a Gate config.
+func (e *Engine) markSkillGatePassed(newSkillName string) {
+	if e.state.ActiveSkillName == "" || e.skills == nil {
+		return
+	}
+	current := e.skills.Get(e.state.ActiveSkillName)
+	if current == nil {
+		return
+	}
+	for _, next := range current.NextSkills {
+		if newSkillName == next {
+			if current.Gate != nil {
+				e.state.SkillGatePassed = true
+			}
+			return
+		}
+	}
+}
+
+// detectSkillGateApproval checks if the user's message signals approval of
+// the active skill's pre-implementation gate (any skill with a [gate] config).
+func (e *Engine) detectSkillGateApproval(userMsg string) bool {
+	msg := strings.ToLower(strings.TrimSpace(userMsg))
+	approvalPhrases := []string{
+		"approved", "looks good", "lgtm", "go ahead",
+		"start implementing", "start coding", "start development",
+		"start fixing", "proceed with the fix", "root cause found",
+		"没问题", "可以了", "同意", "批准", "通过了",
+		"开始实现", "开始写代码", "开始开发", "方案可以", "设计可以",
+		"开始修复", "找到根因", "根因确认", "修复吧", "继续修复",
+	}
+	matched := false
+	for _, p := range approvalPhrases {
+		if strings.Contains(msg, p) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	if e.state.ActiveSkillName == "" || e.skills == nil {
+		return false
+	}
+	current := e.skills.Get(e.state.ActiveSkillName)
+	if current == nil || current.Gate == nil || e.state.SkillGatePassed {
+		return false
+	}
+	e.state.SkillGatePassed = true
+	return true
+}
+
 // accumulateUsage adds a sub-agent's token usage to the main engine's
 // per-Run accumulator. Thread-safe: uses usageMu for concurrent goroutine access.
 func (e *Engine) accumulateUsage(usage *ModelUsage) {
@@ -1206,6 +1289,8 @@ func (e *Engine) deactivateSkill() {
 	// Reset TDD-specific phase tracking
 	e.tddPhase = ""
 	e.tddPhaseDetail = ""
+	// Reset skill gate flag
+	e.state.SkillGatePassed = false
 
 	// Auto-activate next skill in chain
 	if nextSkill != nil {
@@ -1527,6 +1612,9 @@ func describeScope(scope string, zh bool) string {
 // activateSkill activates a skill and injects its methodology into the stable zone.
 // reason is a human-readable description of why the skill was activated (for logging/progress).
 func (e *Engine) activateSkill(s *skill.Skill, reason string) {
+	// Terminal state detection: when transitioning to a skill that's in the
+	// current skill's NextSkills, mark the current skill's gate as passed.
+	e.markSkillGatePassed(s.Name)
 	e.activatedSkills[s.Name] = true
 	e.lastActivatedSkill = s.Name
 	e.state.ActiveSkillName = s.Name

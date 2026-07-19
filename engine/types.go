@@ -233,6 +233,7 @@ type TaskState struct {
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
+	SkillGatePassed     bool             `json:"skill_gate_passed,omitempty"`    // active skill's pre-implementation gate has been passed (user approval or NextSkills transition), allowing edits
 	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
 
 	// ReadHistory records each file read this session (path + scope) so the

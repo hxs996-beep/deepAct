@@ -108,6 +108,7 @@ type Model struct {
 	engine              EngineRunner
 	streaming           string
 	narration           string // accumulated content_delta text for current turn (AI intermediate intent)
+	narrationPending    string // buffered content_delta, flushed to narration on tick to reduce diff renderer churn
 	thinkingContent     string // deprecated: kept for legacy, no longer fed by reasoning_delta
 	thinkingActivity    string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
 	apiKeyInput         string
@@ -182,7 +183,7 @@ const (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
-	progressChan := make(chan ProgressMsg, 32)
+	progressChan := make(chan ProgressMsg, 256)
 	if runner != nil {
 		runner.SetProgressChan(progressChan)
 	}
@@ -582,7 +583,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streaming += msg.Detail
 		case "content_delta":
 			// AI intermediate narration text streamed from the main engine.
-			m.narration += msg.Detail
+			// Buffer to narrationPending; flushed to m.narration on tick or
+			// turn boundary to reduce diff renderer churn (high-frequency
+			// View updates cause garbled CJK text in terminal diff rendering).
+			m.narrationPending += msg.Detail
 		case "usage":
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
@@ -992,6 +996,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toolTree = nil
 			m.streaming = ""
 			m.narration = ""
+			m.narrationPending = ""
 			m.escAt = time.Time{}
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
@@ -1313,6 +1318,7 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 	}
 
 	if m.state == stateRunning || len(m.spinners) > 0 {
+		m.flushNarration()
 		for i := range m.spinners {
 			if m.spinners[i].Active {
 				m.spinners[i].FrameIdx = (m.spinners[i].FrameIdx + 1) % len(spinnerFrames)
@@ -1340,6 +1346,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.subAgents = nil
 	m.streaming = ""
 	m.narration = ""
+	m.narrationPending = ""
 
 	// Handle local slash commands without invoking the engine
 	if strings.TrimSpace(content) == "/help" {
@@ -1363,11 +1370,22 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	)
 }
 
+// flushNarration moves buffered content_delta text from narrationPending into
+// narration, then clears the pending buffer. Called on tick (100ms batching)
+// and before finalizeTurnBlocks to ensure no buffered text is lost.
+func (m *Model) flushNarration() {
+	if m.narrationPending != "" {
+		m.narration += m.narrationPending
+		m.narrationPending = ""
+	}
+}
+
 // finalizeTurnBlocks snapshots the current turn's narration and tool tree into
 // display messages, then clears both. Called at turn boundaries (tool_start)
 // and at finishStreaming to ensure each turn's narration + tools appear as
 // distinct blocks in temporal order.
 func (m *Model) finalizeTurnBlocks() {
+	m.flushNarration()
 	if strings.TrimSpace(m.narration) != "" {
 		m.messages = append(m.messages, DisplayMessage{
 			Role:    "narration",
@@ -1681,7 +1699,10 @@ func renderMessage(msg DisplayMessage, width int) []string {
 		}
 		return wrapLines(styled, width)
 	case "narration":
-		rendered := renderMarkdown(content, width)
+		// NarrationStyle adds PaddingLeft(2) + PaddingRight(1) = 3 columns.
+		// Subtract from width so padded output fits terminal, preventing
+		// auto-wrap that corrupts diff renderer line tracking (garbled text).
+		rendered := renderMarkdown(content, width-3)
 		return strings.Split(NarrationStyle.Render(rendered), "\n")
 	default:
 		rendered := renderMarkdown(content, width)
@@ -2093,25 +2114,10 @@ func renderStreaming(streaming string, width int) []string {
 		return streamRenderCache.lines
 	}
 
-	// Primary path: glamour markdown rendering (same as final display).
-	rendered := renderMarkdown(streaming, width)
-	if rendered != streaming {
-		// Glamour succeeded — split into lines.
-		lines := strings.Split(rendered, "\n")
-		// Collapse runs of 2+ consecutive blank lines into one. Glamour renders
-		// fenced code-block content literally, so blank lines inside a block
-		// (e.g. the critic agent's ``` Check blocks, which often contain blank
-		// lines between **Command run:** / **Result:** fields) survive verbatim
-		// and produce large visual gaps. The legacy wrapText path collapsed
-		// \n\n\n -> \n\n; mirror that here so streaming matches final display.
-		lines = collapseBlankLines(lines)
-		streamRenderCache.content = streaming
-		streamRenderCache.width = width
-		streamRenderCache.lines = lines
-		return lines
-	}
-
-	// Fallback: glamour unavailable or failed — use legacy plain-text rendering.
+	// Use fast plain-text rendering during active streaming. Glamour's full
+	// markdown parse on every content_delta token is expensive (5-50ms) and
+	// causes the progress channel to fill up, dropping tokens. The final
+	// display (after streaming completes) uses glamour via renderMarkdown.
 	normalized := streaming
 	for strings.Contains(normalized, "\n\n\n") {
 		normalized = strings.ReplaceAll(normalized, "\n\n\n", "\n\n")
@@ -2121,23 +2127,6 @@ func renderStreaming(streaming string, width int) []string {
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines
 	return lines
-}
-
-// collapseBlankLines collapses runs of 2+ consecutive blank lines into a single
-// blank line. A line is "blank" if, after stripping ANSI styling, it contains
-// only whitespace — glamour pads every rendered line (including blank ones) to
-// the full width with styled spaces, so a blank line is rarely the empty string.
-func collapseBlankLines(lines []string) []string {
-	out := make([]string, 0, len(lines))
-	for _, l := range lines {
-		if strings.TrimSpace(stripAnsi(l)) == "" && len(out) > 0 &&
-			strings.TrimSpace(stripAnsi(out[len(out)-1])) == "" {
-			// Previous kept line is already blank — drop this one.
-			continue
-		}
-		out = append(out, l)
-	}
-	return out
 }
 
 func renderSpinners(spinners []AgentSpinner, width int) []string {

@@ -468,16 +468,16 @@ func pickIntentPrompt(zh bool) string {
 
 const intentClassifierSystemPromptZh = `你是一个编程助手的用户意图分类器。给定用户当前目标和用户最新消息，判断消息意图属于哪一类。
 
-analyze：用户仅要求分析、解释、排查、检查，不要求修改代码。
-continue：用户继续当前目标的已有工作（追加、修改、验证、优化之前的内容，或引用之前的工作）。
+analyze：用户仅要求分析、解释、排查、检查，不要求修改代码。即使用户引用了之前分析过的内容（如"看下第2点"、"检查之前的方案是否有兜底"），只要消息的核心动作是查看/检查/确认而非修改，就归为 analyze。
+continue：用户继续当前目标的已有工作，且明确要求追加、修改、验证、优化之前的代码或内容。注意：仅引用之前的工作但只要求查看/检查（不含修改动词）的，归为 analyze 而非 continue。
 new_topic：用户开启与当前目标无关的新任务。
 
 只输出 JSON：{"intent": "analyze" 或 "continue" 或 "new_topic"}。`
 
 const intentClassifierSystemPromptEn = `You are a user-intent classifier for a coding agent. Given the user's current goal and the user's latest message, classify the message intent.
 
-analyze: the user only asks for analysis, explanation, investigation, or inspection - no code changes requested.
-continue: the user continues existing work on the current goal (adding to, modifying, verifying, or optimizing prior work, or referencing previous work).
+analyze: the user only asks for analysis, explanation, investigation, or inspection - no code changes requested. Even if the user references prior work items (e.g., "check point 2", "see if the previous approach has fallback"), as long as the core action is to view/check/verify rather than modify, classify as analyze.
+continue: the user continues existing work on the current goal AND explicitly requests adding to, modifying, verifying, or optimizing prior code or content. Note: referencing prior work but only asking to view/check (without modification verbs) is analyze, not continue.
 new_topic: the user starts a new task unrelated to the current goal.
 
 Output JSON only: {"intent": "analyze" or "continue" or "new_topic"}.`

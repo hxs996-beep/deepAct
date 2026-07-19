@@ -12,9 +12,10 @@ import (
 // between tool calls and text - the exact loop the critic falls into when its
 // verdict gets nudged.
 type stubSeqModel struct {
-	responses      []ModelResponse
-	classifierResp string // returned on JsonMode=true calls (ConclusionClassifier probes)
-	calls          int    // counts non-classifier (scripted) calls only
+	responses       []ModelResponse
+	classifierResp  string // returned on JsonMode=true calls (ConclusionClassifier probes)
+	calls           int    // counts non-classifier (scripted) calls only
+	classifierCalls int    // counts ConclusionClassifier (JsonMode) probes
 }
 
 func (m *stubSeqModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
@@ -25,6 +26,7 @@ func (m *stubSeqModel) Complete(_ context.Context, req ModelRequest) (*ModelResp
 	// ConclusionClassifier probes use JsonMode; return the scripted verdict
 	// without advancing the scripted call counter.
 	if req.JsonMode {
+		m.classifierCalls++
 		if m.classifierResp == "" {
 			return &ModelResponse{}, nil
 		}
@@ -89,6 +91,53 @@ func TestSubAgentRunLoop_TerminatesOnConclusionNotLoop(t *testing.T) {
 	}
 	if result.TimedOut {
 		t.Errorf("expected TimedOut=false (terminated on conclusion), got TimedOut=true")
+	}
+	if !strings.Contains(result.Summary, "VERDICT: FAIL") {
+		t.Errorf("expected Summary to contain the verdict, got: %q", result.Summary)
+	}
+}
+
+func TestSubAgentRunLoop_CriticVerdictBypassesClassifier(t *testing.T) {
+	toolCall := ModelResponse{
+		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"go build ./..."}`},
+		}}},
+		FinishReason: "tool_calls",
+	}
+	verdict := ModelResponse{
+		Message: ModelMessage{
+			Role:    "assistant",
+			Content: "构建失败。\n\nVERDICT: FAIL",
+		},
+		FinishReason: "stop",
+	}
+	model := &stubSeqModel{responses: []ModelResponse{toolCall, verdict}, classifierResp: `{"conclusion": false}`}
+
+	runner := &SubAgentRunner{
+		model:     model,
+		tools:     stubToolExecutor{},
+		modelName: "test",
+	}
+
+	result, err := runner.Run(context.Background(), Handoff{
+		Agent:         AgentCritic,
+		Goal:          "验证实现",
+		MaxIterations: 8,
+	})
+	if err != nil {
+		t.Fatalf("runLoop error: %v", err)
+	}
+
+	if model.calls != 2 {
+		t.Errorf("expected loop to terminate at the verdict (2 model calls), got %d", model.calls)
+	}
+	if model.classifierCalls != 0 {
+		t.Errorf("expected classifier to be bypassed on a critic verdict, got %d probe(s)", model.classifierCalls)
+	}
+	if result.TimedOut {
+		t.Errorf("expected TimedOut=false, got true")
 	}
 	if !strings.Contains(result.Summary, "VERDICT: FAIL") {
 		t.Errorf("expected Summary to contain the verdict, got: %q", result.Summary)

@@ -260,7 +260,7 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 	e.state.Roundtable = &RoundtableState{
 		Goal:    "测试裁决界面",
 		Phase:   RoundtableAwaitingVerdict,
-		Members: DefaultDebateMembers,
+		Members: DefaultDebateMembers[:2],
 		DebateRounds: []DebateRound{
 			{
 				Phase: DebateProposal,
@@ -272,8 +272,8 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 			{
 				Phase: DebateChallenge,
 				Outputs: []DebateOutput{
-					{MemberID: "radical", Content: "挑战防守派", Targets: []string{"defender"}},
-					{MemberID: "defender", Content: "挑战创新派", Targets: []string{"radical"}},
+					{MemberID: "radical", Content: "### 挑战: 防守派\n方案过于保守，没有考虑扩展性\nCONFIDENCE: 0.9", Targets: []string{"defender"}},
+					{MemberID: "defender", Content: "### 挑战: 创新派\n重构风险太高\nCONFIDENCE: 0.5", Targets: []string{"radical"}},
 				},
 			},
 			{
@@ -286,14 +286,14 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 			{
 				Phase: DebateFinal,
 				Outputs: []DebateOutput{
-					{MemberID: "radical", Content: "SCORE: radical = 90\nSCORE: defender = 70\nVERDICT: radical"},
-					{MemberID: "defender", Content: "SCORE: radical = 75\nSCORE: defender = 85\nVERDICT: defender"},
+					{MemberID: "radical", Content: "最终立场：坚持创新方案\nSCORE: radical = 90\nSCORE: defender = 70\nVERDICT: radical"},
+					{MemberID: "defender", Content: "最终立场：建议分阶段实施\nSCORE: radical = 75\nSCORE: defender = 85\nVERDICT: defender"},
 				},
 			},
 		},
 	}
 
-	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers, true)
+	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers[:2], true)
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -305,6 +305,25 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 	}
 	if !strings.Contains(resp.Summary, "评分") {
 		t.Errorf("verdict prompt should contain scores")
+	}
+	// Score table should contain average column
+	if !strings.Contains(resp.Summary, "平均") {
+		t.Errorf("verdict prompt should contain average column in score table")
+	}
+	// High-confidence challenge (0.9) should be shown
+	if !strings.Contains(resp.Summary, "高置信度挑战") {
+		t.Errorf("verdict prompt should contain high-confidence challenges section")
+	}
+	if !strings.Contains(resp.Summary, "置信度 90%") {
+		t.Errorf("verdict prompt should show confidence percentage for high-confidence challenge")
+	}
+	// Low-confidence challenge (0.5) should NOT be shown
+	if strings.Contains(resp.Summary, "重构风险太高") {
+		t.Errorf("verdict prompt should not contain low-confidence challenges")
+	}
+	// Final position should be shown instead of raw proposal
+	if !strings.Contains(resp.Summary, "最终立场") {
+		t.Errorf("verdict prompt should contain final position from final round")
 	}
 }
 
