@@ -250,7 +250,7 @@ func TestContainsDecisionText(t *testing.T) {
 func TestBuildArchivePrompt_IncludesGoal(t *testing.T) {
 	state := &TaskState{Goal: "add authentication"}
 	history := []Message{{Role: "user", Content: "hello"}}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	if prompt == "" {
 		t.Fatal("expected non-empty prompt")
 	}
@@ -262,7 +262,7 @@ func TestBuildArchivePrompt_IncludesGoal(t *testing.T) {
 func TestBuildArchivePrompt_NoGoal(t *testing.T) {
 	state := &TaskState{}
 	history := []Message{{Role: "user", Content: "hello"}}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	// Should not contain empty goal string
 	if strContains(prompt, "Task goal:") {
 		t.Error("prompt should not show empty goal")
@@ -275,7 +275,7 @@ func TestBuildArchivePrompt_SkipsSessionArchive(t *testing.T) {
 		{Role: "system", Content: "[SESSION ARCHIVE]\nold stuff"},
 		{Role: "user", Content: "new message"},
 	}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	if strContains(prompt, "[SESSION ARCHIVE]") {
 		t.Error("prompt should skip SESSION ARCHIVE messages")
 	}
@@ -287,7 +287,7 @@ func TestBuildArchivePrompt_SkipsSessionArchive(t *testing.T) {
 func TestBuildArchivePrompt_IncludesMemoryMarkers(t *testing.T) {
 	state := &TaskState{MemoryMarkers: []string{"key: config.go", "note: use X"}}
 	history := []Message{{Role: "user", Content: "hello"}}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	if !strContains(prompt, "key: config.go") {
 		t.Error("prompt should include memory markers")
 	}
@@ -302,7 +302,7 @@ func TestBuildArchivePrompt_IncludesDecisionsAndOpenIssues(t *testing.T) {
 		OpenQuestions: []string{"how to handle error"},
 	}
 	history := []Message{{Role: "user", Content: "hello"}}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	if !strContains(prompt, "use X library") {
 		t.Error("prompt should include decisions")
 	}
@@ -314,7 +314,7 @@ func TestBuildArchivePrompt_IncludesDecisionsAndOpenIssues(t *testing.T) {
 func TestBuildArchivePrompt_NoMemoryMarkers(t *testing.T) {
 	state := &TaskState{MemoryMarkers: nil}
 	history := []Message{{Role: "user", Content: "hello"}}
-	prompt := buildArchivePrompt(state, history)
+	prompt := buildArchivePrompt(state, history, false)
 	if strContains(prompt, "Memory markers") {
 		t.Error("prompt should not mention memory markers when empty")
 	}
@@ -325,7 +325,7 @@ func TestBuildArchivePrompt_NoMemoryMarkers(t *testing.T) {
 func TestBuildModelArchivePrompt(t *testing.T) {
 	goal := "fix bug"
 	history := []ModelMessage{{Role: "user", Content: "hello"}}
-	prompt := buildModelArchivePrompt(goal, history)
+	prompt := buildModelArchivePrompt(goal, history, false)
 	if !strContains(prompt, "fix bug") {
 		t.Error("prompt should contain goal")
 	}
@@ -340,7 +340,7 @@ func TestBuildModelArchivePrompt_ExtractsPreviousArchive(t *testing.T) {
 		{Role: "system", Content: "[SESSION ARCHIVE]\nprev summary"},
 		{Role: "user", Content: "new msg"},
 	}
-	prompt := buildModelArchivePrompt(goal, history)
+	prompt := buildModelArchivePrompt(goal, history, false)
 	if !strContains(prompt, "prev summary") {
 		t.Error("prompt should include previous archive")
 	}
@@ -351,7 +351,7 @@ func TestBuildModelArchivePrompt_ExtractsPreviousArchive(t *testing.T) {
 
 func TestBuildModelArchivePrompt_EmptyGoal(t *testing.T) {
 	history := []ModelMessage{{Role: "user", Content: "hi"}}
-	prompt := buildModelArchivePrompt("", history)
+	prompt := buildModelArchivePrompt("", history, false)
 	if strContains(prompt, "Task goal:") {
 		t.Error("empty goal should not be mentioned")
 	}

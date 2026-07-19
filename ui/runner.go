@@ -87,6 +87,11 @@ func (r *ProgressEngineRunner) Cancel() {
 func (r *ProgressEngineRunner) getEngine() *engine.Engine {
 	r.once.Do(func() {
 		r.eng = engine.NewEngine(r.Config, r.Deps)
+		r.eng.SetStopHooks([]engine.StopHook{
+			&engine.ZeroToolCallHook{MaxRetries: 5},
+			&engine.StalledNarrationHook{MaxRetries: 4, Classifier: r.eng.NewConclusionClassifier()},
+		})
+		r.eng.SetIntentJudge(r.eng.NewIntentClassifier())
 	})
 	return r.eng
 }
@@ -128,7 +133,7 @@ func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
 				}
 				select {
 				case r.progressCh <- msg:
-				default:
+				case <-time.After(100 * time.Millisecond):
 				}
 			}
 		})

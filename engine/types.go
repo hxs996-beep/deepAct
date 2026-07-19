@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+// UserIntent classifies the user's intention for the current message,
+// used to control PlanConfirmed reset and analysis-only constraints.
+type UserIntent int
+
+const (
+	IntentContinue UserIntent = iota // continuing previous task — keep PlanConfirmed
+	IntentNewTopic                   // new topic, different from previous goal — reset PlanConfirmed
+	IntentAnalyze                    // analysis/explanation only, no modifications — reset + inject constraint
+)
+
 type Stage int
 
 const (
@@ -12,6 +22,7 @@ const (
 	StagePlan
 	StageDesignGuard
 	StageAct
+	StageVerifyFailed // critic adversarial verification returned FAIL — user must decide
 	StageVerifyCompact
 )
 
@@ -23,7 +34,7 @@ const (
 )
 
 type ProgressEvent struct {
-	Type       string // "tool_start" | "tool_done" | "thinking" | "agent_start" | "agent_done" | "usage"
+	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage"
 	Name       string
 	Detail     string // brief digest for live display
 	FullDetail string // full content (e.g., diff) for final rendering
@@ -52,9 +63,15 @@ type EngineConfig struct {
 	ModelName              string // default (Pro) model name
 	FlashModelName         string // Flash model name for cheaper agents
 	BaseURL                string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
+	SubAgentBaseURL        string // separate API base URL for sub-agents (cache isolation); empty = same as BaseURL
 	MaxTurns               int
 	MaxIterationsPerTurn   int
 	MaxContextTokens       int
+	// MaxOutputTokens caps the LLM completion length per turn (max_tokens).
+	// DeepSeek's 1M context window supports large completions; a generous
+	// budget lets the model emit full code edits in one turn. 0 = use the
+	// DefaultMaxOutputTokens const.
+	MaxOutputTokens        int
 	PlanningEnabled        bool
 	PlanningThresholdChars int
 	AutoConfirmScope       bool
@@ -66,6 +83,9 @@ type EngineConfig struct {
 	Pricing                PricingConfig
 	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
 	PromptVersion          string // SHA256 hash of the system prompt for tracking
+	// TeamMembers is the ordered list of member IDs to use in /team debate mode.
+	// Empty = use DefaultDebateMembers.
+	TeamMembers []string
 }
 
 type EngineResponse struct {
@@ -144,6 +164,7 @@ type ModelChunk struct {
 	FinishReason   string
 	Usage          *ModelUsage
 	Err            error
+	RetryProgress  string // non-empty when a retry is about to start
 }
 
 type ToolExecContext struct {
@@ -212,7 +233,40 @@ type TaskState struct {
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
 	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
+	SkillGatePassed     bool             `json:"skill_gate_passed,omitempty"`    // active skill's pre-implementation gate has been passed (user approval or NextSkills transition), allowing edits
 	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
+
+	// ReadHistory records each file read this session (path + scope) so the
+	// prompt can warn the agent against re-reading, and the loop guard can count
+	// repeated reads of the same (path, scope). Cleared on new user message.
+	ReadHistory []ReadRecord `json:"read_history"`
+
+	// AnalysisMode is set when the user's intent is analysis-only. When true,
+	// the context builder injects a [ANALYSIS MODE] constraint every turn,
+	// persisting across turns (unlike the former pendingPinnedMessages approach
+	// which was cleared after the first turn). Cleared when the user confirms
+	// the analysis report or starts a new topic.
+	AnalysisMode bool `json:"analysis_mode,omitempty"`
+
+	// AnalysisReportConfirmed is set when the user confirms the analysis report
+	// presented by the agent. When true, the analysis report gate is skipped,
+	// allowing the edit plan guard to proceed normally.
+	//
+	// Scoped to a single Run: it is reset to false at the start of every Run
+	// and only re-set within that Run by handleAnalysisNudgeConfirmation. This
+	// prevents a confirmation from a prior task from leaking into an unrelated
+	// new question (which made the agent skip presenting a fresh report and
+	// falsely claim "analysis report already confirmed"). Later Runs rely on
+	// pendingEditPlan / PlanConfirmed to skip the gate instead.
+	AnalysisReportConfirmed bool `json:"analysis_report_confirmed,omitempty"`
+}
+
+// ReadRecord captures a single read operation for loop-prevention and prompt
+// injection. Scope is a human-readable string: "" for a full-file read,
+// "symbol:Run" for a symbol read, "L10-50" for an offset/limit range.
+type ReadRecord struct {
+	Path  string `json:"path"`
+	Scope string `json:"scope"`
 }
 
 type FileCollapse struct {
@@ -289,20 +343,65 @@ type ScopeResult struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
-// ReviewContextLevel describes how rich the context is for a code review.
-type ReviewContextLevel int
+// DebateRoundPhase labels the phase of a single debate round.
+type DebateRoundPhase string
 
 const (
-	ReviewLevelFull    ReviewContextLevel = iota // L1: Goal + Plan + Diffs available in conference
-	ReviewLevelPartial                           // L2: user describes functionality + workspace code exists
-	ReviewLevelMinimal                           // L3: only user description, no clear code target
+	DebateProposal  DebateRoundPhase = "proposal"
+	DebateChallenge DebateRoundPhase = "challenge"
+	DebateRebuttal  DebateRoundPhase = "rebuttal"
+	DebateFinal     DebateRoundPhase = "final"
 )
 
-// ReviewContext carries all information needed for a unified code review.
-type ReviewContext struct {
-	Level     ReviewContextLevel
-	Goal      string   // original goal or user's functional description
-	PlanSteps string   // plan steps (only for L1)
-	CodeFiles []string // files relevant to the review
-	UserDesc  string   // user's original description (for L2/L3)
+// DebateRound captures one round of the debate arena.
+type DebateRound struct {
+	Phase   DebateRoundPhase `json:"phase"`
+	Outputs []DebateOutput   `json:"outputs"`
+}
+
+// DebateOutput is one member's contribution in a debate round.
+type DebateOutput struct {
+	MemberID string   `json:"member_id"`
+	Content  string   `json:"content"`
+	Targets  []string `json:"targets"` // member IDs this output targets (challenge/rebuttal)
+}
+
+// RoundtablePhase describes which stage of the roundtable we are in.
+type RoundtablePhase int
+
+const (
+	RoundtableIdle           RoundtablePhase = iota
+	RoundtableProposal                        // 提案轮
+	RoundtableChallenge                       // 质询轮
+	RoundtableRebuttal                        // 反驳轮
+	RoundtableFinal                           // 终陈轮
+	RoundtableAwaitingVerdict                 // 等待用户裁决
+	RoundtableDone                            // 完成
+)
+
+func (p RoundtablePhase) String() string {
+	switch p {
+	case RoundtableProposal:
+		return "proposal"
+	case RoundtableChallenge:
+		return "challenge"
+	case RoundtableRebuttal:
+		return "rebuttal"
+	case RoundtableFinal:
+		return "final"
+	case RoundtableAwaitingVerdict:
+		return "awaiting_verdict"
+	case RoundtableDone:
+		return "done"
+	default:
+		return "idle"
+	}
+}
+
+// RoundtableState tracks the current roundtable session within TaskState.
+type RoundtableState struct {
+	Goal         string             `json:"goal"`
+	Phase        RoundtablePhase    `json:"phase"`
+	Members      []RoundtableMember `json:"members"`
+	DebateRounds []DebateRound      `json:"debate_rounds"` // 替代 Proposals + Reviews
 }

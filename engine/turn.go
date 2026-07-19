@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	dlog "github.com/deepact/deepact/internal/log"
@@ -21,12 +22,27 @@ type TurnResult struct {
 	Questions    []string
 	FinishReason string
 	LastOp       string // "toolName:path" for loop detection, empty if irrelevant
+	// LastOpError is true when the operation recorded in LastOp returned an
+	// error status this turn. Used by ErrorLoopState to detect repeated
+	// failing operations that defeat the content-hash-based loop guards.
+	LastOpError bool
+	// VerifyFailedSummary is set when a critic handoff returns FAIL verdict.
+	// The caller (Engine.Run) must present this to the user and pause the agent loop.
+	VerifyFailedSummary string
+	// CompletionSummary holds the summary from the task_complete tool call,
+	// set when the model explicitly signals task completion.
+	CompletionSummary string
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if e.state == nil {
 		return TurnResult{}, fmt.Errorf("state is nil")
 	}
+
+	turnStart := time.Now()
+	defer func() {
+		turnLog.Printf("turn %d total=%s", e.state.TurnNumber, time.Since(turnStart))
+	}()
 
 	if e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "thinking", Name: "deepact", Detail: "analyzing..."})
@@ -44,7 +60,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
+	ctxBuildStart := time.Now()
 	messages := e.context.Build(e.state, e.history, nil)
+	ctxBuildDur := time.Since(ctxBuildStart)
 
 	// Append pinned messages (skill activations, etc.) at the very end
 	// for highest recency attention. Clear after first use so subsequent
@@ -61,8 +79,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		Model:     modelName,
 		Messages:  messages,
 		Tools:     e.toolSpecsWithHandoff(),
-		MaxTokens: 8192,
+		MaxTokens: e.maxOutputTokens(),
 	}
+	turnLog.Printf("turn %d start: model=%s msgs=%d ctx_build=%s", e.state.TurnNumber, modelName, len(messages), ctxBuildDur)
+	streamStart := time.Now()
 	stream, err := e.model.Stream(ctx, req)
 	if err != nil {
 		turnLog.Printf("stream model err: %v", err)
@@ -72,7 +92,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		return TurnResult{
 			Blocked:      true,
 			BlockedBy:    "model_error",
-			Questions:    []string{fmt.Sprintf("LLM API error: %v. Please check your connection and API key, then try again.", err)},
+			Questions:    []string{fmt.Sprintf("API 请求失败，请检查网络连接和 API Key 后重试。\n\nAPI request failed. Please check your connection and API key, then try again.")},
 			FinishReason: "model_error",
 		}, nil
 	}
@@ -89,12 +109,21 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "stream_error",
-				Questions:    []string{fmt.Sprintf("Stream error: %v. The connection was interrupted. Please try again.", chunk.Err)},
+				Questions:    []string{fmt.Sprintf("网络连接中断，请检查网络后重试。\n\nConnection interrupted. Please check your network and try again.")},
 				FinishReason: "stream_error",
 			}, nil
 		}
+		if chunk.RetryProgress != "" {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "retry", Detail: chunk.RetryProgress})
+			}
+			continue
+		}
 		if chunk.Delta != "" {
 			contentBuilder.WriteString(chunk.Delta)
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "content_delta", Detail: chunk.Delta})
+			}
 		}
 		if chunk.ReasoningDelta != "" {
 			reasoningBuilder.WriteString(chunk.ReasoningDelta)
@@ -113,6 +142,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
+	// Reset consecutive failure counter — this LLM call succeeded.
+	e.state.ConsecutiveFailures = 0
+
 	if lastUsage != nil && e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "usage", Usage: lastUsage, ModelName: modelName})
 	}
@@ -124,6 +156,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.runUsageAccum.CacheHitTokens += lastUsage.CacheHitTokens
 		e.runUsageAccum.CacheMissTokens += lastUsage.CacheMissTokens
 	}
+	streamDur := time.Since(streamStart)
+	turnLog.Printf("turn %d model stream done: dur=%s finish=%s tool_calls=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
+		e.state.TurnNumber, streamDur, finish, len(toolCalls),
+		usageOrZero(lastUsage, func(u *ModelUsage) int { return u.PromptTokens }),
+		usageOrZero(lastUsage, func(u *ModelUsage) int { return u.CompletionTokens }),
+		usageOrZero(lastUsage, func(u *ModelUsage) int { return u.CacheHitTokens }),
+		usageOrZero(lastUsage, func(u *ModelUsage) int { return u.CacheMissTokens }))
 
 	content := contentBuilder.String()
 	reasoning := reasoningBuilder.String()
@@ -146,6 +185,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Layer 2: Unconditionally strip any remaining DSML tokens from content.
 	// Even if structured tool_calls exist, DSML must never reach the user.
 	content = stripDSMLTokens(content)
+
+	// Layer 2b: Strip echoed internal prompt/context blocks (Block B, TASK
+	// REMINDER, Environment, read-history hint, ...). DeepSeek sometimes echoes
+	// these back; they must never reach the user or be written into history.
+	content = stripInternalPromptEcho(content)
 
 	// Layer 3: When tool calls exist, strip intermediate thinking text from content.
 	// The model sometimes outputs intent text ("Let me...", "让我...") alongside
@@ -180,6 +224,48 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.history = append(e.history, Message{Role: "user", Content: "继续", Timestamp: time.Now()})
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
+		// Run stop hooks — structured checks that decide whether the model's
+		// text-only response should end the loop or be nudged to continue.
+		// Replaces the former isIntermediateText pattern-matching approach
+		// with behavioral signals (e.g. runToolCallCount).
+		hookResult := e.runStopHooks(ctx, StopHookContext{
+			RunToolCallCount:   e.runToolCallCount,
+			LastContent:        content,
+			FinishReason:       finish,
+			StopHookActive:     e.stopHookActive,
+			StopHookRetryCount: e.stopHookRetryCount,
+			IsChinese:          e.isChinese,
+			Goal:               e.state.Goal,
+			ToolCallSummary:    buildToolCallSummary(e.history, e.runStartHistoryLen),
+		})
+		if hookResult.Block {
+			e.history = append(e.history, Message{
+				Role: "user", Content: hookResult.Message, Timestamp: time.Now(),
+			})
+			e.stopHookActive = true
+			e.stopHookRetryCount++
+			turnLog.Printf("stop hook blocked: reason=%s retry=%d", hookResult.Reason, e.stopHookRetryCount)
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
+		// If a stop hook returned Exhausted=true, MaxRetries was reached.
+		// The model kept narrating instead of acting. Return Blocked (not
+		// Done) so the user sees a diagnostic message instead of mistaking
+		// the narration for a completed conclusion. When the hook didn't
+		// block because the content is a genuine conclusion (not
+		// exhaustion), Exhausted is false and we correctly return Done.
+		if hookResult.Exhausted {
+			msg := "Agent 在叙述循环中卡住了：已多次引导模型直接执行操作，但模型持续输出中间计划而非调用工具。请提供更具体的指令或缩小任务范围。"
+			if !e.isChinese {
+				msg = "The agent is stuck in a narration loop: guided nudges were tried but the model kept describing steps without executing them. Please provide a more specific instruction or narrow the task scope."
+			}
+			turnLog.Printf("stop hook exhausted after %d retries", e.stopHookRetryCount)
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "stalled_narration_exhausted",
+				Questions:    []string{msg},
+				FinishReason: finish,
+			}, nil
+		}
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
@@ -197,9 +283,159 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		args := json.RawMessage(call.Function.Arguments)
 		calls = append(calls, ToolCallRequest{ID: call.ID, Name: call.Function.Name, Input: args})
 	}
+	toolNames := make([]string, 0, len(calls))
+	for _, c := range calls {
+		toolNames = append(toolNames, c.Name)
+	}
+	turnLog.Printf("executeTurn tool branch: tools=%v finish=%s", toolNames, finish)
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
+	}
+
+	// 用可见回复作为方案原因展示，不混入内部思考。
+	// ReasoningContent 是模型内部思考（通常是英文），不应展示给用户。
+	// 当 Content 为空（DeepSeek 常裸发 edit/write 工具调用而不带正文）时，
+	// 回退到历史中最近一条实质性 assistant 文本——即用户刚确认过的分析报告，
+	// 避免显示误导性的“AI 未提供修改原因”，让确认闸门连贯。
+	mergedReasoning := reasoningForEditPlan(e.history, assistant.Content)
+
+	// Skill HARD-GATE: when the active skill has a pre-implementation gate
+	// (declared in its TOML [gate] section) and the gate has not been passed,
+	// block edit/write calls according to the gate type:
+	//   - "path_filter": block edits to paths NOT in AllowedPaths
+	//   - "block_all": block ALL edits
+	// SkillGatePassed is set to true when the LLM calls activate_skill for a
+	// NextSkills skill (terminal state) or when the user signals approval
+	// (detected in loop.go's Run).
+	if e.state.ActiveSkillName != "" && e.skills != nil {
+		if currentSkill := e.skills.Get(e.state.ActiveSkillName); currentSkill != nil && currentSkill.Gate != nil && !e.state.SkillGatePassed {
+			var blockedCalls []ToolCallRequest
+			for _, call := range calls {
+				if call.Name == "edit" || call.Name == "write" {
+					path := extractPathFromArgs(call.Input, e.config.WorkDir)
+					relPath := strings.TrimPrefix(path, e.config.WorkDir+"/")
+					allowed := false
+					switch currentSkill.Gate.Type {
+					case "block_all":
+						allowed = false
+					case "path_filter":
+						for _, p := range currentSkill.Gate.AllowedPaths {
+							if strings.HasPrefix(relPath, p) {
+								allowed = true
+								break
+							}
+						}
+					}
+					if !allowed {
+						blockedCalls = append(blockedCalls, call)
+					}
+				}
+			}
+			if len(blockedCalls) > 0 {
+				turnLog.Printf("skill HARD-GATE: blocking %d edit/write call(s) (skill=%s, gate=%s, SkillGatePassed=%v)",
+					len(blockedCalls), e.state.ActiveSkillName, currentSkill.Gate.Type, e.state.SkillGatePassed)
+				nudgeMsg := fmt.Sprintf("[HARD-GATE] skill `%s` 活跃中，前置阶段尚未完成。\n", e.state.ActiveSkillName) +
+					"在完成前置阶段前，不能修改代码。完成调查/设计后，输出报告并等待用户确认。\n" +
+					"或调用 activate_skill 激活下一个 skill 以转入实现阶段。"
+				if !e.isChinese {
+					nudgeMsg = fmt.Sprintf("[HARD-GATE] skill `%s` is active and its pre-implementation phase is not complete.\n", e.state.ActiveSkillName) +
+						"You cannot modify code until the pre-implementation phase is complete. After investigation/design, output a report and wait for user confirmation.\n" +
+						"Or call activate_skill to activate the next skill to transition to implementation."
+				}
+				e.history = append(e.history, assistant)
+				for _, c := range calls {
+					e.history = append(e.history, Message{
+						Role:       "tool",
+						ToolCallID: c.ID,
+						Content:    "Blocked: " + nudgeMsg,
+						Timestamp:  time.Now(),
+					})
+				}
+				return TurnResult{Done: false, FinishReason: finish}, nil
+			}
+		}
+	}
+
+	// Analysis report gate: before allowing edit/write, require the agent to
+	// present a text-only analysis report and get user confirmation. This gate
+	// fires when the agent has done searches (runToolCallCount > 0) and is now
+	// attempting to modify code, but hasn't yet presented its findings to the
+	// user. After 2 blocks, the gate gives up and lets the edit plan guard
+	// take over in degraded mode (see degradation handler below).
+	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
+		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
+		e.analysisNudgeCount < 2 {
+		var editCalls []ToolCallRequest
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				editCalls = append(editCalls, call)
+			}
+		}
+		if len(editCalls) > 0 {
+			e.analysisNudgeCount++
+			turnLog.Printf("analysis report gate: blocking %d edit/write call(s) (nudgeCount=%d, runToolCallCount=%d)",
+				len(editCalls), e.analysisNudgeCount, e.runToolCallCount)
+			nudgeMsg := "在修改代码之前，请先输出完整的分析报告：\n" +
+				"1. 你发现了什么（列出具体位置和代码）\n" +
+				"2. 为什么需要修改\n" +
+				"3. 计划改哪些文件、怎么改\n" +
+				"输出报告后停止，等待用户确认再执行修改。"
+			if !e.isChinese {
+				nudgeMsg = "Before making changes, output a complete analysis report:\n" +
+					"1. What you found (list specific locations and code)\n" +
+					"2. Why changes are needed\n" +
+					"3. Which files you plan to change and how\n" +
+					"Stop after the report and wait for user confirmation before modifying."
+			}
+			e.pendingAnalysisNudge = true
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: " + nudgeMsg,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
+	}
+
+	// Analysis gate degradation: after 2 blocks without a user-confirmed
+	// analysis report, the gate gives up blocking. Instead of silently
+	// falling through (which leaves the LLM unaware the gate is lifted and
+	// causes it to submit edits one at a time), send a one-time message
+	// telling the LLM to batch ALL planned edits. This ensures the edit plan
+	// guard captures the full change set for a single comprehensive confirmation.
+	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
+		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
+		e.analysisNudgeCount >= 2 {
+		var editCalls []ToolCallRequest
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				editCalls = append(editCalls, call)
+			}
+		}
+		if len(editCalls) > 0 {
+			e.state.AnalysisReportConfirmed = true
+			e.pendingAnalysisNudge = false
+			turnLog.Printf("analysis report gate: degraded after %d blocks, requesting batched resubmission", e.analysisNudgeCount)
+			nudgeMsg := "分析报告要求已自动豁免（已尝试 2 次但未输出报告）。请一次性提交所有计划的修改，以便统一确认后执行。"
+			if !e.isChinese {
+				nudgeMsg = "The analysis report requirement has been automatically waived (2 attempts without a report). Please submit ALL planned edits at once so they can be confirmed together."
+			}
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    "Blocked: " + nudgeMsg,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
 	}
 
 	// Edit plan guard: before executing any edit/write calls for the first time
@@ -213,18 +449,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			}
 		}
 		if len(editCalls) > 0 {
-			// Merge reasoning from both content and thinking (reasoning_content).
-			// When thinking mode is on, the actual analysis lives in ReasoningContent,
-			// and Content is stripped as intermediate text. We need BOTH to give
-			// the user a meaningful explanation of WHY changes are proposed.
-			mergedReasoning := assistant.Content
-			if assistant.ReasoningContent != "" {
-				if mergedReasoning != "" {
-					mergedReasoning = assistant.ReasoningContent + "\n" + mergedReasoning
-				} else {
-					mergedReasoning = assistant.ReasoningContent
-				}
-			}
+			turnLog.Printf("edit plan guard: blocking on %d edit/write call(s) (runToolCallCount=%d)", len(editCalls), e.runToolCallCount)
 			plan := &PendingEditPlan{
 				Reasoning: mergedReasoning,
 				Calls:     calls, // store ALL calls (read, edit, write, bash, handoff, etc.)
@@ -238,7 +463,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 			// Build a rich plan summary for the user
 			zh := e.isChinese
-			planSummary := formatEditPlanSummary(plan, zh)
+			planSummary := formatEditPlanSummary(plan, zh, e.config.WorkDir)
 
 			// Add assistant (with tool_calls) first, then tool messages to close IDs.
 			e.history = append(e.history, assistant)
@@ -260,9 +485,36 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	for _, call := range calls {
-		// Check loop guard: same (tool, path) repeated → block to prevent cycles
+		// Check loop guard: same (tool, path) repeated → block to prevent cycles.
 		if e.guards.loop != nil {
-			loopAction := e.guards.loop.Check(call)
+			var loopAction GuardAction
+			if call.Name == "read_multi" {
+				// Default to Allow. Without this, when every sub-target is Allow,
+				// loopAction stays zero-valued (Type=""), and "" != GuardAllow
+				// below would falsely block the call (with an empty message) -
+				// blocking every read_multi on new files.
+				loopAction = GuardAction{Type: GuardAllow}
+				// read_multi bypasses the single-call key (extractToolKey returns ""
+				// for unknown tools); check each sub-target as a synthetic read so
+				// repeated fan-out reads of the same (path, scope) are still caught.
+				for _, tgt := range parseReadMultiTargets(call.Input) {
+					synthInput, _ := json.Marshal(map[string]interface{}{
+						"path": tgt.Path, "symbol": tgt.Symbol,
+						"offset": tgt.Offset, "limit": tgt.Limit,
+					})
+					synth := ToolCallRequest{ID: call.ID, Name: "read", Input: synthInput}
+					a := e.guards.loop.Check(synth)
+					if a.Type != GuardAllow {
+						loopAction = GuardAction{
+							Type:    a.Type,
+							Message: fmt.Sprintf("read_multi target %s: %s", tgt.Path, a.Message),
+						}
+						break
+					}
+				}
+			} else {
+				loopAction = e.guards.loop.Check(call)
+			}
 			if loopAction.Type != GuardAllow {
 				e.history = append(e.history, assistant)
 				for _, c := range calls {
@@ -273,6 +525,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 						Timestamp:  time.Now(),
 					})
 				}
+				turnLog.Printf("LoopGuard block: %s", loopAction.Message)
 				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{loopAction.Message}}, nil
 			}
 		}
@@ -298,119 +551,59 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Check for activate_skill tool call — intercept and auto-activate if in skill chain
-	for _, call := range calls {
-		if call.Name == ActivateSkillToolName {
-			var params ActivateSkillParams
-			if err := json.Unmarshal(call.Input, &params); err != nil {
-				continue
-			}
-			if params.SkillName == "" {
-				continue
-			}
-
-			// Check if this skill is in the auto-activation chain (NextSkills of lastActivatedSkill)
-			isChainTransition := false
-			if e.lastActivatedSkill != "" {
-				if lastSkill := e.skills.Get(e.lastActivatedSkill); lastSkill != nil {
-					for _, ns := range lastSkill.NextSkills {
-						if strings.EqualFold(ns, params.SkillName) {
-							isChainTransition = true
-							break
-						}
-					}
-				}
-			}
-
-			if isChainTransition {
-				// Auto-activate: skill chain transition, no user confirmation needed
-				s := e.skills.Get(params.SkillName)
-				if s != nil {
-					prevSkill := e.lastActivatedSkill
-					e.activatedSkills[s.Name] = true
-					e.lastActivatedSkill = s.Name
-					e.state.ActiveSkillName = s.Name
-					e.state.ActiveSkillContent = s.Content
-					skillMsg := fmt.Sprintf(
-						"[SKILL ACTIVATED: %s] (auto, chain: %s → %s)\n\n%s",
-						s.Name, prevSkill, s.Name, s.Content,
-					)
-					// Store as pending pinned message to inject at end of this turn
-					e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-					e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
-					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{
-							Type:   "skill_activated",
-							Name:   s.Name,
-							Detail: s.Description + " (auto chain)",
-						})
-					}
-					// Record in history so the chain transition is visible
-					e.history = append(e.history, Message{
-						Role:      "tool",
-						ToolCallID: call.ID,
-						Content:   fmt.Sprintf("✅ Auto-activated skill `%s` (chain: %s → %s)", s.Name, e.lastActivatedSkill, s.Name),
-						Timestamp: time.Now(),
-					})
-				}
-				continue
-			}
-
-			// Not in chain — require user confirmation
-			e.state.PendingActivateSkill = params.SkillName
-			e.history = append(e.history, assistant)
-			for _, c := range calls {
-				reasoning := params.Reasoning
-				if reasoning == "" {
-					reasoning = fmt.Sprintf("建议激活 skill `%s`", params.SkillName)
-				}
-				e.history = append(e.history, Message{
-					Role:       "tool",
-					ToolCallID: c.ID,
-					Content:    "Suggestion: " + reasoning,
-					Timestamp:  time.Now(),
-				})
-			}
-			zh := e.isChinese
-			var question string
-			if zh {
-				question = fmt.Sprintf("💡 模型建议激活 skill **`%s`**。%s\n\n是否确认？", params.SkillName, params.Reasoning)
-			} else {
-				question = fmt.Sprintf("💡 The model suggests activating skill **`%s`**. %s\n\nConfirm?", params.SkillName, params.Reasoning)
-			}
-			return TurnResult{Blocked: true, BlockedBy: "activate_skill", Questions: []string{question}}, nil
-		}
-	}
+	// Check for activate_skill tool call — intercept and auto-activate if in skill chain.
+	// Collect tool messages in a separate slice and add them AFTER the assistant
+	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
+	// followed by tool messages responding to each tool_call_id.
+	pendingActivateMsgs := e.processActivateSkillCalls(calls)
 
 	e.history = append(e.history, assistant)
 
-	// Separate handoff calls from regular tool calls
+	// Add activate_skill tool messages AFTER the assistant message, so the
+	// DeepSeek API sees the correct order: assistant(tool_calls) → tool.
+	for _, msg := range pendingActivateMsgs {
+		e.history = append(e.history, msg)
+	}
+
+	// Separate handoff calls from regular tool calls.
+	// activate_skill is already handled by the intercept block above
+	// (turn.go:363-416) — it must NOT enter regularCalls, or Execute will
+	// produce a duplicate tool message ("tool not found: activate_skill")
+	// with the same tool_call_id, violating the API contract.
 	var handoffCalls []ToolCallRequest
 	var regularCalls []ToolCallRequest
 	for _, call := range calls {
 		if call.Name == HandoffToolName {
 			handoffCalls = append(handoffCalls, call)
+		} else if call.Name == ActivateSkillToolName {
+			continue
 		} else {
 			regularCalls = append(regularCalls, call)
 		}
 	}
 
-	// Execute handoff calls (sub-agents)
-	for _, call := range handoffCalls {
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: "handoff", Detail: summarizeArgs("handoff", call.Input)})
+	// Execute handoff calls (sub-agents) — parallel when multiple, sequential when single.
+	if len(handoffCalls) > 0 {
+		results := e.executeHandoffsParallel(ctx, handoffCalls)
+		msgs, criticFail := e.processHandoffResults(handoffCalls, results, regularCalls)
+		for _, msg := range msgs {
+			e.history = append(e.history, msg)
 		}
-		result := e.executeHandoff(ctx, call)
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: "handoff", Detail: briefDigest(result.Digest)})
+		if criticFail != "" {
+			return TurnResult{
+				Done:                true,
+				VerifyFailedSummary: criticFail,
+			}, nil
 		}
-		toolMessage := Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()}
-		e.history = append(e.history, toolMessage)
 	}
 
 	// Execute regular tool calls.
 	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
+	// statusByID records each call's outcome status so the loop-detection block
+	// below can tell whether the first op errored (feeds ErrorLoopState).
+	statusByID := make(map[string]string, len(regularCalls))
 	if len(regularCalls) > 0 {
+		toolsStart := time.Now()
 		var readOnlyCalls, destructiveCalls []ToolCallRequest
 		for _, call := range regularCalls {
 			if call.Name == "edit" || call.Name == "write" {
@@ -424,7 +617,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if len(readOnlyCalls) > 0 {
 			for _, call := range readOnlyCalls {
 				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 				}
 			}
 			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
@@ -432,6 +625,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				if e.config.OnProgress != nil {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
+				statusByID[result.ToolCallID] = result.Status
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
 		}
@@ -439,7 +633,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// Sequential execute destructive tools (edit/write — show each diff progressively)
 		for _, call := range destructiveCalls {
 			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 			}
 			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
 			if len(results) > 0 {
@@ -447,6 +641,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				if e.config.OnProgress != nil {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
+				statusByID[result.ToolCallID] = result.Status
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
 		}
@@ -460,30 +655,37 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		e.updateTaskStateFromTools(allCalls, allResults)
 		e.runToolCallCount += len(regularCalls)
+		e.stopHookRetryCount = 0 // reset on tool calls — agent is making progress
 
 		// Infer TDD phase from tool calls when TDD skill is active
 		if e.state != nil && e.state.ActiveSkillName == "test-driven-development" {
 			e.inferTDDPhase(allCalls, allResults)
 		}
+		turnLog.Printf("turn %d tools done: dur=%s calls=%d (ro=%d destructive=%d)",
+			e.state.TurnNumber, time.Since(toolsStart), len(regularCalls), len(readOnlyCalls), len(destructiveCalls))
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
 	// Record the first operation for loop detection.
 	// For destructive tools (edit/write), include content hash so different edits
 	// on the same file are recognized as distinct operations.
-	// For read operations, use only tool:path — content hash is unreliable (read
-	// may lack content-bearing fields or vary in offset/limit/symbol), and repeatedly
-	// reading the same file is itself a sign of a stuck agent.
+	// For read operations, include a human-readable scope (symbol/offset/limit) so
+	// reading different sections of the same file produces distinct LastOps and is
+	// not counted as a loop. Repeated reads of the SAME scope are still caught.
+	// Key form is aligned with LoopGuard's read key ("read:path::scope").
 	for _, c := range regularCalls {
-		path := extractPathFromArgs(c.Input)
+		path := extractPathFromArgs(c.Input, e.config.WorkDir)
 		if path == "" {
 			continue
 		}
 		if c.Name == "read" {
-			result.LastOp = c.Name + ":" + path
+			result.LastOp = c.Name + ":" + path + "::" + extractReadScope(c.Input)
 		} else {
 			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
 		}
+		// Record whether this op errored so ErrorLoopState can catch repeated
+		// failures on the same (tool, path) that defeat content-hash guards.
+		result.LastOpError = statusByID[c.ID] == "error"
 		break
 	}
 	return result, nil
@@ -496,12 +698,85 @@ func (e *Engine) selectModel() string {
 	return e.config.ModelName
 }
 
+// maxOutputTokens returns the per-turn completion cap, falling back to the
+// default when the config doesn't override it.
+func (e *Engine) maxOutputTokens() int {
+	if e.config.MaxOutputTokens > 0 {
+		return e.config.MaxOutputTokens
+	}
+	return DefaultMaxOutputTokens
+}
+
+// usageOrZero safely extracts an int field from a possibly-nil *ModelUsage,
+// for timing/log lines that report token counts.
+func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
+	if u == nil {
+		return 0
+	}
+	return get(u)
+}
+
 // toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and activate_skill tools appended.
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
-	specs = append(specs, handoffToolSpec())
+	specs = append(specs, handoffToolSpec(e.isChinese))
 	specs = append(specs, activateSkillToolSpec())
+	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	return specs
+}
+
+// buildCriticFailSummary formats the critic FAIL report for user presentation.
+func buildCriticFailSummary(digest string, zh bool) string {
+	var sb strings.Builder
+	if zh {
+		sb.WriteString("## ⚠️ 对抗验证未通过\n\n")
+		sb.WriteString("Critic 代理对当前实现进行了对抗性验证，发现以下问题：\n\n")
+		sb.WriteString("---\n\n")
+		sb.WriteString(digest)
+		sb.WriteString("\n\n---\n\n")
+		sb.WriteString("### 请选择下一步操作\n\n")
+		sb.WriteString("- **修复**: 根据反馈继续修改代码，修改后重新验证\n")
+		sb.WriteString("- **说明/澄清**: 如果你认为某条反馈是误报或需要补充上下文，请直接回复\n")
+		sb.WriteString("- **跳过**: 忽略此验证结果，继续原方案\n")
+		sb.WriteString("- **放弃**: 放弃当前方案，重新考虑")
+	} else {
+		sb.WriteString("## ⚠️ Adversarial Verification Failed\n\n")
+		sb.WriteString("The critic agent performed adversarial verification on the current implementation and found issues:\n\n")
+		sb.WriteString("---\n\n")
+		sb.WriteString(digest)
+		sb.WriteString("\n\n---\n\n")
+		sb.WriteString("### Choose Next Action\n\n")
+		sb.WriteString("- **Fix**: Continue modifying code based on feedback, then re-verify\n")
+		sb.WriteString("- **Clarify**: If you think a finding is a false positive or needs context, reply directly\n")
+		sb.WriteString("- **Skip**: Ignore this verification result and continue with the original plan\n")
+		sb.WriteString("- **Abandon**: Abandon the current approach and reconsider")
+	}
+	return sb.String()
+}
+
+// parseCriticVerdict extracts the VERDICT line from a critic agent's output.
+// Returns "PASS", "FAIL", "PARTIAL", or "" if no verdict found.
+func parseCriticVerdict(digest string) string {
+	for _, line := range strings.Split(digest, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "VERDICT:") {
+			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "VERDICT:"))
+			switch v {
+			case "PASS", "FAIL", "PARTIAL":
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// isCriticHandoff checks whether a handoff_to_agent call targets the critic agent.
+func isCriticHandoff(input json.RawMessage) bool {
+	var params HandoffToAgentParams
+	if err := json.Unmarshal(input, &params); err != nil {
+		return false
+	}
+	return params.Agent == string(AgentCritic)
 }
 
 // executeHandoff processes a handoff_to_agent tool call from the main agent loop.
@@ -535,13 +810,18 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		}
 	}
 
+	userLang := ""
+	if e.isChinese {
+		userLang = "中文"
+	}
 	handoff := Handoff{
-		Agent:       AgentID(params.Agent),
-		Goal:        params.Goal,
-		Context:     params.Context,
-		Tools:       params.Tools,
-		Constraints: params.Constraints,
-		Depth:       0, // main engine starts at depth 0
+		Agent:         AgentID(params.Agent),
+		Goal:          params.Goal,
+		Context:       params.Context,
+		Tools:         params.Tools,
+		Constraints:   params.Constraints,
+		Depth:         0, // main engine starts at depth 0
+		UserLanguage:  userLang,
 	}
 
 	// Inject matched skill content into sub-agent context
@@ -601,20 +881,102 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		}
 	}
 
-	if result.Usage != nil && e.config.OnProgress != nil {
-		e.config.OnProgress(ProgressEvent{Type: "usage", Usage: result.Usage})
+	if result.Usage != nil {
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{Type: "usage", Usage: result.Usage})
+		}
+		e.accumulateUsage(result.Usage)
 	}
 
-	digest := formatHandoffResult(result)
+	status := "ok"
+	if result.BlockedBy == "cancelled" {
+		status = "cancelled"
+	}
+	digest := formatHandoffResult(result, e.isChinese)
 	return ToolResult{
 		ToolCallID: call.ID,
 		ToolName:   HandoffToolName,
-		Status:     "ok",
+		Status:     status,
 		Digest:     digest,
 	}
 }
 
-func summarizeArgs(toolName string, input json.RawMessage) string {
+// executeHandoffsParallel runs multiple handoff_to_agent calls concurrently.
+// Each sub-agent runs in its own goroutine; results are collected and returned
+// in the original call order. Progress events (agent_start/agent_done) are
+// emitted with the actual agent name and goal, enabling the UI to display
+// multiple sub-agents working simultaneously.
+func (e *Engine) executeHandoffsParallel(ctx context.Context, calls []ToolCallRequest) []ToolResult {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	type indexedResult struct {
+		index  int
+		result ToolResult
+	}
+
+	resultsCh := make(chan indexedResult, len(calls))
+	var wg sync.WaitGroup
+
+	for i, call := range calls {
+		wg.Add(1)
+		go func(idx int, c ToolCallRequest) {
+			defer wg.Done()
+
+			// Parse params for progress display
+			var params HandoffToAgentParams
+			if err := json.Unmarshal(c.Input, &params); err == nil {
+				agentName := params.Agent
+				if agentName == "" {
+					agentName = "sub"
+				}
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "agent_start",
+						Name:   agentName,
+						Detail: params.Goal,
+					})
+				}
+			}
+
+			r := e.executeHandoff(ctx, c)
+
+			// Parse again for agent_done event (use same name)
+			var params2 HandoffToAgentParams
+			if err := json.Unmarshal(c.Input, &params2); err == nil {
+				agentName := params2.Agent
+				if agentName == "" {
+					agentName = "sub"
+				}
+				if e.config.OnProgress != nil {
+					e.config.OnProgress(ProgressEvent{
+						Type:   "agent_done",
+						Name:   agentName,
+						Detail: briefDigest(r.Digest),
+					})
+				}
+			}
+
+			resultsCh <- indexedResult{index: idx, result: r}
+		}(i, call)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Collect results in original order
+	ordered := make([]ToolResult, len(calls))
+	for ir := range resultsCh {
+		ordered[ir.index] = ir.result
+	}
+
+	return ordered
+}
+
+func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -635,11 +997,44 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 			line, _ := m["line"].(float64)
 			chr, _ := m["character"].(float64)
 			if line > 0 {
-				return fmt.Sprintf("%s %s:%d:%d", op, shortPath(fp), int(line), int(chr))
+				return fmt.Sprintf("%s %s:%d:%d", op, relPath(fp, cwd), int(line), int(chr))
 			}
-			return fmt.Sprintf("%s %s", op, shortPath(fp))
+			return fmt.Sprintf("%s %s", op, relPath(fp, cwd))
 		}
 		return op
+	}
+
+	// read_multi: show per-target paths with scope annotation, comma-joined.
+	// Without this, read_multi falls through to fallbackSummary which returns
+	// just "read_multi" - the user sees the tool name but not which files.
+	if toolName == "read_multi" {
+		targets := parseReadMultiTargets(input)
+		if len(targets) == 0 {
+			return fallbackSummary(toolName, m)
+		}
+		parts := make([]string, 0, len(targets))
+		for _, tgt := range targets {
+			s := relPath(tgt.Path, cwd)
+			if tgt.Symbol != "" {
+				s += " (symbol:" + tgt.Symbol + ")"
+			} else if tgt.Offset > 0 || tgt.Limit > 0 {
+				start := tgt.Offset
+				if start == 0 {
+					start = 1
+				}
+				if tgt.Limit == 0 {
+					s += fmt.Sprintf(" (L%d-)", start)
+				} else {
+					s += fmt.Sprintf(" (L%d-%d)", start, start+tgt.Limit-1)
+				}
+			}
+			parts = append(parts, s)
+		}
+		result := strings.Join(parts, ", ")
+		if len(result) > 100 {
+			result = result[:97] + "..."
+		}
+		return result
 	}
 
 	// Extract path first — all file-oriented tools have it.
@@ -678,14 +1073,41 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 	if toolName == "grep" || toolName == "glob" {
 		if pattern, ok := m["pattern"].(string); ok {
 			if path != "" {
-				return fmt.Sprintf("%s in %s", pattern, shortPath(path))
+				return fmt.Sprintf("%s in %s", pattern, relPath(path, cwd))
 			}
 			return pattern
 		}
 		if path != "" {
-			return shortPath(path)
+			return relPath(path, cwd)
 		}
 		return fallbackSummary(toolName, m)
+	}
+
+	// Read tool: annotate the scope so a full read is distinguishable from a
+	// targeted read in the UI. Without this every read renders as a bare path,
+	// so repeated full-file reads (a loop symptom) look identical to targeted
+	// reads and can't be diagnosed. Formats:
+	//   full file    -> "path (全文)"
+	//   symbol       -> "path (symbol:Run)"
+	//   offset/limit -> "path (L52-101)"  (end line computed to avoid the
+	//                                       ambiguous "L52-50" offset/limit form)
+	if toolName == "read" && path != "" {
+		if sym, ok := m["symbol"].(string); ok && strings.TrimSpace(sym) != "" {
+			return fmt.Sprintf("%s (symbol:%s)", relPath(path, cwd), strings.TrimSpace(sym))
+		}
+		offset, _ := m["offset"].(float64)
+		limit, _ := m["limit"].(float64)
+		if int(offset) == 0 && int(limit) == 0 {
+			return relPath(path, cwd) + " (全文)"
+		}
+		start := int(offset)
+		if start == 0 {
+			start = 1
+		}
+		if int(limit) == 0 {
+			return fmt.Sprintf("%s (L%d-)", relPath(path, cwd), start)
+		}
+		return fmt.Sprintf("%s (L%d-%d)", relPath(path, cwd), start, start+int(limit)-1)
 	}
 
 	if path == "" {
@@ -721,7 +1143,7 @@ func summarizeArgs(toolName string, input json.RawMessage) string {
 	}
 
 	if path != "" {
-		return shortPath(path)
+		return relPath(path, cwd)
 	}
 	// Last resort: never return an empty summary — an empty Detail renders as
 	// a bare icon with no context (e.g. "[*]  ✓"), which tells the user nothing.
@@ -762,11 +1184,19 @@ func fallbackSummary(toolName string, m map[string]interface{}) string {
 	return "—"
 }
 
-// shortPath shortens a file path for display — shows last two components.
-func shortPath(p string) string {
+// relPath shortens a file path for display — shows relative path from cwd
+// (project root). Falls back to last-two-components if the path isn't under cwd
+// or if cwd is empty.
+func relPath(p, cwd string) string {
 	if p == "" {
 		return p
 	}
+	if cwd != "" {
+		if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	// Fallback: show last two components.
 	base := filepath.Base(p)
 	dir := filepath.Dir(p)
 	parent := filepath.Base(dir)
@@ -774,6 +1204,12 @@ func shortPath(p string) string {
 		return parent + "/" + base
 	}
 	return base
+}
+
+// shortPath shortens a file path for display — shows last two components.
+// Deprecated: use relPath(p, cwd) for project-root-relative display.
+func shortPath(p string) string {
+	return relPath(p, "")
 }
 
 func briefDigest(digest string) string {
@@ -797,7 +1233,21 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 		return
 	}
 	for i, call := range calls {
-		path := extractPathFromArgs(call.Input)
+		switch call.Name {
+		case "read_multi":
+			// read_multi has no top-level "path"; extractPathFromArgs returns "".
+			// Parse the self-describing metadata in the result digest to record
+			// each sub-target's (path, scope) into ReadHistory, and add each to
+			// the working set as "read".
+			if i < len(results) {
+				for _, rec := range parseReadMultiDigestScopes(results[i].Digest) {
+					addToWorkingSet(e.state, rec.Path, "read")
+					e.state.ReadHistory = append(e.state.ReadHistory, rec)
+				}
+			}
+			continue
+		}
+		path := extractPathFromArgs(call.Input, e.config.WorkDir)
 		if path == "" {
 			continue
 		}
@@ -810,6 +1260,10 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 			addToWorkingSet(e.state, path, "modified")
 		case "read":
 			addToWorkingSet(e.state, path, "read")
+			e.state.ReadHistory = append(e.state.ReadHistory, ReadRecord{
+				Path:  path,
+				Scope: extractReadScope(call.Input),
+			})
 		case "grep", "glob":
 			if i < len(results) && results[i].Status == "ok" {
 				addToWorkingSet(e.state, path, "searched")
@@ -818,14 +1272,59 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 	}
 }
 
+// parseReadMultiDigestScopes extracts per-target ReadRecords from a read_multi
+// result's self-describing metadata comment:
+//
+//	<!-- read_multi targets: path1::scope1 | path2::scope2 | ... -->
+//
+// Returns nil if the metadata line is absent or malformed (best-effort: missing
+// metadata just skips ReadHistory bookkeeping; the loop guard still backstops).
+func parseReadMultiDigestScopes(digest string) []ReadRecord {
+	lineEnd := strings.Index(digest, "\n")
+	if lineEnd < 0 {
+		lineEnd = len(digest)
+	}
+	firstLine := digest[:lineEnd]
+	const marker = "<!-- read_multi targets:"
+	start := strings.Index(firstLine, marker)
+	if start < 0 {
+		return nil
+	}
+	rest := firstLine[start+len(marker):]
+	end := strings.Index(rest, "-->")
+	if end < 0 {
+		return nil
+	}
+	body := strings.TrimSpace(rest[:end])
+	if body == "" {
+		return nil
+	}
+	var recs []ReadRecord
+	for _, part := range strings.Split(body, " | ") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "::", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		recs = append(recs, ReadRecord{Path: kv[0], Scope: kv[1]})
+	}
+	return recs
+}
+
 func (e *Engine) updateGoalFromFirstMessage(userMsg string) {
 	if e.state != nil && e.state.Goal == "" {
 		e.state.Goal = userMsg
 	}
 }
 
-// extractPathFromArgs extracts a file path from tool call arguments.
-func extractPathFromArgs(input json.RawMessage) string {
+// extractPathFromArgs extracts a file path from tool call arguments and
+// normalizes it against workDir so the same physical file yields one path
+// regardless of how the model addressed it (relative/absolute/file_path).
+// Used for loop-detection keys and file-set tracking.
+func extractPathFromArgs(input json.RawMessage, workDir string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -834,15 +1333,46 @@ func extractPathFromArgs(input json.RawMessage) string {
 		return ""
 	}
 	if p, ok := m["path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["file_path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["filePath"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	return ""
+}
+
+// extractReadScope derives a human-readable scope string from a read tool call's
+// arguments: "" for a bare full-file read, "symbol:<name>" for a symbol read,
+// "L<offset>-<limit>" for an offset/limit range (offset defaults to 1 when only
+// limit is given; limit is omitted when only offset is given). Used as the scope
+// component of the loop-detection key and the ReadRecord.
+func extractReadScope(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	if symbol, ok := m["symbol"].(string); ok && symbol != "" {
+		return "symbol:" + symbol
+	}
+	offset, _ := m["offset"].(float64)
+	limit, _ := m["limit"].(float64)
+	if int(offset) == 0 && int(limit) == 0 {
+		return ""
+	}
+	start := int(offset)
+	if start == 0 {
+		start = 1
+	}
+	if int(limit) == 0 {
+		return fmt.Sprintf("L%d-", start)
+	}
+	return fmt.Sprintf("L%d-%d", start, int(limit))
 }
 
 // contentSignature returns a short hash of the tool call's input arguments,
@@ -902,12 +1432,14 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// truncateStr truncates a string to the given max length, appending "..." if truncated.
+// truncateStr truncates a string to the given max rune count, appending "..." if truncated.
+// Uses rune-based slicing to avoid splitting multi-byte UTF-8 characters.
 func truncateStr(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	return string(runes[:max]) + "..."
 }
 
 func addToWorkingSet(state *TaskState, path string, notes string) {
@@ -947,38 +1479,54 @@ func buildEditAction(call ToolCallRequest) PendingEditAction {
 			action.NewText = content
 		}
 	}
-	// Summary is intentionally empty — formatEditPlanSummary shows only the path list.
+	// Summary is intentionally empty — formatEditPlanSummary shows reasoning + path list.
 	return action
 }
 
+// reasoningForEditPlan returns the reasoning text for an edit plan summary.
+// When the current assistant content is non-empty, it is used directly.
+// When empty (e.g. DeepSeek emits bare edit/write tool calls without a body),
+// the function walks history backwards to find the most recent assistant
+// message with non-empty content — typically the analysis report the user
+// just confirmed. This prevents the misleading "AI 未提供修改原因" placeholder.
+func reasoningForEditPlan(history []Message, currentContent string) string {
+	if strings.TrimSpace(currentContent) != "" {
+		return currentContent
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
+			return history[i].Content
+		}
+	}
+	return ""
+}
+
 // formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
-// The summary shows the reasoning (WHY) first, then a file list, then asks
-// the user to confirm the APPROACH. On confirmation, formatEditPlanDiff will
-// show the actual diff for detail review before execution.
-func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
+// The summary shows the reasoning (WHY) first, then asks the user to confirm.
+// On confirmation, the plan is executed directly with diffs shown progressively
+// during tool execution.
+func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
 	var sb strings.Builder
 
 	// Step 1: Show the reasoning — WHY these changes are proposed.
-	reasoning := plan.Reasoning
-	if reasoning == "" {
-		if zh {
-			sb.WriteString("（AI 未提供修改原因）\n")
-		} else {
-			sb.WriteString("(No reasoning provided)\n")
-		}
-	} else {
+	if reasoning := plan.Reasoning; reasoning != "" {
 		sb.WriteString(reasoning)
 		sb.WriteString("\n")
 	}
-
-	// Step 2: Show the file list — WHICH files will be changed (paths only).
-	if zh {
-		sb.WriteString("\n📋 计划修改以下文件：\n")
-	} else {
-		sb.WriteString("\n📋 Planned changes:\n")
-	}
-	for _, edit := range plan.Edits {
-		sb.WriteString(fmt.Sprintf("  • `%s`\n", edit.Path))
+	// Step 2: List the files that will be modified - WHAT will change.
+	// Filename-only: the per-file diff is shown progressively during execution
+	// after confirmation, so the plan summary stays a compact file list. Earlier
+	// versions inlined an old->new preview per edit, which dumped noisy import
+	// blocks and made the confirmation prompt anything but "简单直观".
+	if len(plan.Edits) > 0 {
+		if zh {
+			sb.WriteString(fmt.Sprintf("\n### 涉及 %d 个文件的修改：\n", len(plan.Edits)))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n### %d file(s) to modify:\n", len(plan.Edits)))
+		}
+		for i, edit := range plan.Edits {
+			sb.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, relPath(edit.Path, cwd)))
+		}
 	}
 
 	// Step 3: Ask for confirmation.
@@ -986,70 +1534,6 @@ func formatEditPlanSummary(plan *PendingEditPlan, zh bool) string {
 		sb.WriteString("\n确认执行修改？")
 	} else {
 		sb.WriteString("\nProceed with the changes?")
-	}
-	return sb.String()
-}
-
-// formatEditPlanDiff shows the actual content changes for detail review.
-// Called after the user confirms the approach (file list) but before execution.
-func formatEditPlanDiff(plan *PendingEditPlan, zh bool) string {
-	var sb strings.Builder
-
-	if zh {
-		sb.WriteString("📝 具体修改内容：\n\n")
-	} else {
-		sb.WriteString("📝 Changes in detail:\n\n")
-	}
-
-	for i, edit := range plan.Edits {
-		if zh {
-			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
-		} else {
-			fmt.Fprintf(&sb, "%d. `%s`\n", i+1, edit.Path)
-		}
-		if edit.Tool == "edit" {
-			if edit.OldText != "" && edit.NewText != "" {
-				if zh {
-					sb.WriteString("   原内容:\n")
-				} else {
-					sb.WriteString("   Old:\n")
-				}
-				sb.WriteString("   ```\n")
-				sb.WriteString(truncateStr(edit.OldText, 2000))
-				sb.WriteString("\n   ```\n")
-				if zh {
-					sb.WriteString("   新内容:\n")
-				} else {
-					sb.WriteString("   New:\n")
-				}
-				sb.WriteString("   ```\n")
-				sb.WriteString(truncateStr(edit.NewText, 2000))
-				sb.WriteString("\n   ```\n")
-			} else {
-				// pattern-based edit
-				if zh {
-					sb.WriteString("   (基于模式匹配的替换)\n")
-				} else {
-					sb.WriteString("   (pattern-based replacement)\n")
-				}
-			}
-		} else if edit.Tool == "write" {
-			if zh {
-				sb.WriteString("   写入内容:\n")
-			} else {
-				sb.WriteString("   Content:\n")
-			}
-			sb.WriteString("   ```\n")
-			sb.WriteString(truncateStr(edit.NewText, 2000))
-			sb.WriteString("\n   ```\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	if zh {
-		sb.WriteString("以上修改内容确认无误？确认后将开始执行。")
-	} else {
-		sb.WriteString("Does the diff look correct? Confirm to execute.")
 	}
 	return sb.String()
 }
@@ -1176,7 +1660,7 @@ func (e *Engine) inferTDDPhase(calls []ToolCallRequest, results []ToolResult) {
 
 		switch call.Name {
 		case "write", "edit":
-			path := extractPathFromArgs(call.Input)
+			path := extractPathFromArgs(call.Input, e.config.WorkDir)
 			if isTestFile(path) {
 				newPhase = "red"
 				newDetail = "编写测试..."
@@ -1260,4 +1744,137 @@ func (e *Engine) inferTDDPhase(calls []ToolCallRequest, results []ToolResult) {
 			})
 		}
 	}
+}
+
+// processActivateSkillCalls intercepts activate_skill tool calls from the
+// assistant's response. For each call, it either activates the skill (success)
+// or produces an error tool message (bad JSON, empty name, unknown skill).
+// Every activate_skill call receives a tool response — this is critical because
+// the DeepSeek API requires that every tool_call_id in an assistant message has
+// a matching tool response. Without it, the next model call would be rejected
+// and the session would be permanently stuck.
+//
+// The returned slice of Messages must be appended to history AFTER the
+// assistant message to satisfy the API ordering:
+// assistant(tool_calls) → tool(responses).
+func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
+	var pendingActivateMsgs []Message
+	for _, call := range calls {
+		if call.Name != ActivateSkillToolName {
+			continue
+		}
+		var params ActivateSkillParams
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid activate_skill arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if params.SkillName == "" {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "Error: activate_skill requires a non-empty skill_name",
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+
+		// Directly activate the skill — no user confirmation needed
+		s := e.skills.Get(params.SkillName)
+		if s == nil {
+			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: skill %q not found", params.SkillName),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		// Terminal state detection: when transitioning to a skill that's in the
+		// current skill's NextSkills, mark the current skill's gate as passed.
+		e.markSkillGatePassed(s.Name)
+		prevSkill := e.lastActivatedSkill
+		e.activatedSkills[s.Name] = true
+		e.lastActivatedSkill = s.Name
+		e.state.ActiveSkillName = s.Name
+		e.state.ActiveSkillContent = s.Content
+
+		// Inject skill methodology into stable zone (persistent across turns)
+		e.context.SetActiveSkill(s.Name, s.Content)
+
+		chainInfo := ""
+		if prevSkill != "" {
+			chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
+		}
+		skillMsg := fmt.Sprintf(
+			"✅ Skill `%s` activated%s. Full methodology now in stable zone.",
+			s.Name, chainInfo,
+		)
+		e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
+		e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "skill_activated",
+				Name:   s.Name,
+				Detail: s.Description + chainInfo,
+			})
+		}
+		pendingActivateMsgs = append(pendingActivateMsgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    fmt.Sprintf("✅ Activated skill `%s`%s", s.Name, chainInfo),
+			Timestamp:  time.Now(),
+		})
+	}
+	return pendingActivateMsgs
+}
+
+// processHandoffResults builds tool response messages for handoff call results.
+// Every handoff call receives a response — even cancelled ones — to prevent
+// orphaned tool_call_ids that would cause the DeepSeek API to reject the next
+// request. If a critic sub-agent returns FAIL, responses are also added for
+// all remaining handoff calls and regular calls (which won't execute), and
+// criticFail is set so the caller can return early with the failure summary.
+func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results []ToolResult, regularCalls []ToolCallRequest) (messages []Message, criticFail string) {
+	for i, call := range handoffCalls {
+		result := results[i]
+
+		// Hard gate: if critic returns FAIL, intercept and present to user.
+		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
+			messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+
+			// Add tool responses for remaining handoff calls so their
+			// tool_call_ids are not orphaned (API requires every tool_call
+			// to have a matching tool response).
+			for j := i + 1; j < len(handoffCalls); j++ {
+				r := results[j]
+				content := r.Digest
+				if content == "" {
+					content = "Skipped: critic returned FAIL."
+				}
+				messages = append(messages, Message{Role: "tool", ToolCallID: r.ToolCallID, Content: content, Timestamp: time.Now()})
+			}
+			// Add placeholder responses for regular calls that won't execute.
+			for _, rc := range regularCalls {
+				messages = append(messages, Message{Role: "tool", ToolCallID: rc.ID, Content: "Skipped: critic returned FAIL.", Timestamp: time.Now()})
+			}
+
+			criticFail = buildCriticFailSummary(result.Digest, e.isChinese)
+			return messages, criticFail
+		}
+
+		// Always add a tool response — even for cancelled sub-agents.
+		// Without it, the tool_call_id is orphaned and the DeepSeek API
+		// rejects the next request, permanently stalling the session.
+		content := result.Digest
+		if result.Status == "cancelled" {
+			content = "Sub-agent cancelled."
+		}
+		messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})
+	}
+	return messages, ""
 }

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/deepact/deepact/engine"
 )
 
@@ -454,4 +456,104 @@ func TestAutoScrollEdgeDetection(t *testing.T) {
 
 func containsSeq(s, seq string) bool {
 	return strings.Contains(s, seq)
+}
+
+// ---- truncateVisual tests ----
+
+func TestTruncateVisual_PlainASCII(t *testing.T) {
+	// maxW=5, 输入 10 字符 → 截到显示宽度 5，无尾标记
+	got := truncateVisual("abcdefghij", 5)
+	if w := lipgloss.Width(got); w != 5 {
+		t.Errorf("width: want 5, got %d (%q)", w, got)
+	}
+	if got != "abcde" {
+		t.Errorf("want %q, got %q", "abcde", got)
+	}
+}
+
+func TestTruncateVisual_WideChar(t *testing.T) {
+	// 中文每字宽 2，maxW=5 → 保留 2 字（宽 4），第 3 字会超宽故丢弃
+	got := truncateVisual("你好世界测试", 5)
+	if w := lipgloss.Width(got); w > 5 {
+		t.Errorf("width: want <=5, got %d (%q)", w, got)
+	}
+	if w := lipgloss.Width(got); w != 4 {
+		t.Errorf("width: want 4 (2 CJK chars), got %d (%q)", w, got)
+	}
+}
+
+func TestTruncateVisual_PreservesANSI(t *testing.T) {
+	// 含 ANSI 序列：截断后不切断转义序列，且 stripAnsi 后宽度 <= maxW
+	styled := "\x1b[31mabcdefghij\x1b[0m"
+	got := truncateVisual(styled, 5)
+	if strings.Contains(got, "\x1b[31m") == false {
+		t.Errorf("ANSI seq lost: %q", got)
+	}
+	// 不应出现被切断的残缺转义（如 \x1b[31 但无 m）
+	if strings.Contains(got, "\x1b[0m") == false {
+		t.Errorf("reset seq lost: %q", got)
+	}
+	if w := lipgloss.Width(stripAnsi(got)); w > 5 {
+		t.Errorf("visual width: want <=5, got %d (%q)", w, got)
+	}
+}
+
+func TestTruncateVisual_NoTruncationNeeded(t *testing.T) {
+	got := truncateVisual("abc", 10)
+	if got != "abc" {
+		t.Errorf("want %q, got %q", "abc", got)
+	}
+}
+
+func TestTruncateVisual_EmptyAndZero(t *testing.T) {
+	if got := truncateVisual("", 5); got != "" {
+		t.Errorf("empty input: want %q, got %q", "", got)
+	}
+	if got := truncateVisual("abc", 0); got != "" {
+		t.Errorf("maxW=0: want %q, got %q", "", got)
+	}
+}
+
+// ---- R1/R2 regression tests ----
+
+func TestScreenToLine_AfterEmptyLineFix(t *testing.T) {
+	// 含空行的 plain 数组（模拟 R1 修复后的 1:1 行映射）
+	// 10 行，bodyHeight=5，scrollOffset=0（底对齐）
+	// firstVisibleLine = 10 - 0 - 5 = 5
+	totalLines := 10
+	bodyHeight := 5
+	scroll := 0
+	// 屏幕 row 0 → 数据行 5
+	pt0 := screenToLine(0, 0, scroll, bodyHeight, totalLines)
+	if pt0.Line != 5 {
+		t.Errorf("row 0: want line 5, got %d", pt0.Line)
+	}
+	// 屏幕 row 1 → 数据行 6
+	pt1 := screenToLine(1, 0, scroll, bodyHeight, totalLines)
+	if pt1.Line != 6 {
+		t.Errorf("row 1: want line 6, got %d", pt1.Line)
+	}
+	// 屏幕 row 2 → 数据行 7
+	pt2 := screenToLine(2, 0, scroll, bodyHeight, totalLines)
+	if pt2.Line != 7 {
+		t.Errorf("row 2: want line 7, got %d", pt2.Line)
+	}
+}
+
+func TestExtractSelectionText_NoCRInOutput(t *testing.T) {
+	// R2: 渲染层已剥 \r，故 plain 快照不含 \r。验证选区文本无 \r 且整行复制正确。
+	plain := []string{"+new", "-old", " ctx"}
+	sel := SelectionState{
+		Done:  true,
+		Start: selPoint{Line: 0, Col: 0},
+		End:   selPoint{Line: 2, Col: -1},
+	}
+	got := extractSelectionText(plain, sel)
+	if strings.Contains(got, "\r") {
+		t.Errorf("选区文本含 \\r: %q", got)
+	}
+	want := "+new\n-old\n ctx"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
 }

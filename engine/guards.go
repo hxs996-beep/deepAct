@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -31,20 +32,39 @@ type LoopGuard struct {
 	mu         sync.Mutex
 	entries    map[string]*loopEntry // key: "toolName:path:contentHash"
 	maxRepeats int
+	workDir    string // base for normalizing relative paths in keys
 }
 
 type loopEntry struct {
 	count int
 }
 
-func NewLoopGuard(maxRepeats int) *LoopGuard {
+func NewLoopGuard(workDir string, maxRepeats int) *LoopGuard {
 	if maxRepeats <= 0 {
 		maxRepeats = 4
 	}
 	return &LoopGuard{
 		entries:    make(map[string]*loopEntry),
 		maxRepeats: maxRepeats,
+		workDir:    workDir,
 	}
+}
+
+// normalizePath canonicalizes a file path so the same physical file yields one
+// loop-detection key regardless of how the model addressed it (relative path,
+// "./" prefix, absolute path, or via the file_path alias). Relative paths are
+// resolved against workDir; without a workDir they are only Cleaned. This
+// prevents the model from splitting its repeat count across path forms and
+// never tripping the guard — the root cause of repeated reads.
+func normalizePath(p, workDir string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) || workDir == "" {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(filepath.Join(workDir, p))
 }
 
 // extractToolKey extracts a unique key from a tool call for loop detection.
@@ -52,8 +72,8 @@ func NewLoopGuard(maxRepeats int) *LoopGuard {
 // exploratory tools. Content hash ensures that different edits on the same
 // file (different old_string→new_string) are treated as distinct operations,
 // preventing false loop detection when modifying multiple locations.
-func extractToolKey(call ToolCallRequest) string {
-	path := extractPathField(call.Input)
+func extractToolKey(call ToolCallRequest, workDir string) string {
+	path := extractPathField(call.Input, workDir)
 	if path == "" {
 		return ""
 	}
@@ -65,13 +85,9 @@ func extractToolKey(call ToolCallRequest) string {
 	case "write":
 		contentHash = extractWriteContentHash(call.Input)
 	case "read":
-		// Track read by path + scope (symbol/offset/limit) — different sections
-		// of the same file are distinct operations; only truly repeated reads block.
-		scopeHash := extractReadScopeHash(call.Input)
-		if scopeHash == "" {
-			return "read:" + path
-		}
-		return "read:" + path + ":" + scopeHash
+		// Human-readable scope ("", "symbol:Run", "L10-50") — aligned with
+		// LastOp and ReadRecord so all three use one consistent key form.
+		return "read:" + path + "::" + extractReadScope(call.Input)
 	default:
 		// grep/glob/bash etc. — not tracked for loops
 		return ""
@@ -110,24 +126,26 @@ func extractWriteContentHash(input json.RawMessage) string {
 	return hex.EncodeToString(h[:])
 }
 
-// extractReadScopeHash computes a hash of (symbol, offset, limit) from read input.
-// Different reads on the same file (different sections) produce different hashes,
-// preventing false loop detection when exploring code. Returns "" if no scope params.
-func extractReadScopeHash(input json.RawMessage) string {
-	var m map[string]interface{}
+// readMultiTargetView is engine's view of a read_multi target (mirrors the
+// tools/builtin readMultiTarget struct, kept unexported and local to avoid a
+// tools→engine import).
+type readMultiTargetView struct {
+	Path   string `json:"path"`
+	Symbol string `json:"symbol"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
+}
+
+// parseReadMultiTargets parses the targets array from a read_multi tool call's
+// input. Returns nil on error.
+func parseReadMultiTargets(input json.RawMessage) []readMultiTargetView {
+	var m struct {
+		Targets []readMultiTargetView `json:"targets"`
+	}
 	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
+		return nil
 	}
-	symbol, _ := m["symbol"].(string)
-	offset, _ := m["offset"].(float64)
-	limit, _ := m["limit"].(float64)
-
-	if symbol == "" && offset == 0 && limit == 0 {
-		return "" // bare read with just path, fall back to path-only tracking
-	}
-
-	h := sha256.Sum256([]byte(fmt.Sprintf("symbol=%s|offset=%d|limit=%d", symbol, int(offset), int(limit))))
-	return hex.EncodeToString(h[:])
+	return m.Targets
 }
 
 // Check inspects a tool call for loop behavior. Returns GuardBlock if the
@@ -142,7 +160,7 @@ func (g *LoopGuard) Reset() {
 	g.entries = make(map[string]*loopEntry)
 }
 
-func extractPathField(input json.RawMessage) string {
+func extractPathField(input json.RawMessage, workDir string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -151,10 +169,10 @@ func extractPathField(input json.RawMessage) string {
 		return ""
 	}
 	if p, ok := m["path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	if p, ok := m["file_path"].(string); ok {
-		return p
+		return normalizePath(p, workDir)
 	}
 	return ""
 }
@@ -164,7 +182,7 @@ func (g *LoopGuard) Check(call ToolCallRequest) GuardAction {
 		return GuardAction{Type: GuardAllow}
 	}
 
-	k := extractToolKey(call)
+	k := extractToolKey(call, g.workDir)
 	if k == "" {
 		return GuardAction{Type: GuardAllow}
 	}
@@ -197,10 +215,20 @@ type GuardSystem struct {
 	loop  *LoopGuard
 }
 
+// SetLanguage propagates the session-locked language flag to the scope guard
+// for bilingual dangerous-command prompts.
+func (g *GuardSystem) SetLanguage(zh bool) {
+	if g == nil || g.scope == nil {
+		return
+	}
+	g.scope.SetLanguage(zh)
+}
+
 type ScopeGuard struct {
 	autoConfirm        bool
 	dangerousPending   string // normalized command pending user confirmation
 	dangerousConfirmed map[string]bool
+	isChinese          bool // session-locked language flag for bilingual prompts
 }
 
 func NewScopeGuard(autoConfirm bool) *ScopeGuard {
@@ -208,6 +236,11 @@ func NewScopeGuard(autoConfirm bool) *ScopeGuard {
 		autoConfirm:        autoConfirm,
 		dangerousConfirmed: make(map[string]bool),
 	}
+}
+
+// SetLanguage sets the session-locked language flag used for bilingual guard messages.
+func (g *ScopeGuard) SetLanguage(zh bool) {
+	g.isChinese = zh
 }
 
 // ConfirmDangerous marks a pending dangerous command as confirmed by the user.
@@ -337,7 +370,10 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 			g.dangerousPending = normalized
 			return GuardAction{
 				Type:    GuardAskUser,
-				Message: fmt.Sprintf("⚠️ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
+				Message: pickPrompt(g.isChinese,
+					fmt.Sprintf("⚠️ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", dp.reason, cmd),
+					fmt.Sprintf("⚠️ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
+				),
 			}
 		}
 	}
@@ -352,4 +388,106 @@ func isDestructiveTool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// ReadLoopState tracks per-(path,scope) read counts and applies a two-tier
+// policy: 3rd read of the same key → nudge (GuardDiagnose); 4th → block.
+// Different (path, scope) keys are independent. Reset on new user message.
+//
+// Rationale: reading a file can help the LLM self-correct, so the first
+// repeated reads are allowed and the 3rd injects a nudge giving the agent a
+// chance to recover; only if it keeps re-reading the same scope do we block.
+type ReadLoopState struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func NewReadLoopState() *ReadLoopState {
+	return &ReadLoopState{counts: make(map[string]int)}
+}
+
+// Check returns GuardAllow (1st-2nd), GuardDiagnose (3rd, nudge), or
+// GuardBlock (4th+). key is the scope-aware read key "read:path::scope".
+func (s *ReadLoopState) Check(key string) GuardAction {
+	if s == nil || key == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts[key]++
+	switch s.counts[key] {
+	case 1, 2:
+		return GuardAction{Type: GuardAllow}
+	case 3:
+		return GuardAction{Type: GuardDiagnose, Message: "read-loop-nudge"}
+	default: // 4+
+		return GuardAction{Type: GuardBlock, Message: "read-loop-block"}
+	}
+}
+
+func (s *ReadLoopState) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts = make(map[string]int)
+}
+
+// ErrorLoopState tracks consecutive failures of the same coarse operation
+// (keyed "tool:path", WITHOUT content hash) and blocks when a tool keeps
+// erroring on the same file without progress.
+//
+// Rationale: LoopGuard and consecutiveSameOp both incorporate a content
+// signature, so a model that re-issues a failing call with slightly varied
+// arguments (common when confused by an error) defeats them and loops
+// indefinitely. This guard keys only on (tool, path) so varied-but-failing
+// attempts on the same target still accumulate. A success on the same key
+// resets the streak. Read ops are excluded — they have ReadLoopState.
+type ErrorLoopState struct {
+	mu        sync.Mutex
+	counts    map[string]int // key: coarse "tool:path"
+	maxErrors int
+}
+
+func NewErrorLoopState(maxErrors int) *ErrorLoopState {
+	if maxErrors <= 0 {
+		maxErrors = 3
+	}
+	return &ErrorLoopState{counts: make(map[string]int), maxErrors: maxErrors}
+}
+
+// Check records an error or success for opKey. On error, increments the
+// streak and returns GuardBlock once it reaches maxErrors. On success,
+// clears the streak for opKey. opKey is the coarse "tool:path" form.
+func (s *ErrorLoopState) Check(opKey string, isError bool) GuardAction {
+	if s == nil || opKey == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !isError {
+		delete(s.counts, opKey)
+		return GuardAction{Type: GuardAllow}
+	}
+	s.counts[opKey]++
+	if s.counts[opKey] >= s.maxErrors {
+		return GuardAction{
+			Type: GuardBlock,
+			Message: fmt.Sprintf(
+				"Repeated tool errors on %s (%d times). The agent appears stuck on a failing operation; provide new direction.",
+				opKey, s.counts[opKey],
+			),
+		}
+	}
+	return GuardAction{Type: GuardAllow}
+}
+
+func (s *ErrorLoopState) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts = make(map[string]int)
 }

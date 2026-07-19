@@ -1,6 +1,7 @@
 package context
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -217,4 +218,38 @@ func indexOfStr(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestBuild_AnalysisModeConstraint(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	assembler.userLang = "中文"
+	assembler.userLangSet = true
+	assembler.stableSessionBlock = "stable"
+
+	// AnalysisMode=true: constraint should be present
+	state := &engine.TaskState{
+		Goal:         "test goal",
+		AnalysisMode: true,
+	}
+	msgs := assembler.Build(state, nil, nil)
+	found := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Build with AnalysisMode=true should include [ANALYSIS MODE] constraint")
+	}
+
+	// AnalysisMode=false: constraint should NOT be present
+	state.AnalysisMode = false
+	msgs = assembler.Build(state, nil, nil)
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
+			t.Errorf("Build with AnalysisMode=false should NOT include [ANALYSIS MODE] constraint")
+			break
+		}
+	}
 }

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,7 +270,7 @@ func TestParseSSE(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(input))
 
 	var payloads []string
-	err := parseSSE(reader, func(payload string) error {
+	err := parseSSE(reader, 0, func(payload string) error {
 		payloads = append(payloads, payload)
 		if payload == "[DONE]" {
 			return errSSEDone
@@ -286,6 +288,92 @@ func TestParseSSE(t *testing.T) {
 	}
 	if payloads[2] != "[DONE]" {
 		t.Errorf("payload[2] = %q, want %q", payloads[2], "[DONE]")
+	}
+}
+
+// blockingReader never produces data and never returns EOF — it models a
+// stalled connection where the server accepted the request but sends nothing.
+type blockingReader struct{}
+
+func (blockingReader) Read(p []byte) (int, error) {
+	// Block forever; the test relies on parseSSE's idle watchdog to abort.
+	select {}
+}
+
+// TestParseSSE_IdleTimeout verifies a stalled stream (no data line arrives)
+// is aborted with ErrStreamIdle within ~idleTimeout, instead of blocking
+// forever. This is the regression guard for the "hangs indefinitely when the
+// API connection goes silent" bug.
+func TestParseSSE_IdleTimeout(t *testing.T) {
+	reader := bufio.NewReader(blockingReader{})
+	start := time.Now()
+	err := parseSSE(reader, 50*time.Millisecond, func(payload string) error {
+		t.Fatalf("handler should not be called on a stalled stream")
+		return nil
+	})
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrStreamIdle) {
+		t.Fatalf("parseSSE error = %v, want ErrStreamIdle", err)
+	}
+	// Should trip shortly after the idle timeout, not hang.
+	if elapsed > 2*time.Second {
+		t.Fatalf("idle timeout took %s, want < 2s", elapsed)
+	}
+}
+
+// TestParseSSE_IdleTimeoutDisabled verifies that idleTimeout=0 keeps the
+// legacy unbounded behavior (no watchdog). We feed a normal stream and confirm
+// it completes without timing out.
+func TestParseSSE_IdleTimeoutDisabled(t *testing.T) {
+	input := "data: {\"x\":1}\n\ndata: [DONE]\n\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+	var n int
+	err := parseSSE(reader, 0, func(payload string) error {
+		n++
+		if payload == "[DONE]" {
+			return errSSEDone
+		}
+		return nil
+	})
+	if err != errSSEDone {
+		t.Fatalf("parseSSE error = %v, want errSSEDone", err)
+	}
+	if n != 2 {
+		t.Fatalf("payload count = %d, want 2", n)
+	}
+}
+
+// TestParseSSE_IdleTimeoutResetsOnData verifies the watchdog resets on each
+// successful read — a slow-but-alive stream (a line every < idleTimeout) must
+// not trip the timeout even if its total duration exceeds idleTimeout.
+func TestParseSSE_IdleTimeoutResetsOnData(t *testing.T) {
+	// Emit 3 SSE events spaced 30ms apart, with an 80ms idle timeout. Each
+	// gap (30ms) is under the timeout, but the total (~90ms) exceeds it —
+	// a non-resetting watchdog would falsely trip. The watchdog must reset
+	// per line and let the stream complete.
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		frames := []string{"data: a\n\n", "data: b\n\n", "data: [DONE]\n\n"}
+		for _, f := range frames {
+			time.Sleep(30 * time.Millisecond)
+			pw.Write([]byte(f))
+		}
+	}()
+	reader := bufio.NewReader(pr)
+	var n int
+	err := parseSSE(reader, 80*time.Millisecond, func(payload string) error {
+		n++
+		if payload == "[DONE]" {
+			return errSSEDone
+		}
+		return nil
+	})
+	if err != errSSEDone {
+		t.Fatalf("parseSSE error = %v, want errSSEDone (stream was alive)", err)
+	}
+	if n != 3 {
+		t.Fatalf("payload count = %d, want 3", n)
 	}
 }
 
@@ -394,6 +482,88 @@ func TestBuildRequestBody_ThinkingMode(t *testing.T) {
 	}
 }
 
+func TestValidateToolCallResponses_BackfillsOrphanedIDs(t *testing.T) {
+	// assistant emitted two tool_call_ids but only one has a tool response.
+	// The missing one must be backfilled with a placeholder tool message.
+	msgs := []Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "call_a", Type: "function", Function: FunctionCall{Name: "read"}},
+			{ID: "call_b", Type: "function", Function: FunctionCall{Name: "edit"}},
+		}},
+		{Role: "tool", ToolCallID: "call_b", Content: "edited"},
+	}
+	out := validateToolCallResponses(msgs)
+
+	// Expect: user, assistant, tool(call_b), tool(call_a backfilled)
+	if len(out) != 4 {
+		t.Fatalf("len(out) = %d, want 4: %+v", len(out), out)
+	}
+	if out[2].ToolCallID != "call_b" {
+		t.Errorf("out[2].ToolCallID = %q, want call_b", out[2].ToolCallID)
+	}
+	if out[3].Role != "tool" || out[3].ToolCallID != "call_a" {
+		t.Errorf("out[3] = %+v, want backfilled tool for call_a", out[3])
+	}
+}
+
+func TestValidateToolCallResponses_AllAnswered(t *testing.T) {
+	// Both ids answered — no backfill, no duplication.
+	msgs := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "a"}, {ID: "b"}}},
+		{Role: "tool", ToolCallID: "a", Content: "ra"},
+		{Role: "tool", ToolCallID: "b", Content: "rb"},
+	}
+	out := validateToolCallResponses(msgs)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3 (no backfill)", len(out))
+	}
+}
+
+func TestValidateToolCallResponses_NoToolCalls(t *testing.T) {
+	// Plain messages with no tool_calls pass through unchanged.
+	msgs := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "hello"},
+	}
+	out := validateToolCallResponses(msgs)
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+}
+
+func TestBuildRequestBody_BackfillsOrphanedToolCallID(t *testing.T) {
+	// End-to-end: buildRequestBody must produce a valid message sequence even
+	// when an assistant tool_call has no matching tool response.
+	client := &DeepSeekClient{}
+	body, err := client.buildRequestBody(ChatRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []Message{
+			{Role: "user", Content: "go"},
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{ID: "orphan", Type: "function", Function: FunctionCall{Name: "read"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody error: %v", err)
+	}
+	var parsed struct {
+		Messages []Message `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	// Expect: user, assistant(tool_calls), tool(orphan)
+	if len(parsed.Messages) != 3 {
+		t.Fatalf("len(messages) = %d, want 3", len(parsed.Messages))
+	}
+	last := parsed.Messages[2]
+	if last.Role != "tool" || last.ToolCallID != "orphan" {
+		t.Errorf("last message = %+v, want backfilled tool for orphan", last)
+	}
+}
+
 func newTestServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -437,6 +607,30 @@ func newTestClientWithRetry(t *testing.T, baseURL string, retry RetryPolicy) *De
 
 func overrideEndpoint(c *DeepSeekClient, url string) {
 	c.endpoint = url
+}
+
+func TestChatCompletionsURL(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		want string
+	}{
+		{"empty", "", ""},
+		{"deepseek base", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions"},
+		{"deepseek base trailing slash", "https://api.deepseek.com/", "https://api.deepseek.com/chat/completions"},
+		{"volcano coding v3", "https://ark.cn-beijing.volces.com/api/coding/v3", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"},
+		{"openrouter", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"},
+		{"already full idempotent", "https://api.deepseek.com/chat/completions", "https://api.deepseek.com/chat/completions"},
+		{"sub-agent query preserved", "https://api.deepseek.com?sub=1", "https://api.deepseek.com/chat/completions?sub=1"},
+		{"volcano sub-agent query", "https://ark.cn-beijing.volces.com/api/coding/v3?sub=1", "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions?sub=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chatCompletionsURL(tt.base); got != tt.want {
+				t.Errorf("chatCompletionsURL(%q) = %q, want %q", tt.base, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestValidateReasoningEcho_FillsMissing(t *testing.T) {

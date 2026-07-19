@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	deeplogconfig "github.com/deepact/deepact/config"
-	"github.com/deepact/deepact/context"
+	deeplogcontext "github.com/deepact/deepact/context"
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/policy"
@@ -132,18 +133,19 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
-// buildSkillsBlock renders a static skills hint for the stable zone.
-// Each skill is shown as "name: description" so the model knows what each does.
-// Dynamic skill suggestions (matched by keyword per-turn) are injected
-// separately via pendingPinnedMessages in the engine loop.
+// buildSkillsBlock renders a static skills list for the stable zone.
+// Each skill is shown as "name: description". The model uses semantic
+// understanding (not keyword matching) to decide when to call activate_skill.
+// Engine-level auto-activation is handled separately by SemanticMatcher.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill. Relevant skills for your task are suggested below.\n")
-	b.WriteString("\n")
+	b.WriteString("BLOCKING REQUIREMENT: when the user's request semantically matches a skill below, call the `activate_skill` tool to activate it BEFORE generating any other response about the task. Do not merely mention a skill by name — invoke it. If no skill matches, respond normally.\n")
+	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill explicitly. ")
+	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state.\n\n")
 	for _, s := range all {
 		b.WriteString("- **")
 		b.WriteString(s.Name)
@@ -153,6 +155,16 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		} else {
 			b.WriteString("(no description)")
 		}
+		b.WriteString("\n")
+
+		// Next skills in chain — LLM uses this to know what to activate next
+		if len(s.NextSkills) > 0 && !(len(s.NextSkills) == 1 && s.NextSkills[0] == "") {
+			b.WriteString("  → Next: ")
+			b.WriteString(strings.Join(s.NextSkills, ", "))
+			b.WriteString("\n")
+		}
+
+
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -190,14 +202,29 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	toolExecutor.ArtifactDir = defaultArtifactDir()
 
 	runner := engine.NewSubAgentRunner(client, toolExecutor, nil, config.ModelName)
+	// Always give sub-agents their own API endpoint for prefix cache isolation.
+	// If explicitly configured (SubAgentBaseURL), use that; otherwise auto-derive
+	// from the main agent's endpoint by appending a harmless query parameter.
+	if config.SubAgentBaseURL != "" {
+		runner.SetSubAgentBaseURL(config.SubAgentBaseURL)
+	} else {
+		apiKey, _ := loadAPIKey()
+		runner.SetSubAgentBaseURL(llm.SubAgentEndpoint(config.BaseURL, apiKey))
+	}
 	if config.FlashModelName != "" {
 		runner.SetFlashModel(config.FlashModelName)
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
+	runner.SetMaxOutputTokens(config.MaxOutputTokens)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
 
-	contextAssembler := context.NewContextAssembler(workDir, estimator)
+	// Pre-compute language packs for sub-agent system prompt (zh + en).
+	// User language is detected per-session, so both variants are cached here.
+	projLang := deeplogcontext.DetectLanguage(workDir)
+	runner.SetLangPacks(deeplogcontext.GetLangPack(projLang, "中文"), deeplogcontext.GetLangPack(projLang, ""))
+
+	contextAssembler := deeplogcontext.NewContextAssembler(workDir, estimator)
 
 	compressor := engine.NewCompressionOrchestrator(client, contextAssembler, config.ModelName)
 	if config.FlashModelName != "" {
@@ -249,16 +276,44 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		routing.FlashModelName = config.FlashModelName
 	}
 
+	// Build skill matcher: semantic-only via the primary model.
+	// Skill matching is a first-class feature that must work whenever the
+	// primary model is configured — it must NOT depend on a separate flash
+	// model setting (which may be unset, misconfigured, or too slow).
+	// The user message + all skill descriptions are sent to the model,
+	// which returns the ONE most relevant skill (or null). Keyword substring
+	// matching was removed — it produced rampant false positives (e.g. "PR"
+	// lowercased to "pr" matched "prefix"). MatchFunc wraps client.Complete so
+	// the skill package stays free of any engine import.
+	matchFn := func(ctx context.Context, systemMsg, userMsg string) (string, error) {
+		req := engine.ModelRequest{
+			Model: config.ModelName,
+			Messages: []engine.ModelMessage{
+				{Role: "system", Content: systemMsg},
+				{Role: "user", Content: userMsg},
+			},
+			Temperature: 0,
+			JsonMode:    true,
+		}
+		resp, err := client.Complete(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("skill semantic match: %w", err)
+		}
+		return resp.Message.Content, nil
+	}
+	skillMatcher := skill.NewSemanticMatcher(matchFn, config.ModelName)
+
 	deps := engine.EngineDeps{
-		Model:      client,
-		Tools:      toolExecutor,
-		Policy:     checker,
-		Context:    contextAssembler,
-		Compressor: compressor,
-		Session:    store,
-		Agents:     agentReg,
-		Skills:     skillReg,
-		Router:     routing,
+		Model:        client,
+		Tools:        toolExecutor,
+		Policy:       checker,
+		Context:      contextAssembler,
+		Compressor:   compressor,
+		Session:      store,
+		Agents:       agentReg,
+		Skills:       skillReg,
+		SkillMatcher: skillMatcher,
+		Router:       routing,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown
 	mcpClosers := make([]io.Closer, len(mcpManagers))
@@ -310,9 +365,9 @@ func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.Engin
 	return llm.NewEngineClient(client), nil
 }
 
-
 func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewReadTool())
+	registry.Register(builtin.NewReadMultiTool())
 	registry.Register(builtin.NewWriteTool())
 	registry.Register(builtin.NewEditTool())
 	registry.Register(builtin.NewGrepTool())
@@ -339,7 +394,7 @@ func defaultEngineConfig() engine.EngineConfig {
 			PlanningThresholdChars: 120,
 			AutoConfirmScope:       false,
 			// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-			RiskThreshold:          0.55,
+			RiskThreshold: 0.55,
 			Pricing: engine.PricingConfig{
 				Models: map[string]engine.ModelPricing{
 					"deepseek/deepseek-chat": {
@@ -368,7 +423,7 @@ func defaultEngineConfig() engine.EngineConfig {
 		PlanningThresholdChars: 120,
 		AutoConfirmScope:       false,
 		// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-		RiskThreshold:          0.55,
+		RiskThreshold: 0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{
 				"deepseek-v4-flash": {

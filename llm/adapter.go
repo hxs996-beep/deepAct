@@ -33,6 +33,7 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 				ReasoningDelta: chunk.ReasoningDelta,
 				FinishReason:   chunk.FinishReason,
 				Err:            chunk.Err,
+				RetryProgress:  chunk.RetryProgress,
 			}
 			if len(chunk.ToolCalls) > 0 {
 				engineChunk.ToolCalls = make([]engine.ModelToolCall, 0, len(chunk.ToolCalls))
@@ -74,6 +75,22 @@ func (c *EngineClient) Fork() *EngineClient {
 		return c // not a DeepSeekClient — can't fork, return as-is
 	}
 	return &EngineClient{client: dsClient.Fork()}
+}
+
+// ForkWithBaseURL creates a new EngineClient with an independent ReasoningEchoManager
+// and a DIFFERENT API endpoint derived from baseURL. This gives sub-agents their own
+// prefix cache partition on DeepSeek's server side, preventing sub-agent calls from
+// polluting the main agent's cache.
+func (c *EngineClient) ForkWithBaseURL(baseURL string) *EngineClient {
+	if c == nil || c.client == nil {
+		return c
+	}
+	dsClient, ok := c.client.(*DeepSeekClient)
+	if !ok {
+		return c // not a DeepSeekClient — can't change endpoint
+	}
+	endpoint := DetectBaseURL(baseURL, dsClient.apiKey)
+	return &EngineClient{client: dsClient.ForkWithEndpoint(endpoint)}
 }
 
 func (c *EngineClient) Complete(ctx context.Context, req engine.ModelRequest) (*engine.ModelResponse, error) {

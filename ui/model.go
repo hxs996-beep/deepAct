@@ -25,8 +25,9 @@ const (
 )
 
 type DisplayMessage struct {
-	Role    string
-	Content string
+	Role     string
+	Content  string
+	ToolTree []ToolNode // toolsummary only: toolTree snapshot at completion, for click-to-expand
 }
 
 type AgentSpinner struct {
@@ -80,9 +81,19 @@ type TDDStage struct {
 	Detail string // human-readable detail shown in status bar
 }
 
+// SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
+type SubAgentStatus struct {
+	ID      string // unique key for tracking (agent type + index)
+	Agent   string // agent type e.g. "sub", "critic", "searcher"
+	Goal    string // what the sub-agent is dispatched to do
+	Status  string // "running", "done", "error"
+	Summary string // result summary when done
+}
+
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
-	{Command: "/round", Args: "<需求>", Description: "开启多角色圆桌讨论，探索方案并进行多方评审"},
+	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
+	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
 type Model struct {
@@ -96,6 +107,8 @@ type Model struct {
 	height              int
 	engine              EngineRunner
 	streaming           string
+	narration           string // accumulated content_delta text for current turn (AI intermediate intent)
+	narrationPending    string // buffered content_delta, flushed to narration on tick to reduce diff renderer churn
 	thinkingContent     string // deprecated: kept for legacy, no longer fed by reasoning_delta
 	thinkingActivity    string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
 	apiKeyInput         string
@@ -139,6 +152,9 @@ type Model struct {
 
 	// TDD (test-driven-development) phase tracking
 	tddStages []TDDStage
+
+	// Sub-agent parallel execution tracking
+	subAgents []SubAgentStatus
 }
 
 type messageRenderCache struct {
@@ -167,7 +183,7 @@ const (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
-	progressChan := make(chan ProgressMsg, 32)
+	progressChan := make(chan ProgressMsg, 256)
 	if runner != nil {
 		runner.SetProgressChan(progressChan)
 	}
@@ -250,7 +266,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.autoScrollDir = newDir
 			}
-			return m, nil
+			// Force a full repaint on selection changes. Bubble Tea's default
+			// per-line frame diff mis-repaints rows whose ANSI changed (e.g.
+			// diff rows gaining/losing \x1b[7m reverse video) on iTerm2, leaving
+			// the row showing a neighbour's text. A full repaint bypasses the
+			// incremental diff entirely. (Same mechanism resize uses.)
+			return m, m.repaintCmd()
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -300,7 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoScrollDir = 0
 				m.lastMouseX = msg.X
 				m.lastMouseY = msg.Y
-				return m, nil
+				return m, m.repaintCmd()
 			} else if msg.Action == tea.MouseActionRelease {
 				if m.selection.Active {
 					sel := m.selection
@@ -324,7 +345,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.clipboardFeedback = time.Now()
 					}
 				}
-				return m, nil
+				// Force full repaint on release: the selection highlight is
+				// either finalized (Done) or cleared, both change row ANSI and
+				// can mis-repaint under Bubble Tea's incremental frame diff.
+				return m, m.repaintCmd()
 			}
 		}
 		return m, nil
@@ -409,6 +433,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingContent = ""
 		m.thinkingActivity = ""
 		m.memberStatuses = nil // roundtable phase done, clear member cards
+		m.subAgents = nil      // sub-agent panel done, clear
 		m.tddStages = nil      // TDD phase done, clear stage cards
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
@@ -424,6 +449,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.spinners[0].Goal = msg.Detail
 			}
 			m.thinkingActivity = msg.Detail
+		case "retry":
+			if len(m.spinners) > 0 {
+				m.spinners[0].Goal = msg.Detail
+			}
+			m.thinkingActivity = msg.Detail
 		case "reasoning_delta":
 			// No longer fed into thinkingContent — raw LLM reasoning is not useful
 			// to display. Agent activity is shown via "thinking" events instead.
@@ -431,12 +461,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.spinners[0].Goal = "thinking..."
 			}
 		case "member_start":
-			m.memberStatuses = append(m.memberStatuses, MemberStatus{
-				ID:     msg.Name,
-				Name:   msg.Detail,
-				Avatar: memberAvatar(msg.Name),
-				Status: "running",
-			})
+			// Dedup: if member already exists (from a previous debate round),
+			// reset to "running" instead of appending a duplicate entry.
+			found := false
+			for i := range m.memberStatuses {
+				if m.memberStatuses[i].ID == msg.Name {
+					m.memberStatuses[i].Status = "running"
+					m.memberStatuses[i].Score = 0
+					m.memberStatuses[i].Verdict = ""
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.memberStatuses = append(m.memberStatuses, MemberStatus{
+					ID:     msg.Name,
+					Name:   msg.Detail,
+					Avatar: memberAvatar(msg.Name),
+					Status: "running",
+				})
+			}
 		case "member_done":
 			for i := range m.memberStatuses {
 				if m.memberStatuses[i].ID == msg.Name {
@@ -479,6 +523,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " running..."
 			}
+			// Track sub-agent in the dedicated panel
+			m.subAgents = append(m.subAgents, SubAgentStatus{
+				ID:     fmt.Sprintf("%s-%d", displayName, len(m.subAgents)),
+				Agent:  displayName,
+				Goal:   msg.Detail,
+				Status: "running",
+			})
 		case "agent_done":
 			displayName := msg.Name
 			for i := range m.toolTree {
@@ -495,7 +546,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " ✓"
 			}
+			// Update sub-agent panel status
+			for i := range m.subAgents {
+				if m.subAgents[i].Agent == displayName && m.subAgents[i].Status == "running" {
+					m.subAgents[i].Status = "done"
+					m.subAgents[i].Summary = msg.Detail
+					break
+				}
+			}
 		case "tool_start":
+			m.finalizeTurnBlocks()
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Name + ": " + msg.Detail
@@ -521,6 +581,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "stream_delta":
 			// Progressive text output from sub-agents (searcher, brainstorm, etc.)
 			m.streaming += msg.Detail
+		case "content_delta":
+			// AI intermediate narration text streamed from the main engine.
+			// Buffer to narrationPending; flushed to m.narration on tick or
+			// turn boundary to reduce diff renderer churn (high-frequency
+			// View updates cause garbled CJK text in terminal diff rendering).
+			m.narrationPending += msg.Detail
 		case "usage":
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
@@ -792,9 +858,14 @@ func (m Model) View() string {
 		lines = lines[excess:]
 	}
 
-	// ---- Step 7: Truncate all body lines to terminal width ----
+	// ---- Step 7: Truncate all body lines to terminal width, then pad ----
+	// Padding prevents Bubble Tea's incremental frame diff from leaving
+	// stale characters from the previous frame in blank positions.
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], contentWidth, "")
+		if w := ansi.StringWidth(lines[i]); w < contentWidth {
+			lines[i] += strings.Repeat(" ", contentWidth-w)
+		}
 	}
 
 	// ---- Step 8: Visual scrollbar (removed per user request — was adding │/▐ to right side) ----
@@ -924,18 +995,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinners = nil
 			m.toolTree = nil
 			m.streaming = ""
+			m.narration = ""
+			m.narrationPending = ""
 			m.escAt = time.Time{}
 			m.afterResidue = false
 			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "已中断"})
 		} else if m.state == stateReady {
-			if m.showSuggestions {
-				// Dismiss suggestions first, then set pendingEsc as fallback
-				// so the Enter that follows Option+Enter inserts a newline
-				// instead of submitting.
-				m.showSuggestions = false
-				m.suggestions = nil
-				m.escAt = time.Now()
-			}
+			// ESC: clear input buffer, discard current input
+			m.inputBuf.SetValue("")
+			m.showSuggestions = false
+			m.suggestions = nil
 			// ESC byte may be the first half of Option+Enter on macOS terminals.
 			// Record timestamp; a subsequent Enter within escWindow is treated as Alt+Enter.
 			m.escAt = time.Now()
@@ -1249,6 +1318,7 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 	}
 
 	if m.state == stateRunning || len(m.spinners) > 0 {
+		m.flushNarration()
 		for i := range m.spinners {
 			if m.spinners[i].Active {
 				m.spinners[i].FrameIdx = (m.spinners[i].FrameIdx + 1) % len(spinnerFrames)
@@ -1273,7 +1343,10 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.toolTree = nil
 	m.spinners = nil
 	m.memberStatuses = nil
+	m.subAgents = nil
 	m.streaming = ""
+	m.narration = ""
+	m.narrationPending = ""
 
 	// Handle local slash commands without invoking the engine
 	if strings.TrimSpace(content) == "/help" {
@@ -1297,21 +1370,57 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	)
 }
 
-func (m *Model) finishStreaming(msg EngineResponseMsg) {
+// flushNarration moves buffered content_delta text from narrationPending into
+// narration, then clears the pending buffer. Called on tick (100ms batching)
+// and before finalizeTurnBlocks to ensure no buffered text is lost.
+func (m *Model) flushNarration() {
+	if m.narrationPending != "" {
+		m.narration += m.narrationPending
+		m.narrationPending = ""
+	}
+}
+
+// finalizeTurnBlocks snapshots the current turn's narration and tool tree into
+// display messages, then clears both. Called at turn boundaries (tool_start)
+// and at finishStreaming to ensure each turn's narration + tools appear as
+// distinct blocks in temporal order.
+func (m *Model) finalizeTurnBlocks() {
+	m.flushNarration()
+	if strings.TrimSpace(m.narration) != "" {
+		m.messages = append(m.messages, DisplayMessage{
+			Role:    "narration",
+			Content: m.narration,
+		})
+		m.narration = ""
+	}
 	if len(m.toolTree) > 0 {
-		m.messages = append(m.messages, DisplayMessage{Role: "toolsummary", Content: renderToolSummary(m.toolTree)})
+		snapshot := append([]ToolNode(nil), m.toolTree...)
+		for i := range snapshot {
+			snapshot[i].Children = append([]ToolNode(nil), snapshot[i].Children...)
+		}
+		m.messages = append(m.messages, DisplayMessage{
+			Role:     "toolsummary",
+			Content:  renderToolSummary(m.toolTree),
+			ToolTree: snapshot,
+		})
 		m.toolTree = nil
 	}
+}
+
+func (m *Model) finishStreaming(msg EngineResponseMsg) {
+	m.finalizeTurnBlocks()
 	m.spinners = nil
 	if msg.Err != nil {
 		runnerLog.Printf("finishStreaming err: %v", msg.Err)
-		// Don't show expected cancellation/timeout errors to the user
 		errStr := msg.Err.Error()
-		if !strings.Contains(errStr, "context canceled") &&
-			!strings.Contains(errStr, "context deadline exceeded") &&
-			!strings.Contains(errStr, "connection reset") {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: msg.Err.Error()})
+		// Suppress only expected cancellation/timeout — these are user-initiated
+		// and the "已中断" message is already shown via the Esc handler.
+		if strings.Contains(errStr, "context canceled") ||
+			strings.Contains(errStr, "context deadline exceeded") {
+			m.streaming = ""
+			return
 		}
+		m.messages = append(m.messages, DisplayMessage{Role: "system", Content: msg.Err.Error()})
 		m.streaming = ""
 		return
 	}
@@ -1345,6 +1454,10 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		// Clear streaming — the summary contains the complete response text.
 		// Partial stream_delta content from sub-agents is already reflected in Summary.
 		m.streaming = ""
+		m.narration = ""
+	} else if m.narration != "" {
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: m.narration})
+		m.narration = ""
 	} else if m.streaming != "" {
 		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: m.streaming})
 		m.streaming = ""
@@ -1414,14 +1527,23 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		return lines, plainLines
 	}
 	if len(m.toolTree) > 0 {
-		toolLines := renderToolTree(m.toolTree, width)
+		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
+	}
+	if len(m.subAgents) > 0 {
+		// Sub-agent parallel execution panel: shows which sub-agents are
+		// dispatched and their current status (running/done).
+		subAgentLines := renderSubAgentPanel(m.subAgents, width)
+		lines = append(lines, subAgentLines...)
 	}
 	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
 		// Overlay status area: render TDD phases (left) and/or member
 		// progress (right) in a single status block above the input.
 		overlayLines := renderOverlayStatus(m.tddStages, m.memberStatuses, width)
 		lines = append(lines, overlayLines...)
+	} else if m.narration != "" {
+		narrationLines := renderStreaming(m.narration, width)
+		lines = append(lines, narrationLines...)
 	} else if m.streaming != "" {
 		streamLines := renderStreaming(m.streaming, width)
 		lines = append(lines, streamLines...)
@@ -1572,10 +1694,16 @@ func renderMessage(msg DisplayMessage, width int) []string {
 				// Line already has ANSI color codes, render as-is
 				styled[i] = line
 			} else {
-				styled[i] = ToolTreeStyle.Render(line)
+				styled[i] = DimStyle.Render(line)
 			}
 		}
 		return wrapLines(styled, width)
+	case "narration":
+		// NarrationStyle adds PaddingLeft(2) + PaddingRight(1) = 3 columns.
+		// Subtract from width so padded output fits terminal, preventing
+		// auto-wrap that corrupts diff renderer line tracking (garbled text).
+		rendered := renderMarkdown(content, width-3)
+		return strings.Split(NarrationStyle.Render(rendered), "\n")
 	default:
 		rendered := renderMarkdown(content, width)
 		return strings.Split(rendered, "\n")
@@ -1754,9 +1882,9 @@ func parseOutputLines(fullDetail string, maxLines int) []ToolNode {
 	return children
 }
 
-func renderToolTree(toolTree []ToolNode, width int) []string {
+func (m Model) renderToolTree(width int) []string {
 	lines := []string{}
-	if len(toolTree) == 0 {
+	if len(m.toolTree) == 0 {
 		return lines
 	}
 
@@ -1770,7 +1898,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 	var diffItems []ToolNode
 	var otherItems []ToolNode
 
-	for _, node := range toolTree {
+	for _, node := range m.toolTree {
 		switch node.Name {
 		case "grep", "glob", "read", "lsp":
 			searchItems = append(searchItems, node)
@@ -1804,7 +1932,7 @@ func renderToolTree(toolTree []ToolNode, width int) []string {
 		}
 	}
 	if len(doneDiffItems) > 0 {
-		lines = append(lines, renderDiffBlock(doneDiffItems, blockWidth)...)
+		lines = append(lines, m.renderDiffBlock(doneDiffItems, blockWidth)...)
 		lines = append(lines, "")
 	}
 
@@ -1877,11 +2005,12 @@ func renderExecBlock(nodes []ToolNode, width int) []string {
 	return strings.Split(ExecBlockStyle.Width(width).Render(strings.Join(content, "\n")), "\n")
 }
 
-func renderDiffBlock(nodes []ToolNode, width int) []string {
+func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	var content []string
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
 	content = append(content, "")
+	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range nodes {
 		status := ""
 		if node.Done {
@@ -1890,23 +2019,20 @@ func renderDiffBlock(nodes []ToolNode, width int) []string {
 		content = append(content, fmt.Sprintf("  :: %s%s", node.Detail, status))
 		if node.Done && len(node.Children) > 0 {
 			for _, child := range node.Children {
-				if child.DetailFull != "" {
-					diffLines := renderDiffHunkBlock(child.DetailFull, width-6)
-					content = append(content, diffLines...)
+				if child.DetailFull == "" {
+					continue
 				}
+				hunkSeq++
+				adds, deletes := countHunkAddsDeletes(child.DetailFull)
+				content = append(content, hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes))
 			}
 		}
 	}
-	// Render each line independently to prevent \033[0m from inner styles (diffDeleteStyle etc.)
-	// from cancelling DiffBlockStyle's background on subsequent lines.
-	// Use DiffBlockLineStyle (no vertical padding) to avoid multi-line entries that break
-	// the height calculation in View(). Add padding rows manually at top/bottom.
-	var result []string
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
-	for _, line := range content {
-		result = append(result, DiffBlockLineStyle.Width(width).Render(line))
-	}
-	result = append(result, DiffBlockLineStyle.Width(width).Render(""))
+	// R3: 保留首尾空行作为视觉间隔，不 pad 全宽（View 统一 ansi.Truncate）。
+	result := make([]string, 0, len(content)+2)
+	result = append(result, "")
+	result = append(result, content...)
+	result = append(result, "")
 	return result
 }
 
@@ -1918,8 +2044,9 @@ func renderToolSummary(toolTree []ToolNode) string {
 			modified++
 		}
 	}
-	b.WriteString(fmt.Sprintf("● Done (%d tools, %d files modified)\n", len(toolTree), modified))
+	b.WriteString(fmt.Sprintf("● %d tools executed, %d files modified\n", len(toolTree), modified))
 
+	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range toolTree {
 		icon := node.Icon
 		if icon == "" {
@@ -1930,7 +2057,9 @@ func renderToolSummary(toolTree []ToolNode) string {
 			if node.Name == "edit" || node.Name == "write" {
 				hunkContent := child.DetailFull
 				if hunkContent != "" {
-					b.WriteString(renderDiffHunkFlat(hunkContent))
+					hunkSeq++
+					adds, deletes := countHunkAddsDeletes(hunkContent)
+					b.WriteString(hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes) + "\n")
 				}
 			} else {
 				b.WriteString(fmt.Sprintf("    %s\n", child.Detail))
@@ -1938,148 +2067,6 @@ func renderToolSummary(toolTree []ToolNode) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-// diff styles cached for performance
-var (
-	diffDeleteStyle     lipgloss.Style
-	diffInsertStyle     lipgloss.Style
-	diffContextStyle    lipgloss.Style
-	diffHunkHeaderStyle lipgloss.Style
-	diffLineNumStyle    lipgloss.Style
-	diffStylesOnce      sync.Once
-)
-
-func initDiffStyles() {
-	diffDeleteStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("210")) // light red text, no background
-	diffInsertStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("114")) // light green text, no background
-	diffContextStyle = lipgloss.NewStyle()
-	diffHunkHeaderStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("178")) // yellow
-	diffLineNumStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")) // dim gray
-}
-
-// renderDiffHunkBlock renders a unified diff hunk as flat colored lines for block display.
-func renderDiffHunkBlock(hunkContent string, maxWidth int) []string {
-	diffStylesOnce.Do(initDiffStyles)
-
-	lines := strings.Split(hunkContent, "\n")
-	if len(lines) == 0 {
-		return nil
-	}
-
-	var result []string
-	oldNum, newNum := 1, 1
-
-	for _, hl := range lines {
-		if hl == "" {
-			continue
-		}
-		if strings.HasPrefix(hl, "@@") {
-			if parts := strings.Split(hl, " "); len(parts) >= 4 {
-				oldPart := strings.TrimPrefix(parts[1], "-")
-				newPart := strings.TrimPrefix(parts[2], "+")
-				oldStartStr := oldPart
-				newStartStr := newPart
-				if idx := strings.Index(oldPart, ","); idx > 0 {
-					oldStartStr = oldPart[:idx]
-				}
-				if idx := strings.Index(newPart, ","); idx > 0 {
-					newStartStr = newPart[:idx]
-				}
-				fmt.Sscanf(oldStartStr, "%d", &oldNum)
-				fmt.Sscanf(newStartStr, "%d", &newNum)
-			}
-			result = append(result, "    "+diffHunkHeaderStyle.Render(hl))
-			continue
-		}
-
-		if len(hl) == 0 {
-			continue
-		}
-		prefix := hl[0:1]
-		content := hl[1:]
-
-		switch prefix {
-		case "-":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
-			result = append(result, "    "+lineNum+diffDeleteStyle.Render(prefix+content))
-			oldNum++
-		case "+":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
-			result = append(result, "    "+lineNum+diffInsertStyle.Render(prefix+content))
-			newNum++
-		default:
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
-			result = append(result, "    "+lineNum+content)
-			oldNum++
-			newNum++
-		}
-	}
-	return result
-}
-
-// renderDiffHunkFlat renders a diff hunk as a flat string for tool summary messages.
-func renderDiffHunkFlat(hunkContent string) string {
-	diffStylesOnce.Do(initDiffStyles)
-
-	lines := strings.Split(hunkContent, "\n")
-	if len(lines) == 0 {
-		return ""
-	}
-
-	var buf strings.Builder
-	oldNum, newNum := 1, 1
-
-	for _, hl := range lines {
-		if hl == "" {
-			continue
-		}
-		if strings.HasPrefix(hl, "@@") {
-			if parts := strings.Split(hl, " "); len(parts) >= 4 {
-				oldPart := strings.TrimPrefix(parts[1], "-")
-				newPart := strings.TrimPrefix(parts[2], "+")
-				oldStartStr := oldPart
-				newStartStr := newPart
-				if idx := strings.Index(oldPart, ","); idx > 0 {
-					oldStartStr = oldPart[:idx]
-				}
-				if idx := strings.Index(newPart, ","); idx > 0 {
-					newStartStr = newPart[:idx]
-				}
-				fmt.Sscanf(oldStartStr, "%d", &oldNum)
-				fmt.Sscanf(newStartStr, "%d", &newNum)
-			}
-			buf.WriteString("    " + diffHunkHeaderStyle.Render(hl) + "\n")
-			continue
-		}
-
-		if len(hl) == 0 {
-			continue
-		}
-		prefix := hl[0:1]
-		content := hl[1:]
-
-		switch prefix {
-		case "-":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d     ", oldNum))
-			buf.WriteString("    " + lineNum + diffDeleteStyle.Render(prefix+content) + "\n")
-			oldNum++
-		case "+":
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("    %4d ", newNum))
-			buf.WriteString("    " + lineNum + diffInsertStyle.Render(prefix+content) + "\n")
-			newNum++
-		default:
-			lineNum := diffLineNumStyle.Render(fmt.Sprintf("%4d %4d ", oldNum, newNum))
-			buf.WriteString("    " + lineNum + content + "\n")
-			oldNum++
-			newNum++
-		}
-	}
-	return buf.String()
 }
 
 // isDiffContent checks if a string contains unified diff content.
@@ -2106,11 +2093,40 @@ func splitDiff(digest string) (summary string, diff string, hasDiff bool) {
 	return summary, diff, true
 }
 
+var (
+	streamRenderCacheMu sync.Mutex
+	streamRenderCache   struct {
+		content string
+		width   int
+		lines   []string
+	}
+)
+
 func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
 	}
-	return wrapText(AssistantMsgStyle.Render(streaming), width)
+	streamRenderCacheMu.Lock()
+	defer streamRenderCacheMu.Unlock()
+
+	// Cache hit — content and width unchanged since last render.
+	if streamRenderCache.content == streaming && streamRenderCache.width == width {
+		return streamRenderCache.lines
+	}
+
+	// Use fast plain-text rendering during active streaming. Glamour's full
+	// markdown parse on every content_delta token is expensive (5-50ms) and
+	// causes the progress channel to fill up, dropping tokens. The final
+	// display (after streaming completes) uses glamour via renderMarkdown.
+	normalized := streaming
+	for strings.Contains(normalized, "\n\n\n") {
+		normalized = strings.ReplaceAll(normalized, "\n\n\n", "\n\n")
+	}
+	lines := wrapText(AssistantMsgStyle.Render(normalized), width)
+	streamRenderCache.content = streaming
+	streamRenderCache.width = width
+	streamRenderCache.lines = lines
+	return lines
 }
 
 func renderSpinners(spinners []AgentSpinner, width int) []string {
@@ -2129,6 +2145,63 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 		}
 	}
 	return wrapLines(lines, width)
+}
+
+// renderSubAgentPanel renders the sub-agent parallel execution panel above the input.
+// Shows each dispatched sub-agent with its type icon, goal, and status
+// (spinner for running, checkmark for done). This is the primary visual
+// indicator when multiple sub-agents are working in parallel.
+func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
+	if len(agents) == 0 {
+		return nil
+	}
+	var content []string
+	content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
+	content = append(content, "")
+	for _, a := range agents {
+		icon := agentIcon(a.Agent)
+		goal := a.Goal
+		if len(goal) > 60 {
+			goal = goal[:60] + "..."
+		}
+		switch a.Status {
+		case "running":
+			frame := spinnerFrames[0]
+			line := fmt.Sprintf("  %s %s %s  %s", frame, icon, a.Agent, SpinnerStyle.Render(goal))
+			content = append(content, line)
+		case "done":
+			summary := a.Summary
+			if len(summary) > 60 {
+				summary = summary[:60] + "..."
+			}
+			line := fmt.Sprintf("  ✓ %s %s  %s", icon, a.Agent, SpinnerDoneStyle.Render(summary))
+			content = append(content, line)
+		case "error":
+			line := fmt.Sprintf("  ✗ %s %s  ❌", icon, a.Agent)
+			content = append(content, ErrorStyle.Render(line))
+		}
+	}
+	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, width)...)
+	}
+	return result
+}
+
+// agentIcon returns a default emoji for known agent types.
+func agentIcon(agent string) string {
+	switch agent {
+	case "sub":
+		return "🔍"
+	case "critic":
+		return "🔎"
+	case "team-lead":
+		return "👑"
+	default:
+		return "🤖"
+	}
 }
 
 // renderMemberProgress renders roundtable member status cards above the input.
@@ -2163,7 +2236,12 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return strings.Split(rendered, "\n")
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, width)...)
+	}
+	return result
 }
 
 // tddPhaseMeta maps phase names to their display metadata.
@@ -2236,7 +2314,12 @@ func renderTDDStatus(stages []TDDStage, maxWidth int) []string {
 	}
 
 	rendered := ExecBlockStyle.Width(maxWidth).Render(strings.Join(content, "\n"))
-	return strings.Split(rendered, "\n")
+	rawLines := strings.Split(rendered, "\n")
+	var result []string
+	for _, l := range rawLines {
+		result = append(result, wrapLineAnsi(l, maxWidth)...)
+	}
+	return result
 }
 
 // renderOverlayStatus renders both TDD phases and member progress in a single
@@ -2357,14 +2440,10 @@ func renderThinkingBox(activity string, width int) []string {
 		switch name {
 		case "deepact":
 			icon = ""
-		case "sub", "searcher":
+		case "sub":
 			icon = "🔍"
-		case "planner":
-			icon = "📋"
 		case "critic":
 			icon = "🔎"
-		case "tester":
-			icon = "🧪"
 		}
 		display = icon + " " + name + ": " + task
 	} else {
@@ -2728,6 +2807,10 @@ func wrapLine(line string, width int) []string {
 	if lipgloss.Width(line) <= width {
 		return []string{line}
 	}
+	// Delegate ANSI-containing lines to wrapLineAnsi for safe wrapping
+	if strings.Contains(line, "\x1b[") {
+		return wrapLineAnsi(line, width)
+	}
 	runes := []rune(line)
 	var lines []string
 	for len(runes) > 0 {
@@ -2768,6 +2851,144 @@ func wrapLine(line string, width int) []string {
 	return lines
 }
 
+// isSGR checks whether an ANSI escape sequence is an SGR (Select Graphic
+// Rendition) sequence, i.e. it sets text style attributes like colors.
+// SGR sequences match the pattern \x1b[...m where ... is one or more
+// semicolon-separated numbers, or empty for reset.
+func isSGR(seq string) bool {
+	if len(seq) < 3 || seq[len(seq)-1] != 'm' {
+		return false
+	}
+	params := seq[2 : len(seq)-1]
+	if params == "" {
+		return true // \x1b[m is SGR reset
+	}
+	for _, c := range params {
+		if (c < '0' || c > '9') && c != ';' {
+			return false
+		}
+	}
+	return true
+}
+
+// wrapLineAnsi wraps a line that may contain ANSI escape sequences to fit
+// within the given visual width. It preserves all escape sequences intact,
+// re-emits active SGR sequences at the start of continuation lines, and
+// emits SGR reset at the end of each wrapped line to prevent color bleeding.
+//
+// Word-wrap: prefers breaking at spaces (U+0020, U+3000). Falls back to
+// hard-break at width boundary when no space is found within the segment.
+func wrapLineAnsi(line string, width int) []string {
+	if width <= 0 || line == "" {
+		return []string{line}
+	}
+	if lipgloss.Width(line) <= width {
+		return []string{line}
+	}
+
+	var lines []string
+	var curLine strings.Builder
+	var activeSGRs []string
+	visualCol := 0
+	lastSpaceIdx := -1
+
+	flushLine := func() {
+		s := curLine.String()
+		if len(activeSGRs) > 0 {
+			s += "\x1b[0m"
+		}
+		lines = append(lines, s)
+		curLine.Reset()
+		for _, sgr := range activeSGRs {
+			curLine.WriteString(sgr)
+		}
+		visualCol = 0
+		lastSpaceIdx = -1
+	}
+
+	runes := []rune(line)
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
+
+		if r == '\x1b' {
+			escBuf := strings.Builder{}
+			escBuf.WriteRune(r)
+			i++
+			for i < len(runes) {
+				r2 := runes[i]
+				escBuf.WriteRune(r2)
+				i++
+				if (r2 >= 'a' && r2 <= 'z') || (r2 >= 'A' && r2 <= 'Z') {
+					break
+				}
+			}
+			seq := escBuf.String()
+			curLine.WriteString(seq)
+
+			if isSGR(seq) {
+				if seq == "\x1b[0m" || seq == "\x1b[m" {
+					activeSGRs = nil
+				} else {
+					activeSGRs = append(activeSGRs, seq)
+				}
+			}
+			continue
+		}
+
+		rw := lipgloss.Width(string(r))
+
+		if visualCol+rw > width {
+			if lastSpaceIdx >= 0 {
+				curLineStr := curLine.String()
+				trimmed := curLineStr[:lastSpaceIdx]
+				overflow := curLineStr[lastSpaceIdx:]
+				if len(overflow) > 0 {
+					if overflow[0] == ' ' {
+						overflow = overflow[1:]
+					} else if strings.HasPrefix(overflow, "　") {
+						overflow = overflow[len("　"):]
+					}
+				}
+				curLine.Reset()
+				curLine.WriteString(trimmed)
+				flushLine()
+				curLine.WriteString(overflow)
+				curLine.WriteRune(r)
+				visualCol = lipgloss.Width(stripAnsi(overflow)) + rw
+				lastSpaceIdx = -1
+				i++
+				continue
+			}
+			flushLine()
+			curLine.WriteRune(r)
+			visualCol = rw
+			if r == ' ' || r == '　' {
+				lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+			}
+			i++
+			continue
+		}
+
+		curLine.WriteRune(r)
+		visualCol += rw
+		if r == ' ' || r == '　' {
+			lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+		}
+		i++
+	}
+
+	if curLine.Len() > 0 {
+		if len(lines) == 0 {
+			lines = append(lines, line)
+		} else {
+			lines = append(lines, curLine.String())
+		}
+	}
+
+	return lines
+}
+
 func wrapLines(lines []string, width int) []string {
 	if width <= 0 {
 		return lines
@@ -2776,14 +2997,8 @@ func wrapLines(lines []string, width int) []string {
 	for _, line := range lines {
 		if lipgloss.Width(line) <= width {
 			result = append(result, line)
-			continue
-		}
-		// Lines with ANSI codes cannot be safely word-wrapped (would corrupt
-		// escape sequences). Pass them through — View() handles width enforcement.
-		if strings.Contains(line, "\033[") {
-			result = append(result, line)
 		} else {
-			result = append(result, wrapText(line, width)...)
+			result = append(result, wrapLine(line, width)...)
 		}
 	}
 	return result

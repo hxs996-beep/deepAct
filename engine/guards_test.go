@@ -9,7 +9,7 @@ import (
 // --- LoopGuard ---
 
 func TestNewLoopGuard(t *testing.T) {
-	g := NewLoopGuard(0)
+	g := NewLoopGuard("", 0)
 	if g == nil {
 		t.Fatal("expected non-nil LoopGuard")
 	}
@@ -19,14 +19,14 @@ func TestNewLoopGuard(t *testing.T) {
 }
 
 func TestNewLoopGuard_CustomMax(t *testing.T) {
-	g := NewLoopGuard(3)
+	g := NewLoopGuard("", 3)
 	if g.maxRepeats != 3 {
 		t.Errorf("maxRepeats = %d, want 3", g.maxRepeats)
 	}
 }
 
 func TestLoopGuard_Check_AllowsFirstCall(t *testing.T) {
-	g := NewLoopGuard(3)
+	g := NewLoopGuard("", 3)
 	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
 	action := g.Check(call)
 	if action.Type != GuardAllow {
@@ -35,7 +35,7 @@ func TestLoopGuard_Check_AllowsFirstCall(t *testing.T) {
 }
 
 func TestLoopGuard_Check_BlocksAfterMaxRepeats(t *testing.T) {
-	g := NewLoopGuard(2)
+	g := NewLoopGuard("", 2)
 	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
 
 	// First call — allow
@@ -54,7 +54,7 @@ func TestLoopGuard_Check_BlocksAfterMaxRepeats(t *testing.T) {
 }
 
 func TestLoopGuard_Check_DifferentContentHash(t *testing.T) {
-	g := NewLoopGuard(2)
+	g := NewLoopGuard("", 2)
 	call1 := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
 	call2 := makeToolCall("edit", `{"path":"foo.go","old_string":"c","new_string":"d"}`)
 
@@ -66,7 +66,7 @@ func TestLoopGuard_Check_DifferentContentHash(t *testing.T) {
 }
 
 func TestLoopGuard_Check_NonDestructiveTool(t *testing.T) {
-	g := NewLoopGuard(2)
+	g := NewLoopGuard("", 2)
 	call := makeToolCall("grep", `{"pattern":"foo"}`)
 	// Even with many repeats, non-destructive tools aren't tracked
 	for i := 0; i < 10; i++ {
@@ -77,7 +77,7 @@ func TestLoopGuard_Check_NonDestructiveTool(t *testing.T) {
 }
 
 func TestLoopGuard_Check_ReadWithScope(t *testing.T) {
-	g := NewLoopGuard(2)
+	g := NewLoopGuard("", 2)
 	call1 := makeToolCall("read", `{"path":"foo.go","symbol":"TestFoo"}`)
 	call2 := makeToolCall("read", `{"path":"foo.go","symbol":"TestBar"}`)
 
@@ -89,7 +89,7 @@ func TestLoopGuard_Check_ReadWithScope(t *testing.T) {
 }
 
 func TestLoopGuard_Reset(t *testing.T) {
-	g := NewLoopGuard(2)
+	g := NewLoopGuard("", 2)
 	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
 
 	g.Check(call)
@@ -130,7 +130,7 @@ func TestExtractPathField(t *testing.T) {
 	}
 	for _, tt := range tests {
 		raw := json.RawMessage(tt.input)
-		if got := extractPathField(raw); got != tt.want {
+		if got := extractPathField(raw, ""); got != tt.want {
 			t.Errorf("%s: extractPathField = %q, want %q", tt.name, got, tt.want)
 		}
 	}
@@ -187,42 +187,10 @@ func TestExtractWriteContentHash(t *testing.T) {
 	}
 }
 
-func TestExtractReadScopeHash(t *testing.T) {
-	// No scope params → empty
-	h1 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go"}`))
-	if h1 != "" {
-		t.Errorf("no scope params should return empty, got %s", h1)
-	}
-	// Symbol produces deterministic hash
-	h2 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestFoo"}`))
-	if h2 == "" {
-		t.Error("expected non-empty hash for symbol")
-	}
-	h3 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestFoo"}`))
-	if h2 != h3 {
-		t.Error("hash should be deterministic")
-	}
-	// Different symbols produce different hashes
-	h4 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","symbol":"TestBar"}`))
-	if h2 == h4 {
-		t.Error("different symbols should produce different hashes")
-	}
-	// Offset produces hash
-	h5 := extractReadScopeHash(json.RawMessage(`{"path":"foo.go","offset":10}`))
-	if h5 == "" {
-		t.Error("expected non-empty hash for offset")
-	}
-	// Invalid json → empty
-	h6 := extractReadScopeHash(json.RawMessage(`bad`))
-	if h6 != "" {
-		t.Errorf("expected empty for invalid json, got %s", h6)
-	}
-}
-
 func TestExtractToolKey(t *testing.T) {
 	// edit tool produces key with hash
 	editCall := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
-	editKey := extractToolKey(editCall)
+	editKey := extractToolKey(editCall, "")
 	if !strings.HasPrefix(editKey, "edit:foo.go:") {
 		t.Errorf("edit tool key should start with 'edit:foo.go:', got %q", editKey)
 	}
@@ -230,26 +198,32 @@ func TestExtractToolKey(t *testing.T) {
 		t.Error("edit tool key should include content hash")
 	}
 
-	// read no scope → path-only key
-	readNoScope := extractToolKey(makeToolCall("read", `{"path":"foo.go"}`))
-	if readNoScope != "read:foo.go" {
-		t.Errorf("read no scope should be 'read:foo.go', got %q", readNoScope)
+	// read no scope → "read:path::"
+	readNoScope := extractToolKey(makeToolCall("read", `{"path":"foo.go"}`), "")
+	if readNoScope != "read:foo.go::" {
+		t.Errorf("read no scope should be 'read:foo.go::', got %q", readNoScope)
 	}
 
-	// read with symbol → includes hash
-	readSym := extractToolKey(makeToolCall("read", `{"path":"foo.go","symbol":"TestFoo"}`))
-	if !strings.HasPrefix(readSym, "read:foo.go:") {
-		t.Errorf("read with symbol should include hash, got %q", readSym)
+	// read with symbol → "read:path::symbol:Name"
+	readSym := extractToolKey(makeToolCall("read", `{"path":"foo.go","symbol":"TestFoo"}`), "")
+	if readSym != "read:foo.go::symbol:TestFoo" {
+		t.Errorf("read with symbol should be 'read:foo.go::symbol:TestFoo', got %q", readSym)
+	}
+
+	// read with offset/limit → "read:path::L<off>-<limit>"
+	readRange := extractToolKey(makeToolCall("read", `{"path":"foo.go","offset":10,"limit":50}`), "")
+	if readRange != "read:foo.go::L10-50" {
+		t.Errorf("read with offset/limit should be 'read:foo.go::L10-50', got %q", readRange)
 	}
 
 	// grep not tracked
-	grepKey := extractToolKey(makeToolCall("grep", `{"pattern":"foo"}`))
+	grepKey := extractToolKey(makeToolCall("grep", `{"pattern":"foo"}`), "")
 	if grepKey != "" {
 		t.Errorf("grep should not be tracked, got %q", grepKey)
 	}
 
 	// no path → empty
-	noPath := extractToolKey(makeToolCall("edit", `{"old_string":"a","new_string":"b"}`))
+	noPath := extractToolKey(makeToolCall("edit", `{"old_string":"a","new_string":"b"}`), "")
 	if noPath != "" {
 		t.Errorf("edit without path should return empty, got %q", noPath)
 	}

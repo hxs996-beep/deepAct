@@ -61,6 +61,35 @@ func TestEditTool_FuzzyMatchTrailingWhitespace(t *testing.T) {
 	}
 }
 
+// TestEditTool_FilePathAlias verifies the edit tool accepts `file_path` as an
+// alias for `path`. DeepSeek models sometimes emit `file_path` (Anthropic
+// convention) instead of the declared `path` key; without alias support the
+// tool errors with "path is required" and the model retries in a loop.
+func TestEditTool_FilePathAlias(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.go")
+	os.WriteFile(path, []byte("func hello() {\n\treturn \"hello\"\n}\n"), 0o644)
+
+	tool := NewEditTool()
+	input, _ := json.Marshal(map[string]string{
+		"file_path":  path,
+		"old_string": "return \"hello\"",
+		"new_string": "return \"world\"",
+	})
+
+	result, err := tool.Run(tools.ToolContext{WorkDir: dir}, input)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if result.Status != tools.StatusOK {
+		t.Fatalf("status = %q, want ok. digest: %s", result.Status, result.Digest)
+	}
+	content, _ := os.ReadFile(path)
+	if got := string(content); got != "func hello() {\n\treturn \"world\"\n}\n" {
+		t.Errorf("file content = %q", got)
+	}
+}
+
 func TestEditTool_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")

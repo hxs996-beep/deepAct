@@ -40,6 +40,9 @@ build/
 build_release.ps1
 package_release.ps1
 
+# Superpowers workflow artifacts (specs/plans drafts, SDD task files)
+.superpowers/
+
 # Runtime data (generated at runtime)
 memory/
 retrieval/
@@ -47,3 +50,4 @@ retrieval/
 # Build verification artifacts
 BUILD_RESULT.txt
 BUILD_VERIFICATION.md
+*.tgz

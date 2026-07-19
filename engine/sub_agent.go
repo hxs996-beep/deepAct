@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/deepact/deepact/context/promptset"
 )
 
 const (
@@ -24,8 +26,12 @@ type SubAgentRunner struct {
 	modelName        string // default (Pro) model
 	flashModelName   string // Flash model for cheaper agents
 	maxContextTokens int    // context window limit; 0 = use defaultSubAgentContext
+	maxOutputTokens  int    // per-turn completion cap; 0 = use DefaultMaxOutputTokens
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
+	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
+	langPackZh       string // Chinese language pack (Go/Python rules in zh)
+	langPackEn       string // English language pack (Go/Python rules in en)
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -69,10 +75,36 @@ func (r *SubAgentRunner) SetMaxContextTokens(tokens int) {
 	r.maxContextTokens = tokens
 }
 
+// SetMaxOutputTokens overrides the per-turn completion cap for sub-agents.
+func (r *SubAgentRunner) SetMaxOutputTokens(tokens int) {
+	r.maxOutputTokens = tokens
+}
+
+func (r *SubAgentRunner) outputTokenCap() int {
+	if r.maxOutputTokens > 0 {
+		return r.maxOutputTokens
+	}
+	return DefaultMaxOutputTokens
+}
+
 // SetCompressor sets the CompressionOrchestrator for layered compression (same as main agent).
 // When set, replaces the simple compressSubHistory with the full 4-layer strategy.
 func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
 	r.compressor = c
+}
+
+// SetSubAgentBaseURL sets a separate API base URL for sub-agents. When set, sub-agents
+// use this URL instead of the main agent's, giving them their own DeepSeek prefix cache
+// partition. Empty string (default) means sub-agents share the main agent's endpoint.
+func (r *SubAgentRunner) SetSubAgentBaseURL(url string) {
+	r.subAgentBaseURL = url
+}
+
+// SetLangPacks sets both language variants of the language-specific rules.
+// Called once at startup from cmd/run.go after language detection.
+func (r *SubAgentRunner) SetLangPacks(zh, en string) {
+	r.langPackZh = zh
+	r.langPackEn = en
 }
 
 // contextLimit returns the effective context window limit.
@@ -108,6 +140,26 @@ func (r *SubAgentRunner) RunWithPrompt(ctx context.Context, input Handoff, extra
 // extraPrompt is additional system-level instructions injected for specialist agents.
 // maxIterations caps the number of LLM turns for this agent.
 // modelOverride, if non-empty, overrides the runner's default model for this run.
+// subAgentStreamer guards sub-agent stream_delta emission. Sub-agents use
+// non-streaming Complete, so resp.Message.Content is the full response text.
+// Emitting it as a stream_delta on every runLoop iteration causes the UI to
+// accumulate duplicate blocks (m.streaming += ...), producing repeated text
+// and blank-line gaps. maybeEmit emits only the first non-empty content; the
+// final answer is still surfaced by the main engine's Summary at run end.
+type subAgentStreamer struct {
+	streamed bool
+}
+
+// maybeEmit emits content as a stream_delta the first time it is called with
+// non-empty content and a non-nil onProgress; subsequent calls are no-ops.
+func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content string) {
+	if s.streamed || content == "" || onProgress == nil {
+		return
+	}
+	onProgress(ProgressEvent{Type: "stream_delta", Name: agentName, Detail: content})
+	s.streamed = true
+}
+
 func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
 	if input.Depth > maxSubAgentDepth {
 		return &HandoffResult{
@@ -124,12 +176,20 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
 		model = f.Fork()
 	}
+	// If a separate sub-agent base URL is configured, fork again with a different
+	// endpoint for cache isolation. This gives sub-agents their own DeepSeek prefix
+	// cache partition so their calls don't pollute the main agent's cached prefix.
+	if r.subAgentBaseURL != "" {
+		if f, ok := model.(interface{ ForkWithBaseURL(string) ModelClient }); ok {
+			model = f.ForkWithBaseURL(r.subAgentBaseURL)
+		}
+	}
 
 	// Stable system message — identical across all sub-agent calls → prefix cache hit
 	// Stable agent-type instructions (extraPrompt) — identical per agent type → prefix cache hit
 	// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
 	history := []ModelMessage{
-		{Role: "system", Content: r.stableSystemPrompt()},
+		{Role: "system", Content: r.stableSystemPrompt(input.UserLanguage)},
 	}
 	if extraPrompt != "" {
 		history = append(history, ModelMessage{Role: "user", Content: extraPrompt})
@@ -138,7 +198,16 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 	}
 
-	filteredTools := r.filterTools(input.Tools)
+	// Conclusion classifier for the sub-agent's text-only turns: mirrors the
+	// main engine's StalledNarrationHook. Uses the forked model + flash model
+	// name (cheaper) to decide whether a text-only reply is a final conclusion.
+	classifierModelName := r.flashModelName
+	if classifierModelName == "" {
+		classifierModelName = r.modelName
+	}
+	conclusionClassifier := NewConclusionClassifier(model, classifierModelName, zhFromLang(input.UserLanguage))
+
+	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
 
 	modelName := r.modelName
 	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
@@ -162,6 +231,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	lastOpKey := ""
 	sameOpCount := 0
 	maxSameOp := 5
+	streamer := subAgentStreamer{}
 	for iter := 0; iter < maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
@@ -196,7 +266,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Model:           modelName,
 			Messages:        history,
 			Tools:           filteredTools,
-			MaxTokens:       4096,
+			MaxTokens:       r.outputTokenCap(),
 			ThinkingEnabled: false, // sub-agents do structured tasks, don't need open-ended thinking
 		}
 
@@ -246,8 +316,10 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			} else if resp.Message.Content != "" {
 				preview := firstLine(resp.Message.Content, 60)
 				r.onProgress(ProgressEvent{Type: "thinking", Name: agentName, Detail: fmt.Sprintf("%s: %s", agentName, preview)})
-				// Stream full content for progressive display
-				r.onProgress(ProgressEvent{Type: "stream_delta", Name: agentName, Detail: resp.Message.Content})
+				// Stream full content for progressive display -- but only once
+				// per runLoop. Subsequent text-only rounds re-emit the same
+				// full body; without this guard the UI accumulates duplicates.
+				streamer.maybeEmit(r.onProgress, agentName, resp.Message.Content)
 			}
 		}
 		totalUsage.PromptTokens += resp.Usage.PromptTokens
@@ -272,6 +344,43 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				result := r.buildResult(msg.Content, input.Goal)
 				result.Usage = &totalUsage
 				return result, nil
+			}
+			// A text-only response that is a genuine conclusion (not forward-
+			// looking narration) ends the sub-agent. Mirrors the main engine's
+			// StalledNarrationHook: uses the LLM ConclusionClassifier to tell
+			// conclusion from narration. On classifier error, conservatively
+			// treat as narration (nudge) so the sub-agent never ends early on
+			// an uncertain call.
+			if msg.Content != "" {
+				// Critic fast-path: a well-formed VERDICT line is a
+				// deterministic terminal signal — trust it and skip the
+				// classifier probe, so a genuine verdict is never nudged
+				// into another tool call (the critic run-on root cause).
+				if input.Agent == AgentCritic && parseCriticVerdict(msg.Content) != "" {
+					result := r.buildResult(msg.Content, input.Goal)
+					result.Usage = &totalUsage
+					return result, nil
+				}
+				isConc, err := conclusionClassifier.IsConclusion(ctx, ConclusionCheck{
+				Goal: input.Goal,
+				Text: msg.Content,
+			})
+				if err != nil {
+					turnLog.Printf("sub-agent conclusion classifier error: %v (conservative nudge)", err)
+				} else if isConc && !hasTrailingNextStepIntent(msg.Content) {
+					// Trust the verdict unless the text reads as a forward-looking
+					// next-step plan: the flash classifier can false-positive on
+					// narration leading with an intent marker ("查看 X，确认 Y。").
+					// Genuine conclusions - including critic verdicts like
+					// "结论：失败" - carry no trailing next-step intent and are
+					// trusted. Mirrors the main engine's StalledNarrationHook
+					// heuristic pre-check. Unlike the main engine, NO completion
+					// marker is required here: critic verdicts are legitimate
+					// conclusions without one.
+					result := r.buildResult(msg.Content, input.Goal)
+					result.Usage = &totalUsage
+					return result, nil
+				}
 			}
 			consecutiveIntermediate++
 			if consecutiveIntermediate >= 3 {
@@ -317,7 +426,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}
 
 		// Per-file loop detection: same tool+file repeated N consecutive turns → block
-		opKey := firstOpKey(calls)
+		opKey := firstOpKey(calls, r.workDir)
 		if opKey != "" {
 			if opKey == lastOpKey {
 				sameOpCount++
@@ -333,19 +442,21 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		for _, call := range calls {
 			if r.onProgress != nil {
-				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input)})
+				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, r.workDir)})
 			}
 			if call.Name == HandoffToolName && input.Depth < maxSubAgentDepth {
 				// Execute sub-sub-agent
-				result := r.executeSubHandoff(ctx, call, input.Depth+1)
+				result := r.executeSubHandoff(ctx, call, input.Depth+1, input.UserLanguage)
 				if r.onProgress != nil {
 					r.onProgress(ProgressEvent{Type: "tool_done", Name: "handoff", Detail: briefDigest(result.Digest)})
 				}
-				history = append(history, ModelMessage{
-					Role:       "tool",
-					ToolCallID: call.ID,
-					Content:    result.Digest,
-				})
+				if result.Status != "cancelled" {
+					history = append(history, ModelMessage{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    result.Digest,
+					})
+				}
 			} else if call.Name == HandoffToolName {
 				history = append(history, ModelMessage{
 					Role:       "tool",
@@ -380,12 +491,12 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 // summarizeHistory extracts the last meaningful assistant output from history
 // when the sub-agent runs out of iterations. Falls back to listing tool outputs.
 // firstOpKey extracts "toolName:path" from the first path-bearing call for loop detection.
-func firstOpKey(calls []ToolCallRequest) string {
+func firstOpKey(calls []ToolCallRequest, workDir string) string {
 	for _, c := range calls {
 		if c.Name != "edit" && c.Name != "write" {
 			continue
 		}
-		if path := extractPathFromArgs(c.Input); path != "" {
+		if path := extractPathFromArgs(c.Input, workDir); path != "" {
 			return c.Name + ":" + path
 		}
 	}
@@ -434,33 +545,33 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 	return sb.String()
 }
 
-// stableSystemPrompt returns the fixed system identity shared by all sub-agents.
+// stableSystemPrompt returns the full system prompt shared by all sub-agents.
+// Combines the main system prompt (rules, examples, language pack) with the sub-agent role suffix.
 // Identical across every sub-agent call in the session → enables prefix cache hits.
-func (r *SubAgentRunner) stableSystemPrompt() string {
-	return `You are a sub-agent executing a delegated task. Complete the goal and report your findings.
-
-## Search Methodology (Code Reading Protocol)
-- **Intent first**: use grep/glob with task-relevant keywords to narrow scope. Do NOT glob all files.
-- **LSP before read**: use 'lsp workspaceSymbol' to find function/type definitions by name; use 'lsp hover'/'goToDefinition' for type info. More precise than grep+Read.
-- **Read precisely**: once you know which file you need, read only the relevant symbol/region.
-- **Summarize large outputs**: if a tool returns >50 matches or >10KB, summarize key findings rather than dumping everything.
-- **Batch parallel reads**: when multiple independent files need checking, batch them in a single turn.
-- **Trace through code**: follow function calls and type references to build understanding, not file listing.
-
-When you complete the task, provide a summary of what you did and list key findings/conclusions.
-You can delegate sub-tasks using the '` + HandoffToolName + `' tool.`
+func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
+	prompts := promptset.Get()
+	langPack := r.langPackEn
+	if userLang == "中文" {
+		langPack = r.langPackZh
+	}
+	base := prompts.System + "\n\n" + prompts.Examples
+	if langPack != "" {
+		base += "\n\n" + pickPrompt(userLang == "中文", "# Language Pack\n", "# 语言包\n") + langPack
+	}
+	return base + "\n\n" + prompts.SubAgent
 }
 
 // buildVolatilePrompt assembles the per-call variable content (goal, context, constraints).
 // This is appended as the last user message, after stable system + agent-specific prompts.
 func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
+	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
+	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
 	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
 	}
 	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
+		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
 	}
 	return sb.String()
 }
@@ -468,13 +579,14 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // buildVariablePrompt assembles the per-call variable content (goal, context, constraints, extra).
 // This is appended as the first user message, after the stable system message.
 func (r *SubAgentRunner) buildVariablePrompt(input Handoff, extraPrompt string) string {
+	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
+	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
 	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
 	}
 	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
+		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
 	}
 	if extraPrompt != "" {
 		sb.WriteString(extraPrompt + "\n\n")
@@ -484,10 +596,11 @@ func (r *SubAgentRunner) buildVariablePrompt(input Handoff, extraPrompt string) 
 
 // filterTools returns a tool spec list filtered to only the allowed tools.
 // If allowList is empty, all tools are allowed.
-func (r *SubAgentRunner) filterTools(allowList []string) []ModelTool {
+// userLang controls the language of the handoff tool description ("中文" = Chinese).
+func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
 	all := r.tools.Specs()
 	// Always include the handoff tool
-	result := []ModelTool{handoffToolSpec()}
+	result := []ModelTool{handoffToolSpec(zhFromLang(userLang))}
 
 	if len(allowList) == 0 {
 		return append(result, all...)
@@ -506,7 +619,7 @@ func (r *SubAgentRunner) filterTools(allowList []string) []ModelTool {
 }
 
 // executeSubHandoff handles a handoff_to_agent call from within a sub-agent.
-func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallRequest, depth int) ToolResult {
+func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallRequest, depth int, userLang string) ToolResult {
 	var params HandoffToAgentParams
 	if err := json.Unmarshal(call.Input, &params); err != nil {
 		return ToolResult{
@@ -528,12 +641,13 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 	}
 
 	handoff := Handoff{
-		Agent:       AgentID(params.Agent),
-		Goal:        params.Goal,
-		Context:     params.Context,
-		Tools:       params.Tools,
-		Constraints: params.Constraints,
-		Depth:       depth,
+		Agent:        AgentID(params.Agent),
+		Goal:         params.Goal,
+		Context:      params.Context,
+		Tools:        params.Tools,
+		Constraints:  params.Constraints,
+		Depth:        depth,
+		UserLanguage: userLang,
 	}
 
 	result, err := agent.Run(ctx, handoff)
@@ -546,11 +660,15 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 		}
 	}
 
-	digest := formatHandoffResult(result)
+	status := "ok"
+	if result.BlockedBy == "cancelled" {
+		status = "cancelled"
+	}
+	digest := formatHandoffResult(result, zhFromLang(userLang))
 	return ToolResult{
 		ToolCallID: call.ID,
 		ToolName:   HandoffToolName,
-		Status:     "ok",
+		Status:     status,
 		Digest:     digest,
 	}
 }
