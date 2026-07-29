@@ -14,7 +14,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// Replaces the old searcher/planner/tester trio with a single focused agent.
 	reg.Register(&specialistAgent{
 		id:       AgentCritic,
-		spec:     AgentSpec{ID: AgentCritic, Description: "Adversarial verification — try to break the implementation before claiming completion", ToolNames: []string{"read", "grep", "glob", "lsp", "bash"}, ModelName: "flash", MaxIterations: 0},
+		spec:     AgentSpec{ID: AgentCritic, Description: "Adversarial verification — try to break the implementation before claiming completion", ToolNames: []string{"read", "grep", "glob", "lsp", "bash"}, ModelName: "flash", MaxIterations: 15},
 		promptEn: criticPromptEn,
 		promptZh: criticPromptZh,
 		runner:   runner,

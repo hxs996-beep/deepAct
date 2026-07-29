@@ -190,66 +190,6 @@ func isIntermediateText(text string) bool {
 	return false
 }
 
-// completionMarkers lists phrases that genuinely signal a finished task or a
-// summary. It is a strict subset of the old conclusionMarkers list: only
-// completion signals, NOT analytical phrases like "问题出在" or "建议" which
-// also appear in intermediate findings.
-var completionMarkers = []string{
-	// 中文强完成态。弱标记（综上/总结/总的来说/结论是）已移除 - 它们常出现在
-	// 中间发现"综上，需要..."里，会误判为完成。只保留明确的完成态动词。
-	"已完成", "修复完成", "任务完成", "全部完成",
-	"全部通过", "测试通过", "已通过",
-	"已修复", "已解决",
-	"最终结论",
-	// English completion
-	"completed", "complete", "all tests pass", "tests pass",
-	"passed", "done",
-	"in conclusion",
-}
-
-// futureIntentMarkers lists phrases that signal a forward-looking or
-// incomplete state. Text containing any of these is mid-task regardless of
-// what the classifier says.
-var futureIntentMarkers = []string{
-	// 中文未来态/未完成态
-	"需要", "接下来", "下一步", "将要", "准备",
-	"尚未", "还没", "待办",
-	// English future intent
-	"need to", "going to", "next step", "i'll", "i will",
-}
-
-// hasFutureIntent reports whether text contains a forward-looking or
-// incomplete-state marker. This is the hard guard against declarative
-// intermediate findings like "综上，需要在 turn.go 加入校验" that slip past
-// hasTrailingNextStepIntent (no leading action verb) and confuse the flash
-// classifier. Independent of the classifier, so it still works when the
-// classifier call fails.
-func hasFutureIntent(text string) bool {
-	lower := strings.ToLower(text)
-	for _, m := range futureIntentMarkers {
-		if strings.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasCompletionMarker reports whether text contains an explicit completion or
-// summary marker. Used by StalledNarrationHook to decide whether to trust a
-// classifier "conclusion" verdict: a verdict without any completion marker is
-// treated as unconfirmed and blocked one more round conservatively, avoiding
-// the flash-model classifier's false positives on declarative partial answers
-// ("问题出在 X，建议 Y") that read as conclusions.
-func hasCompletionMarker(text string) bool {
-	lower := strings.ToLower(text)
-	for _, m := range completionMarkers {
-		if strings.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
-}
-
 // ConclusionCheck bundles the information the classifier needs to decide
 // whether the model's text-only response is a final conclusion.
 type ConclusionCheck struct {

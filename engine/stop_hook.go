@@ -16,6 +16,7 @@ type StopHookContext struct {
 	IsChinese          bool   // language preference for nudge message
 	Goal               string // current Run's user goal (e.state.Goal) for LLM judgment
 	ToolCallSummary    string // brief summary of tools called this Run() (e.g. "grep×3, read×2")
+	AnalysisMode       bool   // true when user intent is analysis-only; text output IS the report
 }
 
 // StopHookResult is what a stop hook returns.
@@ -83,30 +84,19 @@ func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) St
 	if sc.RunToolCallCount == 0 {
 		return StopHookResult{}
 	}
+	// Analysis mode: text-only output after tool calls is the analysis report.
+	// Allow exit without content inspection - the intent was explicitly
+	// classified as analysis-only by detectUserIntent. No keyword matching,
+	// no classifier call: the report IS the expected terminal output.
+	if sc.AnalysisMode {
+		return StopHookResult{}
+	}
 	maxRetries := h.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 2
 	}
 	if sc.StopHookRetryCount >= maxRetries {
 		return StopHookResult{Exhausted: true}
-	}
-	// Heuristic pre-check: if the text ends with a clear next-step intention
-	// (e.g., "让我精读这些关键区域。"), block without calling the LLM
-	// classifier. This catches obvious intermediate narration that the
-	// flash-model classifier might miss (false positive on partial answers
-	// that look like they address the goal).
-	// Hard guard: future-intent markers (需要/接下来/将/准备...) hard-classify
-	// text as intermediate, BEFORE the classifier is called. Catches declarative
-	// intermediate findings ("综上，需要在 turn.go 加入校验") that slip past
-	// hasTrailingNextStepIntent (no leading action verb) and would otherwise
-	// hit the classifier - which may false-positive or fail outright.
-	if hasFutureIntent(sc.LastContent) {
-		turnLog.Printf("stop hook: future-intent marker detected, blocking without classifier")
-		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "future_intent"}
-	}
-	if hasTrailingNextStepIntent(sc.LastContent) {
-		turnLog.Printf("stop hook heuristic: next-step intent detected, blocking without classifier")
-		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "heuristic_next_step"}
 	}
 	// Defensive: a StalledNarrationHook registered without a Classifier
 	// (nil ConclusionJudge) must not crash the loop. Skip the check and let
@@ -120,37 +110,18 @@ func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) St
 		Text:            sc.LastContent,
 		ToolCallSummary: sc.ToolCallSummary,
 	})
-	turnLog.Printf("stop hook classifier: conclusion=%v err=%v retry=%d marker=%v content=%.60s",
-		isConclusion, err, sc.StopHookRetryCount, hasCompletionMarker(sc.LastContent), sc.LastContent)
+	turnLog.Printf("stop hook classifier: conclusion=%v err=%v retry=%d content=%.60s",
+		isConclusion, err, sc.StopHookRetryCount, sc.LastContent)
 	if err != nil {
-		turnLog.Printf("conclusion classifier error: %v (falling back to completion-marker check)", err)
-		// Classifier unavailable: fall back to the deterministic completion-marker
-		// check rather than always blocking. A text with a strong completion
-		// marker is allowed to exit; otherwise block conservatively.
-		if hasCompletionMarker(sc.LastContent) {
-			turnLog.Printf("stop hook: allow exit (classifier error + completion marker)")
-			return StopHookResult{}
-		}
-		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "classifier_error"}
+		// Classifier unavailable: allow exit rather than blocking. Blocking on
+		// classifier failure forces the agent to continue when it should stop,
+		// causing more harm (e.g. implementing without user approval) than a
+		// potentially premature exit (user can simply say "continue").
+		turnLog.Printf("conclusion classifier error: %v (allowing exit)", err)
+		return StopHookResult{}
 	}
 	if isConclusion {
-		// Conservative guard against flash-classifier false positives on
-		// declarative intermediate findings ("问题出在 X，建议 Y") that read
-		// as partial answers. Trust the verdict only when the text carries an
-		// explicit completion/summary marker, OR when we have already nudged
-		// once this stall (retry > 0) - giving the model a second chance to
-		// either restate clearly or resume acting. Otherwise block one more
-		// round so a partial answer is not mistaken for completion.
-		if hasCompletionMarker(sc.LastContent) {
-			turnLog.Printf("stop hook: allow exit (classifier=true + completion marker)")
-			return StopHookResult{}
-		}
-		if sc.StopHookRetryCount > 0 {
-			turnLog.Printf("stop hook: allow exit (classifier=true + retry>0 second chance)")
-			return StopHookResult{}
-		}
-		turnLog.Printf("stop hook: classifier verdict unconfirmed (no completion marker), blocking conservatively")
-		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "classifier_unconfirmed"}
+		return StopHookResult{}
 	}
 	return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "stalled_narration"}
 }

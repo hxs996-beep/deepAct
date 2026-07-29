@@ -107,6 +107,12 @@ type Engine struct {
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
+	// teamVerdictPending is set when the user's roundtable verdict is processed.
+	// On the next Run(), it causes PlanConfirmed + AnalysisReportConfirmed to be
+	// set, skipping the analysis-report gate and edit-plan guard - the user
+	// already approved the plan through the debate process.
+	teamVerdictPending bool
+
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
 	runUsageAccum    ModelUsage
@@ -681,6 +687,18 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		loopLog.Printf("intent: continue, cleared AnalysisMode, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
 	}
 
+	// Team verdict: the user already approved a plan through the debate process.
+	// Override intent detection to skip all confirmation gates (analysis-report
+	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
+	// reset by IntentNewTopic/IntentAnalyze.
+	if e.teamVerdictPending {
+		e.state.PlanConfirmed = true
+		e.state.AnalysisReportConfirmed = true
+		e.state.AnalysisMode = false
+		e.teamVerdictPending = false
+		loopLog.Printf("team verdict: PlanConfirmed=true, skipping confirmation gates")
+	}
+
 	// Scope is implicitly confirmed when user sends any message
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
@@ -701,6 +719,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	var lastOp string // "toolName:path" of the previous turn
 	consecutiveSameOp := 0
+	var completionSummary string
 	for {
 		select {
 		case <-ctx.Done():
@@ -755,6 +774,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}, nil
 		}
 		if turnResult.Done {
+			completionSummary = turnResult.CompletionSummary
 			break
 		}
 
@@ -839,7 +859,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Record efficiency eval at end of Run()
 	e.recordRunEval(zh)
 
-	summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
+	summary := completionSummary
+	if summary == "" {
+		summary = buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
+	}
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,

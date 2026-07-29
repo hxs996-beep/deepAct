@@ -237,6 +237,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			IsChinese:          e.isChinese,
 			Goal:               e.state.Goal,
 			ToolCallSummary:    buildToolCallSummary(e.history, e.runStartHistoryLen),
+			AnalysisMode:       e.state.AnalysisMode,
 		})
 		if hookResult.Block {
 			e.history = append(e.history, Message{
@@ -291,6 +292,31 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
+	}
+
+	// Intercept task_complete: explicit completion signal from the LLM.
+	// When the model calls this tool, the turn ends immediately with the
+	// provided summary. This is the primary completion mechanism - no stop
+	// hooks, no guards, no keyword matching. The LLM explicitly signals "done".
+	for _, call := range calls {
+		if call.Name == TaskCompleteToolName {
+			var params TaskCompleteParams
+			_ = json.Unmarshal(call.Input, &params)
+			e.history = append(e.history, assistant)
+			for _, c := range calls {
+				content := "Skipped: task_complete was called."
+				if c.ID == call.ID {
+					content = "Task completed."
+				}
+				e.history = append(e.history, Message{
+					Role:       "tool",
+					ToolCallID: c.ID,
+					Content:    content,
+					Timestamp:  time.Now(),
+				})
+			}
+			return TurnResult{Done: true, CompletionSummary: params.Summary, FinishReason: finish}, nil
+		}
 	}
 
 	// 用可见回复作为方案原因展示，不混入内部思考。

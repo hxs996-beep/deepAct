@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,7 +169,66 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 		state.Roundtable.Phase = RoundtableAwaitingVerdict
 	}
 
-	return h.buildVerdictPrompt(goal, members, zh), nil
+	synthesis := h.synthesizeDebate(ctx, goal, members, zh)
+	return h.buildVerdictPrompt(goal, members, zh, synthesis), nil
+}
+
+// synthesizeDebate runs a final LLM call to produce a concise structured summary
+// of the entire debate. Returns empty string on failure (caller falls back to
+// verbose member viewpoints).
+func (h *RoundtableHall) synthesizeDebate(ctx context.Context, goal string, members []RoundtableMember, zh bool) string {
+	rounds := h.engine.state.Roundtable.DebateRounds
+	if len(rounds) < 4 {
+		return ""
+	}
+
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "synthesis",
+			Name:   "synthesis",
+			Detail: pickPrompt(zh, "Synthesizing debate...", "正在合成辩论摘要..."),
+		})
+	}
+
+	record := formatDebateRecord(rounds, members, zh)
+	taskGoal := fmt.Sprintf(pickPrompt(zh,
+		"## Task\nYou are the debate arena judge's assistant. Below is the complete debate record. Produce a concise summary to help the user decide quickly.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\nFollow this format strictly:\n\n**Top Recommendation**: <winning member name> (avg score X, Y votes)\n<1-2 sentences explaining why>\n\n**One-liner per proposal**:\n- <avatar> <member name>: <core approach>. <main concern raised>\n(one line per proposal, ordered by score descending)\n\n**Strongest Challenge**: <challenger> -> <challenged> (confidence X)\n<challenge summary, 1-2 sentences>\n\n**Best Rebuttal**: <rebuttal author>\n<rebuttal summary, 1-2 sentences>\n\n**Key Disagreements**: <2-3 sentences summarizing core disagreements>",
+		"## 任务\n你是辩论场裁判助理。以下是完整的辩论记录。请产出一份精简摘要，帮助用户快速决策。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n请严格按以下格式输出：\n\n**综合推荐**: <获胜方案角色名>（平均分 X，获 Y 票）\n<1-2句话说明推荐理由>\n\n**各方案一句话**:\n- <avatar> <角色名>: <方案核心思路>。<主要被质疑的问题>\n（每个方案一行，按评分从高到低排列）\n\n**最强挑战**: <挑战者> -> <被挑战者>（置信度 X）\n<挑战内容摘要，1-2句>\n\n**最佳反驳**: <反驳者>\n<反驳要点，1-2句>\n\n**关键分歧**: <2-3句话总结辩论中的核心分歧点>",
+	), goal, record)
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          taskGoal,
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 3,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		if err != nil || result == nil {
+			return ""
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary
+	}
+
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
 }
 
 // runDebateRound executes one round of the debate: all members run in parallel,
@@ -351,8 +411,8 @@ func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhas
 
 	case DebateFinal:
 		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
-			"## Task\nReview the complete debate record. State your final position, and score every proposal (including your own) on a 0-100 scale.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\n1. Your final position summary\n2. Score each proposal:\n   SCORE: <member_id> = <0-100>\n   REASON: <one-line reason>\nEnd with: VERDICT: <your preferred proposal member_id>",
-			"## 任务\n审阅完整辩论记录。陈述你的最终立场，给每个方案（含自己的）打分（0-100）。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n1. 你的最终立场总结\n2. 给每个方案打分:\n   SCORE: <member_id> = <0-100>\n   REASON: <一句话理由>\n以: VERDICT: <你支持的方案 member_id> 结尾",
+			"## Task\nReview the complete debate record. State your final position, and score every proposal (including your own) on a 0-100 scale.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\n1. Your final position summary\n2. Score each proposal using the member_id shown in the debate record headers (e.g. SCORE: radical = 85):\n   SCORE: <member_id> = <0-100>\n   REASON: <one-line reason>\nEnd with: VERDICT: <your preferred proposal member_id>",
+			"## 任务\n审阅完整辩论记录。陈述你的最终立场，给每个方案（含自己的）打分（0-100）。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n1. 你的最终立场总结\n2. 使用辩论记录标题中括号里的 member_id 给每个方案打分（如 SCORE: radical = 85）:\n   SCORE: <member_id> = <0-100>\n   REASON: <一句话理由>\n以: VERDICT: <你支持的方案 member_id> 结尾",
 		), goal, formatDebateRecord(rounds, allMembers, zh)))
 	}
 
@@ -397,7 +457,7 @@ func formatDebateRecord(rounds []DebateRound, members []RoundtableMember, zh boo
 			m := findMember(members, out.MemberID)
 			name := out.MemberID
 			if m != nil {
-				name = fmt.Sprintf("%s %s", m.Avatar, m.displayName(zh))
+				name = fmt.Sprintf("%s %s (id: %s)", m.Avatar, m.displayName(zh), m.ID)
 			}
 			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", name, out.Content))
 		}
@@ -481,9 +541,58 @@ func loadMemberFromFile(path string) (*RoundtableMember, error) {
 	}, nil
 }
 
+// verdictTally represents one member's vote count from the final round.
+type verdictTally struct {
+	memberID string
+	avatar   string
+	name     string
+	votes    int
+}
+
+// parseVerdicts extracts VERDICT: lines from final round outputs and returns
+// a tally sorted by vote count descending.
+func parseVerdicts(outputs []DebateOutput, members []RoundtableMember, zh bool) []verdictTally {
+	votes := make(map[string]int)
+	for _, out := range outputs {
+		for _, line := range strings.Split(out.Content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			lower := strings.ToLower(trimmed)
+			if strings.HasPrefix(lower, "verdict:") {
+				val := strings.TrimSpace(trimmed[len("verdict:"):])
+				if val != "" {
+					votes[val]++
+				}
+				break // only first VERDICT per member
+			}
+		}
+	}
+
+	if len(votes) == 0 {
+		return nil
+	}
+
+	var result []verdictTally
+	for id, count := range votes {
+		vt := verdictTally{memberID: id, votes: count}
+		if m := findMember(members, id); m != nil {
+			vt.avatar = m.Avatar
+			vt.name = m.displayName(zh)
+		} else {
+			vt.name = id
+		}
+		result = append(result, vt)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].votes > result[j].votes
+	})
+	return result
+}
+
 // buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
-// Structure: score overview (总) -> member viewpoints (分) -> high-confidence challenges (conditional) -> verdict instructions.
-func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool) *EngineResponse {
+// When synthesis is non-empty, shows a compact LLM-generated summary (总分 structure:
+// score overview + vote tally as 总, synthesis as 分).
+// When synthesis is empty (LLM call failed), falls back to verbose member viewpoints.
+func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool, synthesis string) *EngineResponse {
 	var sb strings.Builder
 
 	// Header
@@ -499,7 +608,7 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 	state := h.engine.state
 	rounds := state.Roundtable.DebateRounds
 
-	// ── 总: Score overview table ──
+	// ── 总: Score overview table (sorted, top highlighted) + vote tally ──
 	if len(rounds) >= 4 {
 		table := buildScoreTable(rounds[3].Outputs, members, zh)
 		if table != "" {
@@ -507,56 +616,75 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 			sb.WriteString(table)
 			sb.WriteString("\n")
 		}
-	}
 
-	// ── 分: Each member's viewpoint ──
-	if len(rounds) > 0 {
-		sb.WriteString(pickPrompt(zh, "### 📋 Member Viewpoints\n\n", "### 📋 各角色观点\n\n"))
-
-		for _, out := range rounds[0].Outputs {
-			m := findMember(members, out.MemberID)
-			avatar := ""
-			name := out.MemberID
-			stance := ""
-			if m != nil {
-				avatar = m.Avatar
-				name = m.displayName(zh)
-				stance = m.displayStance(zh)
+		tally := parseVerdicts(rounds[3].Outputs, members, zh)
+		if len(tally) > 0 {
+			sb.WriteString(pickPrompt(zh, "### 🗳️ Vote Tally\n\n", "### 🗳️ 投票统计\n\n"))
+			var parts []string
+			for _, v := range tally {
+				parts = append(parts, fmt.Sprintf("%s %s %d%s",
+					v.avatar, v.name, v.votes,
+					pickPrompt(zh, " votes", "票")))
 			}
-
-			sb.WriteString(fmt.Sprintf("#### %s %s\n", avatar, name))
-			if stance != "" {
-				sb.WriteString(fmt.Sprintf("*%s*\n\n", stance))
-			}
-
-			// Prefer final position (round 3); fall back to original proposal (round 0)
-			viewpoint := ""
-			if len(rounds) >= 4 {
-				finalOut := getMemberOutput(out.MemberID, rounds[3].Outputs)
-				if finalOut != "" {
-					viewpoint = extractFinalPosition(finalOut)
-				}
-			}
-			if viewpoint == "" {
-				viewpoint = out.Content
-			}
-			sb.WriteString(viewpoint)
+			sb.WriteString(strings.Join(parts, " | "))
 			sb.WriteString("\n\n")
 		}
 	}
 
-	// ── Conditional: High-confidence challenges ──
-	challenges := extractHighConfidenceChallenges(rounds, members, zh)
-	if len(challenges) > 0 {
-		sb.WriteString(pickPrompt(zh, "### ⚡ High-Confidence Challenges\n\n", "### ⚡ 高置信度挑战\n\n"))
-		for _, c := range challenges {
-			sb.WriteString(fmt.Sprintf("> **%s %s** %s\n\n%s\n\n",
-				c.challengerAvatar, c.challengerName,
-				pickPrompt(zh,
-					fmt.Sprintf("(confidence %.0f%%)", c.confidence*100),
-					fmt.Sprintf("(置信度 %.0f%%)", c.confidence*100),
-				),
-				c.content))
+	if synthesis != "" {
+		// ── 分: LLM synthesis summary ──
+		sb.WriteString(pickPrompt(zh, "### 📝 Debate Summary\n\n", "### 📝 辩论摘要\n\n"))
+		sb.WriteString(synthesis)
+		sb.WriteString("\n\n")
+	} else {
+		// ── Fallback: verbose member viewpoints + high-confidence challenges ──
+		if len(rounds) > 0 {
+			sb.WriteString(pickPrompt(zh, "### 📋 Member Viewpoints\n\n", "### 📋 各角色观点\n\n"))
+
+			for _, out := range rounds[0].Outputs {
+				m := findMember(members, out.MemberID)
+				avatar := ""
+				name := out.MemberID
+				stance := ""
+				if m != nil {
+					avatar = m.Avatar
+					name = m.displayName(zh)
+					stance = m.displayStance(zh)
+				}
+
+				sb.WriteString(fmt.Sprintf("#### %s %s\n", avatar, name))
+				if stance != "" {
+					sb.WriteString(fmt.Sprintf("*%s*\n\n", stance))
+				}
+
+				// Prefer final position (round 3); fall back to original proposal (round 0)
+				viewpoint := ""
+				if len(rounds) >= 4 {
+					finalOut := getMemberOutput(out.MemberID, rounds[3].Outputs)
+					if finalOut != "" {
+						viewpoint = extractFinalPosition(finalOut)
+					}
+				}
+				if viewpoint == "" {
+					viewpoint = out.Content
+				}
+				sb.WriteString(viewpoint)
+				sb.WriteString("\n\n")
+			}
+		}
+
+		challenges := extractHighConfidenceChallenges(rounds, members, zh)
+		if len(challenges) > 0 {
+			sb.WriteString(pickPrompt(zh, "### ⚡ High-Confidence Challenges\n\n", "### ⚡ 高置信度挑战\n\n"))
+			for _, c := range challenges {
+				sb.WriteString(fmt.Sprintf("> **%s %s** %s\n\n%s\n\n",
+					c.challengerAvatar, c.challengerName,
+					pickPrompt(zh,
+						fmt.Sprintf("(confidence %.0f%%)", c.confidence*100),
+						fmt.Sprintf("(置信度 %.0f%%)", c.confidence*100),
+					),
+					c.content))
+			}
 		}
 	}
 
@@ -571,7 +699,8 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 }
 
 // buildScoreTable parses SCORE lines from final round outputs and renders a
-// markdown table: rows = proposals, columns = scorers, with an average column.
+// markdown table: rows = proposals (sorted by average descending), columns =
+// scorers, with an average column. The top-scoring row is marked with 🏆.
 func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool) string {
 	type scoreKey struct{ scorer, scored string }
 	scores := make(map[scoreKey]float64)
@@ -602,6 +731,35 @@ func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool
 		return ""
 	}
 
+	// Compute averages and sort by average descending.
+	type memberScore struct {
+		member RoundtableMember
+		sum    float64
+		count  int
+	}
+	var rankings []memberScore
+	for _, scored := range members {
+		var sum float64
+		var count int
+		for _, scorer := range members {
+			if s, ok := scores[scoreKey{scorer.ID, scored.ID}]; ok {
+				sum += s
+				count++
+			}
+		}
+		rankings = append(rankings, memberScore{member: scored, sum: sum, count: count})
+	}
+	sort.SliceStable(rankings, func(i, j int) bool {
+		ai, aj := 0.0, 0.0
+		if rankings[i].count > 0 {
+			ai = rankings[i].sum / float64(rankings[i].count)
+		}
+		if rankings[j].count > 0 {
+			aj = rankings[j].sum / float64(rankings[j].count)
+		}
+		return ai > aj
+	})
+
 	var sb strings.Builder
 
 	// Header row
@@ -620,22 +778,22 @@ func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool
 	}
 	sb.WriteString("---|\n")
 
-	// Data rows: one per proposal (scored member)
-	for _, scored := range members {
-		sb.WriteString(fmt.Sprintf("| %s%s |", scored.Avatar, scored.displayName(zh)))
-		var sum float64
-		var count int
+	// Data rows: sorted by average descending; top row gets 🏆.
+	for idx, rs := range rankings {
+		label := fmt.Sprintf("%s%s", rs.member.Avatar, rs.member.displayName(zh))
+		if idx == 0 && rs.count > 0 {
+			label = "🏆 " + label
+		}
+		sb.WriteString(fmt.Sprintf("| %s |", label))
 		for _, scorer := range members {
-			if s, ok := scores[scoreKey{scorer.ID, scored.ID}]; ok {
+			if s, ok := scores[scoreKey{scorer.ID, rs.member.ID}]; ok {
 				sb.WriteString(fmt.Sprintf(" %.0f |", s))
-				sum += s
-				count++
 			} else {
 				sb.WriteString(" - |")
 			}
 		}
-		if count > 0 {
-			sb.WriteString(fmt.Sprintf(" %.1f |", sum/float64(count)))
+		if rs.count > 0 {
+			sb.WriteString(fmt.Sprintf(" %.1f |", rs.sum/float64(rs.count)))
 		} else {
 			sb.WriteString(" - |")
 		}
@@ -810,10 +968,33 @@ func (h *RoundtableHall) handleVerdict(userMsg, lower string, zh bool) *EngineRe
 		}
 	}
 
-	// User picks a proposal or provides their own
-	pinned := fmt.Sprintf("[TEAM PLAN: %s]\n\n%s", state.Roundtable.Goal, userMsg)
+	// User picks a proposal or provides their own.
+	// Include the full debate record so the execution agent sees the actual
+	// proposals, challenges, and final positions - not just the verdict label.
+	var record string
+	if len(state.Roundtable.DebateRounds) > 0 {
+		record = formatDebateRecord(state.Roundtable.DebateRounds, state.Roundtable.Members, zh)
+	}
+	pinned := fmt.Sprintf("[TEAM PLAN: %s]\n\n%s\n\n%s\n%s",
+		state.Roundtable.Goal,
+		userMsg,
+		pickPrompt(zh,
+			"## Debate Record (execute the chosen proposal - do NOT re-explore from scratch)",
+			"## 辩论记录（请按选定方案执行，无需从零探索）"),
+		record)
 	h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
 	state.Roundtable.Phase = RoundtableDone
+
+	// Mark that the next Run() should skip confirmation gates - the user
+	// already approved the plan through the debate process.
+	h.engine.teamVerdictPending = true
+
+	// Persist the verdict as a Decision so it survives in Block B across
+	// all execution turns, not just the first turn's pinned message.
+	state.Decisions = append(state.Decisions, Decision{
+		ID:   "team-verdict",
+		Text: userMsg,
+	})
 
 	return &EngineResponse{
 		Summary: pickPrompt(zh,

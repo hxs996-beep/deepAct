@@ -205,6 +205,41 @@ func TestDebateArena_VerdictPick(t *testing.T) {
 	}
 }
 
+func TestDebateArena_VerdictPinnedIncludesDebateRecord(t *testing.T) {
+	e := newTestEngine(t)
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "测试裁决",
+		Phase:   RoundtableAwaitingVerdict,
+		Members: DefaultDebateMembers[:2],
+		DebateRounds: []DebateRound{
+			{
+				Phase: DebateProposal,
+				Outputs: []DebateOutput{
+					{MemberID: "radical", Content: "采用微服务架构拆分模块"},
+					{MemberID: "defender", Content: "保持单体架构渐进重构"},
+				},
+			},
+		},
+	}
+
+	_, err := e.roundtableHall.Advance(context.Background(), "支持创新派的方案")
+	if err != nil {
+		t.Fatalf("Advance() unexpected error: %v", err)
+	}
+
+	if len(e.pendingPinnedMessages) == 0 {
+		t.Fatal("expected pendingPinnedMessages to be non-empty after verdict")
+	}
+
+	pinned := e.pendingPinnedMessages[0]
+	if !strings.Contains(pinned, "采用微服务架构拆分模块") {
+		t.Errorf("pinned message should include radical's proposal content, got:\n%s", pinned)
+	}
+	if !strings.Contains(pinned, "保持单体架构渐进重构") {
+		t.Errorf("pinned message should include defender's proposal content, got:\n%s", pinned)
+	}
+}
+
 func TestDebateArena_VerdictDebateAgain(t *testing.T) {
 	e := newTestEngine(t)
 	e.state.Roundtable = &RoundtableState{
@@ -293,7 +328,7 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 		},
 	}
 
-	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers[:2], true)
+	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers[:2], true, "")
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -310,9 +345,21 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 	if !strings.Contains(resp.Summary, "平均") {
 		t.Errorf("verdict prompt should contain average column in score table")
 	}
-	// High-confidence challenge (0.9) should be shown
+	// Score table should be sorted by average (radical avg 82.5 > defender avg 77.5)
+	// and top row should have 🏆
+	if !strings.Contains(resp.Summary, "🏆") {
+		t.Errorf("verdict prompt should highlight top-scoring proposal with 🏆")
+	}
+	// Vote tally should be shown
+	if !strings.Contains(resp.Summary, "投票统计") {
+		t.Errorf("verdict prompt should contain vote tally section")
+	}
+	if !strings.Contains(resp.Summary, "1票") {
+		t.Errorf("verdict prompt should show vote counts")
+	}
+	// High-confidence challenge (0.9) should be shown in fallback mode
 	if !strings.Contains(resp.Summary, "高置信度挑战") {
-		t.Errorf("verdict prompt should contain high-confidence challenges section")
+		t.Errorf("verdict prompt should contain high-confidence challenges section in fallback")
 	}
 	if !strings.Contains(resp.Summary, "置信度 90%") {
 		t.Errorf("verdict prompt should show confidence percentage for high-confidence challenge")
@@ -394,6 +441,126 @@ func TestResolveMembers_Priority(t *testing.T) {
 	result = resolveMembers([]string{"nonexistent"}, DefaultDebateMembers)
 	if len(result) != 0 {
 		t.Errorf("expected 0 members for unknown ID, got %d", len(result))
+	}
+}
+
+func TestFormatDebateRecord_ContainsMemberID(t *testing.T) {
+	rounds := []DebateRound{
+		{
+			Phase: DebateProposal,
+			Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "方案A"},
+				{MemberID: "defender", Content: "方案B"},
+			},
+		},
+	}
+	rec := formatDebateRecord(rounds, DefaultDebateMembers[:2], true)
+	if !strings.Contains(rec, "(id: radical)") {
+		t.Errorf("debate record should expose member id 'radical', got:\n%s", rec)
+	}
+	if !strings.Contains(rec, "(id: defender)") {
+		t.Errorf("debate record should expose member id 'defender', got:\n%s", rec)
+	}
+}
+
+func TestBuildDebateGoal_FinalRoundInstructsMemberID(t *testing.T) {
+	rounds := []DebateRound{
+		{
+			Phase: DebateProposal,
+			Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "方案A"},
+				{MemberID: "defender", Content: "方案B"},
+			},
+		},
+	}
+	prompt := buildDebateGoal("测试需求", DefaultDebateMembers[0], DebateFinal, DefaultDebateMembers[:2], rounds, true)
+	if !strings.Contains(prompt, "member_id") {
+		t.Errorf("final round prompt should instruct using member_id, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "SCORE: radical = 85") {
+		t.Errorf("final round prompt should include a SCORE example with member_id, got:\n%s", prompt)
+	}
+}
+
+func TestParseVerdicts(t *testing.T) {
+	outputs := []DebateOutput{
+		{MemberID: "radical", Content: "立场\nSCORE: radical = 90\nVERDICT: radical"},
+		{MemberID: "defender", Content: "立场\nSCORE: radical = 75\nVERDICT: defender"},
+		{MemberID: "pragmatic", Content: "立场\nSCORE: radical = 80\nVERDICT: radical"},
+	}
+	tally := parseVerdicts(outputs, DefaultDebateMembers[:3], true)
+	if len(tally) != 2 {
+		t.Fatalf("expected 2 tally entries, got %d", len(tally))
+	}
+	// radical should have 2 votes (sorted first), defender 1 vote
+	if tally[0].memberID != "radical" || tally[0].votes != 2 {
+		t.Errorf("first tally = %s %d votes, want radical 2", tally[0].memberID, tally[0].votes)
+	}
+	if tally[1].memberID != "defender" || tally[1].votes != 1 {
+		t.Errorf("second tally = %s %d votes, want defender 1", tally[1].memberID, tally[1].votes)
+	}
+}
+
+func TestParseVerdicts_NoVerdicts(t *testing.T) {
+	outputs := []DebateOutput{
+		{MemberID: "radical", Content: "no verdict here"},
+	}
+	tally := parseVerdicts(outputs, DefaultDebateMembers[:1], true)
+	if tally != nil {
+		t.Errorf("expected nil tally when no VERDICT lines, got %v", tally)
+	}
+}
+
+func TestBuildVerdictPrompt_WithSynthesis(t *testing.T) {
+	e := newTestEngine(t)
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "测试合成路径",
+		Phase:   RoundtableAwaitingVerdict,
+		Members: DefaultDebateMembers[:2],
+		DebateRounds: []DebateRound{
+			{Phase: DebateProposal, Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "创新派方案"},
+				{MemberID: "defender", Content: "防守派方案"},
+			}},
+			{Phase: DebateChallenge, Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "挑战\nCONFIDENCE: 0.9", Targets: []string{"defender"}},
+			}},
+			{Phase: DebateRebuttal, Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "反驳"},
+				{MemberID: "defender", Content: "反驳"},
+			}},
+			{Phase: DebateFinal, Outputs: []DebateOutput{
+				{MemberID: "radical", Content: "最终立场\nSCORE: radical = 90\nSCORE: defender = 70\nVERDICT: radical"},
+				{MemberID: "defender", Content: "最终立场\nSCORE: radical = 75\nSCORE: defender = 85\nVERDICT: defender"},
+			}},
+		},
+	}
+
+	synthesis := "**综合推荐**: 🔮 创新派（平均分 82.5，获 1 票）\n方案优雅但引入新依赖。\n\n**最强挑战**: 🛡️ 防守派 -> 🔮 创新派（置信度 0.9）\n回滚风险高。"
+	resp := e.roundtableHall.buildVerdictPrompt("测试合成路径", DefaultDebateMembers[:2], true, synthesis)
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	// Synthesis content should be shown
+	if !strings.Contains(resp.Summary, "辩论摘要") {
+		t.Errorf("verdict prompt should contain synthesis section")
+	}
+	if !strings.Contains(resp.Summary, "综合推荐") {
+		t.Errorf("verdict prompt should contain synthesis content")
+	}
+	// Score table + vote tally should still be shown (总)
+	if !strings.Contains(resp.Summary, "评分总览") {
+		t.Errorf("verdict prompt should contain score overview even with synthesis")
+	}
+	if !strings.Contains(resp.Summary, "投票统计") {
+		t.Errorf("verdict prompt should contain vote tally even with synthesis")
+	}
+	// Fallback sections should NOT be shown
+	if strings.Contains(resp.Summary, "各角色观点") {
+		t.Errorf("verdict prompt should not contain member viewpoints when synthesis is present")
+	}
+	if strings.Contains(resp.Summary, "高置信度挑战") {
+		t.Errorf("verdict prompt should not contain high-confidence challenges when synthesis is present")
 	}
 }
 
