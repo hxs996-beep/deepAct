@@ -4,27 +4,40 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/BurntSushi/toml"
 )
 
-// SkillFile represents the structure for an external skill file.
-// Supports both TOML format (parsed via toml tags) and Markdown format
-// (YAML frontmatter, parsed by ParseMarkdownSkill).
+// SkillFile represents the parsed content of a SKILL.md file.
+// All fields are populated by ParseMarkdownSkill from YAML frontmatter.
 type SkillFile struct {
-	Name                  string      `toml:"name"`
-	Description           string      `toml:"description"`
-	Keywords              []string    `toml:"keywords"`
-	Content               string      `toml:"content"`
-	NextSkills            []string    `toml:"next_skills"`
-	AutoActivateThreshold *int        `toml:"auto_activate_threshold"`
-	Gate                  *GateConfig `toml:"gate"`
+	Name                  string
+	Description           string
+	Keywords              []string
+	Content               string
+	NextSkills            []string
+	AutoActivateThreshold *int
+
+	// Claude Code-compatible fields
+	AllowedTools           []string
+	ArgumentHint           string
+	Arguments              []string
+	WhenToUse              string
+	Model                  string
+	Effort                 string
+	Agent                  string
+	Context                string
+	Hooks                  string
+	Paths                  []string
+	UserInvocable          *bool // nil = default true
+	DisableModelInvocation bool
+	Version                string
+	Shell                  string
+	BaseDir                string
 }
 
-// LoadExternalSkills loads skill definitions from TOML or Markdown files in
-// the given directory. Each .toml or .md file should contain a single skill
-// definition. Returns nil, nil if the directory doesn't exist.
+// LoadExternalSkills loads skill definitions from the given directory.
+// Only the directory format is supported: <name>/SKILL.md (Claude Code layout).
+//
+// Returns nil, nil if the directory doesn't exist.
 func LoadExternalSkills(dir string) ([]*Skill, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -36,56 +49,64 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 
 	var skills []*Skill
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() {
+			continue // only <name>/SKILL.md directory format is supported
+		}
+		// The references/ directory holds reference files namespaced
+		// by skill name (references/<skill-name>/), not skill definitions.
+		if entry.Name() == "references" {
 			continue
 		}
-		fname := strings.ToLower(entry.Name())
-		if !strings.HasSuffix(fname, ".toml") && !strings.HasSuffix(fname, ".md") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
+		skillMD := filepath.Join(dir, entry.Name(), "SKILL.md")
+		data, err := os.ReadFile(skillMD)
 		if err != nil {
-			return nil, fmt.Errorf("read skill file %s: %w", path, err)
+			continue // subdirectory has no SKILL.md, skip
 		}
-		sf, err := parseSkillFile(fname, data)
+		sf, err := ParseMarkdownSkill(data)
 		if err != nil {
-			return nil, fmt.Errorf("parse skill file %s: %w", path, err)
+			continue // skip unparseable skill files
 		}
 		if sf.Name == "" {
-			continue
+			sf.Name = entry.Name() // fallback to directory name
 		}
-		skills = append(skills, &Skill{
-			Name:                  sf.Name,
-			Description:           sf.Description,
-			Keywords:              sf.Keywords,
-			Content:               sf.Content,
-			NextSkills:            sf.NextSkills,
-			AutoActivateThreshold: sf.AutoActivateThreshold,
-			Gate:                  sf.Gate,
-		})
-		// Apply default gate config for well-known skills whose files
-		// don't include a [gate] section (e.g., open-source skills
-		// downloaded from GitHub).
-		if skills[len(skills)-1].Gate == nil {
-			skills[len(skills)-1].Gate = DefaultGateFor(sf.Name)
-		}
+		sf.BaseDir = filepath.Join(dir, entry.Name())
+		skills = append(skills, SkillFromSkillFile(sf))
 	}
 	return skills, nil
 }
 
-// parseSkillFile dispatches parsing based on file extension.
-// .md files are parsed as Markdown with YAML frontmatter; all others
-// are parsed as TOML.
-func parseSkillFile(filename string, data []byte) (SkillFile, error) {
-	if strings.HasSuffix(filename, ".md") {
-		return ParseMarkdownSkill(data)
+// SkillFromSkillFile converts a parsed SkillFile into a Skill, applying
+// default gate config (from gates.go) and default UserInvocable=true.
+func SkillFromSkillFile(sf SkillFile) *Skill {
+	s := &Skill{
+		Name:                   sf.Name,
+		Description:            sf.Description,
+		Keywords:               sf.Keywords,
+		Content:                sf.Content,
+		NextSkills:             sf.NextSkills,
+		AutoActivateThreshold:  sf.AutoActivateThreshold,
+		AllowedTools:           sf.AllowedTools,
+		ArgumentHint:           sf.ArgumentHint,
+		Arguments:              sf.Arguments,
+		WhenToUse:              sf.WhenToUse,
+		Model:                  sf.Model,
+		Effort:                 sf.Effort,
+		Agent:                  sf.Agent,
+		Context:                sf.Context,
+		Hooks:                  sf.Hooks,
+		Paths:                  sf.Paths,
+		DisableModelInvocation: sf.DisableModelInvocation,
+		Version:                sf.Version,
+		Shell:                  sf.Shell,
+		BaseDir:                sf.BaseDir,
 	}
-	var sf SkillFile
-	if err := toml.Unmarshal(data, &sf); err != nil {
-		return SkillFile{}, err
+	if sf.UserInvocable != nil {
+		s.UserInvocable = *sf.UserInvocable
+	} else {
+		s.UserInvocable = true
 	}
-	return sf, nil
+	s.Gate = DefaultGateFor(sf.Name)
+	return s
 }
 
 // LoadExternalSkillsFromPaths loads skills from multiple directories in order.

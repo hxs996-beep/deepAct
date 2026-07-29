@@ -147,6 +147,9 @@ func buildSkillsBlock(all []*skill.Skill) string {
 	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill explicitly. ")
 	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state.\n\n")
 	for _, s := range all {
+		if s.DisableModelInvocation {
+			continue
+		}
 		b.WriteString("- **")
 		b.WriteString(s.Name)
 		b.WriteString("**: ")
@@ -154,6 +157,10 @@ func buildSkillsBlock(all []*skill.Skill) string {
 			b.WriteString(s.Description)
 		} else {
 			b.WriteString("(no description)")
+		}
+		if s.WhenToUse != "" {
+			b.WriteString(" Use when ")
+			b.WriteString(s.WhenToUse)
 		}
 		b.WriteString("\n")
 
@@ -244,13 +251,22 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 
-	// Initialize skill registry from user-installed skills in ~/.deepact/skills/.
+	// Initialize skill registry from multiple skill directories. Deepact's own
+	// ~/.deepact/skills/ takes priority; common agent skill directories
+	// (~/.claude/skills/, .claude/skills/, ~/.agent/skills/) are loaded as
+	// supplemental sources. Later directories override earlier ones on name
+	// conflicts.
 	skillReg := skill.NewRegistry()
 	if home, err := os.UserHomeDir(); err == nil {
-		userSkillsDir := filepath.Join(home, ".deepact", "skills")
-		userSkills, err := skill.LoadExternalSkills(userSkillsDir)
+		skillDirs := []string{
+			filepath.Join(home, ".claude", "skills"),
+			filepath.Join(home, ".agent", "skills"),
+			filepath.Join(workDir, ".claude", "skills"),
+			filepath.Join(home, ".deepact", "skills"),
+		}
+		userSkills, err := skill.LoadExternalSkillsFromPaths(skillDirs...)
 		if err != nil {
-			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load user skills: %w", err)
+			return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load skills: %w", err)
 		}
 		for _, s := range userSkills {
 			skillReg.Register(s)
