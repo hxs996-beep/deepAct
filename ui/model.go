@@ -120,7 +120,9 @@ type Model struct {
 	scrollOffset        int
 	cancelled           bool
 	pricing             engine.PricingConfig
-	needsRepaint        bool // forces full Bubble Tea repaint on next frame
+	needsRepaint           bool // forces full Bubble Tea repaint on next frame
+	runStartMsgIdx         int  // index in m.messages at start of current Run; used to strip snapshotted narration on Summary dedup
+	narrationJustFinalized bool // set when finalizeTurnBlocks snapshots narration; triggers full repaint to clear CJK garbling
 
 	escAt               time.Time // timestamp of last ESC key, for time-windowed Alt+Enter detection
 
@@ -626,6 +628,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Detail: msg.Detail,
 				})
 			}
+		}
+		if m.narrationJustFinalized {
+			m.narrationJustFinalized = false
+			return m, tea.Batch(waitForProgress(m.progressChan), m.repaintCmd())
 		}
 		return m, waitForProgress(m.progressChan)
 	case StatusUpdateMsg:
@@ -1339,6 +1345,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	}
 	m.inputBuf.SetValue("")
 	m.cancelled = false
+	m.runStartMsgIdx = len(m.messages)
 	m.messages = append(m.messages, DisplayMessage{Role: "user", Content: content})
 	m.toolTree = nil
 	m.spinners = nil
@@ -1392,6 +1399,7 @@ func (m *Model) finalizeTurnBlocks() {
 			Content: m.narration,
 		})
 		m.narration = ""
+		m.narrationJustFinalized = true
 	}
 	if len(m.toolTree) > 0 {
 		snapshot := append([]ToolNode(nil), m.toolTree...)
@@ -1407,7 +1415,36 @@ func (m *Model) finalizeTurnBlocks() {
 	}
 }
 
+// stripRunNarration removes Role:"narration" messages added during the current
+// Run (after runStartMsgIdx). Called when Summary is present to prevent
+// duplication: narration snapshotted at tool_start by finalizeTurnBlocks
+// duplicates the Summary that finishStreaming appends.
+func (m *Model) stripRunNarration() {
+	if m.runStartMsgIdx >= len(m.messages) {
+		return
+	}
+	filtered := m.messages[:m.runStartMsgIdx]
+	for i := m.runStartMsgIdx; i < len(m.messages); i++ {
+		if m.messages[i].Role != "narration" {
+			filtered = append(filtered, m.messages[i])
+		}
+	}
+	m.messages = filtered
+}
+
 func (m *Model) finishStreaming(msg EngineResponseMsg) {
+	// When Summary is present (from task_complete), the streaming narration
+	// likely duplicates it. Discard narration before finalizeTurnBlocks so
+	// only the toolTree is snapshotted; the Summary is appended below.
+	if msg.Err == nil && msg.Response != nil && !msg.Response.Blocked && msg.Response.Summary != "" {
+		m.narration = ""
+		m.narrationPending = ""
+		// Also strip narration messages snapshotted at tool_start during this
+		// Run. finalizeTurnBlocks (called at tool_start) snapshots m.narration
+		// into m.messages before finishStreaming can clear it, causing the same
+		// text to appear twice (as "narration" + "assistant" Summary).
+		m.stripRunNarration()
+	}
 	m.finalizeTurnBlocks()
 	m.spinners = nil
 	if msg.Err != nil {
@@ -1703,10 +1740,10 @@ func renderMessage(msg DisplayMessage, width int) []string {
 		// Subtract from width so padded output fits terminal, preventing
 		// auto-wrap that corrupts diff renderer line tracking (garbled text).
 		rendered := renderMarkdown(content, width-3)
-		return strings.Split(NarrationStyle.Render(rendered), "\n")
+		return wrapLines(strings.Split(NarrationStyle.Render(rendered), "\n"), width)
 	default:
 		rendered := renderMarkdown(content, width)
-		return strings.Split(rendered, "\n")
+		return wrapLines(strings.Split(rendered, "\n"), width)
 	}
 }
 
@@ -2010,7 +2047,6 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 	header := SpinnerStyle.Render("▍") + " [~] " + SpinnerStyle.Render("Changes")
 	content = append(content, header)
 	content = append(content, "")
-	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range nodes {
 		status := ""
 		if node.Done {
@@ -2022,9 +2058,7 @@ func (m Model) renderDiffBlock(nodes []ToolNode, width int) []string {
 				if child.DetailFull == "" {
 					continue
 				}
-				hunkSeq++
-				adds, deletes := countHunkAddsDeletes(child.DetailFull)
-				content = append(content, hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes))
+				content = append(content, renderHunkLines(child.DetailFull)...)
 			}
 		}
 	}
@@ -2046,7 +2080,6 @@ func renderToolSummary(toolTree []ToolNode) string {
 	}
 	b.WriteString(fmt.Sprintf("● %d tools executed, %d files modified\n", len(toolTree), modified))
 
-	hunkSeq := 0 // global 1-based hunk number across all files
 	for _, node := range toolTree {
 		icon := node.Icon
 		if icon == "" {
@@ -2057,9 +2090,9 @@ func renderToolSummary(toolTree []ToolNode) string {
 			if node.Name == "edit" || node.Name == "write" {
 				hunkContent := child.DetailFull
 				if hunkContent != "" {
-					hunkSeq++
-					adds, deletes := countHunkAddsDeletes(hunkContent)
-					b.WriteString(hunkSummaryLine(hunkSeq-1, child.Detail, adds, deletes) + "\n")
+					for _, line := range renderHunkLines(hunkContent) {
+						b.WriteString(line + "\n")
+					}
 				}
 			} else {
 				b.WriteString(fmt.Sprintf("    %s\n", child.Detail))

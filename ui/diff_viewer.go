@@ -1,41 +1,32 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-// countHunkAddsDeletes counts added (+) and deleted (-) lines in a hunk body.
-// Lines starting with "+++" / "---" (file headers) are not counted.
-func countHunkAddsDeletes(hunk string) (adds, deletes int) {
-	for _, line := range strings.Split(hunk, "\n") {
-		if len(line) == 0 {
-			continue
-		}
-		switch line[0] {
-		case '+':
-			if !strings.HasPrefix(line, "+++") {
-				adds++
-			}
-		case '-':
-			if !strings.HasPrefix(line, "---") {
-				deletes++
-			}
-		}
-	}
-	return adds, deletes
-}
-
-// hunkSummaryLine renders one collapsed hunk summary line:
-//
-//	[N] @@ -1,3 +1,3 @@    +2  -1
-func hunkSummaryLine(idx int, hunkHeader string, adds, deletes int) string {
-	numStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+// renderHunkLines renders a hunk's diff lines with simple foreground coloring:
+// + lines green, - lines red, context/header dim. No background block styling,
+// so each line truncates cleanly without misalignment (like git diff in a terminal).
+// File headers (--- a/, +++ b/) are already stripped by parseDiffHunks, so any
+// line starting with + or - here is a genuine diff line.
+func renderHunkLines(hunk string) []string {
 	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
 	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("210"))
-	label := numStyle.Render(fmt.Sprintf("  [%d] ", idx+1))
-	changes := addStyle.Render(fmt.Sprintf("+%d", adds)) + " " + delStyle.Render(fmt.Sprintf("-%d", deletes))
-	return label + hunkHeader + "    " + changes
+	var lines []string
+	for _, line := range strings.Split(hunk, "\n") {
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "+"):
+			lines = append(lines, addStyle.Render("  "+line))
+		case strings.HasPrefix(line, "-"):
+			lines = append(lines, delStyle.Render("  "+line))
+		default:
+			lines = append(lines, DimStyle.Render("  "+line))
+		}
+	}
+	return lines
 }

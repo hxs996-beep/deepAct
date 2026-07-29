@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func TestRenderDiffBlock_NoPadToTerminalWidth(t *testing.T) {
@@ -26,49 +27,7 @@ func TestRenderDiffBlock_NoPadToTerminalWidth(t *testing.T) {
 	}
 }
 
-func TestCountHunkAddsDeletes(t *testing.T) {
-	tests := []struct {
-		name    string
-		hunk    string
-		adds    int
-		deletes int
-	}{
-		{
-			name:    "mixed",
-			hunk:    "@@ -1,3 +1,3 @@\n ctx\n-old\n+new\n+extra",
-			adds:    2,
-			deletes: 1,
-		},
-		{
-			name:    "only context",
-			hunk:    "@@ -1,2 +1,2 @@\n a\n b",
-			adds:    0,
-			deletes: 0,
-		},
-		{
-			name:    "empty",
-			hunk:    "",
-			adds:    0,
-			deletes: 0,
-		},
-		{
-			name:    "no hunk header",
-			hunk:    "+a\n-b",
-			adds:    1,
-			deletes: 1,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a, d := countHunkAddsDeletes(tt.hunk)
-			if a != tt.adds || d != tt.deletes {
-				t.Errorf("countHunkAddsDeletes(%q) = +%d -%d, want +%d -%d", tt.hunk, a, d, tt.adds, tt.deletes)
-			}
-		})
-	}
-}
-
-func TestRenderDiffBlock_CollapsesHunks(t *testing.T) {
+func TestRenderDiffBlock_ShowsDiffLines(t *testing.T) {
 	m := Model{width: 80}
 	nodes := []ToolNode{{
 		Name:     "edit",
@@ -84,50 +43,23 @@ func TestRenderDiffBlock_CollapsesHunks(t *testing.T) {
 	for i, l := range got {
 		plain[i] = stripAnsi(l)
 	}
-	found1, found2 := false, false
-	for _, l := range plain {
-		if strings.Contains(l, "@@ -1,3 +1,3 @@") && strings.Contains(l, "+2") && strings.Contains(l, "-1") {
-			found1 = true
+	// Should show actual diff lines, not collapsed summaries.
+	wantLines := []string{"@@ -1,3 +1,3 @@", "-old", "+new", "+extra", "@@ -10,2 +10,2 @@", "-old2", "+new2"}
+	for _, want := range wantLines {
+		found := false
+		for _, l := range plain {
+			if strings.Contains(l, want) {
+				found = true
+				break
+			}
 		}
-		if strings.Contains(l, "@@ -10,2 +10,2 @@") && strings.Contains(l, "+1") && strings.Contains(l, "-1") {
-			found2 = true
+		if !found {
+			t.Errorf("expected diff line containing %q, not found: %v", want, plain)
 		}
-	}
-	if !found1 {
-		t.Errorf("缺少 hunk1 摘要 (+2 -1): %v", plain)
-	}
-	if !found2 {
-		t.Errorf("缺少 hunk2 摘要 (+1 -1): %v", plain)
-	}
-	for i, l := range plain {
-		if strings.Contains(l, "old") || strings.Contains(l, "new") || strings.Contains(l, "extra") {
-			t.Errorf("第 %d 行泄漏了 hunk 内容（应折叠）: %q", i, l)
-		}
-	}
-	// 应有两个 [N] 摘要行
-	summaryCount := 0
-	for _, l := range plain {
-		if strings.Contains(l, "[1]") || strings.Contains(l, "[2]") {
-			summaryCount++
-		}
-	}
-	if summaryCount != 2 {
-		t.Errorf("摘要行数: want 2, got %d (%v)", summaryCount, plain)
 	}
 }
 
-func TestHunkSummaryLine_NoExpandHint(t *testing.T) {
-	line := hunkSummaryLine(0, "@@ -1,3 +1,3 @@", 2, 1)
-	plain := stripAnsi(line)
-	if strings.Contains(plain, "点击展开") {
-		t.Errorf("summary line should not contain 点击展开: %q", plain)
-	}
-	if !strings.Contains(plain, "+2") || !strings.Contains(plain, "-1") {
-		t.Errorf("summary line should contain +2 -1: %q", plain)
-	}
-}
-
-func TestRenderToolSummary_CollapsesHunks(t *testing.T) {
+func TestRenderToolSummary_ShowsDiffLines(t *testing.T) {
 	toolTree := []ToolNode{{
 		Name:     "edit",
 		Done:     true,
@@ -135,11 +67,11 @@ func TestRenderToolSummary_CollapsesHunks(t *testing.T) {
 		Children: []ToolNode{{Name: "hunk", Detail: "@@ -1,3 +1,3 @@", DetailFull: "@@ -1,3 +1,3 @@\n ctx\n-old\n+new\n+extra"}},
 	}}
 	got := renderToolSummary(toolTree)
-	if strings.Contains(got, "old") || strings.Contains(got, "new") || strings.Contains(got, "extra") {
-		t.Errorf("toolsummary 泄漏了 hunk 内容（应折叠）: %q", got)
-	}
-	if !strings.Contains(got, "[1]") || !strings.Contains(got, "+2") || !strings.Contains(got, "-1") {
-		t.Errorf("toolsummary 缺少摘要 [1] +2 -1: %q", got)
+	plain := stripAnsi(got)
+	for _, want := range []string{"@@ -1,3 +1,3 @@", "-old", "+new", "+extra"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("toolsummary should contain %q, got: %q", want, plain)
+		}
 	}
 }
 
@@ -176,5 +108,41 @@ func TestFinishStreaming_SnapshotsToolTree(t *testing.T) {
 	}
 	if len(summary.ToolTree[0].Children) != 1 {
 		t.Errorf("快照 Children 应有 1 个 hunk, got %d", len(summary.ToolTree[0].Children))
+	}
+}
+
+
+func TestRenderHunkLines_PlusPrefixEdgeCase(t *testing.T) {
+	// Lines starting with ++ or -- are legitimate add/delete lines in a hunk body.
+	// File headers (--- a/, +++ b/) are already stripped by parseDiffHunks, so any
+	// line starting with + or - here is a genuine diff line and must be colored
+	// accordingly — not misclassified as context (dim).
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.ANSI256)
+
+	hunk := "@@ -1,2 +1,2 @@\n--j;\n++i;\n"
+	got := renderHunkLines(hunk)
+
+	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("210"))
+
+	expectedAdd := addStyle.Render("  ++i;")
+	expectedDel := delStyle.Render("  --j;")
+
+	foundAdd := false
+	foundDel := false
+	for _, l := range got {
+		if l == expectedAdd {
+			foundAdd = true
+		}
+		if l == expectedDel {
+			foundDel = true
+		}
+	}
+	if !foundAdd {
+		t.Errorf("++i; should be rendered as add (green 114), expected %q in %v", expectedAdd, got)
+	}
+	if !foundDel {
+		t.Errorf("--j; should be rendered as delete (red 210), expected %q in %v", expectedDel, got)
 	}
 }
