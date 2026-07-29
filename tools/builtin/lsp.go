@@ -364,7 +364,7 @@ func formatCallHierarchyCall(item json.RawMessage) string {
 	}
 	b.WriteString("\n")
 	if len(call.FromRanges) > 0 {
-		for _, r := range call.FromRanges[:3] { // show up to 3 call sites
+		for _, r := range call.FromRanges[:min(3, len(call.FromRanges))] { // show up to 3 call sites
 			b.WriteString(fmt.Sprintf("    at line %d\n", r.Start.Line+1))
 		}
 		if len(call.FromRanges) > 3 {
