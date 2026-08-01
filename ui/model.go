@@ -1430,6 +1430,11 @@ func (m *Model) stripRunNarration() {
 		}
 	}
 	m.messages = filtered
+	// Invalidate render cache from runStartMsgIdx onward: removing narration
+	// messages shifts indices, so cached lines no longer align with messages.
+	if m.msgCache != nil && m.runStartMsgIdx < len(m.msgCache.lines) {
+		m.msgCache.lines = m.msgCache.lines[:m.runStartMsgIdx]
+	}
 }
 
 func (m *Model) finishStreaming(msg EngineResponseMsg) {

@@ -569,6 +569,7 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,
 		Stream:          true,
+		StreamOptions:   &streamOptions{IncludeUsage: true},
 	}
 	// When tools are present, request parallel tool calls so the model can emit
 	// multiple tool_use blocks (e.g. several reads) in a single response. Without
@@ -618,9 +619,18 @@ type requestBody struct {
 	MaxTokens          int             `json:"max_tokens,omitempty"`
 	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
 	Stream             bool            `json:"stream"`
+	StreamOptions      *streamOptions  `json:"stream_options,omitempty"`
 	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
 	ResponseFormat     *responseFormat `json:"response_format,omitempty"`
 	ExtraBody          *extraBody      `json:"extra_body,omitempty"`
+}
+
+// streamOptions requests usage statistics in streaming responses.
+// DeepSeek's official API returns usage automatically, but most third-party
+// OpenAI-compatible APIs (OpenRouter, proxies, etc.) require this flag to
+// include the "usage" field in the final SSE chunk before [DONE].
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type responseFormat struct {
