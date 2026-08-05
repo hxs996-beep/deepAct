@@ -247,6 +247,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	e.history = append(e.history, Message{Role: "user", Content: userMsg, Timestamp: time.Now()})
 
+	// Drain steer queue: inject messages retained from a previous Blocked run.
+	e.drainSteerQueue()
+
 	// Reset read-loop tracking (LoopGuard + ReadLoopState) on each Run. Read
 	// counts must NOT accumulate across Runs: a user retrying or revisiting a
 	// task legitimately re-reads the same core files, and cross-Run accumulation
@@ -777,6 +780,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		if turnResult.Done {
 			completionSummary = turnResult.CompletionSummary
+			// If steer messages were queued while the agent was running,
+			// inject them and continue the loop instead of returning.
+			if e.drainSteerQueue() {
+				completionSummary = ""
+				continue
+			}
 			break
 		}
 
@@ -837,6 +846,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				lastOp = turnResult.LastOp
 			}
 		}
+
+		// Drain steer queue before next turn: injects user messages queued
+		// during the previous turn's tool execution.
+		e.drainSteerQueue()
+
 		turns++
 	}
 	// Advance session turn counter past the last executed turn so the next
