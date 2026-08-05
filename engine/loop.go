@@ -55,6 +55,8 @@ type Engine struct {
 	config       EngineConfig
 	state        *TaskState
 	history      []Message
+	steerMu      sync.Mutex
+	steerQueue   []string
 	guards       *GuardSystem
 	readLoop     *ReadLoopState
 	errorLoop    *ErrorLoopState
@@ -1551,9 +1553,58 @@ func (e *Engine) clearSessionState() {
 	e.state.AnalysisMode = false
 	e.state.AnalysisReportConfirmed = false
 
+	e.steerMu.Lock()
+	e.steerQueue = nil
+	e.steerMu.Unlock()
+
 	e.deactivateSkill()
 	e.activatedSkills = make(map[string]bool)
 	e.lastActivatedSkill = ""
+}
+
+// Steer queues a user message to be injected into the conversation at the
+// next turn boundary (after current tool execution completes, before the
+// next LLM call). Called by the UI when the user submits input during an
+// active run.
+func (e *Engine) Steer(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	e.steerQueue = append(e.steerQueue, msg)
+	if e.config.OnProgress != nil {
+		e.config.OnProgress(ProgressEvent{Type: "steer_queued", Detail: msg})
+	}
+}
+
+// drainSteerQueue appends all queued steer messages to history as user
+// messages. Returns true if any messages were injected.
+func (e *Engine) drainSteerQueue() bool {
+	e.steerMu.Lock()
+	pending := e.steerQueue
+	e.steerQueue = nil
+	e.steerMu.Unlock()
+
+	if len(pending) == 0 {
+		return false
+	}
+	for _, msg := range pending {
+		e.history = append(e.history, Message{
+			Role:      "user",
+			Content:   msg,
+			Timestamp: time.Now(),
+		})
+	}
+	if e.config.OnProgress != nil {
+		e.config.OnProgress(ProgressEvent{
+			Type:   "steer_injected",
+			Detail: strings.Join(pending, "\n"),
+		})
+	}
+	loopLog.Printf("steer: injected %d message(s)", len(pending))
+	return true
 }
 
 // buildReadLoopNudge builds the nudge message for the 3rd repeated read of the

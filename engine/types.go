@@ -6,12 +6,12 @@ import (
 )
 
 // UserIntent classifies the user's intention for the current message,
-// used to control PlanConfirmed reset and analysis-only constraints.
+// used to control analysis-only constraints.
 type UserIntent int
 
 const (
-	IntentContinue UserIntent = iota // continuing previous task — keep PlanConfirmed
-	IntentNewTopic                   // new topic, different from previous goal — reset PlanConfirmed
+	IntentContinue UserIntent = iota // continuing previous task — 
+	IntentNewTopic                   // new topic, different from previous goal — 
 	IntentAnalyze                    // analysis/explanation only, no modifications — reset + inject constraint
 )
 
@@ -228,7 +228,6 @@ type TaskState struct {
 	TurnNumber          int              `json:"turn_number"`
 	ConsecutiveFailures int              `json:"consecutive_failures"`
 	EditScopeFiles      int              `json:"edit_scope_files"`
-	PlanConfirmed       bool             `json:"plan_confirmed"`                       // user approved the edit plan, skip per-edit guard
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
 	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
@@ -250,15 +249,19 @@ type TaskState struct {
 
 	// AnalysisReportConfirmed is set when the user confirms the analysis report
 	// presented by the agent. When true, the analysis report gate is skipped,
-	// allowing the edit plan guard to proceed normally.
+	// allowing edits to proceed directly.
 	//
 	// Scoped to a single Run: it is reset to false at the start of every Run
 	// and only re-set within that Run by handleAnalysisNudgeConfirmation. This
 	// prevents a confirmation from a prior task from leaking into an unrelated
 	// new question (which made the agent skip presenting a fresh report and
-	// falsely claim "analysis report already confirmed"). Later Runs rely on
-	// pendingEditPlan / PlanConfirmed to skip the gate instead.
+	// falsely claim "analysis report already confirmed").
 	AnalysisReportConfirmed bool `json:"analysis_report_confirmed,omitempty"`
+
+	// PlanConfirmed is set when the user confirms a plan presented by the
+	// agent. When true, the plan gate is skipped, allowing edits to proceed.
+	// Scoped to a single Run: reset to false at the start of every Run.
+	PlanConfirmed bool `json:"plan_confirmed,omitempty"`
 }
 
 // ReadRecord captures a single read operation for loop-prevention and prompt
