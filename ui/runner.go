@@ -19,6 +19,7 @@ type EngineRunner interface {
 	Cancel()
 	SetProgressChan(ch chan ProgressMsg)
 	ValidateConnection() error
+	Steer(msg string)
 }
 
 type DefaultEngineRunner struct {
@@ -45,6 +46,10 @@ func (r *DefaultEngineRunner) Cancel() {
 func (r *DefaultEngineRunner) ValidateConnection() error {
 	// DefaultEngineRunner is used in testing contexts where validation is not needed.
 	return nil
+}
+
+func (r *DefaultEngineRunner) Steer(msg string) {
+	r.Eng.Steer(msg)
 }
 
 func (r *DefaultEngineRunner) Run(prompt string) tea.Cmd {
@@ -111,6 +116,10 @@ func (r *ProgressEngineRunner) ValidateConnection() error {
 		return fmt.Errorf("API key validation failed: %w", err)
 	}
 	return nil
+}
+
+func (r *ProgressEngineRunner) Steer(msg string) {
+	r.getEngine().Steer(msg)
 }
 
 func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
