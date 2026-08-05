@@ -28,6 +28,7 @@ type DisplayMessage struct {
 	Role     string
 	Content  string
 	ToolTree []ToolNode // toolsummary only: toolTree snapshot at completion, for click-to-expand
+	Queued   bool       // true when this is a steer message waiting to be injected
 }
 
 type AgentSpinner struct {
@@ -97,34 +98,34 @@ var slashCommands = []Suggestion{
 }
 
 type Model struct {
-	state               AppState
-	messages            []DisplayMessage
-	inputBuf            *InputBuffer
-	status              StatusInfo
-	spinners            []AgentSpinner
-	toolTree            []ToolNode
-	width               int
-	height              int
-	engine              EngineRunner
-	streaming           string
-	narration           string // accumulated content_delta text for current turn (AI intermediate intent)
-	narrationPending    string // buffered content_delta, flushed to narration on tick to reduce diff renderer churn
-	thinkingContent     string // deprecated: kept for legacy, no longer fed by reasoning_delta
-	thinkingActivity    string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
-	apiKeyInput         string
-	pendingOpenBracket  bool // Windows: lone '[' held to check if it's escape split
-	pendingCloseBracket bool // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
-	afterResidue        bool // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
-	ready               bool
-	progressChan        chan ProgressMsg
-	scrollOffset        int
-	cancelled           bool
-	pricing             engine.PricingConfig
+	state                  AppState
+	messages               []DisplayMessage
+	inputBuf               *InputBuffer
+	status                 StatusInfo
+	spinners               []AgentSpinner
+	toolTree               []ToolNode
+	width                  int
+	height                 int
+	engine                 EngineRunner
+	streaming              string
+	narration              string // accumulated content_delta text for current turn (AI intermediate intent)
+	narrationPending       string // buffered content_delta, flushed to narration on tick to reduce diff renderer churn
+	thinkingContent        string // deprecated: kept for legacy, no longer fed by reasoning_delta
+	thinkingActivity       string // current agent activity shown in thinking box (from "thinking" ProgressMsg)
+	apiKeyInput            string
+	pendingOpenBracket     bool // Windows: lone '[' held to check if it's escape split
+	pendingCloseBracket    bool // lone ']' held to check if it's OSC escape (ESC ] Ps ; Pt ST)
+	afterResidue           bool // Mac: tracks if prev batch was escape residue (for ST terminator \ filtering)
+	ready                  bool
+	progressChan           chan ProgressMsg
+	scrollOffset           int
+	cancelled              bool
+	pricing                engine.PricingConfig
 	needsRepaint           bool // forces full Bubble Tea repaint on next frame
 	runStartMsgIdx         int  // index in m.messages at start of current Run; used to strip snapshotted narration on Summary dedup
 	narrationJustFinalized bool // set when finalizeTurnBlocks snapshots narration; triggers full repaint to clear CJK garbling
 
-	escAt               time.Time // timestamp of last ESC key, for time-windowed Alt+Enter detection
+	escAt time.Time // timestamp of last ESC key, for time-windowed Alt+Enter detection
 
 	// Slash command suggestions
 	showSuggestions    bool
@@ -144,10 +145,10 @@ type Model struct {
 	// Mouse drag selection
 	selection         SelectionState
 	clipboardFeedback time.Time // timestamp of last clipboard copy for status bar feedback
-	clipboardError    string   // last clipboard error message, shown briefly in status bar
-	autoScrollDir     int      // auto-scroll direction during drag: -1=up, 0=none, +1=down
-	lastMouseX        int      // last mouse X during drag (screen coords, for auto-scroll)
-	lastMouseY        int      // last mouse Y during drag (screen coords, for auto-scroll)
+	clipboardError    string    // last clipboard error message, shown briefly in status bar
+	autoScrollDir     int       // auto-scroll direction during drag: -1=up, 0=none, +1=down
+	lastMouseX        int       // last mouse X during drag (screen coords, for auto-scroll)
+	lastMouseY        int       // last mouse Y during drag (screen coords, for auto-scroll)
 
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
@@ -177,9 +178,9 @@ type ProgressMsg struct {
 }
 
 const (
-	logoDelay     = 500 * time.Millisecond
-	spinnerRate   = 100 * time.Millisecond
-	escWindow     = 500 * time.Millisecond // max delay between ESC and Enter to qualify as Alt+Enter
+	logoDelay   = 500 * time.Millisecond
+	spinnerRate = 100 * time.Millisecond
+	escWindow   = 500 * time.Millisecond // max delay between ESC and Enter to qualify as Alt+Enter
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -456,6 +457,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.spinners[0].Goal = msg.Detail
 			}
 			m.thinkingActivity = msg.Detail
+		case "steer_queued":
+			// Message already added to display when Steer() was called from UI.
+			// This event confirms it was received by the engine.
+		case "steer_injected":
+			// Update queued messages to show they've been injected
+			for i := range m.messages {
+				if m.messages[i].Queued {
+					m.messages[i].Queued = false
+				}
+			}
 		case "reasoning_delta":
 			// No longer fed into thinkingContent — raw LLM reasoning is not useful
 			// to display. Agent activity is shown via "thinking" events instead.
@@ -1210,6 +1221,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActionSubmit:
 		m.showSuggestions = false
 		m.activeOptions = nil
+		if m.state == stateRunning {
+			text := m.inputBuf.Value()
+			m.inputBuf.SetValue("")
+			if strings.TrimSpace(text) != "" {
+				m.engine.Steer(text)
+				m.messages = append(m.messages, DisplayMessage{
+					Role:    "user",
+					Content: text,
+					Queued:  true,
+				})
+			}
+			return m, nil
+		}
 		return m.submitInput()
 	case ActionQuit:
 		return m, tea.Quit
@@ -1415,40 +1439,59 @@ func (m *Model) finalizeTurnBlocks() {
 	}
 }
 
-// stripRunNarration removes Role:"narration" messages added during the current
-// Run (after runStartMsgIdx). Called when Summary is present to prevent
-// duplication: narration snapshotted at tool_start by finalizeTurnBlocks
-// duplicates the Summary that finishStreaming appends.
-func (m *Model) stripRunNarration() {
-	if m.runStartMsgIdx >= len(m.messages) {
-		return
-	}
-	filtered := m.messages[:m.runStartMsgIdx]
-	for i := m.runStartMsgIdx; i < len(m.messages); i++ {
-		if m.messages[i].Role != "narration" {
-			filtered = append(filtered, m.messages[i])
+// normalizeForCompare strips whitespace and markdown syntax characters
+// from a string for duplicate comparison. This allows detecting when
+// narration text (with markdown formatting) matches a Summary (which
+// may have different or no markdown).
+func normalizeForCompare(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case ' ', '\t', '\n', '\r', '*', '#', '`', '~', '_':
+		default:
+			b.WriteRune(r)
 		}
 	}
-	m.messages = filtered
-	// Invalidate render cache from runStartMsgIdx onward: removing narration
-	// messages shifts indices, so cached lines no longer align with messages.
-	if m.msgCache != nil && m.runStartMsgIdx < len(m.msgCache.lines) {
-		m.msgCache.lines = m.msgCache.lines[:m.runStartMsgIdx]
+	return b.String()
+}
+
+// narrationDuplicatesSummary checks whether narration content from the
+// current run (both the active buffer and messages snapshotted at
+// tool_start) duplicates the Summary text. Comparison normalizes
+// whitespace and markdown syntax so formatted narration matches plain text.
+func (m *Model) narrationDuplicatesSummary(summary string) bool {
+	ns := normalizeForCompare(summary)
+	if ns == "" {
+		return false
 	}
+	// Check active narration buffer
+	if m.narration != "" && normalizeForCompare(m.narration) == ns {
+		return true
+	}
+	// Check snapshotted narration messages from this run
+	start := m.runStartMsgIdx
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(m.messages); i++ {
+		if m.messages[i].Role == "narration" && normalizeForCompare(m.messages[i].Content) == ns {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) finishStreaming(msg EngineResponseMsg) {
-	// When Summary is present (from task_complete), the streaming narration
-	// likely duplicates it. Discard narration before finalizeTurnBlocks so
-	// only the toolTree is snapshotted; the Summary is appended below.
+	// Flush pending narration so the buffer is complete for comparison.
+	m.flushNarration()
+
+	// Check if narration from this run duplicates the Summary. If so,
+	// keep the narration (already shown during streaming) and skip the
+	// Summary to avoid duplication. If different, keep both so the user
+	// sees intermediate narration AND the final formatted Summary.
+	narrationDupesSummary := false
 	if msg.Err == nil && msg.Response != nil && !msg.Response.Blocked && msg.Response.Summary != "" {
-		m.narration = ""
-		m.narrationPending = ""
-		// Also strip narration messages snapshotted at tool_start during this
-		// Run. finalizeTurnBlocks (called at tool_start) snapshots m.narration
-		// into m.messages before finishStreaming can clear it, causing the same
-		// text to appear twice (as "narration" + "assistant" Summary).
-		m.stripRunNarration()
+		narrationDupesSummary = m.narrationDuplicatesSummary(msg.Response.Summary)
 	}
 	m.finalizeTurnBlocks()
 	m.spinners = nil
@@ -1492,9 +1535,9 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		return
 	}
 	if msg.Response.Summary != "" {
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: msg.Response.Summary})
-		// Clear streaming — the summary contains the complete response text.
-		// Partial stream_delta content from sub-agents is already reflected in Summary.
+		if !narrationDupesSummary {
+			m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: msg.Response.Summary})
+		}
 		m.streaming = ""
 		m.narration = ""
 	} else if m.narration != "" {
@@ -1600,7 +1643,6 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 	}
 	return lines, plainLines
 }
-
 
 func renderLogoBox(width int) string {
 	// Mascot whale art (user-chosen design) — left side
@@ -2140,6 +2182,50 @@ var (
 	}
 )
 
+// preprocessStreamingMarkdown applies lightweight markdown cleanup for
+// streaming display: collapses excessive blank lines and strips common
+// markdown syntax markers (**, ###, ```, `) so raw markdown text is more
+// readable before the final glamour render. Code block content is
+// preserved but fence markers are removed.
+func preprocessStreamingMarkdown(text string) string {
+	// Collapse 3+ consecutive newlines to a single blank line.
+	for strings.Contains(text, "\n\n\n") {
+		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
+	}
+
+	lines := strings.Split(text, "\n")
+	inCodeBlock := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track code block fences. Replace fence lines with empty lines
+		// so code content is visible without the ``` noise.
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			lines[i] = ""
+			continue
+		}
+
+		if inCodeBlock {
+			// Preserve code block content as-is.
+			continue
+		}
+
+		// Strip header markers: "### Title" -> "Title"
+		if strings.HasPrefix(trimmed, "#") {
+			lines[i] = strings.TrimLeft(trimmed, "# ")
+			continue
+		}
+
+		// Strip ** bold markers and ` inline code markers.
+		cleaned := strings.ReplaceAll(line, "**", "")
+		cleaned = strings.ReplaceAll(cleaned, "`", "")
+		lines[i] = cleaned
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
@@ -2152,15 +2238,15 @@ func renderStreaming(streaming string, width int) []string {
 		return streamRenderCache.lines
 	}
 
-	// Use fast plain-text rendering during active streaming. Glamour's full
-	// markdown parse on every content_delta token is expensive (5-50ms) and
-	// causes the progress channel to fill up, dropping tokens. The final
-	// display (after streaming completes) uses glamour via renderMarkdown.
-	normalized := streaming
-	for strings.Contains(normalized, "\n\n\n") {
-		normalized = strings.ReplaceAll(normalized, "\n\n\n", "\n\n")
-	}
-	lines := wrapText(AssistantMsgStyle.Render(normalized), width)
+	// Use lightweight markdown preprocessing during active streaming.
+	// Glamour's full markdown parse on every content_delta token is
+	// expensive (5-50ms) and causes the progress channel to fill up,
+	// dropping tokens. preprocessStreamingMarkdown strips syntax markers
+	// and collapses blank lines for a more readable streaming view.
+	// The final display (after streaming completes) uses glamour via
+	// renderMarkdown for full formatting.
+	processed := preprocessStreamingMarkdown(streaming)
+	lines := wrapText(AssistantMsgStyle.Render(processed), width)
 	streamRenderCache.content = streaming
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines
