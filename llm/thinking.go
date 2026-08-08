@@ -107,3 +107,15 @@ func applyEchoIfNeeded(msgs []Message) []Message {
 	}
 	return msgs
 }
+
+// stripReasoningContent removes the response-only reasoning_content field from
+// every message before it rides the wire. DeepSeek counts re-sent reasoning as
+// billable prompt input (measured ~500 extra tokens per turn on a reasoner
+// chain) and can reject it outright, so the wire request must never carry it.
+// The session keeps the field for display/archive; only the upload drops it.
+func stripReasoningContent(msgs []Message) []Message {
+	for i := range msgs {
+		msgs[i].ReasoningContent = ""
+	}
+	return msgs
+}

@@ -16,7 +16,7 @@ func TestFinalizeTurnBlocks_NarrationAndToolSnapshot(t *testing.T) {
 		messages: []DisplayMessage{},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 2 {
 		t.Fatalf("expected 2 messages (narration + toolsummary), got %d", len(m.messages))
@@ -49,7 +49,7 @@ func TestFinalizeTurnBlocks_EmptyNarrationSkipped(t *testing.T) {
 		messages: []DisplayMessage{},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message (toolsummary only), got %d", len(m.messages))
@@ -68,7 +68,7 @@ func TestFinalizeTurnBlocks_WhitespaceOnlyNarrationSkipped(t *testing.T) {
 		messages:  []DisplayMessage{},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 0 {
 		t.Fatalf("expected 0 messages for whitespace-only narration, got %d: %+v", len(m.messages), m.messages)
@@ -84,7 +84,7 @@ func TestFinalizeTurnBlocks_EmptyToolTreeSkipped(t *testing.T) {
 		messages:  []DisplayMessage{},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message (narration only), got %d", len(m.messages))
@@ -103,7 +103,7 @@ func TestFinalizeTurnBlocks_BothEmpty(t *testing.T) {
 		messages:  []DisplayMessage{},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 0 {
 		t.Fatalf("expected 0 messages, got %d", len(m.messages))
@@ -122,7 +122,7 @@ func TestFinalizeTurnBlocks_PreservesExistingMessages(t *testing.T) {
 		},
 	}
 
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 
 	if len(m.messages) != 4 {
 		t.Fatalf("expected 4 messages (2 existing + narration + toolsummary), got %d", len(m.messages))
@@ -138,5 +138,36 @@ func TestFinalizeTurnBlocks_PreservesExistingMessages(t *testing.T) {
 	}
 	if m.messages[3].Role != "toolsummary" {
 		t.Errorf("fourth message role = %q, want toolsummary", m.messages[3].Role)
+	}
+}
+
+// TestFinalizeTurnBlocks_ToolsFirst verifies that with toolsFirst=true the
+// toolsummary is snapshotted BEFORE the narration, matching the causal order
+// at run end: tools already executed, narration is the concluding analysis.
+func TestFinalizeTurnBlocks_ToolsFirst(t *testing.T) {
+	m := &Model{
+		narration: "分析结论：根因已定位。",
+		toolTree: []ToolNode{
+			{Name: "read_multi", Detail: "controller/TaskController.java, enums/ResponseCode.java", Done: true},
+		},
+		messages: []DisplayMessage{},
+	}
+
+	m.finalizeTurnBlocks(true)
+
+	if len(m.messages) != 2 {
+		t.Fatalf("expected 2 messages (toolsummary + narration), got %d", len(m.messages))
+	}
+	if m.messages[0].Role != "toolsummary" {
+		t.Errorf("first message role = %q, want toolsummary", m.messages[0].Role)
+	}
+	if m.messages[1].Role != "narration" {
+		t.Errorf("second message role = %q, want narration", m.messages[1].Role)
+	}
+	if m.messages[1].Content != "分析结论：根因已定位。" {
+		t.Errorf("narration content = %q, want %q", m.messages[1].Content, "分析结论：根因已定位。")
+	}
+	if len(m.toolTree) != 0 {
+		t.Errorf("toolTree should be cleared after finalize, got %d items", len(m.toolTree))
 	}
 }

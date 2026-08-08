@@ -11,37 +11,36 @@ import (
 // ---- UI Element Styles (auto-detected dark/light) ----
 
 var (
-	isDark             bool
-	LogoStyle          lipgloss.Style
-	LogoGradient1      lipgloss.Style // deep blue
-	LogoGradient2      lipgloss.Style // cyan
-	LogoGradient3      lipgloss.Style // bright cyan/white
-	MascotStyle        lipgloss.Style
-	MascotAccentStyle  lipgloss.Style
-	MascotWaveStyle    lipgloss.Style
-	VersionStyle       lipgloss.Style
-	FlashModelStyle    lipgloss.Style
-	UserMsgStyle       lipgloss.Style
-	AssistantMsgStyle  lipgloss.Style
-	ToolTreeStyle      lipgloss.Style
-	SpinnerStyle       lipgloss.Style
-	SpinnerDoneStyle   lipgloss.Style
-	StatusBarStyle     lipgloss.Style
-	InputPromptStyle   lipgloss.Style
-	InputBoxStyle      lipgloss.Style
-	ErrorStyle         lipgloss.Style
-	DimStyle           lipgloss.Style
-	SystemMsgStyle     lipgloss.Style
-	SuggestionBox      lipgloss.Style
-	SuggestionItem     lipgloss.Style
-	SuggestionDesc     lipgloss.Style
-	SuggestionHotkey   lipgloss.Style
-	SuggestionSelected lipgloss.Style
-	ScrollbarTrackStyle  lipgloss.Style
-	ScrollbarThumbStyle  lipgloss.Style
-	SloganStyle          lipgloss.Style
-	InputBarStyle        lipgloss.Style // blue vertical bar matching logo gradient
-	PasteIndicatorStyle  lipgloss.Style // dim/subtle color for paste-shorthand indicator
+	isDark              bool
+	LogoStyle           lipgloss.Style
+	LogoGradient1       lipgloss.Style // deep blue
+	LogoGradient2       lipgloss.Style // cyan
+	LogoGradient3       lipgloss.Style // bright cyan/white
+	MascotStyle         lipgloss.Style
+	MascotAccentStyle   lipgloss.Style
+	MascotWaveStyle     lipgloss.Style
+	VersionStyle        lipgloss.Style
+	FlashModelStyle     lipgloss.Style
+	UserMsgStyle        lipgloss.Style
+	ToolTreeStyle       lipgloss.Style
+	SpinnerStyle        lipgloss.Style
+	SpinnerDoneStyle    lipgloss.Style
+	StatusBarStyle      lipgloss.Style
+	InputPromptStyle    lipgloss.Style
+	InputBoxStyle       lipgloss.Style
+	ErrorStyle          lipgloss.Style
+	DimStyle            lipgloss.Style
+	SystemMsgStyle      lipgloss.Style
+	SuggestionBox       lipgloss.Style
+	SuggestionItem      lipgloss.Style
+	SuggestionDesc      lipgloss.Style
+	SuggestionHotkey    lipgloss.Style
+	SuggestionSelected  lipgloss.Style
+	ScrollbarTrackStyle lipgloss.Style
+	ScrollbarThumbStyle lipgloss.Style
+	SloganStyle         lipgloss.Style
+	InputBarStyle       lipgloss.Style // blue vertical bar matching logo gradient
+	PasteIndicatorStyle lipgloss.Style // dim/subtle color for paste-shorthand indicator
 
 	// Block styles — background-color differentiated sections (no borders)
 	SearchBlockStyle   lipgloss.Style // file search / grep results
@@ -71,7 +70,6 @@ func initStyles() {
 		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("227")).Bold(true)
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
@@ -114,7 +112,6 @@ func initStyles() {
 		VersionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 		FlashModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130")).Bold(true)
 		UserMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("27"))
-		AssistantMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 		ToolTreeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("130"))
 		SpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("136"))
 		SpinnerDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))

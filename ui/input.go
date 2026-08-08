@@ -383,6 +383,14 @@ const pasteThresholdRunes = 200   // ≥200 runes → paste
 // immediately trigger ActionSubmit.
 const pasteGap = 100 * time.Millisecond
 
+// inputSegment is one piece of PasteMode input. Typed text segments render
+// as-is; paste segments render as a "[Pasted +N lines]" indicator. The raw
+// text of every segment is concatenated on submit.
+type inputSegment struct {
+	text    string // segment content (typed text or pasted content)
+	isPaste bool   // true renders as a paste indicator
+}
+
 // InputBuffer manages the text input state: text buffer, cursor, and selection.
 type InputBuffer struct {
 	text   []rune
@@ -392,9 +400,12 @@ type InputBuffer struct {
 	// content here and show "📋 已粘贴 N 行" in the input instead.
 	PasteContent string // full content to submit (prefix + pasted + suffix)
 	PasteMode    bool   // when true, show paste indicator in input
-	pasteLines   int    // line count of the PASTED portion (excludes prefix)
 	pastePrefix  string // text typed before the paste, shown before indicator
-	pasteSuffix  string // text typed after the burst, shown after indicator
+	// suffixSegments holds, in order, the input after pastePrefix: typed text
+	// (rendered as-is) and paste chunks (rendered as "[Pasted +N lines]"
+	// indicators). Each bracketed paste starts a NEW paste segment so every
+	// paste keeps its own indicator.
+	suffixSegments []inputSegment
 
 	// lastEventTime is the timestamp of the most recent KeyRunes/KeyEnter/
 	// KeySpace event. Used to detect paste bursts (events arriving within
@@ -409,6 +420,13 @@ type InputBuffer struct {
 	// input (the prefix); text[burstStartLen:] is accumulating paste content.
 	// Used to split prefix from pasted content when entering PasteMode.
 	burstStartLen int
+
+	// pasteStreamActive is true while a paste stream is still arriving event
+	// by event (Windows ConPTY without bracketed paste). A fast event in
+	// PasteMode then continues the current paste segment. After a bracketed
+	// paste (msg.Paste) the full content arrived in one event, so
+	// pasteStreamActive is false and fast events are fast typing (text).
+	pasteStreamActive bool
 }
 
 func NewInputBuffer() *InputBuffer {
@@ -424,9 +442,8 @@ func (ib *InputBuffer) SetValue(s string) {
 	ib.cursor = len(ib.text)
 	ib.PasteMode = false
 	ib.PasteContent = ""
-	ib.pasteLines = 0
 	ib.pastePrefix = ""
-	ib.pasteSuffix = ""
+	ib.suffixSegments = nil
 	ib.burstStartLen = 0
 	ib.lastEventTime = time.Time{}
 }
@@ -439,9 +456,8 @@ func (ib *InputBuffer) SubmitContent() string {
 		content := ib.PasteContent
 		ib.PasteMode = false
 		ib.PasteContent = ""
-		ib.pasteLines = 0
 		ib.pastePrefix = ""
-		ib.pasteSuffix = ""
+		ib.suffixSegments = nil
 		ib.text = nil
 		ib.cursor = 0
 		ib.burstStartLen = 0
@@ -483,9 +499,8 @@ func (ib *InputBuffer) insertRunes(runes []rune) {
 
 // enterPasteMode splits the current text at burstStartLen: the prefix
 // (user's pre-burst input) is preserved and shown before the indicator;
-// the rest (accumulated paste) drives the line count. PasteContent holds
-// the full submitted content = prefix + pasted portion.
-func (ib *InputBuffer) enterPasteMode(fullText string, nlCount int) {
+// the rest (accumulated paste) becomes the first paste segment.
+func (ib *InputBuffer) enterPasteMode(fullText string, streamActive bool) {
 	prefix := ""
 	pasted := fullText
 	textRunes := []rune(fullText)
@@ -493,52 +508,129 @@ func (ib *InputBuffer) enterPasteMode(fullText string, nlCount int) {
 		prefix = string(textRunes[:ib.burstStartLen])
 		pasted = string(textRunes[ib.burstStartLen:])
 	}
-	// Line count reflects only the pasted portion (excludes prefix).
-	pastedNl := strings.Count(pasted, "\n")
 	ib.pastePrefix = prefix
-	ib.PasteContent = fullText
-	ib.pasteLines = pastedNl + 1
-	ib.pasteSuffix = ""
+	ib.suffixSegments = []inputSegment{{text: pasted, isPaste: true}}
+	ib.pasteStreamActive = streamActive
 	ib.PasteMode = true
-	ib.rebuildPasteText()
+	ib.rebuild()
 }
 
-// rebuildPasteText regenerates the visible text: prefix + indicator + suffix.
-// The indicator's line count reflects only the pasted portion (the part of
-// PasteContent after the prefix, excluding any appended suffix). Cursor is
-// placed at the end so new input appends after the suffix.
-func (ib *InputBuffer) rebuildPasteText() {
-	pasted := ib.PasteContent
-	// Use rune slices for proper CJK handling: len() on string is bytes,
-	// but burstStartLen and cursor track rune counts.
-	if len(ib.pastePrefix) > 0 {
-		preRunes := []rune(ib.pastePrefix)
-		paRunes := []rune(pasted)
-		if len(paRunes) >= len(preRunes) && string(paRunes[:len(preRunes)]) == ib.pastePrefix {
-			pasted = string(paRunes[len(preRunes):])
+// rebuild regenerates the visible text (pastePrefix + rendered segments) and
+// the full PasteContent (pastePrefix + every segment's raw text). Cursor is
+// placed at the end so new input appends after the last segment.
+//
+// The paste indicator is embedded as "dimOpen + plain marker + reopen" rather
+// than PasteIndicatorStyle.Render(...) directly. Render() emits a trailing
+// \x1b[0m which, when the visible text is nested inside InputBlockStyle.Render
+// in renderInputLine, resets the input block's background mid-line — the rest
+// of the line (and the wrapped lines after it) would lose their background.
+func (ib *InputBuffer) rebuild() {
+	// ANSI open sequences for embedding a styled paste marker inline without
+	// a bare reset: dimOpen starts the dim foreground, reopen restores the
+	// input block's foreground+background right after the marker.
+	dimOpen := strings.TrimSuffix(PasteIndicatorStyle.Render(""), "\x1b[0m")
+	reopen := strings.TrimSuffix(InputBlockStyle.Render(""), "\x1b[0m")
+
+	var vis, content strings.Builder
+	vis.WriteString(ib.pastePrefix)
+	content.WriteString(ib.pastePrefix)
+	for _, seg := range ib.suffixSegments {
+		content.WriteString(seg.text)
+		if seg.isPaste {
+			lines := strings.Count(seg.text, "\n") + 1
+			vis.WriteString(dimOpen)
+			vis.WriteString(fmt.Sprintf("[Pasted +%d lines]", lines))
+			vis.WriteString(reopen)
+		} else {
+			vis.WriteString(seg.text)
 		}
 	}
-	// Exclude appended suffix from the pasted portion for line counting.
-	if len(ib.pasteSuffix) > 0 {
-		sufRunes := []rune(ib.pasteSuffix)
-		paRunes := []rune(pasted)
-		if len(paRunes) >= len(sufRunes) && string(paRunes[len(paRunes)-len(sufRunes):]) == ib.pasteSuffix {
-			pasted = string(paRunes[:len(paRunes)-len(sufRunes)])
-		}
-	}
-	ib.pasteLines = strings.Count(pasted, "\n") + 1
-	indicator := PasteIndicatorStyle.Render(fmt.Sprintf("[Pasted +%d lines]", ib.pasteLines))
-	ib.text = []rune(ib.pastePrefix + indicator + ib.pasteSuffix)
+	ib.text = []rune(vis.String())
 	ib.cursor = len(ib.text)
+	ib.PasteContent = content.String()
+}
+
+// appendTextSegment appends typed text, merging into the trailing text segment
+// if one exists, so successive typing stays in one visible chunk.
+func (ib *InputBuffer) appendTextSegment(s string) {
+	if n := len(ib.suffixSegments); n > 0 {
+		last := &ib.suffixSegments[n-1]
+		if !last.isPaste {
+			last.text += s
+			return
+		}
+	}
+	ib.suffixSegments = append(ib.suffixSegments, inputSegment{text: s})
+}
+
+// appendPasteSegment appends pasted content. A bracketed paste always starts a
+// NEW paste segment (new indicator); fast events from an in-flight burst
+// (Windows ConPTY without bracketed paste) continue the current paste segment.
+func (ib *InputBuffer) appendPasteSegment(s string, forceNew bool) {
+	if !forceNew && len(ib.suffixSegments) > 0 {
+		last := &ib.suffixSegments[len(ib.suffixSegments)-1]
+		if last.isPaste {
+			last.text += s
+			return
+		}
+	}
+	ib.suffixSegments = append(ib.suffixSegments, inputSegment{text: s, isPaste: true})
+}
+
+// deleteFromLastTextSegment removes the last rune of the trailing text segment.
+// Returns false when there is nothing to delete (the input ends with a paste
+// indicator or is empty), in which case the caller cancels the whole paste.
+func (ib *InputBuffer) deleteFromLastTextSegment() bool {
+	n := len(ib.suffixSegments)
+	if n == 0 {
+		return false
+	}
+	last := &ib.suffixSegments[n-1]
+	if last.isPaste || len(last.text) == 0 {
+		return false
+	}
+	r := []rune(last.text)
+	r = r[:len(r)-1]
+	last.text = string(r)
+	if len(last.text) == 0 {
+		ib.suffixSegments = ib.suffixSegments[:n-1]
+	}
+	return true
+}
+
+// deleteTrailingPasteSegment removes the trailing paste segment. Returns true
+// when a paste segment was removed; false when the input does not end with a
+// paste segment (or is empty). When the removed segment was the last one and
+// only the prefix remains, PasteMode ends and the prefix becomes plain input
+// again.
+func (ib *InputBuffer) deleteTrailingPasteSegment() bool {
+	n := len(ib.suffixSegments)
+	if n == 0 || !ib.suffixSegments[n-1].isPaste {
+		return false
+	}
+	ib.suffixSegments = ib.suffixSegments[:n-1]
+	if len(ib.suffixSegments) == 0 {
+		// Nothing left but the prefix (or nothing at all) — leave PasteMode.
+		prefix := ib.pastePrefix
+		ib.PasteMode = false
+		ib.pastePrefix = ""
+		ib.PasteContent = ""
+		ib.burstStartLen = 0
+		ib.pasteStreamActive = false
+		ib.text = []rune(prefix)
+		ib.cursor = len(ib.text)
+		return true
+	}
+	ib.rebuild()
+	return true
 }
 
 // cancelPaste clears all paste state, returning the input to empty.
 func (ib *InputBuffer) cancelPaste() {
 	ib.PasteMode = false
 	ib.PasteContent = ""
-	ib.pasteLines = 0
 	ib.pastePrefix = ""
-	ib.pasteSuffix = ""
+	ib.suffixSegments = nil
 	ib.text = nil
 	ib.cursor = 0
 	ib.burstStartLen = 0
@@ -561,32 +653,31 @@ func (ib *InputBuffer) cancelPaste() {
 // never defers rune insertion. IME composition bursts (which contain no
 // Enter keys) are therefore never misclassified as paste.
 //
-// PasteMode display: once entered, the visible input stays as
-// "📋 已粘贴 N 行  (Enter 提交)" + a suffix of user-typed continuation.
-// Fast events (still inside the paste burst) absorb into PasteContent and
-// update N. Slow events (user typing after the burst) append to both
-// PasteContent and the visible suffix. The indicator is never replaced by
-// the raw pasted content — only Enter submits, Backspace cancels.
+// PasteMode display: once entered, the visible input is a series of segments:
+// paste chunks render as "[Pasted +N lines]" indicators and user-typed text
+// renders as-is (e.g. "123 [Pasted +4 lines] 456 [Pasted +3 lines] 789").
+// Each bracketed paste starts a NEW indicator; slow events (user typing after
+// the burst) become text segments; fast events (still inside the paste burst)
+// continue the current paste segment. Only Enter submits, Backspace cancels.
 func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	now := time.Now()
 	fast := !ib.lastEventTime.IsZero() && now.Sub(ib.lastEventTime) < pasteGap
 
-	// ---- PasteMode: indicator stays, new input appends as suffix ----
+	// ---- PasteMode: indicator stays, new input appends as segments ----
 	if ib.PasteMode {
 		switch msg.Type {
 		case tea.KeyEnter:
 			if msg.Alt || (!fast && runtime.GOOS == "windows" && ctrlKeyPressed()) {
-				// Deliberate manual newline — append visibly to suffix.
-				ib.PasteContent += "\n"
-				ib.pasteSuffix += "\n"
-				ib.rebuildPasteText()
+				// Deliberate manual newline — append visibly as a text segment.
+				ib.appendTextSegment("\n")
+				ib.rebuild()
 				ib.lastEventTime = now
 				return ActionNewline
 			}
 			if fast {
-				// More paste arriving — absorb newline, update line count.
-				ib.PasteContent += "\n"
-				ib.rebuildPasteText()
+				// More paste arriving — absorb newline into the current paste segment.
+				ib.appendPasteSegment("\n", false)
+				ib.rebuild()
 				ib.lastEventTime = now
 				return ActionNewline
 			}
@@ -594,22 +685,18 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			return ActionSubmit
 
 		case tea.KeyBackspace:
-			if len(ib.pasteSuffix) > 0 {
-				// Pop the last user-typed character from suffix and PasteContent.
-				// Use rune slices to correctly handle multi-byte CJK characters:
-				// byte-level slicing (e.g. s[:len(s)-1]) corrupts multi-byte
-				// runes, causing garbled text on the first press (Bug #2).
-				sufRunes := []rune(ib.pasteSuffix)
-				sufRunes = sufRunes[:len(sufRunes)-1]
-				ib.pasteSuffix = string(sufRunes)
-				pcRunes := []rune(ib.PasteContent)
-				pcRunes = pcRunes[:len(pcRunes)-1]
-				ib.PasteContent = string(pcRunes)
-				ib.rebuildPasteText()
+			if ib.deleteFromLastTextSegment() {
+				ib.rebuild()
 				ib.lastEventTime = now
 				return ActionBackspace
 			}
-			// No suffix — cancel the paste entirely (clear input).
+			// Trailing segment is a paste indicator (or nothing) — remove the
+			// paste segment itself, keeping the prefix and earlier segments.
+			if ib.deleteTrailingPasteSegment() {
+				ib.lastEventTime = time.Time{}
+				return ActionBackspace
+			}
+			// Nothing to delete at all — cancel the paste entirely (clear input).
 			ib.cancelPaste()
 			ib.lastEventTime = time.Time{}
 			return ActionBackspace
@@ -630,47 +717,62 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			if len(filtered) == 0 {
 				return ActionNone
 			}
-			ib.PasteContent += string(filtered)
-			if !fast {
-				// User typing after the burst — show after the indicator.
-				ib.pasteSuffix += string(filtered)
+			switch {
+			case msg.Paste:
+				// A bracketed paste always starts a NEW paste segment so it
+				// gets its own indicator (Bug: multiple pastes folded into one).
+				ib.appendPasteSegment(string(filtered), true)
+			case fast && ib.pasteStreamActive:
+				// Fast event while a paste stream is still arriving event by
+				// event (Windows ConPTY, no bracketed paste) — continue the
+				// current paste segment (no new indicator). After a bracketed
+				// paste (msg.Paste) the content arrived complete in one event,
+				// so pasteStreamActive is false and a fast event is just fast
+				// typing — it must go to a text segment, otherwise it creates
+				// a bogus "[Pasted +1 lines]" indicator.
+				ib.appendPasteSegment(string(filtered), false)
+			default:
+				// User typing after the burst — show as a text segment.
+				ib.appendTextSegment(string(filtered))
 			}
-			ib.rebuildPasteText()
+			ib.rebuild()
 			ib.lastEventTime = now
 			return ActionRuneInserted
 
 		case tea.KeySpace:
-			ib.PasteContent += " "
-			if !fast {
-				ib.pasteSuffix += " "
+			if fast {
+				ib.appendPasteSegment(" ", false)
+			} else {
+				ib.appendTextSegment(" ")
 			}
-			ib.rebuildPasteText()
+			ib.rebuild()
 			ib.lastEventTime = now
 			return ActionRuneInserted
 
 		case tea.KeyDelete:
 			// Bug #2: Delete in PasteMode deletes the last user-typed character
-			// from the suffix (same as Backspace). Since cursor is always at end
-			// in PasteMode, Forward-Delete and Backspace are semantically identical.
-			if len(ib.pasteSuffix) > 0 {
-				sufRunes := []rune(ib.pasteSuffix)
-				sufRunes = sufRunes[:len(sufRunes)-1]
-				ib.pasteSuffix = string(sufRunes)
-				pcRunes := []rune(ib.PasteContent)
-				pcRunes = pcRunes[:len(pcRunes)-1]
-				ib.PasteContent = string(pcRunes)
-				ib.rebuildPasteText()
+			// from the trailing text segment (same as Backspace). Since cursor is
+			// always at end in PasteMode, Forward-Delete and Backspace are
+			// semantically identical.
+			if ib.deleteFromLastTextSegment() {
+				ib.rebuild()
 				ib.lastEventTime = now
 				return ActionDelete
 			}
-			// No suffix — cancel the paste entirely (clear input).
+			// Trailing segment is a paste indicator (or nothing) — remove the
+			// paste segment itself, keeping the prefix and earlier segments.
+			if ib.deleteTrailingPasteSegment() {
+				ib.lastEventTime = time.Time{}
+				return ActionDelete
+			}
+			// Nothing to delete at all — cancel the paste entirely (clear input).
 			ib.cancelPaste()
 			ib.lastEventTime = time.Time{}
 			return ActionDelete
 
 		default:
 			// Left/Right/Home/End are no-ops in PasteMode — the
-			// indicator + suffix display is append-only.
+			// indicator + segments display is append-only.
 			return ActionNone
 		}
 	}
@@ -703,7 +805,7 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
 					ib.burstStartLen = origLen
 				}
-				ib.enterPasteMode(string(ib.text), nlCount)
+				ib.enterPasteMode(string(ib.text), true)
 			}
 			ib.lastEventTime = now
 			return ActionNewline
@@ -815,7 +917,7 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
 					ib.burstStartLen = origLen
 				}
-				ib.enterPasteMode(string(ib.text), nlCount)
+				ib.enterPasteMode(string(ib.text), false)
 				enteredPaste = true
 			}
 		} else if fast {
@@ -825,7 +927,7 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
 					ib.burstStartLen = origLen
 				}
-				ib.enterPasteMode(string(ib.text), nlCount)
+				ib.enterPasteMode(string(ib.text), true)
 				enteredPaste = true
 			}
 		}

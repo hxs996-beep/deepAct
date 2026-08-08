@@ -700,12 +700,13 @@ func (r *SubAgentRunner) buildResult(content string, goal string) *HandoffResult
 }
 
 // estimatedTokens returns a rough token count for a slice of model messages.
-// Uses len/4 heuristic (no external estimator dependency).
+// Uses len/4 heuristic (no external estimator dependency). reasoning_content
+// is excluded: the wire request strips it (see llm.stripReasoningContent), so
+// it never contributes to the billed prompt.
 func estimatedTokens(history []ModelMessage) int {
 	total := 0
 	for _, msg := range history {
 		total += len(msg.Content) / 4
-		total += len(msg.ReasoningContent) / 4
 		for _, tc := range msg.ToolCalls {
 			total += len(tc.ID) / 4
 			total += len(tc.Function.Name) / 4

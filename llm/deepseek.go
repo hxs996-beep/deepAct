@@ -561,6 +561,12 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// placeholder tool messages for any orphaned ids so the request is always valid.
 	req.Messages = validateToolCallResponses(req.Messages)
 
+	// reasoning_content is a response-only field and is deliberately NOT sent back:
+	// DeepSeek counts re-sent reasoning as billable prompt input (measured ~500
+	// extra tokens per turn on a reasoner chain) and can reject it outright. The
+	// session keeps it for display/archive; the wire request must not carry it.
+	req.Messages = stripReasoningContent(req.Messages)
+
 	payload := requestBody{
 		Model:           req.Model,
 		Messages:        req.Messages,
@@ -797,11 +803,14 @@ func (s *streamAssembler) buildResponse(model string) *ChatResponse {
 	}
 }
 
+// promptText approximates the prompt actually sent to the provider, for token
+// calibration. reasoning_content is deliberately excluded: the wire request
+// strips it (see stripReasoningContent), so counting it here would inflate the
+// char count and drag avgPerChar down, under-estimating every later Estimate.
 func (s *streamAssembler) promptText(req ChatRequest) string {
 	var builder strings.Builder
 	for _, msg := range req.Messages {
 		builder.WriteString(msg.Content)
-		builder.WriteString(msg.ReasoningContent)
 	}
 	return builder.String()
 }

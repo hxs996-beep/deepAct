@@ -8,9 +8,8 @@ import (
 
 // TestFinishStreaming_SummarySuppressesNarrationDuplication verifies that when
 // both narration (streaming content_delta) and Summary (from task_complete)
-// are present, the text appears exactly once. Previously finalizeTurnBlocks
-// unconditionally snapshotted narration before the Summary check, causing the
-// same text to be displayed twice.
+// are present and match, the text appears exactly once. The narration is
+// snapshotted as a "narration" message and the Summary is skipped.
 func TestFinishStreaming_SummarySuppressesNarrationDuplication(t *testing.T) {
 	m := &Model{
 		width:    80,
@@ -35,34 +34,25 @@ func TestFinishStreaming_SummarySuppressesNarrationDuplication(t *testing.T) {
 	}
 }
 
-// TestFinishStreaming_SummaryStripsPreSnapshottedNarration verifies that
-// narration snapshotted by finalizeTurnBlocks at tool_start (before
-// finishStreaming runs) is stripped when Summary is present. This is the
-// real-world bug: LLM generates narration text, calls a regular tool
-// (triggering tool_start -> finalizeTurnBlocks snapshots narration into
-// m.messages), then calls task_complete with the same text as Summary.
-// Without stripRunNarration, both the narration snapshot and the Summary
-// appear, duplicating the text.
-func TestFinishStreaming_SummaryStripsPreSnapshottedNarration(t *testing.T) {
+// TestFinishStreaming_SummarySkipsWhenPreSnapshottedNarrationMatches verifies
+// that when narration was already snapshotted at tool_start (via
+// finalizeTurnBlocks) and matches the Summary, the narration is kept and the
+// Summary is skipped. Previously stripRunNarration removed all narration;
+// now the narration is preserved and Summary is conditionally suppressed.
+func TestFinishStreaming_SummarySkipsWhenPreSnapshottedNarrationMatches(t *testing.T) {
 	m := &Model{
 		width:    80,
 		height:   24,
 		state:    stateReady,
 		msgCache: &messageRenderCache{},
 	}
-	// Simulate: user sent a message, runStartMsgIdx is set
 	m.runStartMsgIdx = 0
 	m.messages = []DisplayMessage{{Role: "user", Content: "OK"}}
 
-	// Simulate: LLM streamed narration text via content_delta
 	dupText := "用户已确认设计方案。按 brainstorming 流程，先写设计文档，然后转入实现。"
 	m.narration = dupText
+	m.finalizeTurnBlocks(false)
 
-	// Simulate: LLM called a regular tool -> tool_start -> finalizeTurnBlocks
-	// snapshots narration into m.messages as Role:"narration"
-	m.finalizeTurnBlocks()
-
-	// Verify narration was snapshotted
 	narrationCount := 0
 	for _, msg := range m.messages {
 		if msg.Role == "narration" && msg.Content == dupText {
@@ -73,12 +63,10 @@ func TestFinishStreaming_SummaryStripsPreSnapshottedNarration(t *testing.T) {
 		t.Fatalf("precondition: expected 1 narration snapshot, got %d", narrationCount)
 	}
 
-	// Simulate: LLM called task_complete with same text as Summary
 	m.finishStreaming(EngineResponseMsg{
 		Response: &engine.EngineResponse{Summary: dupText},
 	})
 
-	// Verify: dupText should appear exactly once (as assistant, not narration)
 	count := 0
 	for _, msg := range m.messages {
 		if (msg.Role == "assistant" || msg.Role == "narration") && msg.Content == dupText {
@@ -86,14 +74,76 @@ func TestFinishStreaming_SummaryStripsPreSnapshottedNarration(t *testing.T) {
 		}
 	}
 	if count != 1 {
-		t.Errorf("expected pre-snapshotted narration to be stripped, text should appear exactly once, got %d. messages: %+v", count, m.messages)
+		t.Errorf("expected text to appear exactly once, got %d. messages: %+v", count, m.messages)
 	}
 
-	// Verify: no narration role messages remain from this Run
+	foundNarration := false
 	for _, msg := range m.messages {
-		if msg.Role == "narration" {
-			t.Errorf("narration message should have been stripped, got: %+v", msg)
+		if msg.Role == "narration" && msg.Content == dupText {
+			foundNarration = true
 		}
+	}
+	if !foundNarration {
+		t.Error("narration message should be preserved, not stripped")
+	}
+}
+
+// TestFinishStreaming_DifferentNarrationAndSummary_KeepsBoth verifies that
+// when narration differs from Summary, both are kept so the user can see
+// intermediate narration AND the final formatted Summary.
+func TestFinishStreaming_DifferentNarrationAndSummary_KeepsBoth(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	m.narration = "正在分析代码结构..."
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{Summary: "分析完成，问题已定位。"},
+	})
+
+	foundNarration := false
+	foundSummary := false
+	for _, msg := range m.messages {
+		if msg.Role == "narration" && msg.Content == "正在分析代码结构..." {
+			foundNarration = true
+		}
+		if msg.Role == "assistant" && msg.Content == "分析完成，问题已定位。" {
+			foundSummary = true
+		}
+	}
+	if !foundNarration {
+		t.Error("narration should be preserved when different from Summary")
+	}
+	if !foundSummary {
+		t.Error("Summary should be added when different from narration")
+	}
+}
+
+// TestFinishStreaming_MarkdownNarrationMatchesPlainSummary verifies that
+// narration with markdown markers matches a plain-text Summary after
+// normalization. When they match, only one copy is kept (as narration).
+func TestFinishStreaming_MarkdownNarrationMatchesPlainSummary(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	m.narration = "## 分析结果\n\n**问题已修复**"
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{Summary: "分析结果\n\n问题已修复"},
+	})
+
+	count := 0
+	for _, msg := range m.messages {
+		if msg.Role == "narration" || msg.Role == "assistant" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 message (narration or assistant) for matching content, got %d. messages: %+v", count, m.messages)
 	}
 }
 

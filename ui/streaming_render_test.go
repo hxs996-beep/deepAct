@@ -5,29 +5,48 @@ import (
 	"testing"
 )
 
-// TestRenderStreaming_UsesPlainText verifies that renderStreaming uses fast
-// plain-text rendering instead of glamour during active streaming. Plain-text
-// rendering preserves raw ** markers (glamour would render them as styled text).
-// This is intentional: glamour's expensive markdown parse on every token caused
-// the progress channel to fill up and drop content_delta tokens, producing
-// garbled streaming text. The final display (after streaming completes) uses
-// glamour via renderMarkdown.
-func TestRenderStreaming_UsesPlainText(t *testing.T) {
+// TestRenderStreaming_StripsMarkdownMarkers verifies that renderStreaming
+// strips common markdown syntax markers (**, ###, `) for readability during
+// active streaming. The final display (after streaming completes) uses
+// glamour via renderMarkdown for full formatting.
+func TestRenderStreaming_StripsMarkdownMarkers(t *testing.T) {
 	md := "### Check: Build\n\n**Command run:**\n  go build ./...\n\n**Result: PASS**"
 	lines := renderStreaming(md, 80)
 	if len(lines) == 0 {
 		t.Fatal("renderStreaming returned no lines for non-empty input")
 	}
 	joined := strings.Join(lines, "\n")
-	// Plain-text rendering preserves raw ** markers (glamour would strip them).
-	// This proves we're using the fast wrapText path, not glamour.
-	if !strings.Contains(joined, "**Command") {
-		t.Error("renderStreaming should preserve raw '**' markers in plain-text mode")
+	if strings.Contains(joined, "**") {
+		t.Error("renderStreaming should strip '**' markers for streaming display")
+	}
+	if strings.Contains(joined, "###") {
+		t.Error("renderStreaming should strip '###' header markers for streaming display")
+	}
+	if !strings.Contains(joined, "Check: Build") {
+		t.Error("renderStreaming should preserve header text content")
+	}
+	if !strings.Contains(joined, "Command run:") {
+		t.Error("renderStreaming should preserve bold text content")
 	}
 }
 
-// TestRenderStreaming_CacheHit verifies that calling renderStreaming twice
-// with the same input returns the same result without re-rendering.
+// TestRenderStreaming_PreservesCodeBlockContent verifies that code inside
+// fenced code blocks is preserved while the ``` fence markers are removed.
+func TestRenderStreaming_PreservesCodeBlockContent(t *testing.T) {
+	md := "```go\nfunc main() {\n    fmt.Println(\"hello\")\n}\n```"
+	lines := renderStreaming(md, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "func main()") {
+		t.Error("renderStreaming should preserve code block content")
+	}
+	if !strings.Contains(joined, "fmt.Println") {
+		t.Error("renderStreaming should preserve code block content")
+	}
+	if strings.Contains(joined, "```") {
+		t.Error("renderStreaming should strip code fence markers")
+	}
+}
+
 func TestRenderStreaming_CacheHit(t *testing.T) {
 	md := "### Cache Test\n\nUnique content for cache test 12345."
 	first := renderStreaming(md, 80)
@@ -43,7 +62,6 @@ func TestRenderStreaming_CacheHit(t *testing.T) {
 	}
 }
 
-// TestRenderStreaming_EmptyInput verifies that empty input returns an empty slice.
 func TestRenderStreaming_EmptyInput(t *testing.T) {
 	lines := renderStreaming("", 80)
 	if len(lines) != 0 {
@@ -51,10 +69,6 @@ func TestRenderStreaming_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestRenderStreaming_CollapsesBlankLinesInCodeBlock verifies that runs of
-// consecutive blank lines are collapsed to a single blank line. The plain-text
-// streaming path collapses 3+ newlines (\n\n\n) to \n\n, matching the behavior
-// of the final glamour-rendered display.
 func TestRenderStreaming_CollapsesBlankLinesInCodeBlock(t *testing.T) {
 	md := "```\n### Check: Build\n**Command run:**\n  go build\n\n\n**Result: PASS**\n```"
 	lines := renderStreaming(md, 80)

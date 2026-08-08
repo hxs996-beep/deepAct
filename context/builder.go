@@ -167,7 +167,8 @@ func (a *ContextAssembler) EstimateTokens(messages []engine.ModelMessage) int {
 	count := 0
 	for _, msg := range messages {
 		count += a.estimator.Estimate(msg.Content)
-		count += a.estimator.Estimate(msg.ReasoningContent)
+		// reasoning_content is not counted: the wire request strips it (see
+		// llm.stripReasoningContent), so it never contributes to the billed prompt.
 		if len(msg.ToolCalls) > 0 {
 			for _, call := range msg.ToolCalls {
 				count += a.estimator.Estimate(call.ID)

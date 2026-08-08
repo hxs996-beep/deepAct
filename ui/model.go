@@ -568,7 +568,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "tool_start":
-			m.finalizeTurnBlocks()
+			m.finalizeTurnBlocks(false)
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = msg.Name + ": " + msg.Detail
@@ -1415,27 +1415,46 @@ func (m *Model) flushNarration() {
 // display messages, then clears both. Called at turn boundaries (tool_start)
 // and at finishStreaming to ensure each turn's narration + tools appear as
 // distinct blocks in temporal order.
-func (m *Model) finalizeTurnBlocks() {
+//
+// toolsFirst controls block ordering so the displayed flow matches causality:
+//   - false (turn boundary / tool_start): narration states intent BEFORE the
+//     tools run, so order is [narration, toolsummary].
+//   - true (finishStreaming / run end): the tools already ran and the final
+//     narration is the conclusion AFTER them, so order is [toolsummary, narration].
+func (m *Model) finalizeTurnBlocks(toolsFirst bool) {
 	m.flushNarration()
-	if strings.TrimSpace(m.narration) != "" {
-		m.messages = append(m.messages, DisplayMessage{
-			Role:    "narration",
-			Content: m.narration,
-		})
-		m.narration = ""
-		m.narrationJustFinalized = true
-	}
-	if len(m.toolTree) > 0 {
-		snapshot := append([]ToolNode(nil), m.toolTree...)
-		for i := range snapshot {
-			snapshot[i].Children = append([]ToolNode(nil), snapshot[i].Children...)
+
+	appendNarration := func() {
+		if strings.TrimSpace(m.narration) != "" {
+			m.messages = append(m.messages, DisplayMessage{
+				Role:    "narration",
+				Content: m.narration,
+			})
+			m.narration = ""
+			m.narrationJustFinalized = true
 		}
-		m.messages = append(m.messages, DisplayMessage{
-			Role:     "toolsummary",
-			Content:  renderToolSummary(m.toolTree),
-			ToolTree: snapshot,
-		})
-		m.toolTree = nil
+	}
+	appendTools := func() {
+		if len(m.toolTree) > 0 {
+			snapshot := append([]ToolNode(nil), m.toolTree...)
+			for i := range snapshot {
+				snapshot[i].Children = append([]ToolNode(nil), snapshot[i].Children...)
+			}
+			m.messages = append(m.messages, DisplayMessage{
+				Role:     "toolsummary",
+				Content:  renderToolSummary(m.toolTree),
+				ToolTree: snapshot,
+			})
+			m.toolTree = nil
+		}
+	}
+
+	if toolsFirst {
+		appendTools()
+		appendNarration()
+	} else {
+		appendNarration()
+		appendTools()
 	}
 }
 
@@ -1493,7 +1512,9 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	if msg.Err == nil && msg.Response != nil && !msg.Response.Blocked && msg.Response.Summary != "" {
 		narrationDupesSummary = m.narrationDuplicatesSummary(msg.Response.Summary)
 	}
-	m.finalizeTurnBlocks()
+	// Run end: tools already executed, so finalize tools before the concluding
+	// narration/Summary to keep the displayed flow in causal order.
+	m.finalizeTurnBlocks(true)
 	m.spinners = nil
 	if msg.Err != nil {
 		runnerLog.Printf("finishStreaming err: %v", msg.Err)
@@ -2245,8 +2266,16 @@ func renderStreaming(streaming string, width int) []string {
 	// and collapses blank lines for a more readable streaming view.
 	// The final display (after streaming completes) uses glamour via
 	// renderMarkdown for full formatting.
+	//
+	// NOTE: active streaming output is deliberately PLAIN TEXT — no
+	// AssistantMsgStyle color wrapper. During streaming the text grows and
+	// re-wraps every tick; ANSI SGR sequences combined with CJK wide
+	// characters make Bubble Tea's incremental line diff drift on terminals,
+	// visibly swapping characters ("昵称(邮箱" -> "昵(称邮箱"). Plain text
+	// lines re-render cleanly. Full styling returns when the turn finalizes
+	// (renderMessage -> renderMarkdown).
 	processed := preprocessStreamingMarkdown(streaming)
-	lines := wrapText(AssistantMsgStyle.Render(processed), width)
+	lines := wrapText(processed, width)
 	streamRenderCache.content = streaming
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines
@@ -2792,10 +2821,25 @@ func wrapInputText(text string, width int) string {
 		}
 		// Hard-wrap by visual width, not rune count.
 		// This correctly handles CJK characters (visual width 2) and emoji.
+		// ANSI escape sequences (e.g. the styled paste indicator embedded in
+		// ib.text) are skipped as zero-width tokens so they are never split
+		// across a hard wrap — a split sequence would corrupt terminal parsing.
 		runes := []rune(line)
 		var chunk strings.Builder
 		chunkWidth := 0
-		for _, r := range runes {
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+			if r == 0x1b {
+				// Copy the whole escape sequence into the chunk without
+				// counting its width, and without wrapping inside it.
+				start := i
+				i++
+				for i < len(runes) && runes[i] != 'm' {
+					i++
+				}
+				chunk.WriteString(string(runes[start : i+1]))
+				continue
+			}
 			rw := lipgloss.Width(string(r))
 			if chunkWidth+rw > width && chunkWidth > 0 {
 				result = append(result, chunk.String())

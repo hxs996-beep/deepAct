@@ -319,13 +319,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// 用可见回复作为方案原因展示，不混入内部思考。
-	// ReasoningContent 是模型内部思考（通常是英文），不应展示给用户。
-	// 当 Content 为空（DeepSeek 常裸发 edit/write 工具调用而不带正文）时，
-	// 回退到历史中最近一条实质性 assistant 文本——即用户刚确认过的分析报告，
-	// 避免显示误导性的“AI 未提供修改原因”，让确认闸门连贯。
-	mergedReasoning := reasoningForEditPlan(e.history, assistant.Content)
-
 	// Skill HARD-GATE: when the active skill has a pre-implementation gate
 	// (declared in its TOML [gate] section) and the gate has not been passed,
 	// block edit/write calls according to the gate type:
@@ -387,10 +380,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// present a text-only analysis report and get user confirmation. This gate
 	// fires when the agent has done searches (runToolCallCount > 0) and is now
 	// attempting to modify code, but hasn't yet presented its findings to the
-	// user. After 2 blocks, the gate gives up and lets the edit plan guard
-	// take over in degraded mode (see degradation handler below).
+	// user. After 2 blocks, the gate gives up and lets edits proceed directly
+	// in degraded mode (see degradation handler below).
 	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
-		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
 		e.analysisNudgeCount < 2 {
 		var editCalls []ToolCallRequest
 		for _, call := range calls {
@@ -432,10 +424,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// analysis report, the gate gives up blocking. Instead of silently
 	// falling through (which leaves the LLM unaware the gate is lifted and
 	// causes it to submit edits one at a time), send a one-time message
-	// telling the LLM to batch ALL planned edits. This ensures the edit plan
-	// guard captures the full change set for a single comprehensive confirmation.
+	// telling the LLM to batch ALL planned edits. This ensures the full change
+	// set is submitted together for direct execution.
 	if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&
-		!e.state.PlanConfirmed && e.pendingEditPlan == nil &&
 		e.analysisNudgeCount >= 2 {
 		var editCalls []ToolCallRequest
 		for _, call := range calls {
@@ -461,52 +452,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				})
 			}
 			return TurnResult{Done: false, FinishReason: finish}, nil
-		}
-	}
-
-	// Edit plan guard: before executing any edit/write calls for the first time
-	// in this Run(), block and present the agent's understanding + proposed changes
-	// to the user for approval.
-	if e.pendingEditPlan == nil && !e.state.PlanConfirmed {
-		var editCalls []ToolCallRequest
-		for _, call := range calls {
-			if call.Name == "edit" || call.Name == "write" {
-				editCalls = append(editCalls, call)
-			}
-		}
-		if len(editCalls) > 0 {
-			turnLog.Printf("edit plan guard: blocking on %d edit/write call(s) (runToolCallCount=%d)", len(editCalls), e.runToolCallCount)
-			plan := &PendingEditPlan{
-				Reasoning: mergedReasoning,
-				Calls:     calls, // store ALL calls (read, edit, write, bash, handoff, etc.)
-				State:     cloneTaskState(e.state),
-			}
-			for _, c := range editCalls {
-				action := buildEditAction(c)
-				plan.Edits = append(plan.Edits, action)
-			}
-			e.pendingEditPlan = plan
-
-			// Build a rich plan summary for the user
-			zh := e.isChinese
-			planSummary := formatEditPlanSummary(plan, zh, e.config.WorkDir)
-
-			// Add assistant (with tool_calls) first, then tool messages to close IDs.
-			e.history = append(e.history, assistant)
-			for _, c := range calls {
-				e.history = append(e.history, Message{
-					Role:       "tool",
-					ToolCallID: c.ID,
-					Content:    "Blocked: " + planSummary,
-					Timestamp:  time.Now(),
-				})
-			}
-			return TurnResult{
-				Blocked:    true,
-				BlockedBy:  GuardAskUser,
-				Questions:  []string{planSummary},
-				FinishReason: finish,
-			}, nil
 		}
 	}
 
@@ -1478,102 +1423,9 @@ func addToWorkingSet(state *TaskState, path string, notes string) {
 	state.WorkingSet.Files = append(state.WorkingSet.Files, FileRef{Path: path, Notes: notes})
 }
 
-// buildEditAction extracts a human-readable description of a proposed edit from a tool call.
-func buildEditAction(call ToolCallRequest) PendingEditAction {
-	var m map[string]interface{}
-	if err := json.Unmarshal(call.Input, &m); err != nil {
-		return PendingEditAction{Tool: call.Name, Path: "?", Summary: "? (parse error)"}
-	}
 
-	path, _ := m["path"].(string)
-	if path == "" {
-		if p, ok := m["file_path"].(string); ok {
-			path = p
-		}
-	}
 
-	action := PendingEditAction{Tool: call.Name, Path: path}
 
-	if call.Name == "edit" {
-		oldStr, _ := m["old_string"].(string)
-		newStr, _ := m["new_string"].(string)
-		action.OldText = oldStr
-		action.NewText = newStr
-	} else {
-		// write tool
-		if content, ok := m["content"].(string); ok {
-			action.NewText = content
-		}
-	}
-	// Summary is intentionally empty — formatEditPlanSummary shows reasoning + path list.
-	return action
-}
-
-// reasoningForEditPlan returns the reasoning text for an edit plan summary.
-// When the current assistant content is non-empty, it is used directly.
-// When empty (e.g. DeepSeek emits bare edit/write tool calls without a body),
-// the function walks history backwards to find the most recent assistant
-// message with non-empty content — typically the analysis report the user
-// just confirmed. This prevents the misleading "AI 未提供修改原因" placeholder.
-func reasoningForEditPlan(history []Message, currentContent string) string {
-	if strings.TrimSpace(currentContent) != "" {
-		return currentContent
-	}
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
-			return history[i].Content
-		}
-	}
-	return ""
-}
-
-// formatEditPlanSummary builds a user-facing summary of the agent's proposed changes.
-// The summary shows the reasoning (WHY) first, then asks the user to confirm.
-// On confirmation, the plan is executed directly with diffs shown progressively
-// during tool execution.
-func formatEditPlanSummary(plan *PendingEditPlan, zh bool, cwd string) string {
-	var sb strings.Builder
-
-	// Step 1: Show the reasoning — WHY these changes are proposed.
-	if reasoning := plan.Reasoning; reasoning != "" {
-		sb.WriteString(reasoning)
-		sb.WriteString("\n")
-	}
-	// Step 2: List the files that will be modified - WHAT will change.
-	// Filename-only: the per-file diff is shown progressively during execution
-	// after confirmation, so the plan summary stays a compact file list. Earlier
-	// versions inlined an old->new preview per edit, which dumped noisy import
-	// blocks and made the confirmation prompt anything but "简单直观".
-	if len(plan.Edits) > 0 {
-		if zh {
-			sb.WriteString(fmt.Sprintf("\n### 涉及 %d 个文件的修改：\n", len(plan.Edits)))
-		} else {
-			sb.WriteString(fmt.Sprintf("\n### %d file(s) to modify:\n", len(plan.Edits)))
-		}
-		for i, edit := range plan.Edits {
-			sb.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, relPath(edit.Path, cwd)))
-		}
-	}
-
-	// Step 3: Ask for confirmation.
-	if zh {
-		sb.WriteString("\n确认执行修改？")
-	} else {
-		sb.WriteString("\nProceed with the changes?")
-	}
-	return sb.String()
-}
-
-// cloneTaskState creates a shallow-but-safe copy of TaskState for snapshotting.
-func cloneTaskState(s *TaskState) *TaskState {
-	if s == nil {
-		return nil
-	}
-	data, _ := json.Marshal(s)
-	var clone TaskState
-	json.Unmarshal(data, &clone)
-	return &clone
-}
 
 // isTestFile returns true if the file path looks like a test file.
 func isTestFile(path string) bool {

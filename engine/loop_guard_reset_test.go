@@ -53,8 +53,8 @@ func TestRun_ResetsLoopGuardOnNewRun(t *testing.T) {
 // 用户已确认执行" from the stale "✅ 分析报告已确认" marker left in history.
 //
 // AnalysisReportConfirmed is only meaningful within the single Run where
-// handleAnalysisNudgeConfirmation sets it (so the edit-plan guard can take
-// over); later Runs are covered by pendingEditPlan or PlanConfirmed. It must
+// handleAnalysisNudgeConfirmation sets it (so the analysis gate can take
+// over); later Runs are covered by AnalysisReportConfirmed. It must
 // therefore be reset per Run.
 func TestRun_ResetsAnalysisReportConfirmedOnNewRun(t *testing.T) {
 	e := &Engine{

@@ -56,7 +56,7 @@ func TestHandleAnalysisNudgeConfirmation(t *testing.T) {
 
 // TestExecuteTurn_AnalysisGateDegradation_BatchesEdits verifies that when
 // the analysis report gate degrades (analysisNudgeCount >= 2), it does NOT
-// silently fall through to the edit plan guard. Instead, it sets
+// silently fall through. Instead, it sets
 // AnalysisReportConfirmed=true, clears pendingAnalysisNudge, and sends a
 // one-time message telling the LLM to batch ALL planned edits. This prevents
 // the LLM from submitting edits one at a time after being blocked twice.

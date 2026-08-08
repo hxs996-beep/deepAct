@@ -564,6 +564,57 @@ func TestBuildRequestBody_BackfillsOrphanedToolCallID(t *testing.T) {
 	}
 }
 
+// TestBuildRequestBody_StripsReasoningContent guards the cache/cost fix: an
+// assistant turn's reasoning_content is a response-only field and must never be
+// echoed back in the outgoing request. DeepSeek counts re-sent reasoning as
+// billable prompt input (~500 tok/turn on a reasoner chain) and can reject it
+// outright. The session keeps it for display/archive; the wire request must not
+// carry it — regardless of what the caller put in the ChatRequest messages
+// (including the ReasoningEchoManager's echo).
+func TestBuildRequestBody_StripsReasoningContent(t *testing.T) {
+	client := &DeepSeekClient{}
+	body, err := client.buildRequestBody(ChatRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []Message{
+			{Role: "user", Content: "explain"},
+			{Role: "assistant", Content: "the answer", ReasoningContent: "SECRET-CHAIN-OF-THOUGHT"},
+			{Role: "assistant", ReasoningContent: "tool reasoning", ToolCalls: []ToolCall{
+				{ID: "call_1", Type: "function", Function: FunctionCall{Name: "read", Arguments: `{"path":"a.go"}`}},
+			}},
+			{Role: "tool", ToolCallID: "call_1", Content: "package main"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody error: %v", err)
+	}
+	raw := string(body)
+	if strings.Contains(raw, "reasoning_content") {
+		t.Errorf("outgoing request must not carry a reasoning_content field: %s", raw)
+	}
+	if strings.Contains(raw, "SECRET-CHAIN-OF-THOUGHT") || strings.Contains(raw, "tool reasoning") {
+		t.Errorf("assistant chain-of-thought leaked into the request: %s", raw)
+	}
+	// The visible answer and tool calls must survive — we only drop reasoning.
+	var parsed struct {
+		Messages []Message `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(parsed.Messages) != 4 {
+		t.Fatalf("len(messages) = %d, want 4", len(parsed.Messages))
+	}
+	if parsed.Messages[1].Content != "the answer" {
+		t.Errorf("assistant content was dropped along with reasoning: %q", parsed.Messages[1].Content)
+	}
+	if len(parsed.Messages[2].ToolCalls) != 1 {
+		t.Errorf("tool_calls were dropped along with reasoning: %+v", parsed.Messages[2])
+	}
+	if parsed.Messages[2].ReasoningContent != "" {
+		t.Errorf("parsed message still carries reasoning: %q", parsed.Messages[2].ReasoningContent)
+	}
+}
+
 func newTestServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

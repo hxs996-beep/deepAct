@@ -71,7 +71,7 @@ func TestFinalizeTurnBlocks_FlushesPendingNarration(t *testing.T) {
 		narrationPending: " +pending",
 		messages:         []DisplayMessage{},
 	}
-	m.finalizeTurnBlocks()
+	m.finalizeTurnBlocks(false)
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(m.messages))
 	}
