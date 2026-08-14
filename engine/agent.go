@@ -18,6 +18,7 @@ const (
 	HandoffToolName        = "handoff_to_agent"
 	ActivateSkillToolName  = "activate_skill"
 	TaskCompleteToolName   = "task_complete"
+	TodoWriteToolName      = "todo_write"
 )
 
 // Handoff carries delegation parameters from parent to sub-agent.
@@ -192,6 +193,43 @@ func handoffToolSpec(zh bool) ModelTool {
 			Name:        HandoffToolName,
 			Description: desc,
 			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// todoWriteToolSpec returns the tool definition for tracking step progress.
+// The model calls this to report the current state of its step-by-step todo
+// list as a FULL snapshot (not a diff). The UI renders it as a plain-text
+// todo list above the input. Skill-agnostic: any skill can use it.
+func todoWriteToolSpec() ModelTool {
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        TodoWriteToolName,
+			Description: "Report the current state of your step-by-step todo list. Call this whenever you start, complete, or change the status of a step. Pass the FULL list of steps each time (snapshot, not diff). The UI displays it as a plain-text todo list. Status must be one of: pending, in_progress, completed.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"todos": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"content": {
+									"type": "string",
+									"description": "Step description (plain text)"
+								},
+								"status": {
+									"type": "string",
+									"enum": ["pending", "in_progress", "completed"]
+								}
+							},
+							"required": ["content", "status"]
+						}
+					}
+				},
+				"required": ["todos"]
+			}`),
 		},
 	}
 }
