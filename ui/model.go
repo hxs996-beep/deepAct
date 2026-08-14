@@ -2452,14 +2452,14 @@ func renderTodoList(items []engine.TodoItem, width int) []string {
 // progress in a single overlay block. When both are present, they're displayed
 // side-by-side (left/right) with a vertical divider.
 func renderOverlayStatus(todoItems []engine.TodoItem, members []MemberStatus, width int) []string {
-	tddActive := len(todoItems) > 0
+	todoActive := len(todoItems) > 0
 	memberActive := len(members) > 0
 
-	if !tddActive && !memberActive {
+	if !todoActive && !memberActive {
 		return nil
 	}
 
-	if tddActive && memberActive {
+	if todoActive && memberActive {
 		// Side-by-side layout: split width in half
 		halfWidth := (width - 3) / 2 // account for divider and spacing
 		if halfWidth < 30 {
@@ -2499,7 +2499,7 @@ func renderOverlayStatus(todoItems []engine.TodoItem, members []MemberStatus, wi
 		return combined
 	}
 
-	if tddActive {
+	if todoActive {
 		// Ensure todo list panel gets full width (renderTodoList handles this via width)
 		return renderTodoList(todoItems, width)
 	}
