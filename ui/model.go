@@ -1804,10 +1804,13 @@ func renderMessage(msg DisplayMessage, width int) []string {
 		}
 		return wrapLines(styled, width)
 	case "narration":
-		// NarrationStyle adds PaddingLeft(2) + PaddingRight(1) = 3 columns.
-		// Subtract from width so padded output fits terminal, preventing
-		// auto-wrap that corrupts diff renderer line tracking (garbled text).
-		rendered := renderMarkdown(content, width-3)
+		// Narration renders with the same glamour Document margin (2 columns)
+		// as assistant messages. NarrationStyle only adds the foreground color —
+		// no extra padding — so narration and assistant share identical column
+		// alignment. Width is NOT further reduced here: renderMarkdown already
+		// applies WithWordWrap(width-2) internally, and a second subtraction
+		// made narration wrap 5 columns earlier than other messages.
+		rendered := renderMarkdown(content, width)
 		return wrapLines(strings.Split(NarrationStyle.Render(rendered), "\n"), width)
 	default:
 		rendered := renderMarkdown(content, width)
@@ -2275,7 +2278,20 @@ func renderStreaming(streaming string, width int) []string {
 	// lines re-render cleanly. Full styling returns when the turn finalizes
 	// (renderMessage -> renderMarkdown).
 	processed := preprocessStreamingMarkdown(streaming)
-	lines := wrapText(processed, width)
+	// Indent streamed text by the same glamour Document margin (2 columns)
+	// that finalized narration/assistant messages use, and reserve that
+	// margin in the wrap width. Finalized messages render as
+	// margin(2) + glamour wordwrap(width-2) = width columns; streaming must
+	// produce the same: prefix(2) + wrapText(width-2) = width columns.
+	// Without the reserved margin, prefixed lines would exceed the caller's
+	// width and be truncated by View() Step 7, dropping the last character
+	// of every line.
+	lines := wrapText(processed, width-2)
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = "  " + l
+		}
+	}
 	streamRenderCache.content = streaming
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines

@@ -7,11 +7,11 @@ import (
 )
 
 // TestRenderMessage_NarrationFitsWidth verifies that narration message lines
-// (after NarrationStyle padding) do not exceed the given width. NarrationStyle
-// adds PaddingLeft(2) + PaddingRight(1) = 3 columns on top of renderMarkdown's
-// output. If renderMarkdown uses the full width, the padded lines overflow the
-// terminal, causing auto-wrap that corrupts the diff renderer's line tracking
-// and produces garbled text.
+// do not exceed the given width. Narration renders with glamour's Document
+// margin (2 columns) applied via renderMarkdown(content, width), with
+// NarrationStyle adding only the foreground color (no padding). If
+// renderMarkdown uses the full width, any styled line that exceeds the
+// terminal auto-wraps and corrupts the diff renderer's line tracking.
 func TestRenderMessage_NarrationFitsWidth(t *testing.T) {
 	width := 40
 	msg := DisplayMessage{
