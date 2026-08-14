@@ -583,12 +583,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
 	// followed by tool messages responding to each tool_call_id.
 	pendingActivateMsgs := e.processActivateSkillCalls(calls)
+	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 
 	e.history = append(e.history, assistant)
 
 	// Add activate_skill tool messages AFTER the assistant message, so the
 	// DeepSeek API sees the correct order: assistant(tool_calls) → tool.
 	for _, msg := range pendingActivateMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingTodoMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -603,6 +607,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if call.Name == HandoffToolName {
 			handoffCalls = append(handoffCalls, call)
 		} else if call.Name == ActivateSkillToolName {
+			continue
+		} else if call.Name == TodoWriteToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -749,6 +755,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, handoffToolSpec(e.isChinese))
 	specs = append(specs, activateSkillToolSpec())
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
+	specs = append(specs, todoWriteToolSpec())
 	return specs
 }
 
@@ -1072,6 +1079,11 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 
 	// Skill/agent tools — show the human-relevant target, not an empty line.
 	switch toolName {
+	case "todo_write":
+		if todos, ok := m["todos"].([]interface{}); ok {
+			return fmt.Sprintf("update todos: %d 项", len(todos))
+		}
+		return "update todos"
 	case "skill_install", "activate_skill":
 		// skill_install uses "name"; activate_skill uses "skill_name".
 		if n, ok := m["name"].(string); ok && n != "" {
@@ -1765,6 +1777,68 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 		})
 	}
 	return pendingActivateMsgs
+}
+
+// processTodoWriteCalls intercepts todo_write tool calls from the assistant's
+// response. Each call carries a FULL snapshot of the step list; the engine
+// validates it and forwards it to the UI as a "todo_update" progress event.
+// Every call receives a tool response message (satisfying the DeepSeek API
+// requirement that every tool_call_id has a matching tool response).
+func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != TodoWriteToolName {
+			continue
+		}
+		var params struct {
+			Todos []TodoItem `json:"todos"`
+		}
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid todo_write arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		valid := true
+		for _, t := range params.Todos {
+			if strings.TrimSpace(t.Content) == "" {
+				msgs = append(msgs, Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    "Error: todo_write requires non-empty content for each item",
+					Timestamp:  time.Now(),
+				})
+				valid = false
+				break
+			}
+			if t.Status != "pending" && t.Status != "in_progress" && t.Status != "completed" {
+				msgs = append(msgs, Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    fmt.Sprintf("Error: invalid todo status %q (must be pending, in_progress, or completed)", t.Status),
+					Timestamp:  time.Now(),
+				})
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{Type: "todo_update", Todos: params.Todos})
+		}
+		msgs = append(msgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    fmt.Sprintf("✓ 已更新 %d 项 todo", len(params.Todos)),
+			Timestamp:  time.Now(),
+		})
+	}
+	return msgs
 }
 
 // processHandoffResults builds tool response messages for handoff call results.
