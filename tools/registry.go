@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -164,5 +165,10 @@ func (r *Registry) AllSpecs() []ToolSpec {
 	for _, t := range r.tools {
 		specs = append(specs, t.Spec())
 	}
+	// Sort by name: Go map iteration is deliberately randomized, and DeepSeek
+	// tokenizes the tools array before messages — any per-turn ordering jitter
+	// would invalidate the entire cached prefix. Deterministic order keeps the
+	// request bytes stable across turns for prefix-cache hits.
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
 	return specs
 }

@@ -20,6 +20,20 @@ func (s *stubClassifier) IsConclusion(_ context.Context, check ConclusionCheck) 
 	return s.conclusion, s.err
 }
 
+// stubVerdictJudge 是 VerdictJudge 的可控 stub。
+type stubVerdictJudge struct {
+	verdict TextVerdict
+	err     error
+	called  bool
+	last    ConclusionCheck
+}
+
+func (s *stubVerdictJudge) Classify(_ context.Context, check ConclusionCheck) (TextVerdict, error) {
+	s.called = true
+	s.last = check
+	return s.verdict, s.err
+}
+
 func TestStalledNarrationHook_BlocksWhenNotConclusion(t *testing.T) {
 	hook := &StalledNarrationHook{
 		MaxRetries: 4,

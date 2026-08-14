@@ -25,6 +25,10 @@ type StopHookResult struct {
 	Exhausted bool   // true if this hook didn't block because MaxRetries was reached
 	Message   string // nudge message injected as a user message (when Block=true)
 	Reason    string // block reason (for logging)
+	// AwaitUser is true when the model's text-only reply is a question to
+	// the user. The caller must stop the loop and present the reply as a
+	// question — the model must never decide on the user's behalf.
+	AwaitUser bool
 }
 
 // StopHook is checked when the model outputs text without tool calls.
@@ -38,13 +42,31 @@ type StopHook interface {
 // this Run(). A text-only response with zero prior tool calls cannot be a
 // final conclusion - the model is narrating intent without acting.
 // Blocks up to MaxRetries times (default 3), then allows exit.
+// When Verdict is set and the reply is a question, the hook returns
+// AwaitUser=true instead of nudging — the model is asking the user a
+// decision and the loop must stop and wait.
 type ZeroToolCallHook struct {
 	MaxRetries int
+	Verdict    VerdictJudge
 }
 
-func (h *ZeroToolCallHook) Check(_ context.Context, sc StopHookContext) StopHookResult {
+func (h *ZeroToolCallHook) Check(ctx context.Context, sc StopHookContext) StopHookResult {
 	if sc.RunToolCallCount > 0 {
 		return StopHookResult{}
+	}
+	// A question to the user takes priority over nudging: the model must
+	// never decide on the user's behalf. Verdict judge is semantic (LLM),
+	// keyword-free — missed questions are destructive, so we never guess
+	// from keywords here.
+	if h.Verdict != nil {
+		v, err := h.Verdict.Classify(ctx, ConclusionCheck{
+			Goal: sc.Goal,
+			Text: sc.LastContent,
+		})
+		if err == nil && v == VerdictQuestion {
+			turnLog.Printf("zero-tool-call hook: question detected, awaiting user (retry=%d)", sc.StopHookRetryCount)
+			return StopHookResult{AwaitUser: true, Reason: "question_to_user"}
+		}
 	}
 	maxRetries := h.MaxRetries
 	if maxRetries <= 0 {
@@ -78,16 +100,55 @@ func (h *ZeroToolCallHook) Check(_ context.Context, sc StopHookContext) StopHook
 type StalledNarrationHook struct {
 	MaxRetries int
 	Classifier ConclusionJudge
+	// Verdict is the semantic three-way judge (conclusion/question/
+	// intermediate). When set, it takes priority over the binary Classifier:
+	// a question verdict returns AwaitUser=true (stop and wait for the user)
+	// instead of nudging the model to continue. On judge error, falls back
+	// to the binary Classifier (existing behavior).
+	Verdict VerdictJudge
 }
 
 func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) StopHookResult {
 	if sc.RunToolCallCount == 0 {
 		return StopHookResult{}
 	}
+	// A question to the user takes priority over everything, including
+	// AnalysisMode: the model must never decide on the user's behalf.
+	if h.Verdict != nil {
+		v, err := h.Verdict.Classify(ctx, ConclusionCheck{
+			Goal:            sc.Goal,
+			Text:            sc.LastContent,
+			ToolCallSummary: sc.ToolCallSummary,
+		})
+		if err == nil {
+			switch v {
+			case VerdictQuestion:
+				turnLog.Printf("stalled-narration hook: question detected, awaiting user (retry=%d)", sc.StopHookRetryCount)
+				return StopHookResult{AwaitUser: true, Reason: "question_to_user"}
+			case VerdictConclusion:
+				return StopHookResult{}
+			}
+			// VerdictIntermediate. In analysis mode, partial/intermediate text
+			// is still part of the report — allow exit without nudging. Outside
+			// analysis mode, nudge to continue (same as the binary classifier's
+			// "not a conclusion" branch below).
+			if sc.AnalysisMode {
+				return StopHookResult{}
+			}
+			maxRetries := h.MaxRetries
+			if maxRetries <= 0 {
+				maxRetries = 2
+			}
+			if sc.StopHookRetryCount >= maxRetries {
+				return StopHookResult{Exhausted: true}
+			}
+			return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "stalled_narration"}
+		}
+		turnLog.Printf("stalled-narration hook: verdict judge error %v (falling back to binary classifier)", err)
+	}
 	// Analysis mode: text-only output after tool calls is the analysis report.
-	// Allow exit without content inspection - the intent was explicitly
-	// classified as analysis-only by detectUserIntent. No keyword matching,
-	// no classifier call: the report IS the expected terminal output.
+	// Question detection already ran above (Verdict judge), so reaching here
+	// means the reply is not a question. Allow exit without content inspection.
 	if sc.AnalysisMode {
 		return StopHookResult{}
 	}
@@ -145,9 +206,23 @@ func stalledNudgeMsg(sc StopHookContext) string {
 
 // SetStopHooks registers stop hooks checked when the model outputs text
 // without tool calls. A blocking hook injects a nudge message and continues
-// the agent loop instead of terminating.
+// the agent loop instead of terminating. Also extracts the VerdictJudge from
+// registered hooks so the tool branch's self-answering guard can reuse the
+// same semantic question detector (e.verdictJudge).
 func (e *Engine) SetStopHooks(hooks []StopHook) {
 	e.stopHooks = hooks
+	for _, h := range hooks {
+		switch v := h.(type) {
+		case *ZeroToolCallHook:
+			if v.Verdict != nil {
+				e.verdictJudge = v.Verdict
+			}
+		case *StalledNarrationHook:
+			if v.Verdict != nil {
+				e.verdictJudge = v.Verdict
+			}
+		}
+	}
 }
 
 // NewConclusionClassifier constructs a ConclusionClassifier bound to the
@@ -164,6 +239,11 @@ func (e *Engine) runStopHooks(ctx context.Context, sc StopHookContext) StopHookR
 	for _, hook := range e.stopHooks {
 		result := hook.Check(ctx, sc)
 		if result.Block {
+			return result
+		}
+		// AwaitUser takes priority over continuing to later hooks: a question
+		// to the user must stop the loop, not be swallowed by a later hook.
+		if result.AwaitUser {
 			return result
 		}
 		if result.Exhausted {

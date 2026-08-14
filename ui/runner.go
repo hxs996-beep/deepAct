@@ -92,9 +92,14 @@ func (r *ProgressEngineRunner) Cancel() {
 func (r *ProgressEngineRunner) getEngine() *engine.Engine {
 	r.once.Do(func() {
 		r.eng = engine.NewEngine(r.Config, r.Deps)
+		// The ConclusionClassifier implements both the binary ConclusionJudge
+		// and the three-way VerdictJudge (conclusion/question/intermediate).
+		// Sharing one instance keeps the verdict logic consistent across
+		// both hooks and avoids extra allocations.
+		verdict := r.eng.NewConclusionClassifier()
 		r.eng.SetStopHooks([]engine.StopHook{
-			&engine.ZeroToolCallHook{MaxRetries: 5},
-			&engine.StalledNarrationHook{MaxRetries: 4, Classifier: r.eng.NewConclusionClassifier()},
+			&engine.ZeroToolCallHook{MaxRetries: 5, Verdict: verdict},
+			&engine.StalledNarrationHook{MaxRetries: 4, Classifier: verdict, Verdict: verdict},
 		})
 		r.eng.SetIntentJudge(r.eng.NewIntentClassifier())
 	})

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/deepact/deepact/engine"
@@ -121,9 +122,77 @@ func TestFinishStreaming_DifferentNarrationAndSummary_KeepsBoth(t *testing.T) {
 	}
 }
 
-// TestFinishStreaming_MarkdownNarrationMatchesPlainSummary verifies that
-// narration with markdown markers matches a plain-text Summary after
-// normalization. When they match, only one copy is kept (as narration).
+// TestFinishStreaming_AwaitingUser_KeepsNarrationSkipsDuplicate verifies that
+// when the engine blocks with BlockedBy="awaiting_user", the already-streamed
+// narration (intermediate analysis + the question itself) is snapshotted and
+// no duplicate assistant message is appended — the user sees the thinking
+// process AND the question, exactly once.
+func TestFinishStreaming_AwaitingUser_KeepsNarrationSkipsDuplicate(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	questionText := "方案1、2、3 你选哪个？"
+	m.narration = "分析发现两个问题需要决策。\n" + questionText
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{
+			Blocked:   true,
+			BlockedBy: "awaiting_user",
+			Questions: []string{questionText},
+		},
+	})
+
+	// Narration (thinking process + question) must be preserved as a message.
+	foundNarration := false
+	assistantCount := 0
+	for _, msg := range m.messages {
+		if msg.Role == "narration" && strings.Contains(msg.Content, questionText) {
+			foundNarration = true
+		}
+		if msg.Role == "assistant" {
+			assistantCount++
+		}
+	}
+	if !foundNarration {
+		t.Errorf("expected narration (with question) to be preserved, messages: %+v", m.messages)
+	}
+	if assistantCount != 0 {
+		t.Errorf("expected NO duplicate assistant message for awaiting_user, got %d assistant messages: %+v", assistantCount, m.messages)
+	}
+}
+
+// TestFinishStreaming_AwaitingUser_NoNarration_AppendsQuestion verifies that
+// when nothing was streamed (empty narration), the awaiting_user question is
+// still shown as an assistant message — the user must see the question.
+func TestFinishStreaming_AwaitingUser_NoNarration_AppendsQuestion(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	questionText := "是否继续深入排查？"
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{
+			Blocked:   true,
+			BlockedBy: "awaiting_user",
+			Questions: []string{questionText},
+		},
+	})
+
+	found := false
+	for _, msg := range m.messages {
+		if msg.Role == "assistant" && strings.Contains(msg.Content, questionText) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected question in assistant message when narration empty, messages: %+v", m.messages)
+	}
+}
+
 func TestFinishStreaming_MarkdownNarrationMatchesPlainSummary(t *testing.T) {
 	m := &Model{
 		width:    80,

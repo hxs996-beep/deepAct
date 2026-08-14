@@ -239,6 +239,18 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			ToolCallSummary:    buildToolCallSummary(e.history, e.runStartHistoryLen),
 			AnalysisMode:       e.state.AnalysisMode,
 		})
+		// The model asked the user a question. Stop the loop and present the
+		// question instead of nudging the model to continue — the model must
+		// never decide on the user's behalf.
+		if hookResult.AwaitUser {
+			turnLog.Printf("turn %d: awaiting user (question detected, blocked)", e.state.TurnNumber)
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "awaiting_user",
+				Questions:    []string{content},
+				FinishReason: finish,
+			}, nil
+		}
 		if hookResult.Block {
 			e.history = append(e.history, Message{
 				Role: "user", Content: hookResult.Message, Timestamp: time.Now(),
@@ -292,6 +304,50 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
+	}
+
+	// Self-answering guard: when the model asks the user a question in the
+	// SAME reply that carries destructive edit/write calls, block those edits
+	// and wait for the user. Presenting the question AND executing the changes
+	// is "自问自答" — the model decides on the user's behalf. Read-only calls
+	// are NOT blocked: investigation may continue while the user decides.
+	if e.verdictJudge != nil {
+		var hasDestructive bool
+		for _, call := range calls {
+			if call.Name == "edit" || call.Name == "write" {
+				hasDestructive = true
+				break
+			}
+		}
+		if hasDestructive {
+			v, err := e.verdictJudge.Classify(ctx, ConclusionCheck{
+				Goal:            e.state.Goal,
+				Text:            content,
+				ToolCallSummary: buildToolCallSummary(e.history, e.runStartHistoryLen),
+			})
+			if err == nil && v == VerdictQuestion {
+				turnLog.Printf("self-answering guard: blocking edit/write calls (question to user in same reply)")
+				blockMsg := "Blocked: 用户在回答你的问题前，修改不会执行。请等待用户确认后再提交修改。"
+				if !e.isChinese {
+					blockMsg = "Blocked: changes will not be executed until the user answers your question. Wait for user confirmation before submitting modifications."
+				}
+				e.history = append(e.history, assistant)
+				for _, c := range calls {
+					e.history = append(e.history, Message{
+						Role:       "tool",
+						ToolCallID: c.ID,
+						Content:    blockMsg,
+						Timestamp:  time.Now(),
+					})
+				}
+				return TurnResult{
+					Blocked:      true,
+					BlockedBy:    "awaiting_user",
+					Questions:    []string{content},
+					FinishReason: finish,
+				}, nil
+			}
+		}
 	}
 
 	// Intercept task_complete: explicit completion signal from the LLM.

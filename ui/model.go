@@ -6,11 +6,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/deepact/deepact/engine"
 )
@@ -878,9 +880,12 @@ func (m Model) View() string {
 	// ---- Step 7: Truncate all body lines to terminal width, then pad ----
 	// Padding prevents Bubble Tea's incremental frame diff from leaving
 	// stale characters from the previous frame in blank positions.
+	// Width is measured with runewidth so ambiguous-width runes (← → — ·)
+	// are counted at their real terminal width — ansi/lipgloss underestimate
+	// them, producing lines that overflow and wrap, corrupting the renderer.
 	for i := range lines {
-		lines[i] = ansi.Truncate(lines[i], contentWidth, "")
-		if w := ansi.StringWidth(lines[i]); w < contentWidth {
+		lines[i] = truncateToWidth(lines[i], contentWidth)
+		if w := displayWidth(lines[i]); w < contentWidth {
 			lines[i] += strings.Repeat(" ", contentWidth-w)
 		}
 	}
@@ -923,7 +928,7 @@ func (m Model) View() string {
 
 	// ---- Step 11: Final width truncation ----
 	for i := range finalLines {
-		finalLines[i] = ansi.Truncate(finalLines[i], m.width, "")
+		finalLines[i] = truncateToWidth(finalLines[i], m.width)
 	}
 
 	return strings.Join(finalLines, "\n")
@@ -1354,6 +1359,19 @@ func (m Model) handleTick() (tea.Model, tea.Cmd) {
 				m.spinners[i].FrameIdx = (m.spinners[i].FrameIdx + 1) % len(spinnerFrames)
 			}
 		}
+		// While narration/streaming text is actively growing, force a full
+		// repaint on every tick. Long mixed CJK/ASCII narration re-wraps as it
+		// grows; Bubble Tea's incremental line diff mis-tracks CJK wide
+		// characters on terminals, swapping/leaving stale characters
+		// ("GITHUB_TOKEN" -> "G  ITHUB_TOKEN", "goreleaser" -> "gaserorele").
+		// A full repaint via WindowSizeMsg bypasses the incremental diff
+		// entirely (same mechanism resize/repaintCmd uses elsewhere).
+		if m.narration != "" || m.streaming != "" {
+			return m, tea.Batch(
+				tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
+				m.repaintCmd(),
+			)
+		}
 		return m, tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} })
 	}
 	return m, nil
@@ -1536,6 +1554,24 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		return
 	}
 	if msg.Response.Blocked {
+		// awaiting_user: the model asked the user a question. The question
+		// (and any intermediate analysis) was already streamed as narration
+		// and snapshotted by finalizeTurnBlocks above. Only append an
+		// assistant message when nothing was streamed — otherwise the
+		// question appears twice.
+		if msg.Response.BlockedBy == "awaiting_user" {
+			hasNarration := false
+			for _, mmsg := range m.messages {
+				if mmsg.Role == "narration" {
+					hasNarration = true
+					break
+				}
+			}
+			if hasNarration {
+				m.streaming = ""
+				return
+			}
+		}
 		content := ""
 		if msg.Response.Summary != "" {
 			content = msg.Response.Summary
@@ -2765,7 +2801,7 @@ func renderSuggestions(m Model, width int) string {
 func renderInputLine(m Model) string {
 	if m.state == stateApiKeyPrompt {
 		content := "  Key> " + strings.Repeat("*", len(m.apiKeyInput)) + "█"
-		padW := m.width - lipgloss.Width(content)
+		padW := m.width - displayWidth(content)
 		if padW > 0 {
 			content += strings.Repeat(" ", padW)
 		}
@@ -2815,7 +2851,7 @@ func renderInputLine(m Model) string {
 			prefix = "    "
 		}
 		content := prefix + line
-		padW := m.width - 1 - lipgloss.Width(content)
+		padW := m.width - 1 - displayWidth(content)
 		if padW > 0 {
 			content += strings.Repeat(" ", padW)
 		}
@@ -2831,7 +2867,7 @@ func wrapInputText(text string, width int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for _, line := range lines {
-		if lipgloss.Width(line) <= width {
+		if displayWidth(line) <= width {
 			result = append(result, line)
 			continue
 		}
@@ -2856,7 +2892,7 @@ func wrapInputText(text string, width int) string {
 				chunk.WriteString(string(runes[start : i+1]))
 				continue
 			}
-			rw := lipgloss.Width(string(r))
+			rw := runeWidth(r)
 			if chunkWidth+rw > width && chunkWidth > 0 {
 				result = append(result, chunk.String())
 				chunk.Reset()
@@ -2926,22 +2962,23 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 		contentWidth = 1
 	}
 
-	leftW := lipgloss.Width(leftPart)
-	rightW := lipgloss.Width(rightPart)
+	leftW := displayWidth(leftPart)
+	rightW := displayWidth(rightPart)
 	gap := contentWidth - leftW - rightW
 	if gap < 1 {
 		gap = 1
 	}
 	line := leftPart + strings.Repeat(" ", gap) + rightPart
-	// Use ansi.Truncate to guarantee the line fits within contentWidth.
-	// Characters like ↑ ↓ ⌥ ↩ │ have ambiguous East Asian Width on macOS —
-	// lipgloss.Width may underestimate their rendered width, causing terminal
-	// line wrapping that pushes the input area off-screen.
-	line = ansi.Truncate(line, contentWidth, "")
+	// Truncate to guarantee the line fits within contentWidth. Characters like
+	// ↑ ↓ ⌥ ↩ │ have ambiguous East Asian Width on macOS — lipgloss.Width may
+	// underestimate their rendered width, causing terminal line wrapping that
+	// pushes the input area off-screen. truncateToWidth measures with runewidth
+	// (ambiguous runes at their real terminal width).
+	line = truncateToWidth(line, contentWidth)
 	// Defense-in-depth: ensure rendered width exactly fills contentWidth.
 	// Ambiguous-width characters (↑↓│⌥↩) may cause the terminal to render
-	// narrower than ansi.Truncate expects, leaving old characters visible.
-	if w := lipgloss.Width(line); w < contentWidth {
+	// narrower than expected, leaving old characters visible.
+	if w := displayWidth(line); w < contentWidth {
 		line += strings.Repeat(" ", contentWidth-w)
 	}
 	// Render ALL THREE rows as a SINGLE lipgloss block: bg set once, fg
@@ -2988,7 +3025,7 @@ func wrapText(text string, width int) []string {
 }
 
 func wrapLine(line string, width int) []string {
-	if lipgloss.Width(line) <= width {
+	if displayWidth(line) <= width {
 		return []string{line}
 	}
 	// Delegate ANSI-containing lines to wrapLineAnsi for safe wrapping
@@ -2999,7 +3036,7 @@ func wrapLine(line string, width int) []string {
 	var lines []string
 	for len(runes) > 0 {
 		// Measure visual width of remaining text
-		if lipgloss.Width(string(runes)) <= width {
+		if displayWidth(string(runes)) <= width {
 			lines = append(lines, string(runes))
 			break
 		}
@@ -3008,7 +3045,7 @@ func wrapLine(line string, width int) []string {
 		var lastSpaceIdx = -1
 		var cutIdx = len(runes)
 		for i, r := range runes {
-			rw := lipgloss.Width(string(r))
+			rw := runeWidth(r)
 			if visWidth+rw > width {
 				cutIdx = i
 				break
@@ -3066,7 +3103,7 @@ func wrapLineAnsi(line string, width int) []string {
 	if width <= 0 || line == "" {
 		return []string{line}
 	}
-	if lipgloss.Width(line) <= width {
+	if displayWidth(line) <= width {
 		return []string{line}
 	}
 
@@ -3120,7 +3157,7 @@ func wrapLineAnsi(line string, width int) []string {
 			continue
 		}
 
-		rw := lipgloss.Width(string(r))
+		rw := runeWidth(r)
 
 		if visualCol+rw > width {
 			if lastSpaceIdx >= 0 {
@@ -3139,7 +3176,7 @@ func wrapLineAnsi(line string, width int) []string {
 				flushLine()
 				curLine.WriteString(overflow)
 				curLine.WriteRune(r)
-				visualCol = lipgloss.Width(stripAnsi(overflow)) + rw
+				visualCol = displayWidth(stripAnsi(overflow)) + rw
 				lastSpaceIdx = -1
 				i++
 				continue
@@ -3179,13 +3216,125 @@ func wrapLines(lines []string, width int) []string {
 	}
 	result := []string{}
 	for _, line := range lines {
-		if lipgloss.Width(line) <= width {
+		if displayWidth(line) <= width {
 			result = append(result, line)
 		} else {
 			result = append(result, wrapLine(line, width)...)
 		}
 	}
 	return result
+}
+
+// termWidthCond measures display width matching iTerm2's ambiguous-width
+// rendering (2 columns for ← → — · etc. in CJK terminals). runewidth's global
+// DefaultCondition depends on the process locale; we pin EastAsianWidth=true
+// explicitly so rendering is deterministic regardless of environment.
+var termWidthCond = func() *runewidth.Condition {
+	c := runewidth.NewCondition()
+	c.EastAsianWidth = true
+	return c
+}()
+
+// runeVisualWidth returns the terminal display width of the rune decoded at a
+// position, given its decoded size. A lone non-ASCII byte (size==1, r>0x7F) is
+// an incomplete UTF-8 sequence — possible mid-stream because content_delta
+// arrives in byte increments. The terminal shows it as a one-column
+// replacement glyph, so we count it as 1 to match ansi/lipgloss and keep
+// streaming truncation stable.
+//
+// U+FFFD (the replacement character, also produced by []rune() when a stream
+// cuts a multi-byte rune) is likewise rendered 1 column by terminals, and
+// ansi/lipgloss count it as 1; runewidth's EastAsianWidth=true mode counts it
+// as 2, which would over-count and drop a trailing character.
+//
+// Box Drawing / Block Elements (U+2500-U+259F: █ ╔ ═ ╗ ║ ▍ │ …) are pixel-art
+// and border glyphs that terminals render at exactly 1 column regardless of
+// East Asian Width classification. runewidth's EastAsianWidth=true counts them
+// as 2, which over-measures logo lines, borders, and the input blue bar — the
+// truncation then cuts pixel text (logo characters misplaced / vanishing). Pin
+// them to 1 column here; ambiguous runes (← → — ·) still get 2 columns.
+func runeVisualWidth(r rune, size int) int {
+	if size == 1 && r > 0x7F {
+		return 1
+	}
+	if r == utf8.RuneError {
+		return 1
+	}
+	if r >= 0x2500 && r <= 0x259F {
+		return 1
+	}
+	return termWidthCond.RuneWidth(r)
+}
+
+// runeWidth returns the terminal display width of a single rune (already
+// decoded; used by wrapInputText/wrapLineAnsi where the rune comes from a
+// []rune slice). U+FFFD (replacement char from cutting a multi-byte rune) is
+// rendered 1 column by terminals and ansi/lipgloss count it as 1. Box Drawing
+// / Block Elements (U+2500-U+259F) are likewise pinned to 1 column — see
+// runeVisualWidth.
+func runeWidth(r rune) int {
+	if r == utf8.RuneError {
+		return 1
+	}
+	if r >= 0x2500 && r <= 0x259F {
+		return 1
+	}
+	return termWidthCond.RuneWidth(r)
+}
+
+// displayWidth measures the visual display width of s.
+//
+// ansi.StringWidth and lipgloss.Width count ambiguous-width runes (← → — ·,
+// U+2190/U+2192/U+2014/U+00B7) as width 1, but iTerm2 renders them at width 2.
+// Underestimating these runes makes every pad/truncate decision produce lines
+// that are physically wider than the terminal; the terminal then wraps them
+// and Bubble Tea's line counter drifts, causing repeated/garbled rows until a
+// resize forces a full repaint. We measure with runewidth (ANSI escape
+// sequences are zero-width).
+func displayWidth(s string) int {
+	col := 0
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			i = findAnsiSeqEnd(s, i)
+			continue
+		}
+		r, size := decodeRuneAt(s, i)
+		col += runeVisualWidth(r, size)
+		i += size
+	}
+	return col
+}
+
+// truncateToWidth truncates s to at most w display columns, measuring with
+// runewidth so ambiguous-width runes are counted at their real (terminal)
+// width. ansi.Truncate underestimates them, leaving a line that still overflows
+// the terminal by one column per ambiguous rune.
+func truncateToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	col := 0
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Copy the whole ANSI escape sequence verbatim (zero width).
+			end := findAnsiSeqEnd(s, i)
+			b.WriteString(s[i:end])
+			i = end
+			continue
+		}
+		r, size := decodeRuneAt(s, i)
+		rw := runeVisualWidth(r, size)
+		if col+rw > w {
+			break
+		}
+		b.WriteString(s[i : i+size])
+		col += rw
+		i += size
+	}
+	return b.String()
 }
 
 type EngineFactory func(key string) (EngineRunner, error)

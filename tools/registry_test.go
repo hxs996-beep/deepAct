@@ -55,6 +55,40 @@ func TestRegistry_AllSpecs(t *testing.T) {
 	}
 }
 
+// TestRegistry_AllSpecs_DeterministicOrder guards the prefix-cache contract:
+// DeepSeek tokenizes the tools array before messages, so any per-turn ordering
+// jitter (Go map iteration is deliberately randomized) breaks the cached prefix
+// from the very first byte. The returned specs must be sorted by name regardless
+// of registration order or map internals.
+func TestRegistry_AllSpecs_DeterministicOrder(t *testing.T) {
+	reg := NewRegistry()
+	// Register in scrambled order — the old map-iteration implementation
+	// returned these in random order, silently invalidating the cache prefix.
+	reg.Register(&mockTool{name: "read"})
+	reg.Register(&mockTool{name: "grep"})
+	reg.Register(&mockTool{name: "bash"})
+	reg.Register(&mockTool{name: "edit"})
+	reg.Register(&mockTool{name: "write"})
+
+	specs := reg.AllSpecs()
+	if len(specs) != 5 {
+		t.Fatalf("specs count = %d, want 5", len(specs))
+	}
+	for i := 1; i < len(specs); i++ {
+		if specs[i-1].Name > specs[i].Name {
+			t.Errorf("specs not sorted at index %d: %q > %q", i, specs[i-1].Name, specs[i].Name)
+		}
+	}
+
+	// Calling twice must yield byte-identical order (cache stability).
+	second := reg.AllSpecs()
+	for i := range specs {
+		if specs[i].Name != second[i].Name {
+			t.Fatalf("AllSpecs order changed between calls: first=%q second=%q", specs[i].Name, second[i].Name)
+		}
+	}
+}
+
 func TestExecutor_SingleCall(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(&mockTool{name: "echo", result: ToolResultEnvelope{Status: StatusOK, Digest: "hello"}})

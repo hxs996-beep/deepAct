@@ -128,6 +128,13 @@ type Engine struct {
 	stopHookRetryCount int
 	// stopHooks are checked when the model outputs text without tool calls.
 	stopHooks []StopHook
+	// verdictJudge classifies text-only replies into conclusion/question/
+	// intermediate. Extracted automatically from registered stop hooks that
+	// implement VerdictProvider (ZeroToolCallHook/StalledNarrationHook). The
+	// tool branch uses it to block destructive edits when the model asks the
+	// user a question in the same reply (self-answering guard). Nil skips the
+	// check (no judge wired → legacy behavior).
+	verdictJudge VerdictJudge
 	// intentJudge classifies user messages into analyze/continue/new_topic
 	// via a lightweight LLM call. Replaces the old keyword-based detection
 	// functions. Nil falls back to IntentContinue.
@@ -767,6 +774,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			// the same reasoning causes the UI to concatenate Summary +
 			// Questions, showing the reasoning twice.
 			if e.pendingEditPlan != nil {
+				summary = ""
+			}
+			// The awaiting_user block's Questions already contain the model's
+			// question text. Suppress the run summary (which would re-echo
+			// the question or a stale narration) so the user sees exactly one
+			// copy of the question waiting for their input.
+			if turnResult.BlockedBy == "awaiting_user" {
 				summary = ""
 			}
 			return &EngineResponse{

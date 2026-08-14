@@ -298,6 +298,136 @@ func pickClassifierPrompt(zh bool) string {
 	return conclusionClassifierSystemPromptEn
 }
 
+// TextVerdict classifies a text-only model reply along three axes:
+// conclusion (final summary), question (needs user input — engine must stop
+// and wait), or intermediate (mid-task narration / next-step plan).
+type TextVerdict int
+
+const (
+	VerdictIntermediate TextVerdict = iota
+	VerdictConclusion
+	VerdictQuestion
+)
+
+func (v TextVerdict) String() string {
+	switch v {
+	case VerdictConclusion:
+		return "conclusion"
+	case VerdictQuestion:
+		return "question"
+	default:
+		return "intermediate"
+	}
+}
+
+// VerdictJudge classifies a text-only reply into conclusion/question/
+// intermediate. It is the semantic, keyword-free replacement for the
+// "stop and ask the user" path: keyword heuristics miss phrasing the model
+// hasn't been trained on, and a missed question lets the model pick an
+// option itself — which can be destructive for the user.
+type VerdictJudge interface {
+	Classify(ctx context.Context, check ConclusionCheck) (TextVerdict, error)
+}
+
+// Classify uses a lightweight LLM call to classify the assistant's text-only
+// reply into a three-way verdict. ConclusionClassifier implements both
+// ConclusionJudge (IsConclusion, legacy binary) and VerdictJudge (Classify,
+// three-way); stop hooks prefer Classify when it is wired.
+func (c *ConclusionClassifier) Classify(ctx context.Context, check ConclusionCheck) (TextVerdict, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var prompt string
+	if c.isChinese {
+		prompt = fmt.Sprintf("目标：%s\n", check.Goal)
+		if check.ToolCallSummary != "" {
+			prompt += fmt.Sprintf("\n本次已执行工具：%s\n", check.ToolCallSummary)
+		}
+		prompt += fmt.Sprintf("\n助手回复：%s", check.Text)
+	} else {
+		prompt = fmt.Sprintf("Goal: %s\n", check.Goal)
+		if check.ToolCallSummary != "" {
+			prompt += fmt.Sprintf("\nTools called this run: %s\n", check.ToolCallSummary)
+		}
+		prompt += fmt.Sprintf("\nAssistant reply: %s", check.Text)
+	}
+	req := ModelRequest{
+		Model: c.flashModelName,
+		Messages: []ModelMessage{
+			{Role: "system", Content: pickVerdictPrompt(c.isChinese)},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0,
+		MaxTokens:   64,
+		JsonMode:    true,
+	}
+	resp, err := c.model.Complete(ctx, req)
+	if err != nil {
+		return VerdictIntermediate, fmt.Errorf("verdict classify: %w", err)
+	}
+	content := resp.Message.Content
+	if strings.TrimSpace(content) == "" {
+		content = resp.Message.ReasoningContent
+	}
+	return parseVerdictJSON(content)
+}
+
+// parseVerdictJSON extracts the verdict from the model's response, mirroring
+// parseConclusionJSON: direct parse first, then first {...} extraction.
+func parseVerdictJSON(content string) (TextVerdict, error) {
+	content = strings.TrimSpace(content)
+	var out struct {
+		Verdict string `json:"verdict"`
+	}
+	if err := json.Unmarshal([]byte(content), &out); err == nil {
+		return verdictFromString(out.Verdict)
+	}
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(content[start:end+1]), &out); err == nil {
+			return verdictFromString(out.Verdict)
+		}
+	}
+	return VerdictIntermediate, fmt.Errorf("parse verdict response: no valid JSON in %q", content)
+}
+
+func verdictFromString(s string) (TextVerdict, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "conclusion":
+		return VerdictConclusion, nil
+	case "question":
+		return VerdictQuestion, nil
+	case "intermediate":
+		return VerdictIntermediate, nil
+	default:
+		return VerdictIntermediate, fmt.Errorf("unrecognized verdict %q", s)
+	}
+}
+
+func pickVerdictPrompt(zh bool) string {
+	if zh {
+		return verdictClassifierSystemPromptZh
+	}
+	return verdictClassifierSystemPromptEn
+}
+
+const verdictClassifierSystemPromptZh = `你是一个编程助手的文本回复分类器。给定用户目标、本次已执行的工具、和助手的最新纯文本回复，把回复分为三类：
+
+conclusion：回复完整回答了用户目标中的所有问题，包含充分的发现或结果，没有表示要继续执行其他操作，也没有向用户提问。
+question：回复在向用户提问、请求用户决策、或要求用户补充信息。例如列出多个方案询问用户选哪个、询问是否继续、请求澄清需求。**即使回复同时预告了后续动作（如"确认后我就开始写代码""你确认后我再执行"），只要它包含对用户的提问/决策请求，就仍属于 question。这类回复必须停下等待用户，模型绝不能自己替用户做决定。**
+intermediate：回复只回答了部分问题、描述了将要执行的下一步操作、报告了中间发现但未给出完整结论，也没有向用户提问。
+
+只输出 JSON：{"verdict": "conclusion" 或 "question" 或 "intermediate"}。`
+
+const verdictClassifierSystemPromptEn = `You are a text-reply classifier for a coding agent. Given the user's goal, the tools called this run, and the assistant's latest text-only reply, classify the reply into one of three categories:
+
+conclusion: the reply fully answers all questions in the user's goal, contains complete findings or results, and does not indicate any further action nor ask the user anything.
+question: the reply asks the user a question, requests a user decision, or asks for more information. For example, listing multiple options and asking which one the user picks, asking whether to continue, or requesting clarification. **Even if the reply also previews a next action (e.g. "I'll start coding once you confirm"), as long as it contains a question or decision request to the user, it is still a question. Such replies must stop and wait for the user — the model must never decide on the user's behalf.**
+intermediate: the reply only partially answers the goal, describes a next step to be taken, or reports intermediate findings without a complete conclusion, and does not ask the user anything.
+
+Output JSON only: {"verdict": "conclusion" or "question" or "intermediate"}.`
+
 const conclusionClassifierSystemPromptZh = `你是一个编程助手的结论判定器。给定用户目标、本次已执行的工具、和助手的最新纯文本回复，判断该回复是否为对目标的最终结论或完成总结。
 
 是结论的标准：回复完整回答了用户目标中的所有问题，包含充分的发现或结果，没有表示要继续执行其他操作。

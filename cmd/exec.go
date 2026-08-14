@@ -23,10 +23,13 @@ func runHeadless(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	agent := engine.NewEngine(config, deps)
-	classifier := agent.NewConclusionClassifier()
+	// The ConclusionClassifier implements both the binary ConclusionJudge
+	// and the three-way VerdictJudge (conclusion/question/intermediate).
+	// Sharing one instance keeps verdict logic consistent across both hooks.
+	verdict := agent.NewConclusionClassifier()
 	agent.SetStopHooks([]engine.StopHook{
-		&engine.ZeroToolCallHook{MaxRetries: 5},
-		&engine.StalledNarrationHook{MaxRetries: 4, Classifier: classifier},
+		&engine.ZeroToolCallHook{MaxRetries: 5, Verdict: verdict},
+		&engine.StalledNarrationHook{MaxRetries: 4, Classifier: verdict, Verdict: verdict},
 	})
 	agent.SetIntentJudge(agent.NewIntentClassifier())
 
