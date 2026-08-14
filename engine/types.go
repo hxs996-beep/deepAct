@@ -33,13 +33,24 @@ const (
 	LayerFullCompact
 )
 
+// TodoItem is a generic step-tracking item reported by the todo_write tool.
+// It is skill-agnostic: any skill can instruct the model to report its
+// step-by-step progress through this channel, and the UI renders it as a
+// plain-text todo list (no skill-specific theming).
+type TodoItem struct {
+	Content string `json:"content"` // step description (plain text)
+	Status  string `json:"status"`  // "pending" | "in_progress" | "completed"
+}
+
 type ProgressEvent struct {
-	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage"
+	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage" | "todo_update"
 	Name       string
 	Detail     string // brief digest for live display
 	FullDetail string // full content (e.g., diff) for final rendering
 	Usage      *ModelUsage
 	ModelName  string // which model was used for this API call
+	// Todos carries the full todo-list snapshot for Type == "todo_update".
+	Todos []TodoItem
 }
 
 type ProgressFunc func(event ProgressEvent)
