@@ -77,13 +77,6 @@ type MemberStatus struct {
 	Verdict string // "approve", "conditional", "reject" (valid when done)
 }
 
-// TDDStage represents a phase in the TDD (Red-Green-Refactor) workflow.
-type TDDStage struct {
-	Phase  string // "red" | "red_verify" | "green" | "green_verify" | "refactor"
-	Status string // "running" | "done" | "waiting"
-	Detail string // human-readable detail shown in status bar
-}
-
 // SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
 type SubAgentStatus struct {
 	ID      string // unique key for tracking (agent type + index)
@@ -155,8 +148,8 @@ type Model struct {
 	// Roundtable member progress tracking
 	memberStatuses []MemberStatus
 
-	// TDD (test-driven-development) phase tracking
-	tddStages []TDDStage
+	// Generic step-progress tracking (driven by todo_write from any skill)
+	todoItems []engine.TodoItem
 
 	// Sub-agent parallel execution tracking
 	subAgents []SubAgentStatus
@@ -177,6 +170,7 @@ type ProgressMsg struct {
 	TokensOut  int
 	CacheHit   int
 	ModelName  string
+	Todos      []engine.TodoItem
 }
 
 const (
@@ -439,7 +433,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingActivity = ""
 		m.memberStatuses = nil // roundtable phase done, clear member cards
 		m.subAgents = nil      // sub-agent panel done, clear
-		m.tddStages = nil      // TDD phase done, clear stage cards
+		m.todoItems = nil // todo list done, clear items
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
 	case ProgressMsg:
@@ -614,33 +608,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:    "system",
 				Content: fmt.Sprintf("Skill activated: **%s** — %s", msg.Name, msg.Detail),
 			})
-		case "tdd_phase":
-			// Update or add TDD stage
-			found := false
-			for i, s := range m.tddStages {
-				if s.Phase == msg.Name {
-					m.tddStages[i].Status = "running"
-					m.tddStages[i].Detail = msg.Detail
-					found = true
-				} else if s.Status == "running" {
-					// Previous stages are now done
-					m.tddStages[i].Status = "done"
-				}
-			}
-			if !found {
-				// Mark all previous stages as done
-				for i := range m.tddStages {
-					if m.tddStages[i].Status == "waiting" {
-						m.tddStages[i].Status = "done"
-					}
-				}
-				// Add the new stage
-				m.tddStages = append(m.tddStages, TDDStage{
-					Phase:  msg.Name,
-					Status: "running",
-					Detail: msg.Detail,
-				})
-			}
+		case "todo_update":
+			// Full snapshot replacement from engine todo_write interception
+			m.todoItems = msg.Todos
 		}
 		if m.narrationJustFinalized {
 			m.narrationJustFinalized = false
@@ -1678,10 +1648,10 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		subAgentLines := renderSubAgentPanel(m.subAgents, width)
 		lines = append(lines, subAgentLines...)
 	}
-	if len(m.memberStatuses) > 0 || len(m.tddStages) > 0 {
-		// Overlay status area: render TDD phases (left) and/or member
-		// progress (right) in a single status block above the input.
-		overlayLines := renderOverlayStatus(m.tddStages, m.memberStatuses, width)
+	if len(m.memberStatuses) > 0 || len(m.todoItems) > 0 {
+		// Overlay status area: render the step-progress todo list (left) and/or
+		// member progress (right) in a single status block above the input.
+		overlayLines := renderOverlayStatus(m.todoItems, m.memberStatuses, width)
 		lines = append(lines, overlayLines...)
 	} else if m.narration != "" {
 		narrationLines := renderStreaming(m.narration, width)
@@ -2449,89 +2419,40 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 	return result
 }
 
-// tddPhaseMeta maps phase names to their display metadata.
-var tddPhaseMeta = map[string]struct {
-	Label   string
-	Emoji   string
-	PhaseID int // order: red=0, red_verify=1, green=2, green_verify=3, refactor=4
-}{
-	"red":          {"RED", "🔴", 0},
-	"red_verify":   {"VERIFY", "🔍", 1},
-	"green":        {"GREEN", "🟢", 2},
-	"green_verify": {"VERIFY", "🔍", 3},
-	"refactor":     {"REFACTOR", "♻️", 4},
-}
-
-// renderTDDStatus renders the TDD (Red-Green-Refactor) status block.
-// Shows each stage with its completion status: waiting (⬜), running (emoji), done (✅).
-func renderTDDStatus(stages []TDDStage, maxWidth int) []string {
-	if len(stages) == 0 {
+// renderTodoList renders the generic step-progress todo list above the input.
+// Plain-text markers: [ ] pending, [~] in_progress, [x] completed.
+// No emoji, no skill-specific theming — any skill drives it via todo_write.
+func renderTodoList(items []engine.TodoItem, width int) []string {
+	if len(items) == 0 {
 		return nil
 	}
 	var content []string
-	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("TDD: test-driven-development"))
+	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
 	content = append(content, "")
-
-	// Build ordered list of stages (red, red_verify, green, green_verify, refactor)
-	ordered := []struct {
-		Phase  string
-		Status string
-		Detail string
-	}{
-		{Phase: "red", Status: "waiting", Detail: "编写失败测试..."},
-		{Phase: "red_verify", Status: "waiting", Detail: "验证测试失败..."},
-		{Phase: "green", Status: "waiting", Detail: "编写最小实现..."},
-		{Phase: "green_verify", Status: "waiting", Detail: "验证测试通过..."},
-		{Phase: "refactor", Status: "waiting", Detail: "清理代码..."},
-	}
-
-	// Override with actual stage data
-	stageMap := make(map[string]TDDStage)
-	for _, s := range stages {
-		stageMap[s.Phase] = s
-	}
-
-	for i, o := range ordered {
-		if actual, ok := stageMap[o.Phase]; ok {
-			ordered[i].Status = actual.Status
-			if actual.Detail != "" {
-				ordered[i].Detail = actual.Detail
-			}
-		}
-	}
-
-	// Render each stage
-	for _, o := range ordered {
-		meta := tddPhaseMeta[o.Phase]
-		phaseLabel := meta.Emoji + " " + meta.Label
-		var line string
-		switch o.Status {
-		case "running":
-			frame := spinnerFrames[0]
-			line = fmt.Sprintf("  %s  %s   %s  %s",
-				frame, phaseLabel, SpinnerStyle.Render(o.Detail), DimStyle.Render("running"))
-		case "done":
-			line = fmt.Sprintf("  ✓   %s   %s", phaseLabel, SpinnerDoneStyle.Render(o.Detail))
+	for _, it := range items {
+		switch it.Status {
+		case "in_progress":
+			content = append(content, fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content)))
+		case "completed":
+			content = append(content, fmt.Sprintf("  [x]  %s", SpinnerDoneStyle.Render(it.Content)))
 		default:
-			line = fmt.Sprintf("  ·   %s   %s", phaseLabel, DimStyle.Render(o.Detail))
+			content = append(content, fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content)))
 		}
-		content = append(content, line)
 	}
-
-	rendered := ExecBlockStyle.Width(maxWidth).Render(strings.Join(content, "\n"))
+	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
 	rawLines := strings.Split(rendered, "\n")
 	var result []string
 	for _, l := range rawLines {
-		result = append(result, wrapLineAnsi(l, maxWidth)...)
+		result = append(result, wrapLineAnsi(l, width)...)
 	}
 	return result
 }
 
-// renderOverlayStatus renders both TDD phases and member progress in a single
-// overlay block. When both are present, they're displayed side-by-side (left/right)
-// with a vertical divider.
-func renderOverlayStatus(tddStages []TDDStage, members []MemberStatus, width int) []string {
-	tddActive := len(tddStages) > 0
+// renderOverlayStatus renders both the step-progress todo list and member
+// progress in a single overlay block. When both are present, they're displayed
+// side-by-side (left/right) with a vertical divider.
+func renderOverlayStatus(todoItems []engine.TodoItem, members []MemberStatus, width int) []string {
+	tddActive := len(todoItems) > 0
 	memberActive := len(members) > 0
 
 	if !tddActive && !memberActive {
@@ -2544,7 +2465,7 @@ func renderOverlayStatus(tddStages []TDDStage, members []MemberStatus, width int
 		if halfWidth < 30 {
 			halfWidth = 30
 		}
-		leftLines := renderTDDStatus(tddStages, halfWidth)
+		leftLines := renderTodoList(todoItems, halfWidth)
 		rightLines := renderMemberProgress(members, halfWidth)
 
 		// Combine side by side
@@ -2579,8 +2500,8 @@ func renderOverlayStatus(tddStages []TDDStage, members []MemberStatus, width int
 	}
 
 	if tddActive {
-		// Ensure TDD panel gets full width (renderTDDStatus handles this via maxWidth)
-		return renderTDDStatus(tddStages, width)
+		// Ensure todo list panel gets full width (renderTodoList handles this via width)
+		return renderTodoList(todoItems, width)
 	}
 
 	return renderMemberProgress(members, width)

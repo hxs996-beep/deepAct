@@ -138,7 +138,7 @@ func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
 		eng := r.getEngine()
 		eng.SetOnProgress(func(event engine.ProgressEvent) {
 			if r.progressCh != nil {
-				msg := ProgressMsg{Type: event.Type, Name: event.Name, Detail: event.Detail, FullDetail: event.FullDetail}
+				msg := ProgressMsg{Type: event.Type, Name: event.Name, Detail: event.Detail, FullDetail: event.FullDetail, Todos: event.Todos}
 				if event.Usage != nil {
 					msg.TokensIn = event.Usage.PromptTokens
 					msg.TokensOut = event.Usage.CompletionTokens
