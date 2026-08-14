@@ -83,11 +83,6 @@ type Engine struct {
 	// if auto-activation (no user confirmation) is allowed.
 	lastActivatedSkill string
 
-	// tddPhase tracks the current TDD phase when test-driven-development skill is active.
-	// Phases: "" (inactive), "red", "red_verify", "green", "green_verify", "refactor".
-	tddPhase       string
-	tddPhaseDetail string
-
 	// pendingEditPlan holds the agent's proposed edits for user confirmation.
 	// When non-nil, the agent has proposed file modifications and is awaiting
 	// user approval before execution.
@@ -273,8 +268,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.readLoop.Reset()
 	}
 	e.matchedSkillsContent = ""
-	e.tddPhase = ""
-	e.tddPhaseDetail = ""
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
@@ -1339,9 +1332,6 @@ func (e *Engine) deactivateSkill() {
 	e.context.SetActiveSkill("", "")
 	// Keep lastActivatedSkill for chain tracking purposes
 	// Keep activatedSkills map for deduplication purposes
-	// Reset TDD-specific phase tracking
-	e.tddPhase = ""
-	e.tddPhaseDetail = ""
 	// Reset skill gate flag
 	e.state.SkillGatePassed = false
 
