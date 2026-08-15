@@ -373,3 +373,133 @@ func TestStalledNarrationHook_AnalysisModeQuestion_AwaitsUser(t *testing.T) {
 	}
 }
 
+// TestExecuteTurn_WeakQuestionWithWriteCall_BlocksAwaitingUser reproduces the
+// 自问自答 bug from the wild: the model emits a weak/conditional proposal
+// ("需要我把它保存成文件…也可以说一声") AND a write call in the same reply.
+// The guard is fail-closed: any non-conclusion verdict (question, weak
+// proposal, intermediate, classifier error) blocks the write and waits for
+// the user — the model must never decide on the user's behalf.
+func TestExecuteTurn_WeakQuestionWithWriteCall_BlocksAwaitingUser(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta:        "需要我把它保存成文件（比如 docs/h3-metal.md）也可以说一声。",
+			FinishReason: "tool_calls",
+			ToolCalls: []ModelToolCall{{
+				ID:   "c1",
+				Type: "function",
+				Function: ModelFunctionCall{
+					Name:      "write",
+					Arguments: `{"path":"docs/h3-metal.md","content":"# h3-metal 速查"}`,
+				},
+			}},
+		}}},
+		context:      &stubContextBuilder{},
+		tools:        stubToolExecutor{},
+		state:        &TaskState{TurnNumber: 0, Goal: "生成 md 文档", ConfirmedScope: true},
+		history:      []Message{{Role: "user", Content: "生成 md 文档"}},
+		config:       EngineConfig{ModelName: "test"},
+		guards:       &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		stopHooks:    []StopHook{&ZeroToolCallHook{MaxRetries: 5, Verdict: &stubVerdictJudge{verdict: VerdictQuestion}}},
+		verdictJudge: &stubVerdictJudge{verdict: VerdictIntermediate},
+		isChinese:    true,
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Blocked {
+		t.Fatalf("expected Blocked=true for weak proposal + write, got Blocked=%v BlockedBy=%q", result.Blocked, result.BlockedBy)
+	}
+	if result.BlockedBy != "awaiting_user" {
+		t.Errorf("expected BlockedBy='awaiting_user', got %q", result.BlockedBy)
+	}
+	// The write must NOT have been executed: history must contain a Blocked
+	// tool message, not an executed outcome.
+	foundBlocked := false
+	for _, m := range e.history {
+		if m.Role == "tool" && strings.Contains(m.Content, "Blocked") {
+			foundBlocked = true
+			break
+		}
+	}
+	if !foundBlocked {
+		t.Errorf("expected a Blocked tool message in history, got %+v", e.history)
+	}
+}
+
+// TestExecuteTurn_WeakQuestionWithWriteCall_ClassifierError_Blocks verifies the
+// fail-closed path when the verdict classifier errors: a write alongside any
+// non-conclusion text must still be blocked, not silently executed.
+func TestExecuteTurn_WeakQuestionWithWriteCall_ClassifierError_Blocks(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta:        "需要我把它保存成文件（比如 docs/h3-metal.md）也可以说一声。",
+			FinishReason: "tool_calls",
+			ToolCalls: []ModelToolCall{{
+				ID:   "c1",
+				Type: "function",
+				Function: ModelFunctionCall{
+					Name:      "write",
+					Arguments: `{"path":"docs/h3-metal.md","content":"# h3-metal 速查"}`,
+				},
+			}},
+		}}},
+		context:      &stubContextBuilder{},
+		tools:        stubToolExecutor{},
+		state:        &TaskState{TurnNumber: 0, Goal: "生成 md 文档", ConfirmedScope: true},
+		history:      []Message{{Role: "user", Content: "生成 md 文档"}},
+		config:       EngineConfig{ModelName: "test"},
+		guards:       &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		stopHooks:    []StopHook{&ZeroToolCallHook{MaxRetries: 5, Verdict: &stubVerdictJudge{verdict: VerdictQuestion}}},
+		verdictJudge: &stubVerdictJudge{verdict: VerdictIntermediate, err: errBoom},
+		isChinese:    true,
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Blocked {
+		t.Fatalf("expected Blocked=true on classifier error with write, got Blocked=%v BlockedBy=%q", result.Blocked, result.BlockedBy)
+	}
+	if result.BlockedBy != "awaiting_user" {
+		t.Errorf("expected BlockedBy='awaiting_user', got %q", result.BlockedBy)
+	}
+}
+
+// TestExecuteTurn_ConclusionWithWriteCall_NotBlocked verifies the allowed path
+// under fail-closed: a write call carrying text that clearly classifies as a
+// final conclusion is NOT blocked (normal edit flow proceeds).
+func TestExecuteTurn_ConclusionWithWriteCall_NotBlocked(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta:        "文档已生成完毕。",
+			FinishReason: "tool_calls",
+			ToolCalls: []ModelToolCall{{
+				ID:   "c1",
+				Type: "function",
+				Function: ModelFunctionCall{
+					Name:      "write",
+					Arguments: `{"path":"docs/h3-metal.md","content":"# h3-metal 速查"}`,
+				},
+			}},
+		}}},
+		context:      &stubContextBuilder{},
+		tools:        stubToolExecutor{},
+		state:        &TaskState{TurnNumber: 0, Goal: "生成 md 文档", ConfirmedScope: true},
+		history:      []Message{{Role: "user", Content: "生成 md 文档"}},
+		config:       EngineConfig{ModelName: "test"},
+		guards:       &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		stopHooks:    []StopHook{&ZeroToolCallHook{MaxRetries: 5, Verdict: &stubVerdictJudge{verdict: VerdictConclusion}}},
+		verdictJudge: &stubVerdictJudge{verdict: VerdictConclusion},
+		isChinese:    true,
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.Blocked {
+		t.Fatalf("expected NOT blocked for conclusion + write, got BlockedBy=%q", result.BlockedBy)
+	}
+}
+
+

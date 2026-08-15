@@ -311,6 +311,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// and wait for the user. Presenting the question AND executing the changes
 	// is "自问自答" — the model decides on the user's behalf. Read-only calls
 	// are NOT blocked: investigation may continue while the user decides.
+	//
+	// Fail-closed: destructive changes execute only when the reply text
+	// clearly classifies as a final conclusion. An explicit/weak question,
+	// intermediate narration (proposing or describing the change instead of
+	// confirming it), and classifier errors all block the edits — otherwise
+	// the model self-answers its own proposal. A bare tool call with empty
+	// content is allowed: it carries no question or proposal to misjudge.
 	if e.verdictJudge != nil {
 		var hasDestructive bool
 		for _, call := range calls {
@@ -319,14 +326,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				break
 			}
 		}
-		if hasDestructive {
+		if hasDestructive && strings.TrimSpace(content) != "" {
 			v, err := e.verdictJudge.Classify(ctx, ConclusionCheck{
 				Goal:            e.state.Goal,
 				Text:            content,
 				ToolCallSummary: buildToolCallSummary(e.history, e.runStartHistoryLen),
 			})
-			if err == nil && v == VerdictQuestion {
-				turnLog.Printf("self-answering guard: blocking edit/write calls (question to user in same reply)")
+			if err != nil || v != VerdictConclusion {
+				turnLog.Printf("self-answering guard: blocking edit/write calls (reply not a clean conclusion; verdict=%v err=%v)", v, err)
 				blockMsg := "Blocked: 用户在回答你的问题前，修改不会执行。请等待用户确认后再提交修改。"
 				if !e.isChinese {
 					blockMsg = "Blocked: changes will not be executed until the user answers your question. Wait for user confirmation before submitting modifications."
