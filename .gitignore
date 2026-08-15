@@ -46,6 +46,7 @@ package_release.ps1
 # Runtime data (generated at runtime)
 memory/
 retrieval/
+.omo/
 
 # Build verification artifacts
 BUILD_RESULT.txt
