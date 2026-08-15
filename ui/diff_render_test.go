@@ -75,6 +75,26 @@ func TestRenderToolSummary_ShowsDiffLines(t *testing.T) {
 	}
 }
 
+// TestRenderToolSummary_NewFileWrite_CountsModified verifies the Fix 3
+// regression: a write that creates a NEW file (digest has no unified diff →
+// no hunk Children) must still be counted as a modified file. Previously the
+// count depended on len(Children)>0, so a new-file write showed "0 files
+// modified" even though the file was written.
+func TestRenderToolSummary_NewFileWrite_CountsModified(t *testing.T) {
+	toolTree := []ToolNode{{
+		Name:   "write",
+		Done:   true,
+		Detail: "docs/h3-metal.md — write 9639 chars",
+		// New file: no hunk children (no unified diff in digest)
+	}}
+	got := renderToolSummary(toolTree)
+	plain := stripAnsi(got)
+	if !strings.Contains(plain, "1 files modified") {
+		t.Errorf("new-file write should count as 1 modified, got: %q", plain)
+	}
+}
+
+
 func TestFinishStreaming_SnapshotsToolTree(t *testing.T) {
 	m := &Model{
 		width:    80,

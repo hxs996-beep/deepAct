@@ -2151,7 +2151,7 @@ func renderToolSummary(toolTree []ToolNode) string {
 	var b strings.Builder
 	modified := 0
 	for _, n := range toolTree {
-		if n.Done && (n.Name == "edit" || n.Name == "write") && len(n.Children) > 0 {
+		if n.Done && (n.Name == "edit" || n.Name == "write") {
 			modified++
 		}
 	}
