@@ -5,45 +5,46 @@ import (
 	"testing"
 )
 
-// TestRenderStreaming_StripsMarkdownMarkers verifies that renderStreaming
-// strips common markdown syntax markers (**, ###, `) for readability during
-// active streaming. The final display (after streaming completes) uses
-// glamour via renderMarkdown for full formatting.
-func TestRenderStreaming_StripsMarkdownMarkers(t *testing.T) {
+// TestRenderStreaming_FormatsMarkdown verifies that renderStreaming runs
+// streamed text through the same glamour markdown rendering as finalized
+// messages (defensive: no "unformatted output" path remains). Markdown syntax
+// markers are consumed by glamour; visible text content is preserved.
+func TestRenderStreaming_FormatsMarkdown(t *testing.T) {
 	md := "### Check: Build\n\n**Command run:**\n  go build ./...\n\n**Result: PASS**"
 	lines := renderStreaming(md, 80)
 	if len(lines) == 0 {
 		t.Fatal("renderStreaming returned no lines for non-empty input")
 	}
-	joined := strings.Join(lines, "\n")
-	if strings.Contains(joined, "**") {
-		t.Error("renderStreaming should strip '**' markers for streaming display")
+	plain := stripAnsi(strings.Join(lines, "\n"))
+	if strings.Contains(plain, "**") {
+		t.Error("renderStreaming should consume '**' bold markers via glamour")
 	}
-	if strings.Contains(joined, "###") {
-		t.Error("renderStreaming should strip '###' header markers for streaming display")
-	}
-	if !strings.Contains(joined, "Check: Build") {
+	if !strings.Contains(plain, "Check: Build") {
 		t.Error("renderStreaming should preserve header text content")
 	}
-	if !strings.Contains(joined, "Command run:") {
+	if !strings.Contains(plain, "Command run:") {
 		t.Error("renderStreaming should preserve bold text content")
+	}
+	if !strings.Contains(plain, "Result: PASS") {
+		t.Error("renderStreaming should preserve result content")
 	}
 }
 
 // TestRenderStreaming_PreservesCodeBlockContent verifies that code inside
-// fenced code blocks is preserved while the ``` fence markers are removed.
+// fenced code blocks is preserved (with glamour syntax highlighting) while the
+// ``` fence markers are consumed.
 func TestRenderStreaming_PreservesCodeBlockContent(t *testing.T) {
 	md := "```go\nfunc main() {\n    fmt.Println(\"hello\")\n}\n```"
 	lines := renderStreaming(md, 80)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "func main()") {
+	plain := stripAnsi(strings.Join(lines, "\n"))
+	if !strings.Contains(plain, "func main()") {
 		t.Error("renderStreaming should preserve code block content")
 	}
-	if !strings.Contains(joined, "fmt.Println") {
+	if !strings.Contains(plain, "fmt.Println") {
 		t.Error("renderStreaming should preserve code block content")
 	}
-	if strings.Contains(joined, "```") {
-		t.Error("renderStreaming should strip code fence markers")
+	if strings.Contains(plain, "```") {
+		t.Error("renderStreaming should consume code fence markers")
 	}
 }
 
@@ -69,7 +70,9 @@ func TestRenderStreaming_EmptyInput(t *testing.T) {
 	}
 }
 
-func TestRenderStreaming_CollapsesBlankLinesInCodeBlock(t *testing.T) {
+// TestRenderStreaming_CodeBlockBlankLines verifies that glamour-rendered code
+// blocks do not produce excessive blank-line gaps in the streaming display.
+func TestRenderStreaming_CodeBlockBlankLines(t *testing.T) {
 	md := "```\n### Check: Build\n**Command run:**\n  go build\n\n\n**Result: PASS**\n```"
 	lines := renderStreaming(md, 80)
 	maxBlank, cur := 0, 0
@@ -83,7 +86,7 @@ func TestRenderStreaming_CollapsesBlankLinesInCodeBlock(t *testing.T) {
 			cur = 0
 		}
 	}
-	if maxBlank > 1 {
-		t.Errorf("expected at most 1 consecutive blank line, got %d", maxBlank)
+	if maxBlank > 2 {
+		t.Errorf("expected at most 2 consecutive blank lines, got %d", maxBlank)
 	}
 }

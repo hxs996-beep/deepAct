@@ -596,6 +596,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// turn boundary to reduce diff renderer churn (high-frequency
 			// View updates cause garbled CJK text in terminal diff rendering).
 			m.narrationPending += msg.Detail
+			// 强制全量重绘：Bubble Tea 的增量 diff 在部分终端（iTerm2）上会
+			// 误跟踪 CJK 宽字符，产生瞬时字符交换（如"验证门要求"短暂显示为
+			// "验证要求门"）。content_delta 到达时立即重绘，把下一帧变为全量
+			// 重绘，从源头消除增量帧。渲染频率仍受 Bubble Tea 帧率（60fps）
+			// 限制，不会无限重绘。
+			return m, tea.Batch(waitForProgress(m.progressChan), m.repaintCmd())
 		case "usage":
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
@@ -1873,7 +1879,8 @@ func renderMarkdown(content string, width int) string {
 	// Margin(2) + BlockPrefix("\n") which produces 3 leading newlines. These
 	// create a large blank alternating area between toolsummary and assistant
 	// content (especially visible in the blocked/"确认执行代码" state).
-	return strings.Trim(strings.TrimRight(out, "\n"), "\n")
+	out = strings.Trim(strings.TrimRight(out, "\n"), "\n")
+	return out
 }
 
 func toolIcon(name string) string {
@@ -2212,50 +2219,6 @@ var (
 	}
 )
 
-// preprocessStreamingMarkdown applies lightweight markdown cleanup for
-// streaming display: collapses excessive blank lines and strips common
-// markdown syntax markers (**, ###, ```, `) so raw markdown text is more
-// readable before the final glamour render. Code block content is
-// preserved but fence markers are removed.
-func preprocessStreamingMarkdown(text string) string {
-	// Collapse 3+ consecutive newlines to a single blank line.
-	for strings.Contains(text, "\n\n\n") {
-		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
-	}
-
-	lines := strings.Split(text, "\n")
-	inCodeBlock := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Track code block fences. Replace fence lines with empty lines
-		// so code content is visible without the ``` noise.
-		if strings.HasPrefix(trimmed, "```") {
-			inCodeBlock = !inCodeBlock
-			lines[i] = ""
-			continue
-		}
-
-		if inCodeBlock {
-			// Preserve code block content as-is.
-			continue
-		}
-
-		// Strip header markers: "### Title" -> "Title"
-		if strings.HasPrefix(trimmed, "#") {
-			lines[i] = strings.TrimLeft(trimmed, "# ")
-			continue
-		}
-
-		// Strip ** bold markers and ` inline code markers.
-		cleaned := strings.ReplaceAll(line, "**", "")
-		cleaned = strings.ReplaceAll(cleaned, "`", "")
-		lines[i] = cleaned
-	}
-
-	return strings.Join(lines, "\n")
-}
-
 func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
@@ -2268,36 +2231,18 @@ func renderStreaming(streaming string, width int) []string {
 		return streamRenderCache.lines
 	}
 
-	// Use lightweight markdown preprocessing during active streaming.
-	// Glamour's full markdown parse on every content_delta token is
-	// expensive (5-50ms) and causes the progress channel to fill up,
-	// dropping tokens. preprocessStreamingMarkdown strips syntax markers
-	// and collapses blank lines for a more readable streaming view.
-	// The final display (after streaming completes) uses glamour via
-	// renderMarkdown for full formatting.
-	//
-	// NOTE: active streaming output is deliberately PLAIN TEXT — no
-	// AssistantMsgStyle color wrapper. During streaming the text grows and
-	// re-wraps every tick; ANSI SGR sequences combined with CJK wide
-	// characters make Bubble Tea's incremental line diff drift on terminals,
-	// visibly swapping characters ("昵称(邮箱" -> "昵(称邮箱"). Plain text
-	// lines re-render cleanly. Full styling returns when the turn finalizes
-	// (renderMessage -> renderMarkdown).
-	processed := preprocessStreamingMarkdown(streaming)
-	// Indent streamed text by the same glamour Document margin (2 columns)
-	// that finalized narration/assistant messages use, and reserve that
-	// margin in the wrap width. Finalized messages render as
-	// margin(2) + glamour wordwrap(width-2) = width columns; streaming must
-	// produce the same: prefix(2) + wrapText(width-2) = width columns.
-	// Without the reserved margin, prefixed lines would exceed the caller's
-	// width and be truncated by View() Step 7, dropping the last character
-	// of every line.
-	lines := wrapText(processed, width-2)
-	for i, l := range lines {
-		if l != "" {
-			lines[i] = "  " + l
-		}
-	}
+	// 统一用 glamour markdown 渲染流式输出，与最终消息（renderMessage →
+	// renderMarkdown）走同一格式化路径。此前流式用轻量 preprocess + 纯文本，
+	// 属于"未 format 的输出"；该路径在真实终端上出现过 CJK 宽字符错位
+	// （流式显示乱序、finalize 后恢复正常）。统一 format 后流式与最终显示
+	// 完全一致，从源头消除未格式化输出这条隐患路径。
+	rendered := renderMarkdown(streaming, width)
+	// 与 renderMessage 的 assistant/narration 分支一致：glamour 对无空格
+	// CJK 长行不做硬换行，超宽行会进入 View Step 7 被 truncateToWidth 截断
+	// 丢字。wrapLines 在 token 边界硬换行（表格行已被 glamour 控制在宽度内，
+	// 不会被触碰），保证流式输出不丢字。
+	lines := wrapLines(strings.Split(rendered, "\n"), width)
+
 	streamRenderCache.content = streaming
 	streamRenderCache.width = width
 	streamRenderCache.lines = lines
@@ -3020,6 +2965,12 @@ func isSGR(seq string) bool {
 //
 // Word-wrap: prefers breaking at spaces (U+0020, U+3000). Falls back to
 // hard-break at width boundary when no space is found within the segment.
+//
+// The line is tokenized into ANSI sequences and visible runes first; wrapping
+// operates on token boundaries using visual column widths, never on raw byte
+// offsets. This avoids two corruption modes of a byte-slicing implementation:
+// (1) ANSI escape bytes shifting the break position (中英混排错位), and
+// (2) cutting a multi-byte CJK rune mid-sequence (乱码/重排).
 func wrapLineAnsi(line string, width int) []string {
 	if width <= 0 || line == "" {
 		return []string{line}
@@ -3028,107 +2979,114 @@ func wrapLineAnsi(line string, width int) []string {
 		return []string{line}
 	}
 
-	var lines []string
-	var curLine strings.Builder
-	var activeSGRs []string
-	visualCol := 0
-	lastSpaceIdx := -1
+	toks := tokenizeAnsiLine(line)
 
-	flushLine := func() {
-		s := curLine.String()
-		if len(activeSGRs) > 0 {
-			s += "\x1b[0m"
-		}
-		lines = append(lines, s)
-		curLine.Reset()
-		for _, sgr := range activeSGRs {
-			curLine.WriteString(sgr)
-		}
-		visualCol = 0
-		lastSpaceIdx = -1
-	}
-
-	runes := []rune(line)
-	i := 0
-	for i < len(runes) {
-		r := runes[i]
-
-		if r == '\x1b' {
-			escBuf := strings.Builder{}
-			escBuf.WriteRune(r)
-			i++
-			for i < len(runes) {
-				r2 := runes[i]
-				escBuf.WriteRune(r2)
-				i++
-				if (r2 >= 'a' && r2 <= 'z') || (r2 >= 'A' && r2 <= 'Z') {
-					break
-				}
-			}
-			seq := escBuf.String()
-			curLine.WriteString(seq)
-
-			if isSGR(seq) {
-				if seq == "\x1b[0m" || seq == "\x1b[m" {
-					activeSGRs = nil
-				} else {
-					activeSGRs = append(activeSGRs, seq)
-				}
-			}
+	// Greedy segmentation on token boundaries.
+	var segments [][]ansiWrapToken
+	var seg []ansiWrapToken
+	vis := 0
+	lastSpace := -1 // index in seg of the last space token
+	for _, tk := range toks {
+		if tk.isSeq {
+			seg = append(seg, tk)
 			continue
 		}
-
-		rw := runeWidth(r)
-
-		if visualCol+rw > width {
-			if lastSpaceIdx >= 0 {
-				curLineStr := curLine.String()
-				trimmed := curLineStr[:lastSpaceIdx]
-				overflow := curLineStr[lastSpaceIdx:]
-				if len(overflow) > 0 {
-					if overflow[0] == ' ' {
-						overflow = overflow[1:]
-					} else if strings.HasPrefix(overflow, "　") {
-						overflow = overflow[len("　"):]
+		if vis+tk.w > width && vis > 0 {
+			if lastSpace >= 0 {
+				// Break at the last space: keep everything before it, drop the
+				// space (leading whitespace of the next line is stripped).
+				segments = append(segments, seg[:lastSpace])
+				overflow := seg[lastSpace+1:]
+				seg = overflow
+				vis = 0
+				for _, st := range seg {
+					if !st.isSeq {
+						vis += st.w
 					}
 				}
-				curLine.Reset()
-				curLine.WriteString(trimmed)
-				flushLine()
-				curLine.WriteString(overflow)
-				curLine.WriteRune(r)
-				visualCol = displayWidth(stripAnsi(overflow)) + rw
-				lastSpaceIdx = -1
-				i++
-				continue
+				lastSpace = -1
+			} else {
+				segments = append(segments, seg)
+				seg = nil
+				vis = 0
+				lastSpace = -1
 			}
-			flushLine()
-			curLine.WriteRune(r)
-			visualCol = rw
-			if r == ' ' || r == '　' {
-				lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+		}
+		seg = append(seg, tk)
+		vis += tk.w
+		if tk.text == " " || tk.text == "　" {
+			lastSpace = len(seg) - 1
+		}
+	}
+	if len(seg) > 0 {
+		segments = append(segments, seg)
+	}
+
+	// Render segments, replaying active SGRs at each continuation line start.
+	var lines []string
+	var activeSGRs []string
+	for si, seg := range segments {
+		var b strings.Builder
+		if si > 0 {
+			for _, sgr := range activeSGRs {
+				b.WriteString(sgr)
 			}
-			i++
+		}
+		segActive := append([]string{}, activeSGRs...)
+		for _, tk := range seg {
+			if tk.isSeq {
+				b.WriteString(tk.seq)
+				if isSGR(tk.seq) {
+					if tk.seq == "\x1b[0m" || tk.seq == "\x1b[m" {
+						segActive = nil
+					} else {
+						segActive = append(segActive, tk.seq)
+					}
+				}
+			} else {
+				b.WriteString(tk.text)
+			}
+		}
+		if len(segActive) > 0 {
+			b.WriteString("\x1b[0m")
+		}
+		lines = append(lines, b.String())
+		activeSGRs = segActive
+	}
+	return lines
+}
+
+// ansiWrapToken is a single unit of an ANSI-aware line: either a complete
+// escape sequence (isSeq=true) or one visible rune (isSeq=false, w=visual width).
+type ansiWrapToken struct {
+	isSeq bool
+	seq   string // escape sequence text (when isSeq)
+	text  string // visible rune (when !isSeq)
+	w     int    // visual width (0 for sequences)
+}
+
+// tokenizeAnsiLine splits line into ANSI-sequence and visible-rune tokens.
+func tokenizeAnsiLine(line string) []ansiWrapToken {
+	var toks []ansiWrapToken
+	i := 0
+	for i < len(line) {
+		if line[i] == '\x1b' {
+			end := findAnsiSeqEnd(line, i)
+			if end <= i {
+				end = i + 1
+			}
+			toks = append(toks, ansiWrapToken{isSeq: true, seq: line[i:end]})
+			i = end
 			continue
 		}
-
-		curLine.WriteRune(r)
-		visualCol += rw
-		if r == ' ' || r == '　' {
-			lastSpaceIdx = len([]byte(curLine.String())) - len(string(r))
+		r, size := decodeRuneAt(line, i)
+		if size <= 0 {
+			size = 1
 		}
-		i++
+		toks = append(toks, ansiWrapToken{text: line[i : i+size], w: runeWidth(r)})
+		i += size
 	}
-
-	if curLine.Len() > 0 {
-		if len(lines) == 0 {
-			lines = append(lines, line)
-		} else {
-			lines = append(lines, curLine.String())
-		}
-	}
-
-	return lines
+	return toks
 }
 
 func wrapLines(lines []string, width int) []string {
