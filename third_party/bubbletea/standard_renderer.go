@@ -217,9 +217,14 @@ func (r *standardRenderer) flush() {
 			!lineHasWideRune(newLines[i]) // Wide (CJK) lines are always rewritten to avoid incremental diff drift.
 
 		if _, ignore := r.ignoreLines[i]; ignore || canSkip {
-			// Unless this is the last line, move the cursor down.
+			// Unless this is the last line, move the cursor down. CR+LF keeps
+			// the cursor column pinned to 1: after a full-width rendered line
+			// the terminal is in wrap-pending state (cursor past the right
+			// margin), and a bare LF there makes terminals like iTerm2 drift
+			// the column, corrupting subsequent lines. Plain LF is only safe
+			// when the cursor is already at column 1, which CR guarantees.
 			if i < len(newLines)-1 {
-				buf.WriteByte('\n')
+				buf.WriteString("\r\n")
 			}
 			continue
 		}
