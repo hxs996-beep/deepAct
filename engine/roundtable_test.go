@@ -346,9 +346,9 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 		t.Errorf("verdict prompt should contain average column in score table")
 	}
 	// Score table should be sorted by average (radical avg 82.5 > defender avg 77.5)
-	// and top row should have 🏆
-	if !strings.Contains(resp.Summary, "🏆") {
-		t.Errorf("verdict prompt should highlight top-scoring proposal with 🏆")
+	// and top row should have ★
+	if !strings.Contains(resp.Summary, "★") {
+		t.Errorf("verdict prompt should highlight top-scoring proposal with ★")
 	}
 	// Vote tally should be shown
 	if !strings.Contains(resp.Summary, "投票统计") {

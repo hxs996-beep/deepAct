@@ -307,7 +307,7 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 			h.engine.config.OnProgress(ProgressEvent{
 				Type:   "member_done",
 				Name:   member.ID,
-				Detail: fmt.Sprintf("%s ❌", member.displayName(zh)),
+				Detail: fmt.Sprintf("%s ✗", member.displayName(zh)),
 			})
 		}
 		return DebateOutput{MemberID: member.ID, Content: fmt.Sprintf("analysis failed: %v", err)}
@@ -597,8 +597,8 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 
 	// Header
 	sb.WriteString(pickPrompt(zh,
-		"## 🤝 Debate Complete - Your Verdict\n\n",
-		"## 🤝 辩论完成 - 请裁决\n\n",
+		"## Debate Complete - Your Verdict\n\n",
+		"## 辩论完成 - 请裁决\n\n",
 	))
 	sb.WriteString(pickPrompt(zh,
 		fmt.Sprintf("**Goal**: %s\n\n", goal),
@@ -612,14 +612,14 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 	if len(rounds) >= 4 {
 		table := buildScoreTable(rounds[3].Outputs, members, zh)
 		if table != "" {
-			sb.WriteString(pickPrompt(zh, "### 📊 Score Overview\n\n", "### 📊 评分总览\n\n"))
+			sb.WriteString(pickPrompt(zh, "### Score Overview\n\n", "### 评分总览\n\n"))
 			sb.WriteString(table)
 			sb.WriteString("\n")
 		}
 
 		tally := parseVerdicts(rounds[3].Outputs, members, zh)
 		if len(tally) > 0 {
-			sb.WriteString(pickPrompt(zh, "### 🗳️ Vote Tally\n\n", "### 🗳️ 投票统计\n\n"))
+			sb.WriteString(pickPrompt(zh, "### Vote Tally\n\n", "### 投票统计\n\n"))
 			var parts []string
 			for _, v := range tally {
 				parts = append(parts, fmt.Sprintf("%s %s %d%s",
@@ -633,13 +633,13 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 
 	if synthesis != "" {
 		// ── 分: LLM synthesis summary ──
-		sb.WriteString(pickPrompt(zh, "### 📝 Debate Summary\n\n", "### 📝 辩论摘要\n\n"))
+		sb.WriteString(pickPrompt(zh, "### Debate Summary\n\n", "### 辩论摘要\n\n"))
 		sb.WriteString(synthesis)
 		sb.WriteString("\n\n")
 	} else {
 		// ── Fallback: verbose member viewpoints + high-confidence challenges ──
 		if len(rounds) > 0 {
-			sb.WriteString(pickPrompt(zh, "### 📋 Member Viewpoints\n\n", "### 📋 各角色观点\n\n"))
+			sb.WriteString(pickPrompt(zh, "### Member Viewpoints\n\n", "### 各角色观点\n\n"))
 
 			for _, out := range rounds[0].Outputs {
 				m := findMember(members, out.MemberID)
@@ -675,7 +675,7 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 
 		challenges := extractHighConfidenceChallenges(rounds, members, zh)
 		if len(challenges) > 0 {
-			sb.WriteString(pickPrompt(zh, "### ⚡ High-Confidence Challenges\n\n", "### ⚡ 高置信度挑战\n\n"))
+			sb.WriteString(pickPrompt(zh, "### High-Confidence Challenges\n\n", "### 高置信度挑战\n\n"))
 			for _, c := range challenges {
 				sb.WriteString(fmt.Sprintf("> **%s %s** %s\n\n%s\n\n",
 					c.challengerAvatar, c.challengerName,
@@ -700,7 +700,7 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 
 // buildScoreTable parses SCORE lines from final round outputs and renders a
 // markdown table: rows = proposals (sorted by average descending), columns =
-// scorers, with an average column. The top-scoring row is marked with 🏆.
+// scorers, with an average column. The top-scoring row is marked with ★.
 func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool) string {
 	type scoreKey struct{ scorer, scored string }
 	scores := make(map[scoreKey]float64)
@@ -778,11 +778,11 @@ func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool
 	}
 	sb.WriteString("---|\n")
 
-	// Data rows: sorted by average descending; top row gets 🏆.
+	// Data rows: sorted by average descending; top row gets ★.
 	for idx, rs := range rankings {
 		label := fmt.Sprintf("%s%s", rs.member.Avatar, rs.member.displayName(zh))
 		if idx == 0 && rs.count > 0 {
-			label = "🏆 " + label
+			label = "★ " + label
 		}
 		sb.WriteString(fmt.Sprintf("| %s |", label))
 		for _, scorer := range members {
@@ -998,8 +998,8 @@ func (h *RoundtableHall) handleVerdict(userMsg, lower string, zh bool) *EngineRe
 
 	return &EngineResponse{
 		Summary: pickPrompt(zh,
-			fmt.Sprintf("✅ Verdict recorded. Proceeding with: %s", userMsg),
-			fmt.Sprintf("✅ 裁决已记录。将按以下方向执行: %s", userMsg),
+			fmt.Sprintf("✓ Verdict recorded. Proceeding with: %s", userMsg),
+			fmt.Sprintf("✓ 裁决已记录。将按以下方向执行: %s", userMsg),
 		),
 		Stage: StageAct,
 	}

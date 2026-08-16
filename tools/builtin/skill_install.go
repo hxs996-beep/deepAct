@@ -109,7 +109,7 @@ func (t *SkillInstallTool) Run(ctx tools.ToolContext, input json.RawMessage) (to
 	registered := skill.SkillFromSkillFile(sf)
 	t.registry.Register(registered)
 
-	digest := fmt.Sprintf("✅ Skill '%s' installed to %s\n   Description: %s", sf.Name, targetPath, sf.Description)
+	digest := fmt.Sprintf("[ok] Skill '%s' installed to %s\n   Description: %s", sf.Name, targetPath, sf.Description)
 	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest}, nil
 }
 

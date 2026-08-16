@@ -801,7 +801,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 func buildCriticFailSummary(digest string, zh bool) string {
 	var sb strings.Builder
 	if zh {
-		sb.WriteString("## ⚠️ 对抗验证未通过\n\n")
+		sb.WriteString("## ⚠ 对抗验证未通过\n\n")
 		sb.WriteString("Critic 代理对当前实现进行了对抗性验证，发现以下问题：\n\n")
 		sb.WriteString("---\n\n")
 		sb.WriteString(digest)
@@ -812,7 +812,7 @@ func buildCriticFailSummary(digest string, zh bool) string {
 		sb.WriteString("- **跳过**: 忽略此验证结果，继续原方案\n")
 		sb.WriteString("- **放弃**: 放弃当前方案，重新考虑")
 	} else {
-		sb.WriteString("## ⚠️ Adversarial Verification Failed\n\n")
+		sb.WriteString("## ⚠ Adversarial Verification Failed\n\n")
 		sb.WriteString("The critic agent performed adversarial verification on the current implementation and found issues:\n\n")
 		sb.WriteString("---\n\n")
 		sb.WriteString(digest)
@@ -922,7 +922,7 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		if len(e.state.MemoryMarkers) > 0 {
 			agentCtx.WriteString("\nKey findings from the main agent (review for blind spots):\n")
 			for _, m := range e.state.MemoryMarkers {
-				agentCtx.WriteString(fmt.Sprintf("  ⚡ %s\n", m))
+				agentCtx.WriteString(fmt.Sprintf("  • %s\n", m))
 			}
 		}
 
@@ -1594,7 +1594,7 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 			chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
 		}
 		skillMsg := fmt.Sprintf(
-			"✅ Skill `%s` activated%s. Full methodology now in stable zone.",
+			"✓ Skill `%s` activated%s. Full methodology now in stable zone.",
 			s.Name, chainInfo,
 		)
 		e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
@@ -1609,7 +1609,7 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 		pendingActivateMsgs = append(pendingActivateMsgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    fmt.Sprintf("✅ Activated skill `%s`%s", s.Name, chainInfo),
+			Content:    fmt.Sprintf("✓ Activated skill `%s`%s", s.Name, chainInfo),
 			Timestamp:  time.Now(),
 		})
 	}

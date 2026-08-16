@@ -265,7 +265,7 @@ var CustomDarkStyle = ansi.StyleConfig{
 	},
 	ImageText: ansi.StylePrimitive{
 		Color:  stringPtr("243"),
-		Format: "📷 {{.text}}",
+		Format: "[img] {{.text}}",
 	},
 	Code: ansi.StyleBlock{
 		StylePrimitive: ansi.StylePrimitive{
@@ -497,7 +497,7 @@ var CustomLightStyle = ansi.StyleConfig{
 	},
 	ImageText: ansi.StylePrimitive{
 		Color:  stringPtr("243"),
-		Format: "📷 {{.text}}",
+		Format: "[img] {{.text}}",
 	},
 	Code: ansi.StyleBlock{
 		StylePrimitive: ansi.StylePrimitive{

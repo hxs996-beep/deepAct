@@ -63,7 +63,7 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	// the key is invalid.
 	if runner != nil {
 		if err := runner.ValidateConnection(); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ API connection failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "ERROR: API connection failed: %v\n", err)
 			fmt.Fprintf(os.Stderr, "   Check your DEEPSEEK_API_KEY with: deepact set apikey\n")
 			return err
 		}
@@ -354,7 +354,7 @@ func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp
 	for _, sc := range cfg.Servers {
 		manager, err := mcp.StartServer(sc)
 		if err != nil {
-			log.Printf("⚠️  MCP server %q failed to start, skipping: %v", sc.Name, err)
+			log.Printf("WARN: MCP server %q failed to start, skipping: %v", sc.Name, err)
 			continue
 		}
 		*managers = append(*managers, manager)

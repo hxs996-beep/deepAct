@@ -93,12 +93,12 @@ func runEvalHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(records) == 0 {
-		fmt.Println("📊 No evaluation records found.")
+		fmt.Println("[stats] No evaluation records found.")
 		fmt.Printf("   Store: %s\n", path)
 		return nil
 	}
 
-	fmt.Printf("📊 Evaluation Records (last %d)\n", limit)
+	fmt.Printf("[stats] Evaluation Records (last %d)\n", limit)
 	fmt.Printf("   Store: %s\n\n", path)
 
 	// Table header
@@ -116,9 +116,9 @@ func runEvalHistory(cmd *cobra.Command, args []string) error {
 		if len(goal) > 24 {
 			goal = goal[:24]
 		}
-		passMark := "✅"
+		passMark := "pass"
 		if !r.Passed {
-			passMark = "❌"
+			passMark = "FAIL"
 		}
 		pv := r.PromptVersion
 		if len(pv) > 16 {
@@ -142,7 +142,7 @@ func runEvalStats(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get stats: %w", err)
 	}
 
-	fmt.Println("📊 Evaluation Statistics")
+	fmt.Println("[stats] Evaluation Statistics")
 	fmt.Printf("   Store: %s\n\n", path)
 
 	if stats.TotalRecords == 0 {
@@ -275,7 +275,7 @@ func runEvalStats(cmd *cobra.Command, args []string) error {
 			}
 			errMark := ""
 			if r.ErrorCount > 0 {
-				errMark = "⚠️"
+				errMark = "[warn]"
 			}
 			fmt.Printf("%-20s | %7d | %5.1f | %6d | %5.1f%% | %4d | %s %s\n",
 				ts, r.IterationCount, dur, total, hitRate, r.ToolCallCount, goal, errMark)
@@ -295,7 +295,7 @@ func runEvalStats(cmd *cobra.Command, args []string) error {
 			bar := strings.Repeat("▓", turns) + strings.Repeat("░", 20-turns)
 			errSym := " "
 			if r.ErrorCount > 0 {
-				errSym = "⚠"
+				errSym = "!"
 			}
 			ts := r.Timestamp.Format("01-02 15:04")
 			fmt.Printf("  %s %s %3d turns  %s\n", ts, errSym, r.IterationCount, bar)
@@ -323,7 +323,7 @@ func runEvalCompare(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("query v2: %w", err)
 	}
 
-	fmt.Printf("📊 Prompt Version Comparison\n")
+	fmt.Printf("[stats] Prompt Version Comparison\n")
 	fmt.Printf("   Store: %s\n\n", path)
 
 	if len(recs1) == 0 && len(recs2) == 0 {

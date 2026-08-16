@@ -297,7 +297,7 @@ func skillReminder(name string) string {
 	if name == "" {
 		return ""
 	}
-	return fmt.Sprintf("⚠️ Skill '%s' is ACTIVE. Its full methodology is in the stable zone (Message 4). "+
+	return fmt.Sprintf("⚠ Skill '%s' is ACTIVE. Its full methodology is in the stable zone (Message 4). "+
 		"It OVERRIDES general rules — follow it precisely step by step.", name)
 }
 

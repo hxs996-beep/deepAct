@@ -50,7 +50,7 @@ func TestRun_ResetsLoopGuardOnNewRun(t *testing.T) {
 // (which kept it as-is). On an unrelated new question the analysis gate then
 // skipped (because !AnalysisReportConfirmed was false), so the agent never
 // presented a fresh report and instead hallucinated "分析报告已在上一轮输出，
-// 用户已确认执行" from the stale "✅ 分析报告已确认" marker left in history.
+// 用户已确认执行" from the stale "✓ 分析报告已确认" marker left in history.
 //
 // AnalysisReportConfirmed is only meaningful within the single Run where
 // handleAnalysisNudgeConfirmation sets it (so the analysis gate can take

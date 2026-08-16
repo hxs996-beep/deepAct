@@ -71,7 +71,7 @@ type Suggestion struct {
 type MemberStatus struct {
 	ID      string // member ID e.g. "architect"
 	Name    string // display name e.g. "架构师"
-	Avatar  string // emoji e.g. "🏗️"
+	Avatar  string // display tag e.g. "[A]"
 	Status  string // "running", "done", "error"
 	Score   int    // 0-100 (valid when done)
 	Verdict string // "approve", "conditional", "reject" (valid when done)
@@ -497,11 +497,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if score := extractScore(msg.Detail); score >= 0 {
 						m.memberStatuses[i].Score = score
 					}
-					if strings.Contains(msg.Detail, "✅") {
+					if strings.Contains(msg.Detail, "✓") {
 						m.memberStatuses[i].Verdict = "approve"
-					} else if strings.Contains(msg.Detail, "⚠️") {
+					} else if strings.Contains(msg.Detail, "⚠") {
 						m.memberStatuses[i].Verdict = "conditional"
-					} else if strings.Contains(msg.Detail, "❌") {
+					} else if strings.Contains(msg.Detail, "✗") {
 						m.memberStatuses[i].Verdict = "reject"
 					}
 					break
@@ -510,14 +510,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "roundtable_enter":
 			m.memberStatuses = nil
 			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = "🔄 " + msg.Detail
+				m.spinners[0].Goal = msg.Detail
 			}
 		case "roundtable_phase":
 			if msg.Name == "review" {
 				m.memberStatuses = nil
 			}
 			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = "🔄 " + msg.Detail
+				m.spinners[0].Goal = msg.Detail
 			}
 			if msg.Name == "explore_done" || msg.Name == "review_done" {
 				m.memberStatuses = nil
@@ -1629,7 +1629,7 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		apiKeyLines := []string{
 			"┌────────────────────────────────────────────┐",
 			"│  Welcome to DeepAct!                        │",
-			"│  🔑 DeepSeek API Key 需要配置才能使用。      │",
+			"│  DeepSeek API Key 需要配置才能使用。         │",
 			"│  获取地址: https://platform.deepseek.com     │",
 			"│                                              │",
 			"│  输入你的 API Key 后按 Enter 确认           │",
@@ -1904,19 +1904,19 @@ func toolIcon(name string) string {
 	}
 }
 
-// memberAvatar returns a default emoji for known member IDs.
+// memberAvatar returns a default tag for known member IDs.
 func memberAvatar(id string) string {
 	switch id {
 	case "architect":
-		return "🏗️"
+		return "[A]"
 	case "security":
-		return "🔒"
+		return "[S]"
 	case "quality":
-		return "📐"
+		return "[Q]"
 	case "maintainer":
-		return "🔧"
+		return "[M]"
 	default:
-		return "🧑"
+		return "[*]"
 	}
 }
 
@@ -2345,7 +2345,7 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 			line := fmt.Sprintf("  ✓ %s %s  %s", icon, a.Agent, SpinnerDoneStyle.Render(summary))
 			content = append(content, line)
 		case "error":
-			line := fmt.Sprintf("  ✗ %s %s  ❌", icon, a.Agent)
+			line := fmt.Sprintf("  ✗ %s %s  [err]", icon, a.Agent)
 			content = append(content, ErrorStyle.Render(line))
 		}
 	}
@@ -2358,17 +2358,17 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 	return result
 }
 
-// agentIcon returns a default emoji for known agent types.
+// agentIcon returns a default tag for known agent types.
 func agentIcon(agent string) string {
 	switch agent {
 	case "sub":
-		return "🔍"
+		return "[s]"
 	case "critic":
-		return "🔎"
+		return "[c]"
 	case "team-lead":
-		return "👑"
+		return "[t]"
 	default:
-		return "🤖"
+		return "[a]"
 	}
 }
 
@@ -2389,17 +2389,17 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 			line := fmt.Sprintf("  %s %s %s  %s", frame, m.Avatar, m.Name, SpinnerStyle.Render("reviewing..."))
 			content = append(content, line)
 		case "done":
-			verdictIcon := "✅"
+			verdictIcon := "[pass]"
 			switch m.Verdict {
 			case "conditional":
-				verdictIcon = "⚠️"
+				verdictIcon = "[warn]"
 			case "reject":
-				verdictIcon = "❌"
+				verdictIcon = "[fail]"
 			}
 			line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
 			content = append(content, SpinnerDoneStyle.Render(line))
 		case "error":
-			line := fmt.Sprintf("  ✗ %s %s  ❌ error", m.Avatar, m.Name)
+			line := fmt.Sprintf("  ✗ %s %s  [err]", m.Avatar, m.Name)
 			content = append(content, ErrorStyle.Render(line))
 		}
 	}
@@ -2555,18 +2555,18 @@ func renderThinkingBox(activity string, width int) []string {
 	if idx := strings.Index(activity, ": "); idx > 0 {
 		name := activity[:idx]
 		task := activity[idx+2:]
-		icon := "⚙️"
+		icon := "[*]"
 		switch name {
 		case "deepact":
 			icon = ""
 		case "sub":
-			icon = "🔍"
+			icon = "[s]"
 		case "critic":
-			icon = "🔎"
+			icon = "[c]"
 		}
 		display = icon + " " + name + ": " + task
 	} else {
-		display = "⚙️ " + activity
+		display = "[*] " + activity
 	}
 
 	// Truncate if too wide

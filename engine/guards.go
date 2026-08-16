@@ -354,7 +354,7 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 		if strings.Contains(lowered, dp.pattern) {
 			return GuardAction{
 				Type:    GuardBlock,
-				Message: fmt.Sprintf("❌ System-level dangerous command blocked (irreversible): %s\nFull command: %s", dp.reason, cmd),
+				Message: fmt.Sprintf("✗ System-level dangerous command blocked (irreversible): %s\nFull command: %s", dp.reason, cmd),
 			}
 		}
 	}
@@ -371,8 +371,8 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 			return GuardAction{
 				Type:    GuardAskUser,
 				Message: pickPrompt(g.isChinese,
-					fmt.Sprintf("⚠️ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", dp.reason, cmd),
-					fmt.Sprintf("⚠️ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
+					fmt.Sprintf("⚠ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", dp.reason, cmd),
+					fmt.Sprintf("⚠ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
 				),
 			}
 		}

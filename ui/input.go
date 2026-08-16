@@ -397,7 +397,7 @@ type InputBuffer struct {
 	cursor int
 
 	// Paste shorthand mode: when a large paste is detected, store the full
-	// content here and show "📋 已粘贴 N 行" in the input instead.
+	// content here and show a "[Pasted +N lines]" indicator in the input.
 	PasteContent string // full content to submit (prefix + pasted + suffix)
 	PasteMode    bool   // when true, show paste indicator in input
 	pastePrefix  string // text typed before the paste, shown before indicator

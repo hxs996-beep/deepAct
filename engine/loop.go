@@ -372,9 +372,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 			taskText := extractTaskTextAfterSkillCmd(userMsg, sc.name)
 			if taskText == "" {
-				msg := fmt.Sprintf("✅ Skill `%s` activated: %s", s.Name, s.Description)
+				msg := fmt.Sprintf("✓ Skill `%s` activated: %s", s.Name, s.Description)
 				if zh {
-					msg = fmt.Sprintf("✅ 已激活 skill `%s`: %s", s.Name, s.Description)
+					msg = fmt.Sprintf("✓ 已激活 skill `%s`: %s", s.Name, s.Description)
 				}
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
@@ -402,9 +402,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// /clear command — reset all task state and wait for new input.
 	if isClearCommand(userMsg) {
 		e.clearSessionState()
-		msg := "✅ 状态已清理。请提出新的问题。"
+		msg := "✓ 状态已清理。请提出新的问题。"
 		if !zh {
-			msg = "✅ State cleared. Please ask a new question."
+			msg = "✓ State cleared. Please ask a new question."
 		}
 		return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 	}
@@ -480,9 +480,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.PlanConfirmed = true
 		e.state.ConfirmedScope = true
 
-		msg := "✅ 方案已确认，开始执行..."
+		msg := "✓ 方案已确认，开始执行..."
 		if !zh {
-			msg = "✅ Plan confirmed, executing..."
+			msg = "✓ Plan confirmed, executing..."
 		}
 		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 
@@ -607,9 +607,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		confirmedCmd := e.state.PendingDangerousCmd
 		e.guards.scope.ConfirmDangerous(e.state.PendingDangerousCmd)
 		e.state.PendingDangerousCmd = ""
-		msg := "✅ Dangerous command confirmed, proceeding..."
+		msg := "✓ Dangerous command confirmed, proceeding..."
 		if zh {
-			msg = "✅ 危险命令已确认，继续执行..."
+			msg = "✓ 危险命令已确认，继续执行..."
 		}
 		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 		// Tell the agent to re-issue the blocked command.
@@ -627,9 +627,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		if e.detectIntentShift(userMsg) {
 			skillName := e.state.ActiveSkillName
 			e.deactivateSkill()
-			msg := fmt.Sprintf("✅ 自动解除 skill `%s`：检测到意图从开发转向使用/验证。", skillName)
+			msg := fmt.Sprintf("✓ 自动解除 skill `%s`：检测到意图从开发转向使用/验证。", skillName)
 			if !zh {
-				msg = fmt.Sprintf("✅ Auto-deactivated skill `%s`: intent shift from development to usage/verification.", skillName)
+				msg = fmt.Sprintf("✓ Auto-deactivated skill `%s`: intent shift from development to usage/verification.", skillName)
 			}
 			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 			if e.config.OnProgress != nil {
@@ -650,9 +650,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		if e.detectSkillGateApproval(userMsg) {
 			skillName := e.state.ActiveSkillName
 			e.deactivateSkill()
-			msg := fmt.Sprintf("✅ 已确认，自动转入下一个 skill（%s）。", skillName)
+			msg := fmt.Sprintf("✓ 已确认，自动转入下一个 skill（%s）。", skillName)
 			if !zh {
-				msg = fmt.Sprintf("✅ Confirmed, auto-activating next skill (%s).", skillName)
+				msg = fmt.Sprintf("✓ Confirmed, auto-activating next skill (%s).", skillName)
 			}
 			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
 			loopLog.Printf("skill gate approved: deactivating %s, auto-activating next skill", skillName)
@@ -1354,9 +1354,9 @@ func (e *Engine) deactivateSkill() {
 		}
 
 		zh := e.isChinese
-		msg := fmt.Sprintf("✅ Skill `%s` auto-activated%s. Full methodology now in stable zone.", nextSkill.Name, chainInfo)
+		msg := fmt.Sprintf("✓ Skill `%s` auto-activated%s. Full methodology now in stable zone.", nextSkill.Name, chainInfo)
 		if zh {
-			msg = fmt.Sprintf("✅ 已自动激活 skill `%s`%s。方法论已注入稳定区。", nextSkill.Name, chainInfo)
+			msg = fmt.Sprintf("✓ 已自动激活 skill `%s`%s。方法论已注入稳定区。", nextSkill.Name, chainInfo)
 		}
 		e.pendingPinnedMessages = append(e.pendingPinnedMessages, msg)
 
@@ -1513,9 +1513,9 @@ func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
 		// Replace the user's bare confirmation with a contextual message so
 		// the agent knows the analysis was approved and can proceed to edit.
 		if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-			msg := "✅ 分析报告已确认，可以开始修改代码。"
+			msg := "✓ 分析报告已确认，可以开始修改代码。"
 			if !e.isChinese {
-				msg = "✅ Analysis report confirmed. You may now proceed with code changes."
+				msg = "✓ Analysis report confirmed. You may now proceed with code changes."
 			}
 			e.history[len(e.history)-1].Content = msg
 		}
@@ -1714,7 +1714,7 @@ func (e *Engine) activateSkill(s *skill.Skill, reason string) {
 	e.context.SetActiveSkill(s.Name, s.Content)
 
 	skillMsg := fmt.Sprintf(
-		"✅ Skill `%s` auto-activated (%s). Full methodology now in stable zone.",
+		"✓ Skill `%s` auto-activated (%s). Full methodology now in stable zone.",
 		s.Name, reason,
 	)
 	e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
