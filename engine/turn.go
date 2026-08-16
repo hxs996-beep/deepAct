@@ -9,11 +9,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	dlog "github.com/deepact/deepact/internal/log"
 )
 
 var turnLog = dlog.New("[turn] ")
+
+// maxSegmentRunes caps a single buffered paragraph before it is force-flushed
+// as a content_delta event. Without a blank-line boundary the UI would sit
+// idle while the model streams a long unbroken paragraph; splitting into
+// ~60-rune chunks keeps progress visible and each chunk stays a complete
+// readable CJK/ASCII span (never cutting a multi-byte rune).
+const maxSegmentRunes = 60
 
 type TurnResult struct {
 	Done         bool
@@ -102,6 +110,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	var toolCalls []ModelToolCall
 	var finish string
 	var lastUsage *ModelUsage
+	var seg string // buffered content_delta text awaiting a paragraph boundary
+	flushUpTo := func(n int) {
+		if n <= 0 || e.config.OnProgress == nil {
+			return
+		}
+		e.config.OnProgress(ProgressEvent{Type: "content_delta", Detail: seg[:n]})
+		seg = seg[n:]
+	}
 	for chunk := range stream {
 		if chunk.Err != nil {
 			turnLog.Printf("stream chunk err: %v", chunk.Err)
@@ -121,8 +137,15 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		if chunk.Delta != "" {
 			contentBuilder.WriteString(chunk.Delta)
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "content_delta", Detail: chunk.Delta})
+			seg += chunk.Delta
+			// 段落切分：发射最后一个空行分隔符之前的完整段落（含 \n\n）。
+			// 段落完整才输出，UI 每次渲染的都是语义完整的文本，半截
+			// markdown（** / `）和 CJK 字符截断问题从根上消失。
+			if idx := strings.LastIndex(seg, "\n\n"); idx >= 0 {
+				flushUpTo(idx + 2)
+			} else if utf8.RuneCountInString(seg) >= maxSegmentRunes {
+				// 单段超长无空行：强制切段，避免屏幕长时间无反馈。
+				flushUpTo(len(seg))
 			}
 		}
 		if chunk.ReasoningDelta != "" {
@@ -141,6 +164,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			lastUsage = chunk.Usage
 		}
 	}
+	flushUpTo(len(seg)) // 流结束：发掉残余段
 
 	// Reset consecutive failure counter — this LLM call succeeded.
 	e.state.ConsecutiveFailures = 0
@@ -221,7 +245,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		e.history = append(e.history, assistant)
 		if finish == "length" {
-			e.history = append(e.history, Message{Role: "user", Content: "继续", Timestamp: time.Now()})
+			// "继续" must be seen by the model on the next turn to resume, but
+			// must NOT persist as a fake user message in history — use the
+			// pinned mechanism (appended per-turn, cleared after use).
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "继续")
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
 		// Run stop hooks — structured checks that decide whether the model's
@@ -252,9 +279,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			}, nil
 		}
 		if hookResult.Block {
-			e.history = append(e.history, Message{
-				Role: "user", Content: hookResult.Message, Timestamp: time.Now(),
-			})
+			// Nudge is injected as a pinned message: the model sees it on the
+			// next turn to act, but it does NOT persist as a fake user message
+			// in history (avoids context pollution / false user intent).
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, hookResult.Message)
 			e.stopHookActive = true
 			e.stopHookRetryCount++
 			turnLog.Printf("stop hook blocked: reason=%s retry=%d", hookResult.Reason, e.stopHookRetryCount)
@@ -326,7 +354,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				break
 			}
 		}
-		if hasDestructive && strings.TrimSpace(content) != "" {
+		if hasDestructive && strings.TrimSpace(content) != "" &&
+			!e.state.PlanConfirmed && !e.state.AnalysisReportConfirmed {
 			v, err := e.verdictJudge.Classify(ctx, ConclusionCheck{
 				Goal:            e.state.Goal,
 				Text:            content,
@@ -334,6 +363,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			})
 			if err != nil || v != VerdictConclusion {
 				turnLog.Printf("self-answering guard: blocking edit/write calls (reply not a clean conclusion; verdict=%v err=%v)", v, err)
+				// Record the nudge so the user's next confirmation ("ok") sets
+				// AnalysisReportConfirmed, which lets the retried edit through.
+				// Without this, "确认→又被拦→再确认" loops forever: the guard
+				// blocks, no signal is recorded, and the user's approval never
+				// releases the edit.
+				e.pendingAnalysisNudge = true
 				blockMsg := "Blocked: 用户在回答你的问题前，修改不会执行。请等待用户确认后再提交修改。"
 				if !e.isChinese {
 					blockMsg = "Blocked: changes will not be executed until the user answers your question. Wait for user confirmation before submitting modifications."
@@ -852,13 +887,13 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		userLang = "中文"
 	}
 	handoff := Handoff{
-		Agent:         AgentID(params.Agent),
-		Goal:          params.Goal,
-		Context:       params.Context,
-		Tools:         params.Tools,
-		Constraints:   params.Constraints,
-		Depth:         0, // main engine starts at depth 0
-		UserLanguage:  userLang,
+		Agent:        AgentID(params.Agent),
+		Goal:         params.Goal,
+		Context:      params.Context,
+		Tools:        params.Tools,
+		Constraints:  params.Constraints,
+		Depth:        0, // main engine starts at depth 0
+		UserLanguage: userLang,
 	}
 
 	// Inject matched skill content into sub-agent context

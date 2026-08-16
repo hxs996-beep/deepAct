@@ -42,9 +42,15 @@ type StopHook interface {
 // this Run(). A text-only response with zero prior tool calls cannot be a
 // final conclusion - the model is narrating intent without acting.
 // Blocks up to MaxRetries times (default 3), then allows exit.
-// When Verdict is set and the reply is a question, the hook returns
-// AwaitUser=true instead of nudging — the model is asking the user a
-// decision and the loop must stop and wait.
+// Verdict is a three-way judge (conclusion/question/intermediate):
+//   - VerdictQuestion returns AwaitUser=true instead of nudging — the model
+//     is asking the user a decision and the loop must stop and wait. Takes
+//     priority over everything, including AnalysisMode.
+//   - VerdictConclusion allows exit: a clear final answer with zero tool
+//     calls (e.g. a pure-reasoning answer) is complete and must not be
+//     nudged into acting.
+//   - VerdictIntermediate falls through to the nudge below, unless
+//     AnalysisMode is set (text-only output IS the report — allow exit).
 type ZeroToolCallHook struct {
 	MaxRetries int
 	Verdict    VerdictJudge
@@ -63,10 +69,27 @@ func (h *ZeroToolCallHook) Check(ctx context.Context, sc StopHookContext) StopHo
 			Goal: sc.Goal,
 			Text: sc.LastContent,
 		})
-		if err == nil && v == VerdictQuestion {
-			turnLog.Printf("zero-tool-call hook: question detected, awaiting user (retry=%d)", sc.StopHookRetryCount)
-			return StopHookResult{AwaitUser: true, Reason: "question_to_user"}
+		if err == nil {
+			switch v {
+			case VerdictQuestion:
+				turnLog.Printf("zero-tool-call hook: question detected, awaiting user (retry=%d)", sc.StopHookRetryCount)
+				return StopHookResult{AwaitUser: true, Reason: "question_to_user"}
+			case VerdictConclusion:
+				// A clear conclusion with zero tool calls (pure-reasoning
+				// answer) is complete — nudging would block a full answer.
+				return StopHookResult{}
+			}
+			// VerdictIntermediate. In analysis mode, text-only output IS the
+			// report — allow exit without nudging (mirrors StalledNarrationHook).
+			if sc.AnalysisMode {
+				return StopHookResult{}
+			}
 		}
+	}
+	// No Verdict wired, verdict error, or intermediate non-analysis:
+	// in analysis mode, text-only output is the report — allow exit.
+	if sc.AnalysisMode {
+		return StopHookResult{}
 	}
 	maxRetries := h.MaxRetries
 	if maxRetries <= 0 {
@@ -165,6 +188,15 @@ func (h *StalledNarrationHook) Check(ctx context.Context, sc StopHookContext) St
 	if h.Classifier == nil {
 		turnLog.Printf("StalledNarrationHook: nil Classifier (wiring bug), skipping stop-hook check")
 		return StopHookResult{}
+	}
+	// Deterministic pre-check before the binary LLM call (fall-back path:
+	// no Verdict wired, or the Verdict judge errored above). A clear
+	// next-step plan ("让我/接下来/深入读取...") is never a conclusion —
+	// block without the cost and latency of a flash-model call. Question
+	// detection already ran in the Verdict branch above, so a hit here is
+	// intermediate narration, never a user question.
+	if hasTrailingNextStepIntent(sc.LastContent) {
+		return StopHookResult{Block: true, Message: stalledNudgeMsg(sc), Reason: "stalled_narration"}
 	}
 	isConclusion, err := h.Classifier.IsConclusion(ctx, ConclusionCheck{
 		Goal:            sc.Goal,

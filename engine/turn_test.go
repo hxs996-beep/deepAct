@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -75,7 +76,7 @@ func (m *stubStreamModel) Complete(_ context.Context, _ ModelRequest) (*ModelRes
 type stubToolExecutor struct{}
 
 func (stubToolExecutor) Execute(_ ToolExecContext, _ []ToolCallRequest) []ToolResult { return nil }
-func (stubToolExecutor) Specs() []ModelTool                                           { return nil }
+func (stubToolExecutor) Specs() []ModelTool                                          { return nil }
 
 // TestExecuteTurn_ZeroToolCalls_StopHookNudges verifies that when
 // the model emits text without a tool call and runToolCallCount=0,
@@ -101,9 +102,13 @@ func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
 	if result.Done {
 		t.Errorf("expected Done=false (zero tool calls → stop hook should nudge), got Done=true")
 	}
-	last := e.history[len(e.history)-1]
-	if last.Role != "user" {
-		t.Errorf("expected last message to be user nudge, got role=%q", last.Role)
+	// Nudge is pinned (not persisted to history): the model sees it next
+	// turn, but history must not grow a fake user message.
+	if len(e.pendingPinnedMessages) != 1 || !strings.Contains(e.pendingPinnedMessages[0], "执行下一步") {
+		t.Errorf("expected one pinned nudge, got %q", e.pendingPinnedMessages)
+	}
+	if len(e.history) != 2 { // original user + assistant narration
+		t.Errorf("expected history unchanged (no nudge persisted), got %d messages", len(e.history))
 	}
 	if result.FinishReason != "stop" {
 		t.Errorf("expected FinishReason='stop', got %q", result.FinishReason)

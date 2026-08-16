@@ -400,9 +400,17 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				continue
 			}
 			// Give one more chance with a nudge
+			// For the critic, the generic "use tools" nudge would push it into
+			// more read calls — the opposite of convergence. A critic nudge
+			// forces a verdict instead, so the next text-only turn carries a
+			// VERDICT line and hits the critic fast-path above.
+			content := getNudgeMessage(input.Goal)
+			if input.Agent == AgentCritic {
+				content = getCriticNudgeMessage(zhFromLang(input.UserLanguage))
+			}
 			history = append(history, ModelMessage{
 				Role:    "user",
-				Content: getNudgeMessage(input.Goal),
+				Content: content,
 			})
 			continue
 		}
@@ -794,4 +802,16 @@ func getNudgeMessage(goal string) string {
 		return "请直接使用工具执行下一步，完成目标后给出最终结论。不要只描述计划。"
 	}
 	return "Use tools to take the next action. Complete the goal and give your final conclusions. Do not just describe a plan."
+}
+
+// getCriticNudgeMessage forces the critic to converge: stop reading and emit
+// a verdict. The generic nudge ("use tools") would push the static reviewer
+// into more read calls — the opposite of what we want. This command-style
+// nudge drives the next text-only turn to carry a VERDICT line, which the
+// runLoop critic fast-path terminates on deterministically.
+func getCriticNudgeMessage(zh bool) string {
+	if zh {
+		return "不要再读取或调用任何工具。立即给出最终评审结论，以一行结束：VERDICT: PASS 或 VERDICT: FAIL 或 VERDICT: PARTIAL。"
+	}
+	return "Do not read or call any more tools. Immediately produce your final review conclusion, ending with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL."
 }

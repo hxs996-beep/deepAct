@@ -179,6 +179,75 @@ func TestStalledNarrationHook_PassesGoalAndTextToClassifier(t *testing.T) {
 	}
 }
 
+// Fall-back pre-check: when no Verdict is wired (or it errors), a clear
+// next-step plan ("让我/深入读取...") must block WITHOUT calling the binary
+// LLM classifier — the deterministic heuristic saves a flash-model call.
+func TestStalledNarrationHook_NextStepIntent_BlocksWithoutClassifier(t *testing.T) {
+	classifier := &stubClassifier{conclusion: true} // would say conclusion if called
+	hook := &StalledNarrationHook{MaxRetries: 4, Classifier: classifier}
+	result := hook.Check(context.Background(), StopHookContext{
+		RunToolCallCount:   3,
+		StopHookRetryCount: 0,
+		LastContent:        "搜索结果集中在这几处。让我精读这些关键区域。",
+		Goal:               "分析代码流程",
+		IsChinese:          true,
+	})
+	if !result.Block {
+		t.Errorf("expected Block=true for next-step intent, got Block=%v", result.Block)
+	}
+	if result.Reason != "stalled_narration" {
+		t.Errorf("expected Reason='stalled_narration', got %q", result.Reason)
+	}
+	if classifier.called {
+		t.Errorf("binary classifier must NOT be called when next-step pre-check hits (cost optimization)")
+	}
+}
+
+// The same pre-check applies when a Verdict judge is wired but errors:
+// fall back to the deterministic next-step check, still skipping the binary
+// LLM call when the text clearly reads as a plan.
+func TestStalledNarrationHook_NextStepIntent_VerdictError_BlocksWithoutClassifier(t *testing.T) {
+	classifier := &stubClassifier{conclusion: true}
+	hook := &StalledNarrationHook{
+		MaxRetries: 4,
+		Verdict:    &stubVerdictJudge{verdict: VerdictIntermediate, err: errBoom},
+		Classifier: classifier,
+	}
+	result := hook.Check(context.Background(), StopHookContext{
+		RunToolCallCount:   3,
+		StopHookRetryCount: 0,
+		LastContent:        "继续查看 engine/loop.go 的实现。",
+		Goal:               "分析代码流程",
+		IsChinese:          true,
+	})
+	if !result.Block {
+		t.Errorf("expected Block=true for next-step intent on verdict error, got Block=%v", result.Block)
+	}
+	if classifier.called {
+		t.Errorf("binary classifier must NOT be called when next-step pre-check hits")
+	}
+}
+
+// A genuine conclusion must still reach the binary classifier (not be
+// swallowed by the pre-check).
+func TestStalledNarrationHook_Conclusion_ReachesClassifier(t *testing.T) {
+	classifier := &stubClassifier{conclusion: true}
+	hook := &StalledNarrationHook{MaxRetries: 4, Classifier: classifier}
+	result := hook.Check(context.Background(), StopHookContext{
+		RunToolCallCount:   3,
+		StopHookRetryCount: 0,
+		LastContent:        "任务已完成，所有文件已修改。",
+		Goal:               "修复 bug",
+		IsChinese:          true,
+	})
+	if result.Block {
+		t.Errorf("expected Block=false for conclusion, got Block=%v", result.Block)
+	}
+	if !classifier.called {
+		t.Errorf("expected binary classifier to be called for genuine conclusion")
+	}
+}
+
 // AnalysisMode: text-only output after tool calls is the analysis report.
 // The hook allows exit immediately without calling the classifier - no
 // keyword matching, no content inspection. This is the core fix for the
@@ -244,9 +313,12 @@ func TestExecuteTurn_StalledNarrationAfterToolCalls_Nudges(t *testing.T) {
 	if result.Done {
 		t.Errorf("expected Done=false (mid-task narration -> nudge), got Done=true")
 	}
-	last := e.history[len(e.history)-1]
-	if last.Role != "user" {
-		t.Errorf("expected last message to be user nudge, got role=%q", last.Role)
+	// Nudge is pinned (not persisted to history) — avoids fake user messages.
+	if len(e.pendingPinnedMessages) != 1 {
+		t.Fatalf("expected one pinned nudge, got %q", e.pendingPinnedMessages)
+	}
+	if len(e.history) != 2 { // original user + assistant narration
+		t.Errorf("expected history unchanged (no nudge persisted), got %d messages", len(e.history))
 	}
 }
 

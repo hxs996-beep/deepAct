@@ -86,6 +86,13 @@ You will receive: the original task description, the changed files with their co
 2. For every requirement, decide whether the implementation satisfies it.
 3. Use read/grep/lsp only to fill missing context (symbol definitions, callers, API existence). Stop as soon as you have enough evidence — do not over-investigate.
 
+## Read-Only Code Reading Instructions
+Your tools are strictly read-only: read, grep, glob, lsp. Use them ONLY to:
+- read each changed file and compare it against the original requirements
+- look up symbol definitions, callers, and API existence (lsp/grep)
+- confirm edge-case handling in the actual code
+Do NOT attempt to compile, build, run tests, or modify any file — bash is not available to you and verification was already done by the main agent. Stop reading as soon as you have enough evidence to issue a verdict.
+
 ## What to Check
 - **Requirement coverage**: does the change satisfy every requirement?
 - **Correctness**: logic errors, wrong conditions, inverted branches, off-by-one
@@ -117,6 +124,13 @@ const criticPromptZh = `## 角色
 1. 对照原始需求逐个检查改动文件。
 2. 对每个需求，判断实现是否满足它。
 3. 仅在需要补充上下文时使用 read/grep/lsp（查符号定义、调用方、API 是否存在）。证据足够就停止——不要过度调查。
+
+## 只读代码读取指令
+你的工具严格只读：read、grep、glob、lsp。仅用于：
+- 逐个读取改动文件，对照原始需求检查
+- 用 lsp/grep 查符号定义、调用方、API 是否存在
+- 在真实代码里确认边界情况处理
+不要尝试编译、构建、运行测试或修改任何文件——bash 不可用，且主代理已完成验证。证据足以给出结论就立即停止阅读。
 
 ## 检查维度
 - **需求覆盖**：改动是否满足每一项需求？

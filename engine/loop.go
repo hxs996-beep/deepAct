@@ -140,7 +140,7 @@ type Engine struct {
 	// into this run's summary when the model emits bare tool calls (empty
 	// Content) and never produces a final text body.
 	runStartHistoryLen int
-	runErrorCount    int
+	runErrorCount      int
 
 	// isChinese is set once from the first user message in the session.
 	// All per-turn UI messages (skill list, activation prompts, etc.) use
@@ -806,11 +806,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				switch action.Type {
 				case GuardDiagnose:
 					nudge := buildReadLoopNudge(turnResult.LastOp, zh)
-					e.history = append(e.history, Message{
-						Role:    "user",
-						Content: nudge,
-					})
-					loopLog.Printf("read-loop nudge injected for %s", turnResult.LastOp)
+					// Pinned (not persisted to history): the nudge is a runtime
+					// reminder to the model for the next turn, not a real user
+					// message — avoids context pollution.
+					e.pendingPinnedMessages = append(e.pendingPinnedMessages, nudge)
+					loopLog.Printf("read-loop nudge pinned for %s", turnResult.LastOp)
 				case GuardBlock:
 					msg := buildReadLoopBlockMsg(turnResult.LastOp, zh)
 					return &EngineResponse{
