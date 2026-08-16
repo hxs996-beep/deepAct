@@ -2219,6 +2219,50 @@ var (
 	}
 )
 
+// preprocessStreamingMarkdown applies lightweight markdown cleanup for
+// streaming display: collapses excessive blank lines and strips common
+// markdown syntax markers (**, ###, ```, `) so raw markdown text is more
+// readable before the final glamour render. Code block content is
+// preserved but fence markers are removed.
+func preprocessStreamingMarkdown(text string) string {
+	// Collapse 3+ consecutive newlines to a single blank line.
+	for strings.Contains(text, "\n\n\n") {
+		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
+	}
+
+	lines := strings.Split(text, "\n")
+	inCodeBlock := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track code block fences. Replace fence lines with empty lines
+		// so code content is visible without the ``` noise.
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			lines[i] = ""
+			continue
+		}
+
+		if inCodeBlock {
+			// Preserve code block content as-is.
+			continue
+		}
+
+		// Strip header markers: "### Title" -> "Title"
+		if strings.HasPrefix(trimmed, "#") {
+			lines[i] = strings.TrimLeft(trimmed, "# ")
+			continue
+		}
+
+		// Strip ** bold markers and ` inline code markers.
+		cleaned := strings.ReplaceAll(line, "**", "")
+		cleaned = strings.ReplaceAll(cleaned, "`", "")
+		lines[i] = cleaned
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func renderStreaming(streaming string, width int) []string {
 	if streaming == "" {
 		return []string{}
@@ -2231,17 +2275,21 @@ func renderStreaming(streaming string, width int) []string {
 		return streamRenderCache.lines
 	}
 
-	// 统一用 glamour markdown 渲染流式输出，与最终消息（renderMessage →
-	// renderMarkdown）走同一格式化路径。此前流式用轻量 preprocess + 纯文本，
-	// 属于"未 format 的输出"；该路径在真实终端上出现过 CJK 宽字符错位
-	// （流式显示乱序、finalize 后恢复正常）。统一 format 后流式与最终显示
-	// 完全一致，从源头消除未格式化输出这条隐患路径。
-	rendered := renderMarkdown(streaming, width)
-	// 与 renderMessage 的 assistant/narration 分支一致：glamour 对无空格
-	// CJK 长行不做硬换行，超宽行会进入 View Step 7 被 truncateToWidth 截断
-	// 丢字。wrapLines 在 token 边界硬换行（表格行已被 glamour 控制在宽度内，
-	// 不会被触碰），保证流式输出不丢字。
-	lines := wrapLines(strings.Split(rendered, "\n"), width)
+	// 流式路径刻意用"消费标记 + 纯文本"：glamour 全量渲染对每 tick 重写的
+	// 流式帧太贵，且 ANSI SGR + CJK 宽字符在 Bubble Tea 增量 diff 下会产生
+	// 列漂移（字符交换/错位），以及流式中途未闭合的 markdown 片段会被原样
+	// 显示成 `**`/`` ` ``。这里无条件剥离标记（** / ` / ``` / #），用纯文本
+	// wrapText 换行——无 ANSI，每帧干净重渲染，用户可安全复制。最终帧
+	// （renderMessage → renderMarkdown）再走 glamour 完整格式化。
+	processed := preprocessStreamingMarkdown(streaming)
+	// 与最终消息一致的 2 列 Document margin 预留：finalized 渲染为
+	// margin(2) + glamour wordwrap(width-2)；流式同样 prefix(2) + wrapText(width-2)。
+	lines := wrapText(processed, width-2)
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = "  " + l
+		}
+	}
 
 	streamRenderCache.content = streaming
 	streamRenderCache.width = width

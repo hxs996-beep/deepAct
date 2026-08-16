@@ -5,10 +5,12 @@ import (
 	"testing"
 )
 
-// TestRenderStreaming_FormatsMarkdown verifies that renderStreaming runs
-// streamed text through the same glamour markdown rendering as finalized
-// messages (defensive: no "unformatted output" path remains). Markdown syntax
-// markers are consumed by glamour; visible text content is preserved.
+// TestRenderStreaming_FormatsMarkdown verifies that renderStreaming consumes
+// markdown syntax markers (**, ###) during streaming so raw markdown text is
+// never shown — the user can safely copy streamed text into a file. Markers
+// are stripped unconditionally by preprocessStreamingMarkdown (regardless of
+// whether the markdown is complete yet, unlike glamour which leaks unclosed
+// markers); visible text content is preserved.
 func TestRenderStreaming_FormatsMarkdown(t *testing.T) {
 	md := "### Check: Build\n\n**Command run:**\n  go build ./...\n\n**Result: PASS**"
 	lines := renderStreaming(md, 80)
@@ -17,7 +19,7 @@ func TestRenderStreaming_FormatsMarkdown(t *testing.T) {
 	}
 	plain := stripAnsi(strings.Join(lines, "\n"))
 	if strings.Contains(plain, "**") {
-		t.Error("renderStreaming should consume '**' bold markers via glamour")
+		t.Error("renderStreaming should consume '**' bold markers")
 	}
 	if !strings.Contains(plain, "Check: Build") {
 		t.Error("renderStreaming should preserve header text content")
@@ -31,8 +33,7 @@ func TestRenderStreaming_FormatsMarkdown(t *testing.T) {
 }
 
 // TestRenderStreaming_PreservesCodeBlockContent verifies that code inside
-// fenced code blocks is preserved (with glamour syntax highlighting) while the
-// ``` fence markers are consumed.
+// fenced code blocks is preserved while the ``` fence markers are consumed.
 func TestRenderStreaming_PreservesCodeBlockContent(t *testing.T) {
 	md := "```go\nfunc main() {\n    fmt.Println(\"hello\")\n}\n```"
 	lines := renderStreaming(md, 80)
@@ -70,8 +71,8 @@ func TestRenderStreaming_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestRenderStreaming_CodeBlockBlankLines verifies that glamour-rendered code
-// blocks do not produce excessive blank-line gaps in the streaming display.
+// TestRenderStreaming_CodeBlockBlankLines verifies that streamed code blocks
+// do not produce excessive blank-line gaps in the streaming display.
 func TestRenderStreaming_CodeBlockBlankLines(t *testing.T) {
 	md := "```\n### Check: Build\n**Command run:**\n  go build\n\n\n**Result: PASS**\n```"
 	lines := renderStreaming(md, 80)
