@@ -362,9 +362,9 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 					return result, nil
 				}
 				isConc, err := conclusionClassifier.IsConclusion(ctx, ConclusionCheck{
-				Goal: input.Goal,
-				Text: msg.Content,
-			})
+					Goal: input.Goal,
+					Text: msg.Content,
+				})
 				if err != nil {
 					turnLog.Printf("sub-agent conclusion classifier error: %v (conservative nudge)", err)
 				} else if isConc && !hasTrailingNextStepIntent(msg.Content) {
@@ -491,7 +491,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	// Max iterations reached — extract whatever findings the agent accumulated
 	summary := r.summarizeHistory(history, input.Goal)
 	return &HandoffResult{
-		Summary: summary,
+		Summary:  summary,
 		TimedOut: true,
 	}, nil
 }
@@ -540,15 +540,35 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 			return "(analysis timed out, partial result)\n" + content
 		}
 	}
-	// Fallback: compile tool discoveries
+	// Fallback: compile tool discoveries — CONCISELY. Dumping every tool result
+	// floods the context/UI with hundreds of discovery lines; keep only the
+	// first line of each distinct discovery, capped.
 	var sb strings.Builder
-	sb.WriteString("(analysis timed out — listing discoveries)\n")
+	count := 0
+	seen := make(map[string]bool)
+	var shown []string
 	for _, msg := range history {
-		if msg.Role == "tool" && msg.Content != "" {
-			sb.WriteString("- ")
-			sb.WriteString(msg.Content)
-			sb.WriteString("\n")
+		if msg.Role != "tool" || msg.Content == "" {
+			continue
 		}
+		count++
+		line := firstLine(strings.TrimSpace(msg.Content), 100)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		shown = append(shown, "- "+line)
+		if len(shown) >= 12 {
+			break
+		}
+	}
+	if count == 0 {
+		return "(analysis timed out — no partial discoveries)"
+	}
+	sb.WriteString(fmt.Sprintf("(analysis timed out — %d tool calls; showing first discoveries)\n", count))
+	for _, l := range shown {
+		sb.WriteString(l)
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

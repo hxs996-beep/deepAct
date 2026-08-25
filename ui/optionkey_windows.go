@@ -14,6 +14,7 @@ var (
 const (
 	vkMenu    = 0x12 // VK_MENU — the Alt key
 	vkControl = 0x11 // VK_CONTROL — the Ctrl key
+	vkShift   = 0x10 // VK_SHIFT — the Shift key
 )
 
 // optionKeyPressed returns true if the Alt key is currently held down.
@@ -27,5 +28,11 @@ func optionKeyPressed() bool {
 // ctrlKeyPressed returns true if the Ctrl key is currently held down.
 func ctrlKeyPressed() bool {
 	ret, _, _ := getAsyncKeyState.Call(uintptr(vkControl))
+	return ret&0x8000 != 0
+}
+
+// shiftKeyPressed returns true if the Shift key is currently held down.
+func shiftKeyPressed() bool {
+	ret, _, _ := getAsyncKeyState.Call(uintptr(vkShift))
 	return ret&0x8000 != 0
 }

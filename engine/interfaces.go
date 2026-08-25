@@ -38,6 +38,15 @@ type SessionStore interface {
 	LoadEvents(sessionID string) ([]Event, error)
 }
 
+// MemoryStore persists cross-session memory snapshots per project. Implemented
+// by the memory package; injected via EngineDeps so engine never imports
+// memory (which imports engine for the MemorySnapshot type).
+type MemoryStore interface {
+	Load() (*MemorySnapshot, error)
+	Save(snap *MemorySnapshot) error
+	Clear() error
+}
+
 type ModelRouter interface {
 	SelectModel(ctx RouteContext) RouteDecision
 }

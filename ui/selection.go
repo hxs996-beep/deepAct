@@ -81,7 +81,12 @@ func screenToLine(screenRow, screenCol, scrollOffset, bodyHeight, totalLines int
 		lineIdx = 0
 	}
 	if totalLines > 0 && lineIdx >= totalLines {
-		lineIdx = totalLines - 1
+		// Click in the blank padded region BELOW the content (content is shorter
+		// than the body). Do NOT snap to the last content line — that made a click
+		// on a blank row highlight/copy the wrong (last) content line (the
+		// "select line 16 -> copies line 10" report). Leave it out of content
+		// range; the highlight/extract paths already skip out-of-range lines.
+		lineIdx = totalLines
 	}
 	return selPoint{Line: lineIdx, Col: screenCol}
 }

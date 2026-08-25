@@ -8,9 +8,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// roundtableMemberMaxIterations bounds each debate member's sub-agent loop.
+// A debate lens reasons about the requirement rather than exhaustively editing,
+// so a high cap wastes time/tokens (4 members × 4 rounds × up-to-N iterations
+// dominates the /team latency). 15 is enough for a member to grep/read a couple
+// of files for grounding without looping; it cuts the debate wall-clock
+// substantially while keeping analysis quality.
+const roundtableMemberMaxIterations = 15
+
+// roundtableMemberMaxOutputTokens caps a single-shot member's reply length.
+const roundtableMemberMaxOutputTokens = 2500
 
 // RoundtableMember defines a single reviewer's identity and stance.
 // Name/Stance/Prompt hold the Chinese values (the historical defaults);
@@ -23,8 +35,8 @@ type RoundtableMember struct {
 	Avatar   string `json:"avatar"`
 	Stance   string `json:"stance"`
 	StanceEn string `json:"stance_en,omitempty"`
-	Prompt   string `json:"prompt"`               // Chinese system-level instruction injected as extraPrompt
-	PromptEn string `json:"prompt_en,omitempty"`   // English variant
+	Prompt   string `json:"prompt"`              // Chinese system-level instruction injected as extraPrompt
+	PromptEn string `json:"prompt_en,omitempty"` // English variant
 }
 
 // displayName returns the member's name in the language matching zh.
@@ -234,6 +246,7 @@ func (h *RoundtableHall) synthesizeDebate(ctx context.Context, goal string, memb
 // runDebateRound executes one round of the debate: all members run in parallel,
 // each with visibility scoped to the current debate phase.
 func (h *RoundtableHall) runDebateRound(ctx context.Context, phase DebateRoundPhase, goal string, members []RoundtableMember, zh bool) error {
+	roundStart := time.Now()
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "debate_phase",
@@ -267,6 +280,8 @@ func (h *RoundtableHall) runDebateRound(ctx context.Context, phase DebateRoundPh
 	}
 	wg.Wait()
 
+	fmt.Fprintf(os.Stderr, "[debate] round %s done in %.1fs\n", phaseLabel(phase, zh), time.Since(roundStart).Seconds())
+
 	state := h.engine.state
 	state.Roundtable.DebateRounds = append(state.Roundtable.DebateRounds, DebateRound{
 		Phase:   phase,
@@ -280,6 +295,7 @@ func (h *RoundtableHall) runDebateRound(ctx context.Context, phase DebateRoundPh
 // Visibility is scoped by phase: proposal sees only goal; challenge sees all proposals;
 // rebuttal sees only challenges targeting this member; final sees the full record.
 func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member RoundtableMember, goal string, phase DebateRoundPhase, allMembers []RoundtableMember, zh bool) DebateOutput {
+	memberStart := time.Now()
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
 			Type:   "member_start",
@@ -297,8 +313,27 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: 50,
+		MaxIterations: roundtableMemberMaxIterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+
+	// FAST PATH (production): reasoning-only single model call. The value of the
+	// debate is divergent reasoning, not repo exploration — so one compact call
+	// (small prompt, no growing history, no tool loop) is orders of magnitude
+	// faster than a sub-agent that iterates with an ever-larger prompt. The
+	// sub-agent path below is kept only for tests / when the model is unset.
+	if h.engine.model != nil {
+		content := h.runMemberSingleShot(ctx, member, taskGoal, zh)
+		if h.engine.config.OnProgress != nil {
+			h.engine.config.OnProgress(ProgressEvent{
+				Type:   "member_done",
+				Name:   member.ID,
+				Detail: fmt.Sprintf("%s ✓", member.displayName(zh)),
+			})
+		}
+		fmt.Fprintf(os.Stderr, "[debate]   member %s (%s) done in %.1fs, contentLen=%d\n",
+			member.ID, phaseLabel(phase, zh), time.Since(memberStart).Seconds(), len(content))
+		return DebateOutput{MemberID: member.ID, Content: content, Targets: targets}
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
@@ -343,12 +378,50 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 			Detail: fmt.Sprintf("%s ✓", member.displayName(zh)),
 		})
 	}
+	fmt.Fprintf(os.Stderr, "[debate]   member %s (%s) done in %.1fs, contentLen=%d\n",
+		member.ID, phaseLabel(phase, zh), time.Since(memberStart).Seconds(), len(content))
 
 	return DebateOutput{
 		MemberID: member.ID,
 		Content:  content,
 		Targets:  targets,
 	}
+}
+
+// runMemberSingleShot makes one reasoning-only model call for a debate member:
+// a compact role system prompt + the phase task, no tools, no history growth.
+// This is far faster than a tool-iterating sub-agent and the debate's value is
+// divergent reasoning, not repo exploration. Empty model name falls back to the
+// Pro model via EngineConfig defaults applied by the caller's client.
+func (h *RoundtableHall) runMemberSingleShot(ctx context.Context, member RoundtableMember, taskGoal string, zh bool) string {
+	modelName := h.engine.config.FlashModelName
+	if modelName == "" {
+		modelName = h.engine.config.ModelName
+	}
+	req := ModelRequest{
+		Model:     modelName,
+		Messages:  []ModelMessage{{Role: "system", Content: memberRolePrompt(member, zh)}, {Role: "user", Content: taskGoal}},
+		MaxTokens: roundtableMemberMaxOutputTokens,
+	}
+	resp, err := h.engine.model.Complete(ctx, req)
+	if err != nil {
+		return fmt.Sprintf("analysis failed: %v", err)
+	}
+	if resp != nil && resp.Message.Content != "" {
+		return resp.Message.Content
+	}
+	return "(empty)"
+}
+
+// memberRolePrompt is a compact system prompt identifying the member's debate
+// role. Intentionally tiny (the debate doesn't need the full coding system
+// prompt), so every single-shot call is cheap and fast.
+func memberRolePrompt(member RoundtableMember, zh bool) string {
+	return pickPrompt(zh,
+		"You are "+member.displayName(false)+" in a multi-role debate. "+member.displayStance(false)+
+			" Give a direct, structured analysis for the task. Be concise and specific.",
+		"你是「"+member.displayName(true)+"」——多角色辩论中的评审者。"+member.displayStance(true)+
+			" 直接给出结构化的分析，保持简洁、具体。")
 }
 
 // buildDebateGoal constructs the task prompt for a member in a specific debate phase.
@@ -1014,5 +1087,3 @@ func findMember(members []RoundtableMember, id string) *RoundtableMember {
 	}
 	return nil
 }
-
-

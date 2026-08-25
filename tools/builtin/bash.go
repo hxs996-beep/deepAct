@@ -55,7 +55,7 @@ func NewBashToolWithBlocklist(blocklist map[string]string) *BashTool {
 func (t *BashTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "bash",
-		Description: "Execute shell commands",
+		Description: "Execute shell commands. Use for build/test/git/package-manager operations and anything not covered by a dedicated tool. Prefer read/write/edit/grep/glob/lsp for file inspection and code changes; prefer web_search/fetch for web content.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"workdir":{"type":"string"},"timeout":{"type":"integer"}},"required":["command"]}`),
 	}
 }

@@ -92,6 +92,29 @@ var slashCommands = []Suggestion{
 	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
 }
 
+// helpTools is the curated capability surface shown in the /help screen. It
+// mirrors the tools wired into the model by the engine (builtin tools, engine
+// tools, plus any MCP servers' tools which are appended at runtime). Kept as a
+// static reference so /help works without coupling to the live registry.
+var helpTools = []Suggestion{
+	{Command: "read", Description: "Read a file (offset/limit/symbol)"},
+	{Command: "read_multi", Description: "Read up to 8 files in parallel"},
+	{Command: "write", Description: "Create or overwrite a file"},
+	{Command: "edit", Description: "Search-and-replace text in a file"},
+	{Command: "grep", Description: "Search file contents (regex or literal)"},
+	{Command: "glob", Description: "Find files by path pattern"},
+	{Command: "bash", Description: "Run shell commands (timeout, blocked-command list)"},
+	{Command: "revert", Description: "Revert a file to an earlier artifact backup"},
+	{Command: "fetch", Description: "Fetch a URL and extract readable text"},
+	{Command: "web_search", Description: "Search the web (Tavily; needs TAVILY_API_KEY / [search].api_key)"},
+	{Command: "lsp", Description: "Code intelligence (definition/references/hover/symbols/callers)"},
+	{Command: "skill_install", Description: "Install a skill from the community registry"},
+	{Command: "handoff_to_agent", Description: "Delegate a sub-task to a sub or critic agent"},
+	{Command: "activate_skill", Description: "Activate a skill to govern the current task"},
+	{Command: "task_complete", Description: "Submit your final conclusion to the user"},
+	{Command: "todo_write", Description: "Report your step-by-step todo list"},
+}
+
 type Model struct {
 	state                  AppState
 	messages               []DisplayMessage
@@ -433,7 +456,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingActivity = ""
 		m.memberStatuses = nil // roundtable phase done, clear member cards
 		m.subAgents = nil      // sub-agent panel done, clear
-		m.todoItems = nil // todo list done, clear items
+		m.todoItems = nil      // todo list done, clear items
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
 	case ProgressMsg:
@@ -1135,6 +1158,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// ---- Shift+Enter: insert newline ----
+	// Common chat-UI convention: Shift+Enter inserts a newline, plain Enter
+	// submits. bubbletea exposes no msg.Shift and most terminals send a
+	// byte-identical \r for Shift+Enter, so we read the physical Shift key via
+	// the OS (CGEvent on macOS / GetAsyncKeyState on Windows), mirroring the
+	// Alt+Enter detection. On platforms without a UI hook this degrades to
+	// Enter (submit) — the platform stub reports false.
+	if msg.Type == tea.KeyEnter && !msg.Alt && shiftKeyPressed() {
+		m.showSuggestions = false
+		m.suggestions = nil
+		altMsg := msg
+		altMsg.Alt = true
+		m.inputBuf.HandleKey(altMsg)
+		return m, nil
+	}
+
 	// ---- Options keyboard handling (Enter/Tab/Up/Down when visible) ----
 	if len(m.activeOptions) > 0 {
 		switch msg.Type {
@@ -1376,7 +1415,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	// Handle local slash commands without invoking the engine
 	if strings.TrimSpace(content) == "/help" {
 		m.state = stateReady
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: buildHelpText(slashCommands)})
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: buildHelpText(slashCommands, m.skillSuggestions, helpTools)})
 		return m, nil
 	}
 
@@ -1797,7 +1836,9 @@ func boxWithBorder(lines []string, width int) string {
 }
 
 func renderMessage(msg DisplayMessage, width int) []string {
-	content := msg.Content
+	// Content is sanitized before styling so raw ANSI/control bytes from scripts
+	// or command output can never move the terminal cursor (see sanitizeForTerminal).
+	content := sanitizeForTerminal(msg.Content)
 	switch msg.Role {
 	case "user":
 		return wrapText(UserMsgStyle.Render("> ")+content, width)
@@ -2281,7 +2322,9 @@ func renderStreaming(streaming string, width int) []string {
 	// 显示成 `**`/`` ` ``。这里无条件剥离标记（** / ` / ``` / #），用纯文本
 	// wrapText 换行——无 ANSI，每帧干净重渲染，用户可安全复制。最终帧
 	// （renderMessage → renderMarkdown）再走 glamour 完整格式化。
-	processed := preprocessStreamingMarkdown(streaming)
+	// sanitizeForTerminal 先剥离内容里可能存在的 ANSI 转义与 \r/控制符——
+	// 这些字节若原样进终端会移动光标/清屏，导致重复行乱跳与输入框变形。
+	processed := preprocessStreamingMarkdown(sanitizeForTerminal(streaming))
 	// 与最终消息一致的 2 列 Document margin 预留：finalized 渲染为
 	// margin(2) + glamour wordwrap(width-2)；流式同样 prefix(2) + wrapText(width-2)。
 	lines := wrapText(processed, width-2)
@@ -2644,7 +2687,7 @@ func renderedHeight(s string) int {
 	return len(strings.Split(s, "\n"))
 }
 
-func buildHelpText(commands []Suggestion) string {
+func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestion) string {
 	var b strings.Builder
 	b.WriteString("# DeepAct — CLI Coding Agent\n\n")
 	b.WriteString("## Keyboard Shortcuts\n\n")
@@ -2669,7 +2712,31 @@ func buildHelpText(commands []Suggestion) string {
 	default:
 		b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
 	}
-	b.WriteString("\nType a natural language request to start.\n")
+	b.WriteString("\n## Slash Commands\n\n")
+	if len(commands) == 0 {
+		b.WriteString("(none)\n\n")
+	} else {
+		for _, c := range commands {
+			b.WriteString(fmt.Sprintf("- %s %s — %s\n", c.Command, c.Args, c.Description))
+		}
+		b.WriteString("\n")
+	}
+	if len(skills) > 0 {
+		b.WriteString("## Skills (/<name>)\n\n")
+		for _, s := range skills {
+			b.WriteString(fmt.Sprintf("- /%s — %s\n", s.Command, s.Description))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## Available Tools\n\n")
+	for _, t := range tools {
+		b.WriteString(fmt.Sprintf("- %s — %s\n", t.Command, t.Description))
+	}
+	b.WriteString("- (MCP) — tools registered by configured MCP servers\n")
+	b.WriteString("- (skills) — tools exposed by the active skill\n\n")
+
+	b.WriteString("Type a natural language request to start, or use `/team <需求>` for multi-role debate.\n")
 	return b.String()
 }
 
@@ -2849,12 +2916,12 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 			dragHint = "✓ Copied"
 		}
 	}
-	newlineHint := "Alt+↩"
+	newlineHint := "Alt/⇧+↩"
 	switch runtime.GOOS {
 	case "windows":
-		newlineHint = "Ctrl+↩"
+		newlineHint = "Ctrl/⇧+↩"
 	case "darwin":
-		newlineHint = "⌥+↩"
+		newlineHint = "⌥/⇧+↩"
 	}
 
 	// Compute cache hit rate as integer percentage

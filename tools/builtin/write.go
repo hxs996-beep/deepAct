@@ -20,7 +20,7 @@ func NewWriteTool() *WriteTool {
 func (t *WriteTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "write",
-		Description: "Write a file (create or overwrite)",
+		Description: "Create a new file or completely overwrite an existing one. Read an existing file first (you must inspect before changing it); prefer edit for a targeted change to part of a file.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
 	}
 }

@@ -23,7 +23,7 @@ func NewEditTool() *EditTool {
 func (t *EditTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "edit",
-		Description: "Search and replace text in a file",
+		Description: "Targeted change to an existing file: replace an exact old_string with new_string. old_string must appear exactly once; if it repeats, include more surrounding context or set replace_all=true. Read the file first. Prefer edit over write for modifying part of a file.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}`),
 	}
 }

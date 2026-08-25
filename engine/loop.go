@@ -34,6 +34,7 @@ type EngineDeps struct {
 	Context      ContextBuilder
 	Compressor   Compressor
 	Session      SessionStore
+	Memory       MemoryStore
 	Agents       *AgentRegistry
 	Skills       *skill.Registry
 	SkillMatcher skill.SkillMatcher
@@ -48,6 +49,7 @@ type Engine struct {
 	context      ContextBuilder
 	compressor   Compressor
 	session      SessionStore
+	memory       MemoryStore
 	agents       *AgentRegistry
 	skills       *skill.Registry
 	skillMatcher skill.SkillMatcher
@@ -180,6 +182,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		context:         deps.Context,
 		compressor:      deps.Compressor,
 		session:         deps.Session,
+		memory:          deps.Memory,
 		agents:          deps.Agents,
 		skills:          deps.Skills,
 		skillMatcher:    deps.SkillMatcher,
@@ -193,6 +196,12 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
+
+	// Load cross-session persistent memory for this project and merge it into
+	// TaskState. These fields (memory_markers, decisions, open_questions,
+	// assumptions) flow into Block B on every turn, so prior-session findings
+	// survive process restarts.
+	e.loadPersistentMemory()
 
 	// Initialize eval store
 	evalPath := cfg.EvalStoreDir
@@ -879,6 +888,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		return nil, err
 	}
 
+	// Persist cross-session memory after the run completes so findings
+	// (markers, decisions, open questions, assumptions) survive restarts.
+	e.persistMemory()
+
 	// Record efficiency eval at end of Run()
 	e.recordRunEval(zh)
 
@@ -886,6 +899,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if summary == "" {
 		summary = buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
 	}
+	// The engine derives the authoritative set of modified files from state, so
+	// the model never has to track it in the prompt window — and a long task is
+	// never under-reported from stale prompt state.
+	summary = appendModifiedFilesSummary(summary, e.state.ModifiedFiles, zh)
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
@@ -930,6 +947,30 @@ func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool
 		return fmt.Sprintf("（本轮未生成回复文本，已执行 %d 次工具调用）", toolCallCount)
 	}
 	return fmt.Sprintf("(no text reply generated; %d tool calls executed this run)", toolCallCount)
+}
+
+// appendModifiedFilesSummary appends the engine-derived authoritative list of
+// modified files to a Run's summary. The model no longer carries the full list
+// in the prompt (only a count + recent window), so the completion report is
+// computed from state to never under-report a long task.
+func appendModifiedFilesSummary(summary string, files []string, zh bool) string {
+	if len(files) == 0 {
+		return summary
+	}
+	var b strings.Builder
+	b.WriteString(summary)
+	if summary != "" {
+		b.WriteString("\n\n")
+	}
+	if zh {
+		b.WriteString(fmt.Sprintf("修改文件（%d 个）：\n", len(files)))
+	} else {
+		b.WriteString(fmt.Sprintf("Files modified (%d):\n", len(files)))
+	}
+	for _, f := range files {
+		b.WriteString("- " + f + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // isSubstantiveSummary checks whether a summary string contains meaningful
@@ -1544,6 +1585,68 @@ func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
 	return true
 }
 
+// loadPersistentMemory loads the cross-session memory snapshot for this
+// project (if any) and merges it into TaskState. Called once at engine
+// startup. Failures are non-fatal: a corrupt/missing memory file must not
+// prevent the agent from starting.
+func (e *Engine) loadPersistentMemory() {
+	if e.memory == nil {
+		return
+	}
+	snap, err := e.memory.Load()
+	if err != nil {
+		loopLog.Printf("load persistent memory: %v", err)
+		return
+	}
+	if snap == nil {
+		return
+	}
+	if len(snap.MemoryMarkers) > 0 {
+		e.state.MemoryMarkers = appendUniqMarkers(e.state.MemoryMarkers, snap.MemoryMarkers...)
+	}
+	for _, d := range snap.Decisions {
+		if d.Text == "" {
+			continue
+		}
+		if !containsDecisionText(e.state.Decisions, d.Text) {
+			e.state.Decisions = append(e.state.Decisions, d)
+		}
+	}
+	for _, q := range snap.OpenQuestions {
+		if !containsString(e.state.OpenQuestions, q) {
+			e.state.OpenQuestions = append(e.state.OpenQuestions, q)
+		}
+	}
+	for _, a := range snap.Assumptions {
+		if !containsString(e.state.Assumptions, a) {
+			e.state.Assumptions = append(e.state.Assumptions, a)
+		}
+	}
+	if len(snap.MemoryMarkers) > 0 || len(snap.Decisions) > 0 || len(snap.OpenQuestions) > 0 || len(snap.Assumptions) > 0 {
+		loopLog.Printf("loaded persistent memory: %d markers, %d decisions, %d open questions, %d assumptions",
+			len(snap.MemoryMarkers), len(snap.Decisions), len(snap.OpenQuestions), len(snap.Assumptions))
+	}
+}
+
+// persistMemory snapshots the persistent subset of TaskState to the memory
+// store. Called at the end of each Run() so findings survive process restarts.
+func (e *Engine) persistMemory() {
+	if e.memory == nil {
+		return
+	}
+	snap := &MemorySnapshot{
+		CWD:           e.config.WorkDir,
+		UpdatedAt:     time.Now(),
+		MemoryMarkers: e.state.MemoryMarkers,
+		Decisions:     e.state.Decisions,
+		OpenQuestions: e.state.OpenQuestions,
+		Assumptions:   e.state.Assumptions,
+	}
+	if err := e.memory.Save(snap); err != nil {
+		loopLog.Printf("persist memory: %v", err)
+	}
+}
+
 // clearSessionState resets all task-level state to a fresh session.
 // Conversation history is preserved for project context.
 func (e *Engine) clearSessionState() {
@@ -1578,6 +1681,14 @@ func (e *Engine) clearSessionState() {
 	e.deactivateSkill()
 	e.activatedSkills = make(map[string]bool)
 	e.lastActivatedSkill = ""
+
+	// /clear also wipes the cross-session persistent memory for this project,
+	// so a cleared state does not resurface on the next process start.
+	if e.memory != nil {
+		if err := e.memory.Clear(); err != nil {
+			loopLog.Printf("clear persistent memory: %v", err)
+		}
+	}
 }
 
 // Steer queues a user message to be injected into the conversation at the

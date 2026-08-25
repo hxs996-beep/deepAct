@@ -61,11 +61,46 @@ type ChatResponse struct {
 }
 
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens"`
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	// PromptTokensDetails carries the OpenAI-compatible cache breakdown used by
+	// most third-party relays/proxies (中转站). DeepSeek's official API reports
+	// prompt_cache_hit_tokens directly; relays usually do NOT, and instead send
+	// prompt_tokens_details.cached_tokens. UnmarshalJSON normalizes so the
+	// cache-hit rate shown in the UI is non-zero through a relay too.
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails is the OpenAI-compatible usage breakdown.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// UnmarshalJSON decodes usage and then falls back to the OpenAI-compatible
+// prompt_tokens_details.cached_tokens field when DeepSeek's native
+// prompt_cache_hit_tokens is absent (as returned by relays/proxies).
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	// Alias avoids recursing into UnmarshalJSON.
+	type usageAlias Usage
+	var a usageAlias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*u = Usage(a)
+	if u.PromptCacheHitTokens == 0 && u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		u.PromptCacheHitTokens = u.PromptTokensDetails.CachedTokens
+		if u.PromptCacheMissTokens == 0 {
+			miss := u.PromptTokens - u.PromptCacheHitTokens
+			if miss < 0 {
+				miss = 0
+			}
+			u.PromptCacheMissTokens = miss
+		}
+	}
+	return nil
 }
 
 type Chunk struct {

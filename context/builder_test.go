@@ -70,7 +70,7 @@ func TestTruncString(t *testing.T) {
 		{"equal to max", "hello", 5, "hello"},
 		{"longer than max", "hello world", 5, "hello..."},
 		{"empty string", "", 5, ""},
-		{"max is 0", "hello", 0, "...",},
+		{"max is 0", "hello", 0, "..."},
 	}
 	for _, tt := range tests {
 		if got := truncString(tt.s, tt.max); got != tt.want {
@@ -250,6 +250,153 @@ func TestBuild_AnalysisModeConstraint(t *testing.T) {
 		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
 			t.Errorf("Build with AnalysisMode=false should NOT include [ANALYSIS MODE] constraint")
 			break
+		}
+	}
+}
+
+func TestFormatTaskStateVolatile_EngineOnlyFields(t *testing.T) {
+	// read_history / full modified_files / full decisions are engine-layer state,
+	// NOT rendered to the prompt. The rendered Block B exposes a count + recent
+	// window for the model's current reasoning only.
+	state := &engine.TaskState{
+		Goal:          "fix the race",
+		TurnNumber:    7,
+		ModifiedFiles: []string{"a.go", "b.go", "c.go", "d.go"},
+		ReadHistory:   []engine.ReadRecord{{Path: "x.go", Scope: ""}, {Path: "y.go", Scope: "symbol:Run"}},
+		Decisions:     []engine.Decision{{ID: "d-1", Text: "use sync.Mutex"}, {ID: "d-2", Text: "add test"}},
+	}
+	got := formatTaskStateVolatile(state)
+
+	// Absent from the rendered JSON (engine-only).
+	for _, banned := range []string{`"read_history"`, `"modified_files"`} {
+		if strContains(got, banned) {
+			t.Errorf("rendered Block B must not contain %s:\n%s", banned, got)
+		}
+	}
+	// Present: the count + recent window instead of the full list.
+	if !strContains(got, `"modified_count":4`) {
+		t.Errorf("expected modified_count=4:\n%s", got)
+	}
+	if !strContains(got, `"recent_modified"`) {
+		t.Errorf("expected recent_modified window:\n%s", got)
+	}
+	// decisions are rendered as the recent window.
+	if strContains(got, `"decisions"`) {
+		t.Errorf("full decisions field should be replaced by recent_decisions:\n%s", got)
+	}
+	if !strContains(got, `"recent_decisions"`) {
+		t.Errorf("expected recent_decisions window:\n%s", got)
+	}
+}
+
+func TestFormatTaskStateVolatile_CapsWindows(t *testing.T) {
+	// The recent window is capped so a long session does not grow the tail.
+	var modified []string
+	for i := 0; i < 60; i++ {
+		modified = append(modified, "f"+itoaForTest(i)+".go")
+	}
+	state := &engine.TaskState{ModifiedFiles: modified}
+	got := formatTaskStateVolatile(state)
+	if !strContains(got, `"modified_count":60`) {
+		t.Errorf("expected modified_count=60:\n%s", got)
+	}
+	if strContains(got, "f0.go") {
+		t.Errorf("recent window should drop the oldest file (f0.go):\n%s", got)
+	}
+	if !strContains(got, "f59.go") {
+		t.Errorf("recent window should keep the newest file (f59.go):\n%s", got)
+	}
+}
+
+func TestLastN(t *testing.T) {
+	in := []string{"a", "b", "c"}
+	if got := lastN(in, 3); len(got) != 3 || got[0] != "a" {
+		t.Errorf("lastN(in,3) = %v", got)
+	}
+	if got := lastN(in, 2); len(got) != 2 || got[0] != "b" || got[1] != "c" {
+		t.Errorf("lastN(in,2) = %v", got)
+	}
+	if got := lastN(in, 0); len(got) != 0 {
+		t.Errorf("lastN(in,0) = %v, want empty", got)
+	}
+	if got := lastN(nil, 5); got != nil {
+		t.Errorf("lastN(nil,5) = %v, want nil", got)
+	}
+}
+
+func itoaForTest(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
+
+func TestBuild_ActiveSkillInTail(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	assembler.userLang = "中文"
+	assembler.userLangSet = true
+	assembler.stableSessionBlock = "stable"
+	assembler.skillsBlock = "[skills]"
+
+	assembler.SetActiveSkill("writing-plans", "1. 先写计划\n2. 再执行")
+
+	state := &engine.TaskState{Goal: "g"}
+	history := []engine.Message{
+		{Role: "user", Content: "开始"},
+		{Role: "assistant", Content: "好的"},
+	}
+	msgs := assembler.Build(state, history, nil)
+
+	lastHistoryIdx := -1
+	skillIdx := -1
+	for i, msg := range msgs {
+		if msg.Content == "开始" || msg.Content == "好的" {
+			lastHistoryIdx = i
+		}
+		if strings.Contains(msg.Content, "[SKILL ACTIVATED: writing-plans]") {
+			skillIdx = i
+		}
+	}
+	if skillIdx == -1 {
+		t.Fatalf("active skill message not found in Build output")
+	}
+	if lastHistoryIdx == -1 {
+		t.Fatalf("history messages not found in Build output")
+	}
+	// The skill methodology must sit AFTER history (tail snapshot, recency), not
+	// in the stable zone before it — so a skill change only touches the tail and
+	// never shifts the cached history prefix.
+	if skillIdx <= lastHistoryIdx {
+		t.Errorf("active skill message should come AFTER history; skillIdx=%d lastHistoryIdx=%d", skillIdx, lastHistoryIdx)
+	}
+	// It must appear before Block B (the very last "current state" message).
+	for j := skillIdx + 1; j < len(msgs); j++ {
+		if strings.Contains(msgs[j].Content, "Block B") {
+			if !strings.Contains(msgs[skillIdx].Content, "1. 先写计划") {
+				t.Errorf("skill methodology text should be preserved in tail block")
+			}
+			return
+		}
+	}
+	t.Errorf("Block B not found after the active skill message")
+}
+
+func TestBuildBlockB_SupersedesPhrase(t *testing.T) {
+	zh := BuildBlockB(`{"goal":"g"}`, "中文")
+	for _, want := range []string{"Block B", "权威", "覆盖此前", "实时状态"} {
+		if !strContains(zh, want) {
+			t.Errorf("zh Block B missing %q:\n%s", want, zh)
+		}
+	}
+	en := BuildBlockB(`{"goal":"g"}`, "en")
+	for _, want := range []string{"Block B", "authoritative", "supersedes", "Live State"} {
+		if !strContains(en, want) {
+			t.Errorf("en Block B missing %q:\n%s", want, en)
 		}
 	}
 }

@@ -17,30 +17,38 @@ type lspRPCResponse struct {
 	Err    string // non-empty if gopls returned a JSON-RPC error
 }
 
-// lspSession manages a single gopls subprocess lifecycle per session.
-// Communicates via stdin/stdout using the LSP JSON-RPC protocol.
+// lspSession manages a single language-server subprocess lifecycle per
+// (session,language). It communicates via stdin/stdout using the LSP JSON-RPC
+// protocol. The server is generic: gopls, typescript-language-server, pyright,
+// rust-analyzer etc. all speak the same protocol and only differ in the launch
+// command/args and the languageId reported in didOpen.
 type lspSession struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	scanner  *bufio.Scanner
-	mu       sync.Mutex
-	msgID    int
-	pending  map[int]chan<- lspRPCResponse
+	spec      lspServerSpec
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	scanner   *bufio.Scanner
+	mu        sync.Mutex
+	msgID     int
+	pending   map[int]chan<- lspRPCResponse
 	openFiles map[string]bool // files sent via textDocument/didOpen
 
 	closeOnce sync.Once
 	done      chan struct{}
 }
 
-func newLSPSession(workDir string) (*lspSession, error) {
-	// Find gopls in PATH
-	goplsPath, err := exec.LookPath("gopls")
+func newLSPSession(workDir string, spec lspServerSpec) (*lspSession, error) {
+	if spec.Command == "" {
+		return nil, fmt.Errorf("lsp server for language %q has no command", spec.Language)
+	}
+	// Resolve the binary in PATH so we fail fast with a clear message when the
+	// server for this language is not installed (instead of a cryptic exec error).
+	serverPath, err := exec.LookPath(spec.Command)
 	if err != nil {
-		return nil, fmt.Errorf("gopls not found in PATH: %w", err)
+		return nil, fmt.Errorf("LSP server %q (language %q) not found in PATH: %w", spec.Command, spec.Language, err)
 	}
 
-	cmd := exec.Command(goplsPath, "serve")
+	cmd := exec.Command(serverPath, spec.Args...)
 	cmd.Dir = workDir
 
 	stdin, err := cmd.StdinPipe()
@@ -81,29 +89,37 @@ func newLSPSession(workDir string) (*lspSession, error) {
 		"processId": os.Getpid(),
 		"capabilities": map[string]interface{}{
 			"textDocument": map[string]interface{}{
-				"hover":            map[string]interface{}{"contentFormat": []string{"markdown", "plaintext"}},
-				"definition":       map[string]interface{}{"linkSupport": true},
-				"references":       map[string]interface{}{},
-				"documentSymbol":   map[string]interface{}{},
-				"implementation":   map[string]interface{}{},
-				"callHierarchy":    map[string]interface{}{},
+				"hover":          map[string]interface{}{"contentFormat": []string{"markdown", "plaintext"}},
+				"definition":     map[string]interface{}{"linkSupport": true},
+				"references":     map[string]interface{}{},
+				"documentSymbol": map[string]interface{}{},
+				"implementation": map[string]interface{}{},
+				"callHierarchy":  map[string]interface{}{},
 			},
 			"workspace": map[string]interface{}{
 				"symbol": map[string]interface{}{},
 			},
 		},
-		"rootUri":      "file://" + workDir,
-		"rootPath":     workDir,
+		"rootUri":  "file://" + workDir,
+		"rootPath": workDir,
+	}
+	// Merge optional server-specific initializationOptions (e.g. pyright's
+	// python.analysis settings). Servers that don't need one simply get nothing.
+	if len(spec.InitOpts) > 0 {
+		var opts interface{}
+		if err := json.Unmarshal(spec.InitOpts, &opts); err == nil && opts != nil {
+			initParams["initializationOptions"] = opts
+		}
 	}
 	if _, err := s.sendRequest(initCtx, "initialize", initParams); err != nil {
 		s.close()
-		return nil, fmt.Errorf("gopls initialize: %w", err)
+		return nil, fmt.Errorf("%s initialize: %w", spec.Command, err)
 	}
 
 	// Send initialized notification
 	if err := s.sendNotification("initialized", map[string]interface{}{}); err != nil {
 		s.close()
-		return nil, fmt.Errorf("gopls initialized: %w", err)
+		return nil, fmt.Errorf("%s initialized: %w", spec.Command, err)
 	}
 
 	return s, nil
@@ -131,7 +147,7 @@ func (s *lspSession) sendRequest(ctx context.Context, method string, params inte
 	select {
 	case resp := <-ch:
 		if resp.Err != "" {
-			return nil, fmt.Errorf("gopls %s: %s", method, resp.Err)
+			return nil, fmt.Errorf("lsp %s: %s", method, resp.Err)
 		}
 		return resp.Result, nil
 	case <-ctx.Done():
@@ -166,7 +182,7 @@ func (s *lspSession) openFile(filePath string) error {
 	params := map[string]interface{}{
 		"textDocument": map[string]interface{}{
 			"uri":        "file://" + filePath,
-			"languageId": "go",
+			"languageId": s.spec.Language,
 			"version":    1,
 			"text":       string(data),
 		},
@@ -273,10 +289,10 @@ type lspLocation struct {
 }
 
 type lspSymbol struct {
-	Name          string `json:"name"`
-	Kind          int    `json:"kind"`
-	Detail        string `json:"detail,omitempty"`
-	ContainerName string `json:"containerName,omitempty"`
+	Name          string      `json:"name"`
+	Kind          int         `json:"kind"`
+	Detail        string      `json:"detail,omitempty"`
+	ContainerName string      `json:"containerName,omitempty"`
 	Location      lspLocation `json:"location"`
 }
 
@@ -438,8 +454,8 @@ func (s *lspSession) outgoingCalls(ctx context.Context, filePath string, line, c
 
 // lspReader reads Content-Length framed messages from an LSP server.
 type lspReader struct {
-	reader  *bufio.Reader
-	buf     []byte
+	reader *bufio.Reader
+	buf    []byte
 }
 
 func newLSPReader(r io.Reader) *lspReader {
@@ -475,7 +491,10 @@ func (lr *lspReader) readMessage() ([]byte, error) {
 	return data, nil
 }
 
-// lspManager manages LSP sessions keyed by session ID.
+// lspManager manages language-server sessions keyed by (sessionID, language).
+// One session can host several language servers simultaneously — a Go file and
+// a TS file in the same LLM session need gopls and typescript-language-server
+// running side by side — so the key must include the language.
 type lspManager struct {
 	mu       sync.Mutex
 	sessions map[string]*lspSession
@@ -483,36 +502,45 @@ type lspManager struct {
 
 var globalLSPManager = &lspManager{sessions: make(map[string]*lspSession)}
 
-func (m *lspManager) getOrCreate(sessionID, workDir string) (*lspSession, error) {
+// sessionKey namespaces a language server under a session and a language so two
+// different languages never share a subprocess (they cannot — each speaks its
+// own protocol dialect). A null byte is safe in a map key and cannot collide
+// with a real session id.
+func sessionKey(sessionID, language string) string {
+	return sessionID + "\x00" + language
+}
+
+func (m *lspManager) getOrCreate(sessionID, workDir string, spec lspServerSpec) (*lspSession, error) {
+	key := sessionKey(sessionID, spec.Language)
 	m.mu.Lock()
-	if s, ok := m.sessions[sessionID]; ok {
+	if s, ok := m.sessions[key]; ok {
 		if s.isAlive() {
 			m.mu.Unlock()
 			return s, nil
 		}
 		// Dead session — clean up and recreate
 		s.close()
-		delete(m.sessions, sessionID)
+		delete(m.sessions, key)
 	}
 	m.mu.Unlock()
 
-	s, err := newLSPSession(workDir)
+	s, err := newLSPSession(workDir, spec)
 	if err != nil {
 		return nil, err
 	}
 
 	m.mu.Lock()
-	m.sessions[sessionID] = s
+	m.sessions[key] = s
 	m.mu.Unlock()
 	return s, nil
 }
 
-func (m *lspManager) closeSession(sessionID string) {
+func (m *lspManager) closeSession(sessionID, language string) {
 	m.mu.Lock()
-	s, ok := m.sessions[sessionID]
-	delete(m.sessions, sessionID)
+	s, ok := m.sessions[sessionKey(sessionID, language)]
+	delete(m.sessions, sessionKey(sessionID, language))
 	m.mu.Unlock()
-	if ok {
+	if ok && s != nil {
 		s.close()
 	}
 }

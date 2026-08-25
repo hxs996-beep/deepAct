@@ -18,6 +18,7 @@ import (
 	deeplogcontext "github.com/deepact/deepact/context"
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
+	"github.com/deepact/deepact/memory"
 	"github.com/deepact/deepact/policy"
 	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
@@ -171,7 +172,6 @@ func buildSkillsBlock(all []*skill.Skill) string {
 			b.WriteString("\n")
 		}
 
-
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -186,8 +186,12 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	config.WorkDir = workDir
 
 	// Load and apply .deepact/config.toml over defaults
+	var lspOverrides map[string]builtin.LSPCommand
+	searchCfg := builtin.WebSearchConfig{}
 	if f := deeplogconfig.LoadProject(workDir); f != nil {
 		deeplogconfig.Apply(&config, f)
+		lspOverrides = toLSPOverrides(f)
+		searchCfg = toWebSearchConfig(f)
 	}
 	config.SessionID = fmt.Sprintf("session-%d", time.Now().UnixNano())
 
@@ -197,7 +201,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
 	registry := tools.NewRegistry()
-	registerBuiltinTools(registry)
+	registerBuiltinTools(registry, lspOverrides, searchCfg)
 
 	// Start MCP servers and register their tools
 	var mcpManagers []*mcp.ManagedServer
@@ -247,6 +251,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	checker.SetModelName(config.ModelName)
 
 	store, err := session.NewStore(defaultSessionDir())
+	if err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, err
+	}
+
+	// Cross-session persistent memory, stored per-project under
+	// ~/.deepact/memory/<cwd-hash>/.
+	memStore, err := memory.New(defaultMemoryDir(workDir))
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
@@ -326,6 +337,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Context:      contextAssembler,
 		Compressor:   compressor,
 		Session:      store,
+		Memory:       memStore,
 		Agents:       agentReg,
 		Skills:       skillReg,
 		SkillMatcher: skillMatcher,
@@ -381,7 +393,7 @@ func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.Engin
 	return llm.NewEngineClient(client), nil
 }
 
-func registerBuiltinTools(registry *tools.Registry) {
+func registerBuiltinTools(registry *tools.Registry, lspOverrides map[string]builtin.LSPCommand, searchCfg builtin.WebSearchConfig) {
 	registry.Register(builtin.NewReadTool())
 	registry.Register(builtin.NewReadMultiTool())
 	registry.Register(builtin.NewWriteTool())
@@ -391,7 +403,40 @@ func registerBuiltinTools(registry *tools.Registry) {
 	registry.Register(builtin.NewBashTool())
 	registry.Register(builtin.NewRevertTool())
 	registry.Register(builtin.NewFetchTool())
-	registry.Register(builtin.NewLSPTool())
+	registry.Register(builtin.NewWebSearchTool(searchCfg))
+	registry.Register(builtin.NewLSPToolWithOverrides(lspOverrides))
+}
+
+// toLSPOverrides converts the [lsp.servers] config section into the builtin
+// LSP override map. Returns nil when no per-language servers are configured.
+func toLSPOverrides(f *deeplogconfig.File) map[string]builtin.LSPCommand {
+	if f == nil || len(f.LSP.Servers) == 0 {
+		return nil
+	}
+	out := make(map[string]builtin.LSPCommand, len(f.LSP.Servers))
+	for lang, s := range f.LSP.Servers {
+		out[lang] = builtin.LSPCommand{
+			Command:  s.Command,
+			Args:     s.Args,
+			Language: s.Language,
+		}
+	}
+	return out
+}
+
+// toWebSearchConfig projects the [search] config section into the builtin
+// web_search config. Environment fallback (TAVILY_API_KEY) is handled inside the
+// tool, so only explicitly-configured values are carried here.
+func toWebSearchConfig(f *deeplogconfig.File) builtin.WebSearchConfig {
+	if f == nil {
+		return builtin.WebSearchConfig{}
+	}
+	return builtin.WebSearchConfig{
+		Provider:   f.Search.Provider,
+		APIKey:     f.Search.APIKey,
+		BaseURL:    f.Search.BaseURL,
+		MaxResults: f.Search.MaxResults,
+	}
 }
 
 func defaultEngineConfig() engine.EngineConfig {
@@ -469,4 +514,15 @@ func defaultArtifactDir() string {
 		return filepath.Join(home, ".deepact", "artifacts")
 	}
 	return filepath.Join(os.TempDir(), "deepact", "artifacts")
+}
+
+// defaultMemoryDir returns the per-project persistent memory directory for cwd:
+// ~/.deepact/memory/<cwd-hash>/. The hash keeps paths filesystem-safe and
+// isolates projects from each other.
+func defaultMemoryDir(cwd string) string {
+	dir, err := memory.DefaultDir(cwd)
+	if err != nil {
+		return filepath.Join(os.TempDir(), "deepact", "memory")
+	}
+	return dir
 }

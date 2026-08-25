@@ -118,11 +118,11 @@ func TestLoadProject_NotFound(t *testing.T) {
 
 func TestApply(t *testing.T) {
 	cfg := &engine.EngineConfig{
-		ModelName:      "my-pro",
-		FlashModelName: "my-flash",
-		BaseURL:        "https://custom.api.com",
+		ModelName:        "my-pro",
+		FlashModelName:   "my-flash",
+		BaseURL:          "https://custom.api.com",
 		MaxContextTokens: 500000,
-		RiskThreshold:  0.5,
+		RiskThreshold:    0.5,
 		AutoConfirmScope: false,
 	}
 
@@ -283,5 +283,85 @@ scope_guard = true
 	}
 	if !f.Guards.ScopeGuard {
 		t.Error("ScopeGuard should remain true")
+	}
+}
+
+func TestLoad_LSPServers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := []byte(`
+[lsp.servers.python]
+command = "pyright-langserver"
+args    = ["--stdio"]
+
+[lsp.servers.go]
+command = "custom-go-ls"
+args    = ["serve"]
+language = "go"
+`)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if f == nil {
+		t.Fatal("expected non-nil File")
+	}
+	if len(f.LSP.Servers) != 2 {
+		t.Fatalf("expected 2 LSP server overrides, got %d", len(f.LSP.Servers))
+	}
+	py, ok := f.LSP.Servers["python"]
+	if !ok {
+		t.Fatal("expected a python override")
+	}
+	if py.Command != "pyright-langserver" {
+		t.Errorf("python command = %q", py.Command)
+	}
+	if len(py.Args) != 1 || py.Args[0] != "--stdio" {
+		t.Errorf("python args = %v", py.Args)
+	}
+	go_srv, ok := f.LSP.Servers["go"]
+	if !ok {
+		t.Fatal("expected a go override")
+	}
+	if go_srv.Language != "go" {
+		t.Errorf("go language = %q", go_srv.Language)
+	}
+}
+
+func TestLoad_SearchConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := []byte(`
+[search]
+provider    = "tavily"
+api_key     = "tvly-fake"
+base_url    = "https://api.tavily.com"
+max_results = 8
+`)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if f == nil {
+		t.Fatal("expected non-nil File")
+	}
+	if f.Search.Provider != "tavily" {
+		t.Errorf("Provider = %q", f.Search.Provider)
+	}
+	if f.Search.APIKey != "tvly-fake" {
+		t.Errorf("APIKey = %q", f.Search.APIKey)
+	}
+	if f.Search.BaseURL != "https://api.tavily.com" {
+		t.Errorf("BaseURL = %q", f.Search.BaseURL)
+	}
+	if f.Search.MaxResults != 8 {
+		t.Errorf("MaxResults = %d, want 8", f.Search.MaxResults)
 	}
 }

@@ -1146,16 +1146,21 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 		}
 	}
 
-	// Grep/glob: show pattern first, path as short suffix.
+	// Grep/glob: show pattern first, path as short suffix, include glob as
+	// scope annotation so a filtered search is distinguishable in the UI.
 	if toolName == "grep" || toolName == "glob" {
+		include := ""
+		if inc, ok := m["include"].(string); ok && strings.TrimSpace(inc) != "" {
+			include = " (" + strings.TrimSpace(inc) + ")"
+		}
 		if pattern, ok := m["pattern"].(string); ok {
 			if path != "" {
-				return fmt.Sprintf("%s in %s", pattern, relPath(path, cwd))
+				return fmt.Sprintf("%s in %s%s", pattern, relPath(path, cwd), include)
 			}
-			return pattern
+			return pattern + include
 		}
 		if path != "" {
-			return relPath(path, cwd)
+			return relPath(path, cwd) + include
 		}
 		return fallbackSummary(toolName, m)
 	}

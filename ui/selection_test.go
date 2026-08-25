@@ -89,8 +89,8 @@ func TestScreenToLine_ClampBeyondContent(t *testing.T) {
 		t.Errorf("last content line: want line 9, got %d", pt.Line)
 	}
 	pt2 := screenToLine(15, 0, 0, 36, 10)
-	if pt2.Line != 9 {
-		t.Errorf("beyond content: want line 9, got %d", pt2.Line)
+	if pt2.Line != 10 {
+		t.Errorf("beyond content: want line 10 (out-of-range blank, not 9), got %d", pt2.Line)
 	}
 }
 
@@ -555,5 +555,23 @@ func TestExtractSelectionText_NoCRInOutput(t *testing.T) {
 	want := "+new\n-old\n ctx"
 	if got != want {
 		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func TestScreenToLine_BlankRegionNoSnapToLastLine(t *testing.T) {
+	// Content is 6 lines, body is taller (35). A click on a blank row (16) below
+	// the content must NOT snap to the last content line (5) — it should stay out
+	// of content range so the highlight/copy skip it.
+	pt := screenToLine(16, 1, 0, 35, 6)
+	if pt.Line != 6 {
+		t.Errorf("blank-region click: Line = %d, want 6 (past last content line, not 5)", pt.Line)
+	}
+	// A click within the content maps 1:1 by screen row.
+	if got := screenToLine(4, 1, 0, 35, 6).Line; got != 4 {
+		t.Errorf("content click row 4 -> Line %d, want 4", got)
+	}
+	// Scrolled case: firstVisible + row, still within content.
+	if got := screenToLine(0, 1, 6, 15, 21).Line; got != 0 {
+		t.Errorf("scrolled row 0 -> Line %d, want 0 (firstVisible=0)", got)
 	}
 }

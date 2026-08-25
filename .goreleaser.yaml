@@ -34,6 +34,7 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - README.md
+      - README.zh.md
       - LICENSE
 
 checksum:

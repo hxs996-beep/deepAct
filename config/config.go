@@ -14,22 +14,54 @@ import (
 
 // File mirrors the structure of .deepact/config.toml.
 type File struct {
-	Model      modelConfig      `toml:"model"`
-	Routing    routingConfig    `toml:"routing"`
-	Context    contextConfig    `toml:"context"`
-	Guards     guardsConfig     `toml:"guards"`
+	Model   modelConfig   `toml:"model"`
+	Routing routingConfig `toml:"routing"`
+	Context contextConfig `toml:"context"`
+	Guards  guardsConfig  `toml:"guards"`
 	// Conference field removed — ConferenceEnabled was dead code (never read by engine).
 	// Conference state is managed via TaskState.Conference in the engine package.
-	Team       teamConfig       `toml:"team"`
-	UI         uiConfig         `toml:"ui"`
+	Team   teamConfig   `toml:"team"`
+	LSP    lspConfig    `toml:"lsp"`
+	Search searchConfig `toml:"search"`
+	UI     uiConfig     `toml:"ui"`
+}
+
+// searchConfig configures the native web_search tool.
+//
+//	[search]
+//	provider    = "tavily"
+//	api_key     = "tvly-..."
+//	base_url    = "https://api.tavily.com"
+//	max_results = 5
+type searchConfig struct {
+	Provider   string `toml:"provider"`
+	APIKey     string `toml:"api_key"`
+	BaseURL    string `toml:"base_url"`
+	MaxResults int    `toml:"max_results"`
+}
+
+// lspConfig holds per-language LSP server overrides:
+//
+//	[lsp.servers.python]
+//	command = "pyright-langserver"
+//	args    = ["--stdio"]
+type lspConfig struct {
+	Servers map[string]lspServerOverride `toml:"servers"`
+}
+
+// lspServerOverride overrides the auto-selected server for one language.
+type lspServerOverride struct {
+	Command  string   `toml:"command"`
+	Args     []string `toml:"args,omitempty"`
+	Language string   `toml:"language,omitempty"` // optional override of the LSP languageId
 }
 
 type modelConfig struct {
-	Default        string `toml:"default"`
-	Escalation     string `toml:"escalation"`
-	BaseURL        string `toml:"base_url"`      // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
-	SubAgentURL    string `toml:"sub_agent_url"` // separate endpoint for sub-agents (cache isolation)
-	APIKey         string `toml:"api_key"`       // DeepSeek/OpenRouter API key
+	Default     string `toml:"default"`
+	Escalation  string `toml:"escalation"`
+	BaseURL     string `toml:"base_url"`      // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
+	SubAgentURL string `toml:"sub_agent_url"` // separate endpoint for sub-agents (cache isolation)
+	APIKey      string `toml:"api_key"`       // DeepSeek/OpenRouter API key
 }
 
 type routingConfig struct {

@@ -10,8 +10,8 @@ import (
 type UserIntent int
 
 const (
-	IntentContinue UserIntent = iota // continuing previous task — 
-	IntentNewTopic                   // new topic, different from previous goal — 
+	IntentContinue UserIntent = iota // continuing previous task —
+	IntentNewTopic                   // new topic, different from previous goal —
 	IntentAnalyze                    // analysis/explanation only, no modifications — reset + inject constraint
 )
 
@@ -70,14 +70,14 @@ type PricingConfig struct {
 }
 
 type EngineConfig struct {
-	SessionID              string
-	ModelName              string // default (Pro) model name
-	FlashModelName         string // Flash model name for cheaper agents
-	BaseURL                string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
-	SubAgentBaseURL        string // separate API base URL for sub-agents (cache isolation); empty = same as BaseURL
-	MaxTurns               int
-	MaxIterationsPerTurn   int
-	MaxContextTokens       int
+	SessionID            string
+	ModelName            string // default (Pro) model name
+	FlashModelName       string // Flash model name for cheaper agents
+	BaseURL              string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
+	SubAgentBaseURL      string // separate API base URL for sub-agents (cache isolation); empty = same as BaseURL
+	MaxTurns             int
+	MaxIterationsPerTurn int
+	MaxContextTokens     int
 	// MaxOutputTokens caps the LLM completion length per turn (max_tokens).
 	// DeepSeek's 1M context window supports large completions; a generous
 	// budget lets the model emit full code edits in one turn. 0 = use the
@@ -86,7 +86,7 @@ type EngineConfig struct {
 	PlanningEnabled        bool
 	PlanningThresholdChars int
 	AutoConfirmScope       bool
-	ShowThinking           bool   // stream model reasoning/thinking to UI
+	ShowThinking           bool    // stream model reasoning/thinking to UI
 	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
 	ToolAllowList          []string
 	WorkDir                string
@@ -223,32 +223,34 @@ type MessageToolCall struct {
 }
 
 type TaskState struct {
-	TaskID              string           `json:"task_id"`
-	Goal                string           `json:"goal"`
-	ConfirmedScope      bool             `json:"confirmed_scope"`
-	Constraints         []string         `json:"constraints"`
-	Assumptions         []string         `json:"assumptions"`
-	Decisions           []Decision       `json:"decisions"`
-	MemoryMarkers       []string         `json:"memory_markers"` // extracted from <!-- REMEMBER: ... --> in model output
-	Plan                []PlanStep       `json:"plan"`
-	WorkingSet          WorkingSet       `json:"working_set"`
-	OpenQuestions       []string         `json:"open_questions"`
-	ModifiedFiles       []string         `json:"modified_files"`
-	FileCollapse        []FileCollapse   `json:"file_collapse"`
-	CallChain           []CallChainEntry `json:"call_chain"`
-	TurnNumber          int              `json:"turn_number"`
-	ConsecutiveFailures int              `json:"consecutive_failures"`
-	EditScopeFiles      int              `json:"edit_scope_files"`
-	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
+	TaskID               string           `json:"task_id"`
+	Goal                 string           `json:"goal"`
+	ConfirmedScope       bool             `json:"confirmed_scope"`
+	Constraints          []string         `json:"constraints"`
+	Assumptions          []string         `json:"assumptions"`
+	Decisions            []Decision       `json:"decisions"`
+	MemoryMarkers        []string         `json:"memory_markers"` // extracted from <!-- REMEMBER: ... --> in model output
+	Plan                 []PlanStep       `json:"plan"`
+	WorkingSet           WorkingSet       `json:"working_set"`
+	OpenQuestions        []string         `json:"open_questions"`
+	ModifiedFiles        []string         `json:"modified_files"`
+	FileCollapse         []FileCollapse   `json:"file_collapse"`
+	CallChain            []CallChainEntry `json:"call_chain"`
+	TurnNumber           int              `json:"turn_number"`
+	ConsecutiveFailures  int              `json:"consecutive_failures"`
+	EditScopeFiles       int              `json:"edit_scope_files"`
+	PendingDangerousCmd  string           `json:"pending_dangerous_cmd,omitempty"`  // normalized command awaiting user confirmation
 	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
-	ActiveSkillName     string           `json:"active_skill_name,omitempty"`  // name of the currently activated skill
-	ActiveSkillContent  string           `json:"active_skill_content,omitempty"` // full content of the activated skill
-	SkillGatePassed     bool             `json:"skill_gate_passed,omitempty"`    // active skill's pre-implementation gate has been passed (user approval or NextSkills transition), allowing edits
-	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
+	ActiveSkillName      string           `json:"active_skill_name,omitempty"`      // name of the currently activated skill
+	ActiveSkillContent   string           `json:"active_skill_content,omitempty"`   // full content of the activated skill
+	SkillGatePassed      bool             `json:"skill_gate_passed,omitempty"`      // active skill's pre-implementation gate has been passed (user approval or NextSkills transition), allowing edits
+	Roundtable           *RoundtableState `json:"roundtable,omitempty"`
 
-	// ReadHistory records each file read this session (path + scope) so the
-	// prompt can warn the agent against re-reading, and the loop guard can count
-	// repeated reads of the same (path, scope). Cleared on new user message.
+	// ReadHistory records each file read this session (path + scope) for the
+	// loop guard to count repeated reads of the same (path, scope) and block
+	// read loops. It is NOT rendered into the prompt — the read stub + loop
+	// guard enforce re-read prevention in-engine, and rendering the full list
+	// leaked stale all-session state and grew the volatile tail.
 	ReadHistory []ReadRecord `json:"read_history"`
 
 	// AnalysisMode is set when the user's intent is analysis-only. When true,
@@ -297,6 +299,19 @@ type CallChainEntry struct {
 type Decision struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
+}
+
+// MemorySnapshot is the cross-session persisted subset of TaskState. The
+// memory store saves it per-project to ~/.deepact/memory/<cwd-hash>/ and the
+// engine merges it back into TaskState at startup, so these fields survive
+// process restarts and are injected into Block B on every turn.
+type MemorySnapshot struct {
+	CWD           string     `json:"cwd,omitempty"`
+	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
+	MemoryMarkers []string   `json:"memory_markers,omitempty"`
+	Decisions     []Decision `json:"decisions,omitempty"`
+	OpenQuestions []string   `json:"open_questions,omitempty"`
+	Assumptions   []string   `json:"assumptions,omitempty"`
 }
 
 type PlanStep struct {
@@ -384,7 +399,7 @@ type DebateOutput struct {
 type RoundtablePhase int
 
 const (
-	RoundtableIdle           RoundtablePhase = iota
+	RoundtableIdle            RoundtablePhase = iota
 	RoundtableProposal                        // 提案轮
 	RoundtableChallenge                       // 质询轮
 	RoundtableRebuttal                        // 反驳轮

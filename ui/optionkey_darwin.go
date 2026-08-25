@@ -13,6 +13,9 @@ const (
 	// kCGEventFlagMaskAlternate — bit set in the modifier-flag word when the
 	// Option (⌥) key is held.
 	cgEventFlagMaskAlternate = 0x00080000
+	// kCGEventFlagMaskShift — bit set in the modifier-flag word when the
+	// Shift key is held.
+	cgEventFlagMaskShift = 0x00020000
 )
 
 // cgEventSourceFlagsState is bound to the macOS CoreGraphics symbol
@@ -57,3 +60,14 @@ func optionKeyPressed() bool {
 // ctrlKeyPressed is unused on macOS but must exist so the platform-agnostic
 // stub (optionkey_stub.go) is excluded when this file is compiled.
 func ctrlKeyPressed() bool { return false }
+
+// shiftKeyPressed returns true if the Shift key is currently held. Needed to
+// distinguish Shift+Enter (insert newline) from a plain Enter (submit), since
+// most terminals send a byte-identical \r for both and bubbletea exposes no
+// msg.Shift. Uses the same CoreGraphics HID state read as optionKeyPressed.
+func shiftKeyPressed() bool {
+	if cgEventSourceFlagsState == nil {
+		return false
+	}
+	return cgEventSourceFlagsState(cgEventSourceStateCombinedSessionState)&cgEventFlagMaskShift != 0
+}

@@ -107,6 +107,11 @@ func runRipgrep(payload grepInput) (string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			// ripgrep exits 1 when no matches are found — not an error.
+			return "(no matches)", nil
+		}
 		return strings.TrimSpace(stderr.String()), fmt.Errorf("ripgrep failed: %w", err)
 	}
 

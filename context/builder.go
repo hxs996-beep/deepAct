@@ -37,7 +37,7 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 	return &ContextAssembler{
 		projectRoot: projectRoot,
 		estimator:   estimator,
-		envInfo:     buildEnvironmentInfo(),
+		envInfo:     buildEnvironmentInfo(projectRoot),
 	}
 }
 
@@ -110,16 +110,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
 	}
 
-	// Message 4: Active skill methodology — injected into the stable zone so the
-	// full skill instructions are ALWAYS in the model's attention window, regardless
-	// of conversation length. This replaces the previous approach of one-time
-	// pendingPinnedMessages injection that got buried in history.
-	// Changes on skill switch (e.g., brainstorming → writing-plans in TDD flow),
-	// which intentionally breaks the prefix cache for the active-skill slot.
-	if a.activeSkillBlock != "" {
-		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.activeSkillBlock})
-	}
-
 	// === HISTORY ZONE (append-only — cacheable prefix) ===
 	// History sits after the stable zone. Since previous turns' messages
 	// never change, the entire history is a strict prefix extension and
@@ -139,13 +129,23 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 
 	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-	// Block B: runtime TaskState as a single machine-readable JSON blob. Goal,
-	// decisions, modified files, open questions, current plan step and read
-	// history all live here — kept as JSON (not prose) so the model treats it as
-	// reference data instead of echoing it back as a "Recent Actions" preamble.
-	// The agent's understanding of these fields is governed by the system prompt;
-	// re-read prevention is enforced by this read_history list (the harness),
-	// not by asking the model to track reads itself.
+	// Active skill methodology lives HERE, after history, not in the stable zone.
+	// Placing it in the stable zone (before history) meant activating or switching a
+	// skill inserted/removed a message at that position, shifting the entire history
+	// and invalidating the prefix cache for the session. As a tail message it is
+	// still in the model's attention (recency — the end is attended best), and a
+	// skill change only touches the tail, leaving the cached prefix intact. Only the
+	// skill content changes; the standing "overrides general rules" marker below keeps
+	// it authoritative, and the skillReminder in Block B keeps it in mind each turn.
+	if a.activeSkillBlock != "" {
+		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.activeSkillBlock})
+	}
+
+	// Block B: runtime state as single compact JSON. Goal, open questions, recent
+	// decisions, recent modified files, current step and counts live here — kept as
+	// JSON (not prose) so the model treats it as reference data. The engine keeps the
+	// full state in-process (read loop-guard, cross-session memory, and the final
+	// completion summary) independent of what is rendered here.
 	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
@@ -180,16 +180,21 @@ func (a *ContextAssembler) EstimateTokens(messages []engine.ModelMessage) int {
 	return count
 }
 
-func buildEnvironmentInfo() EnvironmentInfo {
+// buildEnvironmentInfo assembles the session-stable environment data. The
+// directory tree snapshot is generated from the project root (which the engine
+// sets to the work dir), not from os.Getwd(), so it reflects the actual project
+// even if the process CWD differs.
+func buildEnvironmentInfo(root string) EnvironmentInfo {
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = ""
 	}
 	return EnvironmentInfo{
-		OS:   runtime.GOOS,
-		Arch: runtime.GOARCH,
-		CWD:  wd,
-		Date: time.Now().Format("2006-01-02"),
+		OS:      runtime.GOOS,
+		Arch:    runtime.GOARCH,
+		CWD:     wd,
+		Date:    time.Now().Format("2006-01-02"),
+		DirTree: buildDirTree(root, treeMaxDepth, treeMaxEntries),
 	}
 }
 
@@ -205,37 +210,52 @@ func hasFirstUserMessage(history []engine.Message) bool {
 	return false
 }
 
+// Live-state rendering budget. The rendered Block B is the model's "current
+// reasoning state", so it must stay small and stable to keep the tail cache
+// miss small and avoid leaking stale all-session data. These caps sit well
+// above realistic single-task sizes (so nothing is lost mid-task) but bound a
+// long multi-task session where only the recent window is useful. The ENGINE
+// keeps the full state — read loop-guard, cross-session memory, and the final
+// completion summary — independent of how much is rendered here.
+const (
+	maxRenderedDecisions = 30
+	maxRenderedModified  = 20
+	maxRenderedMarkers   = 20
+)
+
 func formatTaskStateVolatile(state *engine.TaskState) string {
 	if state == nil {
 		return ""
 	}
 	volatile := struct {
-		ActiveSkillName  string                    `json:"active_skill_name,omitempty"`
-		SkillReminder    string                    `json:"skill_reminder,omitempty"`
-		Goal             string                    `json:"goal,omitempty"`
-		MemoryMarkers    []string                  `json:"memory_markers,omitempty"`
-		Decisions        []decisionVolatile        `json:"decisions,omitempty"`
-		ModifiedFiles    []string                  `json:"modified_files,omitempty"`
-		OpenQuestions    []string                  `json:"open_questions,omitempty"`
-		CurrentStep      string                    `json:"current_step,omitempty"`
-		TurnNumber       int                       `json:"turn_number"`
-		ConsecutiveFails int                       `json:"consecutive_failures"`
-		EditScopeFiles   int                       `json:"edit_scope_files"`
-		ReadHistory      []readRecordVolatile      `json:"read_history,omitempty"`
-		Roundtable       *roundtableVolatile       `json:"roundtable,omitempty"`
+		Goal             string              `json:"goal,omitempty"`
+		ActiveSkillName  string              `json:"active_skill_name,omitempty"`
+		SkillReminder    string              `json:"skill_reminder,omitempty"`
+		MemoryMarkers    []string            `json:"memory_markers,omitempty"`
+		OpenQuestions    []string            `json:"open_questions,omitempty"`
+		Assumptions      []string            `json:"assumptions,omitempty"`
+		RecentDecisions  []decisionVolatile  `json:"recent_decisions,omitempty"`
+		ModifiedCount    int                 `json:"modified_count"`
+		RecentModified   []string            `json:"recent_modified,omitempty"`
+		CurrentStep      string              `json:"current_step,omitempty"`
+		TurnNumber       int                 `json:"turn_number"`
+		ConsecutiveFails int                 `json:"consecutive_failures"`
+		EditScopeFiles   int                 `json:"edit_scope_files"`
+		Roundtable       *roundtableVolatile `json:"roundtable,omitempty"`
 	}{
+		Goal:             state.Goal,
 		ActiveSkillName:  state.ActiveSkillName,
 		SkillReminder:    skillReminder(state.ActiveSkillName),
-		Goal:             state.Goal,
-		MemoryMarkers:    state.MemoryMarkers,
-		Decisions:        flattenDecisions(state.Decisions),
-		ModifiedFiles:    state.ModifiedFiles,
+		MemoryMarkers:    lastN(state.MemoryMarkers, maxRenderedMarkers),
 		OpenQuestions:    state.OpenQuestions,
+		Assumptions:      state.Assumptions,
+		RecentDecisions:  lastNDecisions(state.Decisions, maxRenderedDecisions),
+		ModifiedCount:    len(state.ModifiedFiles),
+		RecentModified:   lastN(state.ModifiedFiles, maxRenderedModified),
 		CurrentStep:      currentPlanStep(state.Plan),
 		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
-		ReadHistory:      flattenReadHistory(state.ReadHistory),
 		Roundtable:       flattenRoundtable(state.Roundtable),
 	}
 	data, err := json.Marshal(volatile)
@@ -245,60 +265,50 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 	return string(data)
 }
 
-// readRecordVolatile is the compact form of a ReadRecord injected into Block B.
-type readRecordVolatile struct {
-	Path  string `json:"path"`
-	Scope string `json:"scope,omitempty"`
-}
-
-// flattenReadHistory returns one entry per distinct (path, scope) read, in
-// insertion order. Previously this kept only the last 20 records to bound
-// prompt size, but a read record is just a {path, scope} pair (~40 bytes), so
-// truncation needlessly hid earlier reads from the agent — encouraging
-// re-reads. Dedup keeps the list small without losing any file.
-func flattenReadHistory(records []engine.ReadRecord) []readRecordVolatile {
-	if len(records) == 0 {
+// lastN returns the last n elements of in, or the whole slice when shorter.
+// A nil slice stays nil so the field is omitted from the rendered JSON.
+func lastN(in []string, n int) []string {
+	if len(in) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(records))
-	out := make([]readRecordVolatile, 0, len(records))
-	for _, r := range records {
-		key := r.Path + "\x00" + r.Scope
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, readRecordVolatile{Path: r.Path, Scope: r.Scope})
+	if len(in) <= n {
+		return in
 	}
-	return out
+	return in[len(in)-n:]
 }
 
-// decisionVolatile is the compact form of a Decision injected into Block B.
-type decisionVolatile struct {
-	Text string `json:"text"`
-}
-
-// flattenDecisions projects Decision records into the compact volatile form.
-func flattenDecisions(ds []engine.Decision) []decisionVolatile {
-	if len(ds) == 0 {
+// lastNDecisions projects the most recent n decisions into the compact form.
+// Only the recent window matters for consistent reasoning; the full history is
+// preserved by the session log and the cross-session memory store.
+func lastNDecisions(in []engine.Decision, n int) []decisionVolatile {
+	if len(in) == 0 {
 		return nil
 	}
-	out := make([]decisionVolatile, 0, len(ds))
-	for _, d := range ds {
+	start := 0
+	if len(in) > n {
+		start = len(in) - n
+	}
+	out := make([]decisionVolatile, 0, len(in)-start)
+	for _, d := range in[start:] {
 		out = append(out, decisionVolatile{Text: d.Text})
 	}
 	return out
 }
 
+// decisionVolatile is the compact form of a Decision rendered into Block B.
+type decisionVolatile struct {
+	Text string `json:"text"`
+}
+
 // skillReminder returns a short reminder that the active skill's methodology
-// is in the stable zone and must be followed. Included in Block B so the model
-// sees it every turn without relying on distant history.
+// is in the tail runtime context and must be followed. Included in Block B so
+// the model sees it every turn without relying on distant history.
 func skillReminder(name string) string {
 	if name == "" {
 		return ""
 	}
-	return fmt.Sprintf("⚠ Skill '%s' is ACTIVE. Its full methodology is in the stable zone (Message 4). "+
-		"It OVERRIDES general rules — follow it precisely step by step.", name)
+	return fmt.Sprintf("⚠ Skill '%s' is ACTIVE. Its full methodology is in the [SKILL ACTIVE: %s] block near the end of the context. "+
+		"It OVERRIDES general rules — follow it precisely step by step.", name, name)
 }
 
 // currentPlanStep returns the text of the in-progress plan step, or "" if none.

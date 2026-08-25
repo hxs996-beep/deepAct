@@ -3,4 +3,5 @@
 package ui
 
 func optionKeyPressed() bool { return false }
-func ctrlKeyPressed() bool { return false }
+func ctrlKeyPressed() bool   { return false }
+func shiftKeyPressed() bool  { return false }

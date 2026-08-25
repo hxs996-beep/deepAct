@@ -1,99 +1,220 @@
-# DeepAct — 专为 DeepSeek 打造的终端 AI 编码代理
+# DeepAct — Lightweight Terminal AI Coding Agent · Built for DeepSeek
+
+**English** | [简体中文](README.zh.md)
 
 <p align="center">
-  
   <a href="https://goreportcard.com/report/github.com/deepact/deepact"><img src="https://img.shields.io/badge/go_report-A-brightgreen?style=flat-square" alt="Go Report"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go 1.24+"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms">
 </p>
 
 <p align="center">
-  <b>DeepSeek 原生 · 团队协作（/team） · 四道守卫 · 子代理并行 · MCP 扩展</b>
+  <b>⚡ Single binary · ~6 MB download · ~25 MB memory · Zero runtime deps · DeepSeek-native</b>
 </p>
+
+**DeepAct is an AI coding agent that lives in your terminal** — written in Go, statically compiled, open source (MIT), and tuned end-to-end for the DeepSeek API.
+
+- **Light** — a ~6 MB download. No Node, no Python, no Docker.
+- **Fast** — prompt engineering, prefix caching, temperature scheduling, and tool-call formats are all tailored to DeepSeek.
+- **Accurate** — compared to "a generic agent pointed at DeepSeek," it is **cheaper, faster, and follows instructions more precisely**.
 
 ---
 
-> **DeepAct 是什么？** 一个跑在终端里的 AI 编码助手，从零为 DeepSeek 模型构建。提示工程、前缀缓存、温度调度、工具调用格式都针对 DeepSeek API 调优——相比"通用代理换上 DeepSeek 模型"，**成本更低、响应更快、指令遵循更准**。
+## 📖 Contents
 
-## 为什么选 DeepAct
+1. [How Lightweight It Is](#how-lightweight-it-is)
+2. [Quick Start](#quick-start)
+3. [Day-to-Day Use](#day-to-day-use)
+4. [Connecting to DeepSeek](#connecting-to-deepseek)
+5. [Core Capabilities](#core-capabilities)
+6. [CLI Reference](#cli-reference)
+7. [Architecture](#architecture)
 
-- **团队协作（Team）** —— 输入 `/team <需求>`，开启多角色团队协作模式。主代理先就需求生成 2-3 个实现方案，随后多位带立场的角色（架构师、安全工程师……）**并行评审、独立打分**，输出方案×角色评分矩阵；你选定方案后，代理循环直接落地实现。一个 agent 闭门造车 vs. 一桌专家对着吵，结论质量不在一个量级。支持 `--members` 指定成员、`--add` 加载自定义 TOML 角色文件、`[team]` 配置默认成员。
-- **四道守卫** —— 每个破坏性操作经过：模糊检测 → 设计审查 → 范围守卫 → 循环检测。含糊的请求会被反问，反模式方案会被打回，越界操作会被拦截，原地打转会被叫停。
-- **子代理并行** —— 复杂任务拆给专用子代理（searcher / planner / critic / tester）独立推进，结果汇聚回主循环。
-- **DeepSeek 原生** —— `reasoning_content` 回显、前缀缓存分层（稳定区全命中，仅 volatile tail 缺失）、温度分级路由，全部按 DeepSeek API 特性调校。
-- **MCP 扩展** —— 接入任意 MCP 服务器，工具集随需扩展。
-- **可回退** —— 每步操作不可变 JSONL 记录，可回退到任意步骤、分叉新分支；工具输出内容寻址存储，落盘前自动脱敏密钥。
+---
 
-## 快速开始
+## How Lightweight It Is
 
-需要一个 [DeepSeek API Key](https://platform.deepseek.com/)。二进制静态编译，零运行时依赖。
+| Metric | Measured | Notes |
+|--------|----------|-------|
+| Download size | **~6 MB** (tar.gz) | Linux / macOS / Windows, amd64 + arm64 |
+| Single binary | **~16 MB** | Static build (`CGO_ENABLED=0` + `-s -w`), zero external libraries |
+| Peak startup memory | **~25 MB** | Measured with `deepact --help` (macOS arm64) |
+| Startup time | **~10 ms** | Same measurement |
+| Runtime dependencies | **0** | No Node / Python / Docker / Electron — just a DeepSeek API key |
+
+*Measured on release 1.0.6 (macOS arm64); figures vary slightly by platform.*
+
+One 16 MB Go file that ships a full agent: four guards, team collaboration, parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
+
+## Quick Start
+
+> [!NOTE]
+> You need a [DeepSeek API Key](https://platform.deepseek.com/) (sign up at [platform.deepseek.com](https://platform.deepseek.com/)).
+
+### Step 1 · Install
 
 ```bash
-# 安装（macOS / Linux 一键）
+# macOS / Linux one-liner
 curl -sSfL https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.sh | sh
 
-# 或 Homebrew
+# or Homebrew
 brew install hxs996-beep/homebrew-tap/deepact
 
-# 或 Go
+# or Go
 go install github.com/deepact/deepact@latest
 ```
 
-Windows PowerShell、手动下载见 [Releases](https://github.com/hxs996-beep/deepAct/releases)。
+Windows users: see [Releases](https://github.com/hxs996-beep/deepAct/releases) (PowerShell or manual download).
+
+### Step 2 · Configure Your DeepSeek API Key
 
 ```bash
-deepact set api-key          # 交互式配置 API Key
-deepact                      # 启动交互式 TUI（默认）
-deepact exec "修复连接池竞态"  # 非交互 / CI 模式
+deepact set api-key          # interactive; writes ~/.deepact/config.toml (mode 0600)
 ```
 
-## 用户接入点
+> [!TIP]
+> A project-level `.deepact/config.toml` overrides the global config, so different repos can use different models and permission modes.
 
-**`deepact.md`** — 放在项目根目录，定义本项目对 AI 的编码规范、架构约束、安全红线。DeepAct 启动自动加载。本项目自带的 [`deepact.md`](deepact.md) 就是完整范例。
+### Step 3 · Start Using
 
-**`.deepact/config.toml`** — 项目级（或全局 `~/.deepact/config.toml`）配置：模型与路由、权限模式、危险命令白名单、上下文预算、UI、LSP、MCP 服务器等。完整字段见文件内注释。
+```bash
+deepact                      # interactive TUI (Windows / macOS / Linux)
+deepact exec "fix the connection-pool race"   # non-interactive / CI mode
+deepact --auto exec "..."    # auto mode (skip confirmations)
+deepact --model pro "..."    # pick a model: flash (fast/cheap) or pro (strong/full)
+```
 
-**外部技能** — 在 `~/.deepact/skills/` 放 TOML 技能文件，TUI 中以 `/<name>` 激活。技能可声明 `next_skills` 形成链式工作流。
+## Day-to-Day Use
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+Q` | Quit |
+| `Esc` | Cancel current task |
+| `Enter` | Submit |
+| `Tab` | Complete |
+| `Alt+Enter` | Newline |
+
+### One-Line Tasks (from the shell)
+
+```bash
+deepact exec "add timeout and circuit breaker to LoginHandler"
+deepact exec "migrate the user table to Postgres and fix all compile errors" --auto
+deepact exec "review the last 5 commits for potential bugs" --output jsonl > review.jsonl
+```
+
+Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`.
+
+### Multi-Agent Team Mode (/team)
+
+```bash
+deepact exec "/team add idempotency control to the order module"
+```
+
+The main agent first produces 2–3 implementation plans; then roles like architect and security engineer **review in parallel and score independently**, producing a plan × role score matrix. Once you pick a plan, the agent lands it directly. Supports `--members` for custom roles and `--add` to load TOML role files.
+
+### Project Rules & Skills
+
+Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent **auto-activates** the most relevant skill by semantically matching your message against each skill's `name`/`description` (silently falls back on mismatch). You can also switch manually with the `activate_skill` tool.
+
+Skill directories are loaded by priority (later ones win on name conflicts):
+
+| Priority | Directory | Notes |
+|----------|-----------|-------|
+| 1 | `~/.deepact/skills/` | DeepAct-specific |
+| 2 | `<project>/.claude/skills/` | Project-level |
+| 3 | `~/.agent/skills/` | Agent-generic |
+| 4 | `~/.claude/skills/` | Claude Code compatible |
+
+Format: `<name>/SKILL.md` (Claude Code layout, YAML frontmatter):
+
+```markdown
+---
+name: my-flow
+description: Audits code in module X; includes compile checks and test generation.
+when_to_use: When the user mentions code related to X
+next_skills: [writing-plans]
+---
+# My Workflow
+1. Do A
+2. Do B
+3. Verify C
+```
+
+### MCP Support
+
+Register any MCP server in the `[mcp]` section of `config.toml`; its tools join the available tool set automatically, no code changes needed.
+
+## Connecting to DeepSeek
+
+DeepAct is built for DeepSeek from the ground up — it does not compromise for "generic models":
+
+- **Layered prefix caching** — the stable region of a request is fully cache-hit, only the volatile tail misses, saving tokens and cutting latency.
+- **`reasoning_content` echoes** — DeepSeek's reasoning is stored structurally in the session: replayable and auditable.
+- **Tiered temperature routing** — temperature is tuned per task type (analysis / coding / tool calls), reducing hallucinations and wasted retries.
+- **Dual-model routing** — `flash` (fast, cheap) handles tool calls and routine work; `pro` (strong) handles design review and hard reasoning. Pay the right price per task.
+- **Retry & rate limiting** — degrades gracefully on DeepSeek-specific error patterns (rate limits / timeouts / truncation) instead of spinning.
+
+Config example (`~/.deepact/config.toml`, or project-level `.deepact/config.toml`):
 
 ```toml
-# ~/.deepact/skills/my-flow.toml
-name        = "my-flow"
-description = "我的自定义工作流"
-keywords    = ["我的项目"]
-next_skills = ["writing-plans"]
-content     = """
-# My Workflow
-1. 先做 A
-2. 再做 B
-3. 验证 C
-"""
+[model]
+api_key = "sk-..."        # or: deepact set api-key
+default = "flash"         # default routing model
+
+[search]
+provider    = "tavily"    # built-in web_search tool
+api_key     = "tvly-..."
+max_results = 5
 ```
 
-**MCP 服务器** — 在 `config.toml` 的 `[mcp]` 段注册外部 MCP 服务器，其工具自动并入可用工具集。
+> [!TIP]
+> See the comments inside the config file for the full field list: model & routing, permission modes, context budget, UI, LSP, and MCP servers are all TOML-configurable.
 
-## CLI 命令
+## Core Capabilities
 
-| 命令 | 说明 |
-|------|------|
-| `deepact` | 交互式 TUI |
-| `deepact exec <prompt>` | 非交互 / CI 模式 |
-| `deepact set [key] [value]` | 配置项（如 `set api-key`） |
-| `deepact eval history` / `stats` / `compare <v1> <v2>` | 提示版本评估与对比 |
+### The Four Guards
 
-TUI 常用键：`Ctrl+Q` 退出 · `Esc` 取消任务 · `Enter` 提交 · `Tab` 补全 · `Alt+Enter` 换行。
+Every destructive action (file edits, shell commands) passes four gates:
 
-## 架构
+1. **Ambiguity Check** — vague requests get questioned back
+2. **Design Review** — anti-pattern plans get rejected
+3. **Scope Guard** — out-of-scope actions get blocked
+4. **Loop Detection** — spinning in circles gets stopped
 
+### Parallel Subagents
+
+Complex tasks are split across dedicated subagents (searcher / planner / critic / tester) that run independently, with results merged back into the main loop — fast without getting messy.
+
+### Rewindable Sessions
+
+Every step is written to an immutable JSONL log: rewind to any step, fork a new branch; tool output is content-addressed and secrets are auto-redacted before hitting disk.
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `deepact` | Interactive TUI |
+| `deepact exec <prompt>` | Non-interactive / CI mode (`--auto`, `--output`, `--max-turns`) |
+| `deepact set [key] [value]` | Config entries (e.g. `set api-key`) |
+| `deepact eval history` / `stats` / `compare <v1> <v2>` | Prompt-version evaluation and comparison |
+
+## Architecture
+
+```text
+cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
+engine/   agent loop·guards·roundtable·subagents   policy/   ambiguity·design·scope guards
+context/  prompt build·tree snapshot·compaction   llm/      DeepSeek client (stream·retry·rate)
+tools/    built-in tools + MCP      router/    model routing
+session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
+skill/    external skill loading    config/    shared config
 ```
-cmd/      CLI 入口（Cobra）        ui/       终端 UI（Bubble Tea）
-engine/   代理循环·守卫·圆桌·子代理  policy/   模糊检测·设计审查·范围守卫
-context/  提示构建·代码库映射·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
-tools/    内置工具 + MCP 适配        router/   模型路由
-session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
-skill/    外部技能加载与注册         config/   共享配置
-```
 
-分层铁律：`engine/` 不依赖 `ui/`/`cmd/`；`tools/` 不依赖 `engine/`；跨层调用走接口。
+Layering rules: `engine/` never imports `ui/`/`cmd/`; `tools/` never imports `engine/`; cross-layer calls go through interfaces.
+
+---
 
 ## License
 

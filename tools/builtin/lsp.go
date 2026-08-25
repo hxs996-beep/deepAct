@@ -12,23 +12,38 @@ import (
 
 const lspTimeOut = 30 * time.Second
 
-type LSPTool struct{}
+// LSPTool provides code intelligence across many languages by driving a
+// per-language LSP server (gopls, typescript-language-server, pyright,
+// rust-analyzer, ...). The server table is copied from the defaults and then
+// layered with any [lsp] config overrides.
+type LSPTool struct {
+	servers map[string]lspServerSpec // extension -> spec
+}
 
 func NewLSPTool() *LSPTool {
-	return &LSPTool{}
+	return &LSPTool{servers: buildLSPServers(nil)}
+}
+
+// NewLSPToolWithOverrides builds the tool with user-supplied server overrides
+// keyed by LSP language (see buildLSPServers). The override map is owned by the
+// caller and copied in, so later mutation does not affect the tool.
+func NewLSPToolWithOverrides(overrides map[string]LSPCommand) *LSPTool {
+	return &LSPTool{servers: buildLSPServers(overrides)}
 }
 
 func (t *LSPTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name: "lsp",
-		Description: `Interact with gopls (Go LSP server) for precise code intelligence.
+		Description: `Interact with a language server for precise code intelligence. The server is
+selected automatically from the file extension (gopls for Go, typescript-language-server
+for TS/JS, pyright-langserver for Python, rust-analyzer for Rust, clangd for C/C++, and more).
 
 Supported operations:
 - goToDefinition: Find where a symbol is defined (requires file_path, line, character)
 - findReferences: Find all references to a symbol (requires file_path, line, character)
 - hover: Get type information and documentation for a symbol (requires file_path, line, character)
 - documentSymbol: List all symbols (types, functions, methods) in a file (requires file_path)
-- workspaceSymbol: Search for symbols across the entire workspace (requires query)
+- workspaceSymbol: Search for symbols across the entire workspace (requires query; optionally hint language)
 - goToImplementation: Find implementations of an interface (requires file_path, line, character)
 - incomingCalls: Find all functions that call the function at a position (requires file_path, line, character)
 - outgoingCalls: Find all functions called by the function at a position (requires file_path, line, character)
@@ -52,7 +67,7 @@ Use this tool INSTEAD of reading entire files when you need to:
     },
     "file_path": {
       "type": "string",
-      "description": "Absolute path to the file (required for goToDefinition, findReferences, hover, documentSymbol, goToImplementation, incomingCalls, outgoingCalls)"
+      "description": "Absolute path to the file (required for goToDefinition, findReferences, hover, documentSymbol, goToImplementation, incomingCalls, outgoingCalls; used to choose the language server)"
     },
     "line": {
       "type": "integer",
@@ -65,6 +80,10 @@ Use this tool INSTEAD of reading entire files when you need to:
     "query": {
       "type": "string",
       "description": "Symbol name to search for (required for workspaceSymbol)"
+    },
+    "language": {
+      "type": "string",
+      "description": "Optional LSP language hint for workspaceSymbol when no file_path is given (e.g. 'go', 'typescript', 'python', 'rust'). If omitted, all configured servers are queried."
     }
   },
   "required": ["operation"]
@@ -73,11 +92,12 @@ Use this tool INSTEAD of reading entire files when you need to:
 }
 
 type lspInput struct {
-	Operation  string `json:"operation"`
-	FilePath   string `json:"file_path"`
-	Line       int    `json:"line"`
-	Character  int    `json:"character"`
-	Query      string `json:"query"`
+	Operation string `json:"operation"`
+	FilePath  string `json:"file_path"`
+	Line      int    `json:"line"`
+	Character int    `json:"character"`
+	Query     string `json:"query"`
+	Language  string `json:"language"` // optional hint for workspaceSymbol
 }
 
 func (t *LSPTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolResultEnvelope, error) {
@@ -122,15 +142,28 @@ func (t *LSPTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolR
 		}
 	}
 
-	// Long-lived: get or create gopls session (process survives across calls)
-	session, err := globalLSPManager.getOrCreate(ctx.SessionID, ctx.WorkDir)
-	if err != nil {
-		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("LSP session: %v", err)}, err
-	}
-
-	// Per-call: timeout for this specific operation (gopls process is NOT killed when this cancels)
+	// Per-call: timeout for this specific operation (the server process is NOT killed when this cancels)
 	lspCtx, cancel := context.WithTimeout(context.Background(), lspTimeOut)
 	defer cancel()
+
+	// workspaceSymbol needs no file, so it may fan out across languages.
+	if payload.Operation == "workspaceSymbol" {
+		formatted, err := t.workspaceSymbol(lspCtx, ctx, payload)
+		if err != nil {
+			return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, nil
+		}
+		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: formatted}, nil
+	}
+
+	// All remaining operations target one file's language server.
+	spec, ok := resolveLSPByExt(t.servers, safePath)
+	if !ok {
+		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("no LSP server configured for file %s (unknown extension)", safePath)}, nil
+	}
+	session, err := globalLSPManager.getOrCreate(ctx.SessionID, ctx.WorkDir, spec)
+	if err != nil {
+		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("LSP session (%s): %v", spec.Language, err)}, err
+	}
 
 	// Execute the requested operation
 	var result json.RawMessage
@@ -143,8 +176,6 @@ func (t *LSPTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolR
 		result, err = session.hover(lspCtx, safePath, payload.Line, payload.Character)
 	case "documentSymbol":
 		result, err = session.documentSymbol(lspCtx, safePath)
-	case "workspaceSymbol":
-		result, err = session.workspaceSymbol(lspCtx, payload.Query)
 	case "goToImplementation":
 		result, err = session.goToImplementation(lspCtx, safePath, payload.Line, payload.Character)
 	case "incomingCalls":
@@ -161,6 +192,78 @@ func (t *LSPTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.ToolR
 
 	formatted := formatLSPResult(payload.Operation, safePath, result)
 	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: formatted}, nil
+}
+
+// workspaceSymbol resolves a symbol by name across the configured language
+// servers. When the model provides a language hint, only that server is queried;
+// otherwise every configured server is consulted and results are deduplicated
+// by (name, file). Servers whose binary is missing are skipped with a note.
+func (t *LSPTool) workspaceSymbol(ctx context.Context, toolCtx tools.ToolContext, payload lspInput) (string, error) {
+	langs := knownLanguages(t.servers)
+	if payload.Language != "" {
+		if _, ok := resolveLSPByLanguage(t.servers, payload.Language); !ok {
+			return "", fmt.Errorf("no LSP server configured for language %q", payload.Language)
+		}
+		langs = []string{payload.Language}
+	}
+
+	var all []lspSymbol
+	var skipped []string
+	for _, lang := range langs {
+		spec, ok := resolveLSPByLanguage(t.servers, lang)
+		if !ok {
+			continue
+		}
+		session, err := globalLSPManager.getOrCreate(toolCtx.SessionID, toolCtx.WorkDir, spec)
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", lang, err))
+			continue
+		}
+		raw, err := session.workspaceSymbol(ctx, payload.Query)
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", lang, err))
+			continue
+		}
+		var syms []lspSymbol
+		if err := json.Unmarshal(raw, &syms); err != nil {
+			// Some servers return a single element or nothing.
+			var one lspSymbol
+			if err2 := json.Unmarshal(raw, &one); err2 == nil && one.Name != "" {
+				syms = []lspSymbol{one}
+			} else {
+				skipped = append(skipped, fmt.Sprintf("%s (unexpected result)", lang))
+				continue
+			}
+		}
+		all = append(all, syms...)
+	}
+
+	// Dedupe by (name, file) because the same symbol can surface from several servers.
+	seen := make(map[string]struct{}, len(all))
+	dedup := all[:0]
+	for _, sym := range all {
+		key := sym.Name + "\x00" + sym.Location.URI
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		dedup = append(dedup, sym)
+	}
+
+	var b strings.Builder
+	b.WriteString("LSP workspaceSymbol result:\n")
+	if len(skipped) > 0 {
+		b.WriteString(fmt.Sprintf("  (servers skipped: %s)\n", strings.Join(skipped, ", ")))
+	}
+	if len(dedup) == 0 {
+		b.WriteString("  (no results)\n")
+		return b.String(), nil
+	}
+	raw, err := json.Marshal(dedup)
+	if err != nil {
+		return "", err
+	}
+	return formatLSPResult("workspaceSymbol", "", raw), nil
 }
 
 func formatLSPResult(operation string, filePath string, result json.RawMessage) string {
@@ -299,12 +402,12 @@ func formatDocumentSymbol(raw json.RawMessage, indent int) string {
 
 	// Try DocumentSymbol first (has children)
 	var ds struct {
-		Name           string             `json:"name"`
-		Kind           int                `json:"kind"`
-		Detail         string             `json:"detail,omitempty"`
-		Range          json.RawMessage    `json:"range"`
-		SelectionRange json.RawMessage    `json:"selectionRange"`
-		Children       []json.RawMessage  `json:"children,omitempty"`
+		Name           string            `json:"name"`
+		Kind           int               `json:"kind"`
+		Detail         string            `json:"detail,omitempty"`
+		Range          json.RawMessage   `json:"range"`
+		SelectionRange json.RawMessage   `json:"selectionRange"`
+		Children       []json.RawMessage `json:"children,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &ds); err == nil {
 		var b strings.Builder
@@ -334,10 +437,10 @@ func formatDocumentSymbol(raw json.RawMessage, indent int) string {
 func formatCallHierarchyCall(item json.RawMessage) string {
 	var call struct {
 		From struct {
-			Name           string `json:"name"`
-			Kind           int    `json:"kind"`
-			Detail         string `json:"detail,omitempty"`
-			URI            string `json:"uri"`
+			Name           string          `json:"name"`
+			Kind           int             `json:"kind"`
+			Detail         string          `json:"detail,omitempty"`
+			URI            string          `json:"uri"`
 			Range          json.RawMessage `json:"range"`
 			SelectionRange json.RawMessage `json:"selectionRange"`
 		} `json:"from"`
