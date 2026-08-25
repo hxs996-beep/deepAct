@@ -41,9 +41,6 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
-snapshot:
-  name_template: "{{ .Tag }}-next"
-
 changelog:
   sort: asc
   filters:
@@ -63,6 +60,7 @@ nfpms:
     package_name: deepact
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
     vendor: deepact
+    maintainer: hxs996-beep <hxs.996@gmail.com>
     homepage: https://github.com/deepact/deepact
     description: "A terminal-native AI coding agent with guarded execution and dual-model routing."
     license: "MIT"
