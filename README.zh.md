@@ -58,9 +58,6 @@
 # macOS / Linux 一键安装
 curl -sSfL https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.sh | sh
 
-# 或 Homebrew
-brew install hxs996-beep/homebrew-tap/deepact
-
 # 或 Go
 go install github.com/deepact/deepact@latest
 ```

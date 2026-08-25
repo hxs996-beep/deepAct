@@ -58,20 +58,6 @@ release:
   draft: false
   prerelease: auto
 
-brews:
-  - name: deepact
-    repository:
-      owner: hxs996-beep
-      name: homebrew-tap
-    directory: Formula
-    homepage: https://github.com/deepact/deepact
-    description: "A terminal-native AI coding agent with guarded execution and dual-model routing."
-    license: "MIT"
-    test: |
-      system "#{bin}/deepact --version"
-    install: |
-      bin.install "deepact"
-
 nfpms:
   - id: packages
     package_name: deepact

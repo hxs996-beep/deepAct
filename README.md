@@ -58,9 +58,6 @@ One 16 MB Go file that ships a full agent: four guards, team collaboration, para
 # macOS / Linux one-liner
 curl -sSfL https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.sh | sh
 
-# or Homebrew
-brew install hxs996-beep/homebrew-tap/deepact
-
 # or Go
 go install github.com/deepact/deepact@latest
 ```
