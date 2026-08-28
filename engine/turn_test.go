@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -78,10 +77,10 @@ type stubToolExecutor struct{}
 func (stubToolExecutor) Execute(_ ToolExecContext, _ []ToolCallRequest) []ToolResult { return nil }
 func (stubToolExecutor) Specs() []ModelTool                                          { return nil }
 
-// TestExecuteTurn_ZeroToolCalls_StopHookNudges verifies that when
-// the model emits text without a tool call and runToolCallCount=0,
-// the stop hook injects a nudge and continues the loop.
-func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
+// TestExecuteTurn_ZeroToolCalls_TextOnlyDone verifies that when no stop
+// hooks are registered (dsh-structured completion), a text-only reply
+// with zero tool calls ends the turn directly — no nudge.
+func TestExecuteTurn_ZeroToolCalls_TextOnlyDone(t *testing.T) {
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{
 			{Delta: "查看 buildResult 如何提取 Summary", FinishReason: "stop"},
@@ -91,7 +90,6 @@ func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
 		state:     &TaskState{TurnNumber: 0},
 		history:   []Message{{Role: "user", Content: "执行方案"}},
 		config:    EngineConfig{ModelName: "test-model"},
-		stopHooks: []StopHook{&ZeroToolCallHook{MaxRetries: 3}},
 		isChinese: true,
 	}
 
@@ -99,16 +97,12 @@ func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeTurn error: %v", err)
 	}
-	if result.Done {
-		t.Errorf("expected Done=false (zero tool calls → stop hook should nudge), got Done=true")
+	if !result.Done {
+		t.Errorf("expected Done=true (no stop hooks → text-only reply ends the turn), got Done=false")
 	}
-	// Nudge is pinned (not persisted to history): the model sees it next
-	// turn, but history must not grow a fake user message.
-	if len(e.pendingPinnedMessages) != 1 || !strings.Contains(e.pendingPinnedMessages[0], "执行下一步") {
-		t.Errorf("expected one pinned nudge, got %q", e.pendingPinnedMessages)
-	}
-	if len(e.history) != 2 { // original user + assistant narration
-		t.Errorf("expected history unchanged (no nudge persisted), got %d messages", len(e.history))
+	// No nudge is pinned: the turn ended cleanly.
+	if len(e.pendingPinnedMessages) != 0 {
+		t.Errorf("expected no pinned nudge, got %q", e.pendingPinnedMessages)
 	}
 	if result.FinishReason != "stop" {
 		t.Errorf("expected FinishReason='stop', got %q", result.FinishReason)
@@ -116,7 +110,7 @@ func TestExecuteTurn_ZeroToolCalls_StopHookNudges(t *testing.T) {
 }
 
 // TestExecuteTurn_FinalTextAfterToolCalls_Done verifies that a
-// conclusion after prior tool calls ends the loop (stop hook won't block
+// conclusion after prior tool calls ends the loop (no stop hook blocks
 // when runToolCallCount > 0).
 func TestExecuteTurn_FinalTextAfterToolCalls_Done(t *testing.T) {
 	e := &Engine{
@@ -128,9 +122,8 @@ func TestExecuteTurn_FinalTextAfterToolCalls_Done(t *testing.T) {
 		state:            &TaskState{TurnNumber: 0},
 		history:          []Message{{Role: "user", Content: "执行方案"}},
 		config:           EngineConfig{ModelName: "test-model"},
-		stopHooks:        []StopHook{&ZeroToolCallHook{MaxRetries: 3}},
 		isChinese:        true,
-		runToolCallCount: 2, // prior tool calls → hook won't block
+		runToolCallCount: 2, // prior tool calls
 	}
 
 	result, err := e.executeTurn(context.Background())

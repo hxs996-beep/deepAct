@@ -1,8 +1,10 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +173,118 @@ func TestList_IgnoresDirectories(t *testing.T) {
 	}
 	if len(infos) != 1 {
 		t.Errorf("expected 1 session (ignoring dirs), got %d", len(infos))
+	}
+}
+
+// TestListFirstMsg verifies List() populates FirstMsg from the first user message.
+func TestListFirstMsg(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore(): %v", err)
+	}
+	// user_message 事件 + message 事件
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: "user_message", Timestamp: time.Now(),
+		Payload: json.RawMessage(`"第一条用户消息，这是一段较长的内容需要截断"`)})
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: engine.EventTypeMessage, Timestamp: time.Now(),
+		Payload: json.RawMessage(`{"role":"assistant","content":"回答"}`)})
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("len(infos) = %d, want 1", len(infos))
+	}
+	if !strings.Contains(infos[0].FirstMsg, "第一条用户消息") {
+		t.Errorf("FirstMsg = %q, want contains 第一条用户消息", infos[0].FirstMsg)
+	}
+	if len([]rune(infos[0].FirstMsg)) > 43 {
+		t.Errorf("FirstMsg = %q, want truncated to <=40 runes + ellipsis", infos[0].FirstMsg)
+	}
+}
+
+// TestListFirstMsg_TruncatesLongUserMessage verifies a >40-rune user_message
+// payload is truncated to 40 runes plus an ellipsis.
+func TestListFirstMsg_TruncatesLongUserMessage(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore(): %v", err)
+	}
+	long := strings.Repeat("这段内容足够长，用来验证会话预览的省略号截断逻辑是否真正生效。", 4)
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: "user_message", Timestamp: time.Now(),
+		Payload: json.RawMessage(`"` + long + `"`)})
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("len(infos) = %d, want 1", len(infos))
+	}
+	got := infos[0].FirstMsg
+	if r := []rune(got); len(r) != firstMsgMaxRunes+1 {
+		t.Errorf("FirstMsg runes = %d, want %d (40 + ellipsis); got %q", len(r), firstMsgMaxRunes+1, got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("FirstMsg = %q, want suffix …", got)
+	}
+}
+
+// TestListFirstMsg_FallbackToMessageEvent verifies the message-event fallback:
+// a session with only message events (role=user) still populates FirstMsg,
+// and the fallback content is truncated like the user_message branch.
+func TestListFirstMsg_FallbackToMessageEvent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore(): %v", err)
+	}
+	long := strings.Repeat("这是 message 事件兜底分支的消息内容，足够长以验证兜底分支同样截断。", 3)
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: engine.EventTypeMessage, Timestamp: time.Now(),
+		Payload: json.RawMessage(`{"role":"user","content":"` + long + `"}`)})
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("len(infos) = %d, want 1", len(infos))
+	}
+	if !strings.Contains(infos[0].FirstMsg, "这是 message 事件兜底分支的消息内容") {
+		t.Errorf("FirstMsg = %q, want contains 兜底消息内容", infos[0].FirstMsg)
+	}
+	if r := []rune(infos[0].FirstMsg); len(r) != firstMsgMaxRunes+1 {
+		t.Errorf("FirstMsg runes = %d, want %d (fallback should truncate too); got %q", len(r), firstMsgMaxRunes+1, infos[0].FirstMsg)
+	}
+	if !strings.HasSuffix(infos[0].FirstMsg, "…") {
+		t.Errorf("FirstMsg = %q, want suffix …", infos[0].FirstMsg)
+	}
+}
+
+// TestListFirstMsg_NonStringPayloadFallback verifies extractFirstMsg returns ""
+// for a non-string payload (e.g. "{}") and the message-event fallback picks up.
+func TestListFirstMsg_NonStringPayloadFallback(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore(): %v", err)
+	}
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: "user_message", Timestamp: time.Now(),
+		Payload: json.RawMessage(`{}`)})
+	s.AppendEvent(engine.Event{SessionID: "sess1", Type: engine.EventTypeMessage, Timestamp: time.Now(),
+		Payload: json.RawMessage(`{"role":"user","content":"兜底取到这条消息"}`)})
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("len(infos) = %d, want 1", len(infos))
+	}
+	if !strings.Contains(infos[0].FirstMsg, "兜底取到这条消息") {
+		t.Errorf("FirstMsg = %q, want contains 兜底取到这条消息", infos[0].FirstMsg)
 	}
 }
 

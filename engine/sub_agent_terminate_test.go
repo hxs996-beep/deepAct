@@ -16,6 +16,7 @@ type stubSeqModel struct {
 	classifierResp  string // returned on JsonMode=true calls (ConclusionClassifier probes)
 	calls           int    // counts non-classifier (scripted) calls only
 	classifierCalls int    // counts ConclusionClassifier (JsonMode) probes
+	lastReq         ModelRequest // most recent request, for tool-spec assertions
 }
 
 func (m *stubSeqModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
@@ -23,6 +24,7 @@ func (m *stubSeqModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk,
 }
 
 func (m *stubSeqModel) Complete(_ context.Context, req ModelRequest) (*ModelResponse, error) {
+	m.lastReq = req
 	// ConclusionClassifier probes use JsonMode; return the scripted verdict
 	// without advancing the scripted call counter.
 	if req.JsonMode {
@@ -181,42 +183,30 @@ func TestSubAgentRunLoop_NudgesOnNextStepNarration(t *testing.T) {
 	}
 }
 
-// TestSubAgentRunLoop_NudgesOnNextStepNarrationDespiteClassifierFalsePositive
-// reproduces the "intermediate result, then stops" bug on the sub-agent path:
-// the flash classifier WRONGLY judges a forward-looking narration as a
-// conclusion (classifierResp=true). The sub-agent must still nudge instead of
-// terminating on the first turn, because the text carries trailing next-step
-// intent. Without the heuristic guard the sub-agent returns immediately
-// (calls=1) on a partial answer.
-func TestSubAgentRunLoop_NudgesOnNextStepNarrationDespiteClassifierFalsePositive(t *testing.T) {
-	narration := ModelResponse{
-		Message: ModelMessage{
-			Role:    "assistant",
-			Content: "查看 finishStreaming 逻辑，确认截断点。",
-		},
-		FinishReason: "stop",
-	}
-	model := &stubSeqModel{responses: []ModelResponse{narration}, classifierResp: `{"conclusion": true}`}
-
-	runner := &SubAgentRunner{
-		model:     model,
-		tools:     stubToolExecutor{},
-		modelName: "test",
-	}
-
+// TestSubAgentStructured_CriticNudgeNamesVerdict: 结构化 critic 在 text-only
+// 轮次收到引导 VERDICT 的 nudge，3-strike 后以 no_result 结束（不误判为完成）。
+func TestSubAgentStructured_CriticNudgeNamesVerdict(t *testing.T) {
+	model := &stubSeqModel{responses: []ModelResponse{
+		{Message: ModelMessage{Role: "assistant", Content: "我继续分析。"}, FinishReason: "stop"},
+	}}
+	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent:         AgentSub,
-		Goal:          "分析截断问题",
-		MaxIterations: 8,
+		Agent: AgentCritic, Goal: "验证实现", MaxIterations: 8, StructuredResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
-	// Must NOT terminate on the first turn despite the classifier false positive.
-	if model.calls < 2 {
-		t.Errorf("expected narration to be nudged despite classifier false positive (>=2 calls), got %d - over-terminated", model.calls)
+	if model.calls != 3 {
+		t.Errorf("expected 3 calls (3-strike), got %d", model.calls)
 	}
-	if !strings.Contains(result.Summary, "截断") {
-		t.Errorf("expected Summary to retain the narration content, got: %q", result.Summary)
+	if model.classifierCalls != 0 {
+		t.Errorf("expected classifier never probed in structured mode, got %d", model.classifierCalls)
+	}
+	if result.FinishReason != HandoffReasonNoResult {
+		t.Errorf("expected no_result, got %q", result.FinishReason)
+	}
+	last := model.lastReq.Messages[len(model.lastReq.Messages)-1].Content
+	if !strings.Contains(last, "VERDICT") {
+		t.Errorf("expected nudge to name VERDICT, last message=%q", last)
 	}
 }

@@ -336,6 +336,28 @@ func itoaForTest(n int) string {
 	return string(digits)
 }
 
+func TestBuild_AgentsBlockInStableZone(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	assembler.userLang = "中文"
+	assembler.userLangSet = true
+
+	agentsContent := "\n## Project Conventions (AGENTS.md)\n\n### AGENTS.md\n\n项目规则：用标准库\n"
+	assembler.SetAgentsBlock(agentsContent)
+
+	state := &engine.TaskState{}
+	msgs := assembler.Build(state, nil, nil)
+	found := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "项目规则：用标准库") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Build() should include AGENTS.md content in stable zone")
+	}
+}
+
 func TestBuild_ActiveSkillInTail(t *testing.T) {
 	assembler := NewContextAssembler(".", nil)
 	assembler.userLang = "中文"

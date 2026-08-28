@@ -23,6 +23,7 @@ type ContextAssembler struct {
 	stableSessionBlock   string          // built once from envInfo + userLang, cached for cache stability
 	skillsBlock          string          // built once from skill registry, cached for cache stability
 	activeSkillBlock     string          // active skill methodology injected in stable zone; changes on skill switch
+	agentsBlock          string          // rendered AGENTS.md content in the stable zone; built once at startup, cached
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
@@ -46,6 +47,13 @@ func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *Con
 // The skills block is cached and included as a stable message after Block S.
 func (a *ContextAssembler) SetSkillsBlock(s string) {
 	a.skillsBlock = s
+}
+
+// SetAgentsBlock sets the rendered AGENTS.md content for inclusion in the
+// stable zone. Called once at startup from cmd/run.go after LoadAgentsMD.
+// Empty string means no AGENTS.md files were found (output identical to current).
+func (a *ContextAssembler) SetAgentsBlock(rendered string) {
+	a.agentsBlock = rendered
 }
 
 // SetActiveSkill injects the active skill's full methodology into the stable zone.
@@ -99,6 +107,9 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 	if a.stableSessionBlock == "" && a.userLangSet {
 		a.stableSessionBlock = BuildStableSessionContext(a.envInfo, a.userLang)
+		if a.agentsBlock != "" {
+			a.stableSessionBlock += a.agentsBlock
+		}
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
 

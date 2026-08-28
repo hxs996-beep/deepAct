@@ -394,6 +394,91 @@ func TestMouseDragSelection_FullFlow(t *testing.T) {
 	}
 }
 
+// TestNarrationClickStreamVsSnapshot_SelectsSameText reproduces the reported
+// bug end-to-end: while a narration streams a read result (line-numbered code
+// + "──────────────" separator + lsp hint, all OUTSIDE a code fence), the user
+// scrolls to an offset and clicks a screen row. After the narration finalizes
+// into a message (turn boundary), clicking the SAME screen row at the SAME
+// offset must select the SAME text.
+//
+// Before the fix, the finalized narration rendered via glamour, which merged
+// non-fenced lines into a paragraph and produced FEWER lines than the streamed
+// wrapText output. totalLines / scroll mapping therefore shifted, so the click
+// landed on a neighbour's logical line — "clicking one line becomes another
+// line's text". This test drives the same code path as the real mouse handler
+// (computeLayoutFull + screenToLine).
+func TestNarrationClickStreamVsSnapshot_SelectsSameText(t *testing.T) {
+	content := "analysis report and get user confirmation. This gate\n" +
+		"  479: // fires when the agent has done searches (runToolCallCount > 0) and is now\n" +
+		"  480: // attempting to modify code, but hasn't yet presented its findings to the\n" +
+		"  481: // user. After 2 blocks, the gate gives up and lets edits proceed directly\n" +
+		"  482: // in degraded mode (see degradation handler below).\n" +
+		"  483: if e.runToolCallCount > 0 && !e.state.AnalysisReportConfirmed &&\n" +
+		"  484: e.analysisNudgeCount < 2 {\n" +
+		"  485: var editCalls []ToolCallRequest\n" +
+		"  486: for _, call := range calls {\n" +
+		"  487: if call.Name == \"edit\" || call.Name == \"write\" {\n" +
+		"  488: editCalls = append(editCalls, call)\n" +
+		"  489: }\n" +
+		"\n" +
+		"  ---\n" +
+		"\n" +
+		"  Need to find a symbol definition, type info, or references? Use the `lsp` tool."
+
+	m := NewModel(nil, engine.PricingConfig{})
+	m.ready = true
+	m.state = stateRunning
+	m.width = 80
+	m.height = 24
+	m.messages = []DisplayMessage{{Role: "user", Content: "分析这段代码"}}
+	m.narration = content
+	m.flushNarration()
+
+	// 流式期间布局：用户滚动到中间某 offset，点击 body 中部的屏幕行。
+	total1, bh1, _, plain1 := m.computeLayoutFull()
+	offset := total1 / 2
+	if offset > total1-bh1 {
+		offset = total1 - bh1
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	row := bh1 / 2
+	if row >= bh1 {
+		row = bh1 - 1
+	}
+	if row < 0 {
+		row = 0
+	}
+	pt1 := screenToLine(row, 5, offset, bh1, total1)
+	line1 := ""
+	if pt1.Line >= 0 && pt1.Line < len(plain1) {
+		line1 = plain1[pt1.Line]
+	}
+
+	// Turn 边界：narration 快照成消息。
+	m.finalizeTurnBlocks(false)
+
+	// 快照后布局：同一 offset、同一屏幕行，必须映射到同一行文字。
+	total2, bh2, _, plain2 := m.computeLayoutFull()
+	if total2 != total1 || bh2 != bh1 {
+		t.Fatalf("finalize changed layout: streaming (total=%d, bh=%d) → snapshot (total=%d, bh=%d); scroll/click mapping would drift",
+			total1, bh1, total2, bh2)
+	}
+	pt2 := screenToLine(row, 5, offset, bh2, total2)
+	line2 := ""
+	if pt2.Line >= 0 && pt2.Line < len(plain2) {
+		line2 = plain2[pt2.Line]
+	}
+	if line1 != line2 {
+		t.Errorf("clicking same screen row (offset=%d, row=%d) selected different text after finalize:\n  streaming: %q\n  snapshot: %q",
+			offset, row, line1, line2)
+	}
+	if line1 == "" {
+		t.Fatalf("clicked line resolved to empty text; test setup invalid (offset=%d row=%d total=%d bh=%d)", offset, row, total1, bh1)
+	}
+}
+
 func TestSelectionClickNoDrag(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady

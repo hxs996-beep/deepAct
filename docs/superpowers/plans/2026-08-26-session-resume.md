@@ -968,7 +968,8 @@ const (
 			return m, nil
 		case tea.KeyEnter:
 			if !msg.Alt {
-				return m.applyResume(m.selectedResume), nil
+				m.applyResume(m.selectedResume)
+				return m, nil
 			}
 		case tea.KeyEsc:
 			m.state = stateReady

@@ -2,107 +2,33 @@ package engine
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
-func TestZeroToolCallHook_BlocksWhenNoToolCalls(t *testing.T) {
-	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 0,
-		IsChinese:          true,
-	})
-	if !result.Block {
-		t.Errorf("expected Block=true when runToolCallCount=0")
-	}
-	if result.Reason != "zero_tool_calls" {
-		t.Errorf("expected Reason='zero_tool_calls', got %q", result.Reason)
-	}
-	if result.Message == "" {
-		t.Errorf("expected non-empty nudge Message")
-	}
+// stubStopHook is a controllable StopHook stub for framework tests.
+type stubStopHook struct {
+	result StopHookResult
 }
 
-func TestZeroToolCallHook_PassesWhenToolsCalled(t *testing.T) {
-	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   1,
-		StopHookRetryCount: 0,
-		IsChinese:          true,
-	})
-	if result.Block {
-		t.Errorf("expected Block=false when runToolCallCount>0")
-	}
-}
-
-func TestZeroToolCallHook_PassesAfterMaxRetries(t *testing.T) {
-	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 3,
-		IsChinese:          true,
-	})
-	if result.Block {
-		t.Errorf("expected Block=false when retryCount>=maxRetries")
-	}
-}
-
-func TestZeroToolCallHook_DefaultMaxRetries(t *testing.T) {
-	hook := &ZeroToolCallHook{} // MaxRetries=0 → default 3
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 2,
-		IsChinese:          true,
-	})
-	if !result.Block {
-		t.Errorf("expected Block=true when retryCount=2 < default maxRetries=3")
-	}
-}
-
-func TestZeroToolCallHook_NegativeMaxRetries(t *testing.T) {
-	hook := &ZeroToolCallHook{MaxRetries: -1} // negative → default 3
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 2,
-		IsChinese:          true,
-	})
-	if !result.Block {
-		t.Errorf("expected Block=true when MaxRetries=-1 defaults to 3 and retryCount=2 < 3")
-	}
-}
-
-func TestZeroToolCallHook_EnglishMessage(t *testing.T) {
-	hook := &ZeroToolCallHook{MaxRetries: 3}
-	result := hook.Check(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 0,
-		IsChinese:          false,
-	})
-	if !result.Block {
-		t.Errorf("expected Block=true")
-	}
-	if result.Message == "" {
-		t.Errorf("expected non-empty English nudge Message")
-	}
-	if strings.ContainsAny(result.Message, "请完成目标描述") {
-		t.Errorf("expected English message, got Chinese: %q", result.Message)
-	}
+func (s stubStopHook) Check(context.Context, StopHookContext) StopHookResult {
+	return s.result
 }
 
 func TestRunStopHooks_FirstBlockingResult(t *testing.T) {
 	e := &Engine{
 		stopHooks: []StopHook{
-			&ZeroToolCallHook{MaxRetries: 3},
+			stubStopHook{result: StopHookResult{Block: true, Message: "nudge", Reason: "test"}},
 		},
 	}
-	result := e.runStopHooks(context.Background(), StopHookContext{
-		RunToolCallCount:   0,
-		StopHookRetryCount: 0,
-		IsChinese:          true,
-	})
+	result := e.runStopHooks(context.Background(), StopHookContext{})
 	if !result.Block {
-		t.Errorf("expected Block=true when runToolCallCount=0")
+		t.Errorf("expected Block=true when a registered hook blocks")
+	}
+	if result.Message != "nudge" {
+		t.Errorf("expected Message='nudge', got %q", result.Message)
+	}
+	if result.Reason != "test" {
+		t.Errorf("expected Reason='test', got %q", result.Reason)
 	}
 }
 
@@ -114,26 +40,70 @@ func TestRunStopHooks_NoHooksRegistered(t *testing.T) {
 	if result.Block {
 		t.Errorf("expected Block=false when no hooks registered")
 	}
+	if result.Exhausted {
+		t.Errorf("expected Exhausted=false when no hooks registered")
+	}
 }
 
 func TestRunStopHooks_HookPassesThrough(t *testing.T) {
 	e := &Engine{
 		stopHooks: []StopHook{
-			&ZeroToolCallHook{MaxRetries: 3},
+			stubStopHook{result: StopHookResult{}},
 		},
 	}
 	result := e.runStopHooks(context.Background(), StopHookContext{
 		RunToolCallCount: 5,
 	})
 	if result.Block {
-		t.Errorf("expected Block=false when runToolCallCount>0")
+		t.Errorf("expected Block=false when hook passes through")
+	}
+}
+
+func TestRunStopHooks_AwaitUserPriority(t *testing.T) {
+	// AwaitUser takes priority over continuing to later hooks.
+	e := &Engine{
+		stopHooks: []StopHook{
+			stubStopHook{result: StopHookResult{AwaitUser: true, Reason: "question_to_user"}},
+			stubStopHook{result: StopHookResult{Block: true, Message: "later", Reason: "later_hook"}},
+		},
+	}
+	result := e.runStopHooks(context.Background(), StopHookContext{})
+	if !result.AwaitUser {
+		t.Errorf("expected AwaitUser=true to take priority, got AwaitUser=%v Block=%v", result.AwaitUser, result.Block)
+	}
+	if result.Reason != "question_to_user" {
+		t.Errorf("expected Reason='question_to_user', got %q", result.Reason)
+	}
+}
+
+func TestRunStopHooks_ExhaustedAccumulates(t *testing.T) {
+	e := &Engine{
+		stopHooks: []StopHook{
+			stubStopHook{result: StopHookResult{Exhausted: true}},
+		},
+	}
+	result := e.runStopHooks(context.Background(), StopHookContext{})
+	if result.Block {
+		t.Errorf("expected Block=false when hook only exhausts")
+	}
+	if !result.Exhausted {
+		t.Errorf("expected Exhausted=true when a hook reports exhaustion")
 	}
 }
 
 func TestSetStopHooks(t *testing.T) {
 	e := &Engine{}
-	e.SetStopHooks([]StopHook{&ZeroToolCallHook{MaxRetries: 3}})
+	e.SetStopHooks([]StopHook{stubStopHook{result: StopHookResult{}}})
 	if len(e.stopHooks) != 1 {
 		t.Errorf("expected 1 hook registered, got %d", len(e.stopHooks))
+	}
+}
+
+func TestSetStopHooks_EmptyClears(t *testing.T) {
+	e := &Engine{}
+	e.SetStopHooks([]StopHook{stubStopHook{result: StopHookResult{}}})
+	e.SetStopHooks(nil)
+	if len(e.stopHooks) != 0 {
+		t.Errorf("expected 0 hooks after clearing, got %d", len(e.stopHooks))
 	}
 }

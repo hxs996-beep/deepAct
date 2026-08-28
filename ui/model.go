@@ -24,6 +24,7 @@ const (
 	stateApiKeyPrompt
 	stateReady
 	stateRunning
+	stateResume
 )
 
 type DisplayMessage struct {
@@ -90,6 +91,7 @@ var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
 	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
+	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
 }
 
 // helpTools is the curated capability surface shown in the /help screen. It
@@ -176,6 +178,10 @@ type Model struct {
 
 	// Sub-agent parallel execution tracking
 	subAgents []SubAgentStatus
+
+	// Resume session picker
+	resumeSessions []SessionSummary
+	selectedResume int
 }
 
 type messageRenderCache struct {
@@ -770,6 +776,7 @@ func (m Model) View() string {
 
 	suggestionPopup := renderSuggestions(m, contentWidth)
 	optionsPopup := renderOptionsPopup(m, contentWidth)
+	resumePopup := renderResumePopup(m, contentWidth)
 
 	// ---- Step 1: Render footer components (bottom-fixed area) ----
 	inputLine := renderInputLine(m)
@@ -782,6 +789,9 @@ func (m Model) View() string {
 	}
 	if optionsPopup != "" {
 		footerHeight += renderedHeight(optionsPopup)
+	}
+	if resumePopup != "" {
+		footerHeight += renderedHeight(resumePopup)
 	}
 
 	// ---- Step 3: Body area = remaining space above footer ----
@@ -907,6 +917,9 @@ func (m Model) View() string {
 	if optionsPopup != "" {
 		footerParts = append([]string{optionsPopup}, footerParts...)
 	}
+	if resumePopup != "" {
+		footerParts = append([]string{resumePopup}, footerParts...)
+	}
 	footer := "\033[0m" + strings.Join(footerParts, "\n\033[0m")
 
 	full := body + "\n" + footer
@@ -1002,6 +1015,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Ctrl+Q: quit
 	if msg.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
+	}
+
+	// ---- Resume session picker keys ----
+	if m.state == stateResume {
+		switch msg.Type {
+		case tea.KeyUp:
+			m.selectedResume--
+			if m.selectedResume < 0 {
+				m.selectedResume = len(m.resumeSessions) - 1
+			}
+			return m, nil
+		case tea.KeyDown:
+			m.selectedResume = (m.selectedResume + 1) % len(m.resumeSessions)
+			return m, nil
+		case tea.KeyEnter:
+			if !msg.Alt {
+				m.applyResume(m.selectedResume)
+				return m, nil
+			}
+		case tea.KeyEsc:
+			m.state = stateReady
+			m.resumeSessions = nil
+			m.selectedResume = 0
+			return m, nil
+		default:
+			return m, nil // picker 中忽略其他键
+		}
 	}
 
 	// Esc: cancel if running; in ready state, mark as potential Alt+Enter
@@ -1419,6 +1459,23 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle /resume: show session picker without invoking the engine
+	if strings.TrimSpace(content) == "/resume" {
+		if m.engine == nil {
+			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "API key required. Restart and enter key."})
+			return m, nil
+		}
+		sessions := m.engine.ListSessions()
+		if len(sessions) == 0 {
+			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "没有可恢复的会话。"})
+			return m, nil
+		}
+		m.resumeSessions = sessions
+		m.selectedResume = 0
+		m.state = stateResume
+		return m, nil
+	}
+
 	if m.engine == nil {
 		m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "API key required. Restart and enter key."})
 		return m, nil
@@ -1432,6 +1489,30 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
 		waitForProgress(m.progressChan),
 	)
+}
+
+// applyResume 恢复选中的会话：continue 语义 + 预载历史 + 预填 UI 消息流。
+func (m *Model) applyResume(idx int) {
+	if m.engine == nil || idx < 0 || idx >= len(m.resumeSessions) {
+		return
+	}
+	s := m.resumeSessions[idx]
+	m.engine.SetSessionID(s.ID)
+	history := m.engine.LoadHistory(s.ID)
+	if history == nil {
+		history = []engine.Message{}
+	}
+	m.engine.SetHistory(history)
+
+	m.messages = append(m.messages, DisplayMessage{Role: "system", Content: fmt.Sprintf("已恢复会话 %s", s.ID)})
+	for _, h := range history {
+		if h.Role == "user" || h.Role == "assistant" {
+			m.messages = append(m.messages, DisplayMessage{Role: h.Role, Content: h.Content})
+		}
+	}
+	m.state = stateReady
+	m.resumeSessions = nil
+	m.selectedResume = 0
 }
 
 // flushNarration moves buffered content_delta text from narrationPending into
@@ -1701,9 +1782,20 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 	} else if m.narration != "" {
 		narrationLines := renderStreaming(m.narration, width)
 		lines = append(lines, narrationLines...)
+		// Message blocks (renderBody above) each end with a trailing blank line.
+		// The streamed narration is not yet a message, so append the same
+		// separator here. Without it, finalizing the narration into a message
+		// adds one line to totalLines, shifting scrollOffset / screenToLine
+		// mapping by one row — clicking a screen row would select the next
+		// line's text.
+		lines = append(lines, "")
 	} else if m.streaming != "" {
 		streamLines := renderStreaming(m.streaming, width)
 		lines = append(lines, streamLines...)
+		// Same trailing blank line as the narration branch above: finalizing
+		// streamed text into an assistant message adds a blank separator line,
+		// so the live block must match to keep scroll/click mapping stable.
+		lines = append(lines, "")
 	}
 	if len(m.spinners) > 0 {
 		spinnerLines := renderSpinners(m.spinners, width)
@@ -1857,14 +1949,25 @@ func renderMessage(msg DisplayMessage, width int) []string {
 		}
 		return wrapLines(styled, width)
 	case "narration":
-		// Narration renders with the same glamour Document margin (2 columns)
-		// as assistant messages. NarrationStyle only adds the foreground color —
-		// no extra padding — so narration and assistant share identical column
-		// alignment. Width is NOT further reduced here: renderMarkdown already
-		// applies WithWordWrap(width-2) internally, and a second subtraction
-		// made narration wrap 5 columns earlier than other messages.
-		rendered := renderMarkdown(content, width)
-		return wrapLines(strings.Split(NarrationStyle.Render(rendered), "\n"), width)
+		// Narration reuses the streaming render pipeline (preprocessStreamingMarkdown
+		// + wrapText at width-2 + 2-column prefix) so the finalized snapshot has
+		// EXACTLY the same line structure as the streamed narration. Previously it
+		// rendered via glamour, which merges adjacent non-fenced lines into a
+		// paragraph and re-wraps them (e.g. code quoted from a read result with
+		// line numbers), producing a different line count than renderStreaming.
+		// The line-count jump between streaming and finalize shifted scrollOffset /
+		// screenToLine mapping mid-view, so rows under the cursor pointed at the
+		// wrong logical line (scrolling showed wrong rows; clicking selected a
+		// neighbour's text). NarrationStyle adds only the foreground color (no
+		// padding), keeping column alignment with assistant messages.
+		streamLines := renderStreaming(content, width)
+		styled := make([]string, len(streamLines))
+		for i, l := range streamLines {
+			if l != "" {
+				styled[i] = NarrationStyle.Render(l)
+			}
+		}
+		return styled
 	default:
 		rendered := renderMarkdown(content, width)
 		return wrapLines(strings.Split(rendered, "\n"), width)
@@ -2393,10 +2496,25 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
+	return splitLipglossBlock(rendered, width)
+}
+
+// splitLipglossBlock splits a lipgloss-rendered block into lines, wrapping any
+// line whose width exceeds `width`. lipgloss pads each line to `width` using
+// ansi.StringWidth, which counts ambiguous-width runes (← → — ·, U+2190/U+2192/
+// U+2014/U+00B7) as 1 column. The gate here uses the same benchmark so already-
+// padded lines pass through unchanged. Using displayWidth (EastAsianWidth=true,
+// ambiguous counted as 2) would re-measure a padded header as 1 column over the
+// limit and split it, emitting a phantom blank line — see renderSubAgentPanel.
+func splitLipglossBlock(rendered string, width int) []string {
 	rawLines := strings.Split(rendered, "\n")
 	var result []string
 	for _, l := range rawLines {
-		result = append(result, wrapLineAnsi(l, width)...)
+		if ansi.StringWidth(l) > width {
+			result = append(result, wrapLineAnsi(l, width)...)
+		} else {
+			result = append(result, l)
+		}
 	}
 	return result
 }
@@ -2447,12 +2565,7 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	rawLines := strings.Split(rendered, "\n")
-	var result []string
-	for _, l := range rawLines {
-		result = append(result, wrapLineAnsi(l, width)...)
-	}
-	return result
+	return splitLipglossBlock(rendered, width)
 }
 
 // renderTodoList renders the generic step-progress todo list above the input.
@@ -2476,12 +2589,7 @@ func renderTodoList(items []engine.TodoItem, width int) []string {
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	rawLines := strings.Split(rendered, "\n")
-	var result []string
-	for _, l := range rawLines {
-		result = append(result, wrapLineAnsi(l, width)...)
-	}
-	return result
+	return splitLipglossBlock(rendered, width)
 }
 
 // renderOverlayStatus renders both the step-progress todo list and member
@@ -2676,6 +2784,41 @@ func renderOptionsPopup(m Model, width int) string {
 		}
 	}
 	lines = append(lines, DimStyle.Render("Enter/Tab: select  ↑↓: navigate  or type feedback"))
+	content := strings.Join(lines, "\n")
+	return SuggestionBox.Width(width - 2).Render(content)
+}
+
+// renderResumePopup 渲染会话选择器（/resume）。
+func renderResumePopup(m Model, width int) string {
+	if m.state != stateResume || len(m.resumeSessions) == 0 {
+		return ""
+	}
+	total := len(m.resumeSessions)
+	start, end := visiblePopupWindow(total, m.selectedResume, maxPopupItems)
+	var lines []string
+	for i := start; i < end; i++ {
+		s := m.resumeSessions[i]
+		preview := s.FirstMsg
+		if len([]rune(preview)) > 30 {
+			preview = string([]rune(preview)[:30]) + "…"
+		}
+		line := fmt.Sprintf("%s  %s  %s", s.UpdatedAt.Format("01-02 15:04"), preview, s.ID)
+		if i == m.selectedResume {
+			line = SuggestionSelected.Render(" " + line + " ")
+		} else {
+			line = SuggestionItem.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	if total > maxPopupItems {
+		remain := total - end
+		if remain > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" … and %d more (scroll ↑↓)", remain)))
+		} else if start > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf(" (↑ scroll for %d more)", start)))
+		}
+	}
+	lines = append(lines, DimStyle.Render("Enter: 恢复  ↑↓: 选择  Esc: 取消"))
 	content := strings.Join(lines, "\n")
 	return SuggestionBox.Width(width - 2).Render(content)
 }

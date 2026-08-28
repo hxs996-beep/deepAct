@@ -163,9 +163,10 @@ func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content
 func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
 	if input.Depth > maxSubAgentDepth {
 		return &HandoffResult{
-			Summary:   fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", maxSubAgentDepth),
-			Blocked:   true,
-			BlockedBy: "max_depth",
+			Summary:      fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", maxSubAgentDepth),
+			Blocked:      true,
+			BlockedBy:    "max_depth",
+			FinishReason: HandoffReasonMaxDepth,
 		}, nil
 	}
 
@@ -197,10 +198,20 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
 		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 	}
+	// Structured run: attach the scoped submit_result tool and its requirement
+	// as the trailing (highest-recency) instruction. From here on the loop
+	// only completes through a valid submission — termination never depends
+	// on an LLM judgment call (mirrors the harness structured_output).
+	structured := input.StructuredResult
+	if structured {
+		history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
+	}
 
-	// Conclusion classifier for the sub-agent's text-only turns: mirrors the
-	// main engine's StalledNarrationHook. Uses the forked model + flash model
-	// name (cheaper) to decide whether a text-only reply is a final conclusion.
+	// Conclusion classifier for the sub-agent's text-only turns. Unlike the
+	// main engine (which ends on any text-only reply — dsh structured
+	// completion), the sub-agent has no user to nudge it, so it keeps the
+	// LLM ConclusionClassifier to tell a genuine conclusion from narration.
+	// Uses the forked model + flash model name (cheaper).
 	classifierModelName := r.flashModelName
 	if classifierModelName == "" {
 		classifierModelName = r.modelName
@@ -208,6 +219,10 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	conclusionClassifier := NewConclusionClassifier(model, classifierModelName, zhFromLang(input.UserLanguage))
 
 	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
+
+	if structured {
+		filteredTools = append(filteredTools, submitResultToolSpec(zhFromLang(input.UserLanguage)))
+	}
 
 	modelName := r.modelName
 	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
@@ -228,6 +243,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	compressThreshold := limit * 95 / 100
 	var totalUsage ModelUsage
 	consecutiveIntermediate := 0
+	consecutiveTruncation := 0
 	lastOpKey := ""
 	sameOpCount := 0
 	maxSameOp := 5
@@ -236,10 +252,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		select {
 		case <-ctx.Done():
 			return &HandoffResult{
-				Summary:   "(cancelled)",
-				Blocked:   true,
-				BlockedBy: "cancelled",
-				Usage:     &totalUsage,
+				Summary:      "(cancelled)",
+				Blocked:      true,
+				BlockedBy:    "cancelled",
+				FinishReason: HandoffReasonCancelled,
+				Usage:        &totalUsage,
 			}, nil
 		default:
 		}
@@ -298,10 +315,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			// Don't crash the parent session — return a graceful degradation.
 			summary := r.summarizeHistory(history, input.Goal)
 			return &HandoffResult{
-				Summary:   "(sub-agent error: " + err.Error() + ") \n" + summary,
-				Blocked:   true,
-				BlockedBy: "sub_agent_error",
-				Usage:     &totalUsage,
+				Summary:      "(sub-agent error: " + err.Error() + ") \n" + summary,
+				Blocked:      true,
+				BlockedBy:    "sub_agent_error",
+				FinishReason: HandoffReasonError,
+				Usage:        &totalUsage,
 			}, nil
 		}
 
@@ -329,6 +347,17 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		msg := resp.Message
 
+		// Output-cap truncation (finish_reason == "length"): the response was
+		// cut off, so it may end with a partially streamed tool call whose
+		// arguments never closed. The partial text is NOT a conclusion — never
+		// classify it, and never execute the (possibly incomplete) calls. The
+		// run resumes with "继续" and gives up with reason="max_tokens" only
+		// after repeated truncations.
+		truncated := resp.FinishReason == "length"
+		if truncated {
+			msg.ToolCalls = nil
+		}
+
 		// Strip intermediate thinking text from content when tool calls exist.
 		// The model sometimes outputs intent text alongside structured tool calls;
 		// this text is noise and should not pollute the sub-agent's history.
@@ -340,17 +369,51 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 		// No tool calls → agent may be done
 		if len(msg.ToolCalls) == 0 {
+			if truncated {
+				consecutiveTruncation++
+				if consecutiveTruncation >= 3 {
+					result := r.buildResult(msg.Content, input.Goal)
+					result.FinishReason = HandoffReasonMaxTokens
+					result.Usage = &totalUsage
+					return result, nil
+				}
+				history = append(history, ModelMessage{
+					Role:    "user",
+					Content: pickPrompt(zhFromLang(input.UserLanguage), "Continue.", "继续。"),
+				})
+				continue
+			}
 			if input.NoNudge {
 				result := r.buildResult(msg.Content, input.Goal)
 				result.Usage = &totalUsage
 				return result, nil
 			}
+			// Structured run: text alone never completes. Nudge toward
+			// submit_result — no classifier probe, no ambiguity.
+			if structured {
+				consecutiveIntermediate++
+				if consecutiveIntermediate >= 3 {
+					result := r.buildResult(msg.Content, input.Goal)
+					result.FinishReason = HandoffReasonNoResult
+					result.Usage = &totalUsage
+					return result, nil
+				}
+				content := getSubmitResultNudge(zhFromLang(input.UserLanguage))
+				if input.Agent == AgentCritic {
+					content = getCriticSubmitNudge(zhFromLang(input.UserLanguage))
+				}
+				history = append(history, ModelMessage{
+					Role:    "user",
+					Content: content,
+				})
+				continue
+			}
 			// A text-only response that is a genuine conclusion (not forward-
-			// looking narration) ends the sub-agent. Mirrors the main engine's
-			// StalledNarrationHook: uses the LLM ConclusionClassifier to tell
-			// conclusion from narration. On classifier error, conservatively
-			// treat as narration (nudge) so the sub-agent never ends early on
-			// an uncertain call.
+			// looking narration) ends the sub-agent. Uses the LLM
+			// ConclusionClassifier to tell conclusion from narration (the
+			// sub-agent has no user to nudge it, unlike the main engine).
+			// On classifier error, conservatively treat as narration (nudge)
+			// so the sub-agent never ends early on an uncertain call.
 			if msg.Content != "" {
 				// Critic fast-path: a well-formed VERDICT line is a
 				// deterministic terminal signal — trust it and skip the
@@ -367,16 +430,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				})
 				if err != nil {
 					turnLog.Printf("sub-agent conclusion classifier error: %v (conservative nudge)", err)
-				} else if isConc && !hasTrailingNextStepIntent(msg.Content) {
-					// Trust the verdict unless the text reads as a forward-looking
-					// next-step plan: the flash classifier can false-positive on
-					// narration leading with an intent marker ("查看 X，确认 Y。").
-					// Genuine conclusions - including critic verdicts like
-					// "结论：失败" - carry no trailing next-step intent and are
-					// trusted. Mirrors the main engine's StalledNarrationHook
-					// heuristic pre-check. Unlike the main engine, NO completion
-					// marker is required here: critic verdicts are legitimate
-					// conclusions without one.
+				} else if isConc {
+					// Trust the LLM verdict. The keyword-based
+					// hasTrailingNextStepIntent guard was removed (dsh
+					// structured completion): the classifier is the sole
+					// judge for the sub-agent, which has no user to nudge it.
 					result := r.buildResult(msg.Content, input.Goal)
 					result.Usage = &totalUsage
 					return result, nil
@@ -386,6 +444,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			if consecutiveIntermediate >= 3 {
 				// Break — model keeps producing text without acting
 				result := r.buildResult(msg.Content, input.Goal)
+				result.FinishReason = HandoffReasonStalledNarration
 				result.Usage = &totalUsage
 				return result, nil
 			}
@@ -430,7 +489,56 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}
 
 		if len(calls) == 0 {
-			return r.buildResult(msg.Content, input.Goal), nil
+			result := r.buildResult(msg.Content, input.Goal)
+			result.Usage = &totalUsage
+			return result, nil
+		}
+
+		// Structured-run terminal gate: submit_result is the ONLY way a
+		// structured run completes. A valid submission ends the run
+		// immediately with the submitted summary; an invalid one (missing or
+		// empty summary) is refused as a tool error so the model retries.
+		// Sibling calls in the same message are skipped either way (mirrors
+		// the parent's task_complete interception and the harness
+		// structured_output monotonic guard).
+		if structured {
+			if idx := submitCallIndex(calls); idx >= 0 {
+				call := calls[idx]
+				var params SubmitResultParams
+				if err := json.Unmarshal(call.Input, &params); err != nil || strings.TrimSpace(params.Summary) == "" {
+					// msg is already appended to history above; close every
+					// tool_call_id so the next request is well-formed.
+					for _, c := range calls {
+						content := "Blocked: submit_result requires a non-empty summary string. Other calls were skipped."
+						if c.ID == call.ID {
+							content = "Blocked: submit_result failed parameter validation — retry with a non-empty summary."
+						}
+						history = append(history, ModelMessage{
+							Role:       "tool",
+							ToolCallID: c.ID,
+							Content:    content,
+						})
+					}
+					continue
+				}
+				for _, c := range calls {
+					content := "Skipped: submit_result was called."
+					if c.ID == call.ID {
+						content = "Result submitted."
+					}
+					history = append(history, ModelMessage{
+						Role:       "tool",
+						ToolCallID: c.ID,
+						Content:    content,
+					})
+				}
+				result := r.buildResult(params.Summary, input.Goal)
+				if len(params.Conclusions) > 0 {
+					result.Conclusions = params.Conclusions
+				}
+				result.Usage = &totalUsage
+				return result, nil
+			}
 		}
 
 		// Per-file loop detection: same tool+file repeated N consecutive turns → block
@@ -440,7 +548,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				sameOpCount++
 				if sameOpCount >= maxSameOp {
 					summary := r.summarizeHistory(history, input.Goal)
-					return &HandoffResult{Summary: summary, Usage: &totalUsage}, nil
+					return &HandoffResult{
+						Summary:      summary,
+						FinishReason: HandoffReasonLoopDetected,
+						Usage:        &totalUsage,
+					}, nil
 				}
 			} else {
 				sameOpCount = 1
@@ -490,10 +602,46 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 
 	// Max iterations reached — extract whatever findings the agent accumulated
 	summary := r.summarizeHistory(history, input.Goal)
+	reason := HandoffReasonMaxIterations
+	if structured {
+		// A structured run that burned its whole budget without submitting a
+		// result delivered nothing — report that explicitly.
+		reason = HandoffReasonNoResult
+	}
 	return &HandoffResult{
-		Summary:  summary,
-		TimedOut: true,
+		Summary:      summary,
+		TimedOut:     true,
+		FinishReason: reason,
 	}, nil
+}
+
+// submitCallIndex returns the index of the submit_result call in calls, or -1.
+func submitCallIndex(calls []ToolCallRequest) int {
+	for i, c := range calls {
+		if c.Name == SubmitResultToolName {
+			return i
+		}
+	}
+	return -1
+}
+
+// getSubmitResultNudge directs a structured run's text-only turn to the
+// terminal tool instead of the generic "use tools" nudge: the tool call is
+// the only recognized completion for this run.
+func getSubmitResultNudge(zh bool) string {
+	if zh {
+		return "请立即调用 submit_result 提交你的最终结论（summary 必填）。不要继续输出纯文本或调用其他工具。"
+	}
+	return "Call submit_result now to report your final result (summary is required). Do not continue with plain text or further tool calls."
+}
+
+// getCriticSubmitNudge directs a structured critic's text-only turn to the
+// terminal tool with a verdict-shaped summary, so the FAIL gate stays reliable.
+func getCriticSubmitNudge(zh bool) string {
+	if zh {
+		return "评审完成。请立即调用 submit_result 提交最终评审结论，summary 必须包含一行 VERDICT: PASS / VERDICT: FAIL / VERDICT: PARTIAL。不要继续输出纯文本或调用其他工具。"
+	}
+	return "Review complete. Call submit_result now to submit your final review, with the summary containing one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL. Do not continue with plain text or further tool calls."
 }
 
 // summarizeHistory extracts the last meaningful assistant output from history
@@ -704,8 +852,9 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 // buildResult extracts conclusions from the agent's final text response.
 func (r *SubAgentRunner) buildResult(content string, goal string) *HandoffResult {
 	result := &HandoffResult{
-		Summary:     content,
-		Conclusions: make([]string, 0),
+		Summary:      content,
+		Conclusions:  make([]string, 0),
+		FinishReason: HandoffReasonCompleted,
 	}
 
 	// Try to extract conclusions from bullet points in the final text

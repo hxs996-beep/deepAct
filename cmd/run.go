@@ -294,6 +294,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillsBlock := buildSkillsBlock(skillReg.All())
 	contextAssembler.SetSkillsBlock(skillsBlock)
 
+	// Load AGENTS.md files (user-level + project-level) into the stable zone.
+	// Missing files are skipped; empty block → output identical to current.
+	agentsFiles := deeplogcontext.LoadAgentsMD(workDir)
+	contextAssembler.SetAgentsBlock(deeplogcontext.RenderAgentsBlock(agentsFiles))
+
 	// Create model router for Pro/Flash routing decisions
 	routing := router.NewRouter(config.RiskThreshold)
 	if config.ModelName != "" {

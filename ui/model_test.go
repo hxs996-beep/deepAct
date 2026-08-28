@@ -423,3 +423,39 @@ func TestWrapLineAnsi_WideChars(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderSubAgentPanel_NoPhantomBlankLine guards against the phantom blank
+// line in the sub-agent panel header.
+//
+// Root cause: lipgloss pads the header to `width` using ansi.StringWidth, which
+// counts the ambiguous "→" (U+2192) as 1 column. This package's displayWidth
+// counts "→" as 2 (EastAsianWidth=true), so the padded header measures 1 column
+// over the limit and wrapLineAnsi splits it, emitting a 1-space phantom line.
+// Combined with the explicit "" separator this renders as two blank lines
+// between "Sub-Agents" and the agent row.
+func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
+	lines := renderSubAgentPanel([]SubAgentStatus{
+		{Agent: "critic", Goal: "批判性审查本次\"修复 narration 流式/快照渲染\"", Status: "running"},
+	}, 80)
+
+	plain := make([]string, len(lines))
+	for i, l := range lines {
+		plain[i] = strings.TrimRight(stripAnsi(l), " ")
+	}
+
+	headerIdx, agentIdx := -1, -1
+	for i, p := range plain {
+		if strings.Contains(p, "Sub-Agents") {
+			headerIdx = i
+		}
+		if strings.Contains(p, "[c] critic") {
+			agentIdx = i
+		}
+	}
+	if headerIdx < 0 || agentIdx < 0 {
+		t.Fatalf("panel lines missing header or agent row: %q", plain)
+	}
+	if gap := agentIdx - headerIdx - 1; gap != 1 {
+		t.Errorf("want exactly 1 blank line between header and agent, got %d: %q", gap, plain)
+	}
+}

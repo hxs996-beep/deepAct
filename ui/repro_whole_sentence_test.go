@@ -25,10 +25,14 @@ func (r *mockRunner) Run(prompt string) tea.Cmd {
 		}
 	}
 }
-func (r *mockRunner) Cancel()                            {}
-func (r *mockRunner) SetProgressChan(ch chan ProgressMsg) { r.progressCh = ch }
-func (r *mockRunner) ValidateConnection() error           { return nil }
-func (r *mockRunner) Steer(msg string)                    {}
+func (r *mockRunner) Cancel()                                {}
+func (r *mockRunner) SetProgressChan(ch chan ProgressMsg)    { r.progressCh = ch }
+func (r *mockRunner) ValidateConnection() error              { return nil }
+func (r *mockRunner) Steer(msg string)                       {}
+func (r *mockRunner) SetSessionID(id string)                 {}
+func (r *mockRunner) SetHistory(messages []engine.Message)   {}
+func (r *mockRunner) ListSessions() []SessionSummary         { return nil }
+func (r *mockRunner) LoadHistory(id string) []engine.Message { return nil }
 
 // TestReproWholeSentenceView checks the TEXT LAYER: a whole sentence arriving
 // as one content_delta must render in correct character order in View().

@@ -222,6 +222,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		content = ""
 	}
 
+	// Layer 4 (max-token truncation): when the output cap cut the stream
+	// (finish_reason == "length"), the response may end with a partially
+	// streamed tool call whose arguments never closed. Never execute it —
+	// drop every tool call and fall through to the text branch, whose
+	// finish=="length" path resumes with "继续" (mirrors the harness
+	// assembler's max-tokens truncation: tool calls are dropped, text kept).
+	if finish == "length" {
+		toolCalls = nil
+	}
+
 	assistant := Message{
 		Role:             "assistant",
 		Content:          content,
@@ -239,18 +249,23 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	if !hasValidToolCalls(toolCalls) {
+		if finish == "length" {
+			// Output-cap truncation: the model did not finish its turn. Keep
+			// whatever text streamed, then resume it with a pinned "继续" so
+			// the partial reply is never mistaken for a conclusion. The pinned
+			// message is seen by the model next turn but is NOT persisted as a
+			// fake user message in history.
+			if assistant.Content != "" || assistant.ReasoningContent != "" {
+				e.history = append(e.history, assistant)
+			}
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "继续")
+			return TurnResult{Done: false, FinishReason: finish}, nil
+		}
 		if assistant.Content == "" && assistant.ReasoningContent == "" {
 			turnLog.Printf("skipping empty assistant message (no content, no reasoning, no tool_calls)")
 			return TurnResult{Done: true, FinishReason: finish}, nil
 		}
 		e.history = append(e.history, assistant)
-		if finish == "length" {
-			// "继续" must be seen by the model on the next turn to resume, but
-			// must NOT persist as a fake user message in history — use the
-			// pinned mechanism (appended per-turn, cleared after use).
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "继续")
-			return TurnResult{Done: false, FinishReason: finish}, nil
-		}
 		// Run stop hooks — structured checks that decide whether the model's
 		// text-only response should end the loop or be nudged to continue.
 		// Replaces the former isIntermediateText pattern-matching approach
@@ -263,7 +278,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			StopHookRetryCount: e.stopHookRetryCount,
 			IsChinese:          e.isChinese,
 			Goal:               e.state.Goal,
-			ToolCallSummary:    buildToolCallSummary(e.history, e.runStartHistoryLen),
 			AnalysisMode:       e.state.AnalysisMode,
 		})
 		// The model asked the user a question. Stop the loop and present the
@@ -332,64 +346,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if len(calls) == 0 {
 		e.history = append(e.history, assistant)
 		return TurnResult{Done: true, FinishReason: finish}, nil
-	}
-
-	// Self-answering guard: when the model asks the user a question in the
-	// SAME reply that carries destructive edit/write calls, block those edits
-	// and wait for the user. Presenting the question AND executing the changes
-	// is "自问自答" — the model decides on the user's behalf. Read-only calls
-	// are NOT blocked: investigation may continue while the user decides.
-	//
-	// Fail-closed: destructive changes execute only when the reply text
-	// clearly classifies as a final conclusion. An explicit/weak question,
-	// intermediate narration (proposing or describing the change instead of
-	// confirming it), and classifier errors all block the edits — otherwise
-	// the model self-answers its own proposal. A bare tool call with empty
-	// content is allowed: it carries no question or proposal to misjudge.
-	if e.verdictJudge != nil {
-		var hasDestructive bool
-		for _, call := range calls {
-			if call.Name == "edit" || call.Name == "write" {
-				hasDestructive = true
-				break
-			}
-		}
-		if hasDestructive && strings.TrimSpace(content) != "" &&
-			!e.state.PlanConfirmed && !e.state.AnalysisReportConfirmed {
-			v, err := e.verdictJudge.Classify(ctx, ConclusionCheck{
-				Goal:            e.state.Goal,
-				Text:            content,
-				ToolCallSummary: buildToolCallSummary(e.history, e.runStartHistoryLen),
-			})
-			if err != nil || v != VerdictConclusion {
-				turnLog.Printf("self-answering guard: blocking edit/write calls (reply not a clean conclusion; verdict=%v err=%v)", v, err)
-				// Record the nudge so the user's next confirmation ("ok") sets
-				// AnalysisReportConfirmed, which lets the retried edit through.
-				// Without this, "确认→又被拦→再确认" loops forever: the guard
-				// blocks, no signal is recorded, and the user's approval never
-				// releases the edit.
-				e.pendingAnalysisNudge = true
-				blockMsg := "Blocked: 用户在回答你的问题前，修改不会执行。请等待用户确认后再提交修改。"
-				if !e.isChinese {
-					blockMsg = "Blocked: changes will not be executed until the user answers your question. Wait for user confirmation before submitting modifications."
-				}
-				e.history = append(e.history, assistant)
-				for _, c := range calls {
-					e.history = append(e.history, Message{
-						Role:       "tool",
-						ToolCallID: c.ID,
-						Content:    blockMsg,
-						Timestamp:  time.Now(),
-					})
-				}
-				return TurnResult{
-					Blocked:      true,
-					BlockedBy:    "awaiting_user",
-					Questions:    []string{content},
-					FinishReason: finish,
-				}, nil
-			}
-		}
 	}
 
 	// Intercept task_complete: explicit completion signal from the LLM.
@@ -966,10 +922,11 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 	}
 	digest := formatHandoffResult(result, e.isChinese)
 	return ToolResult{
-		ToolCallID: call.ID,
-		ToolName:   HandoffToolName,
-		Status:     status,
-		Digest:     digest,
+		ToolCallID:   call.ID,
+		ToolName:     HandoffToolName,
+		Status:       status,
+		Digest:       digest,
+		FinishReason: result.FinishReason,
 	}
 }
 
@@ -1514,16 +1471,6 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// truncateStr truncates a string to the given max rune count, appending "..." if truncated.
-// Uses rune-based slicing to avoid splitting multi-byte UTF-8 characters.
-func truncateStr(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max]) + "..."
-}
-
 func addToWorkingSet(state *TaskState, path string, notes string) {
 	for i, f := range state.WorkingSet.Files {
 		if f.Path == path {
@@ -1721,7 +1668,7 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 		// Without it, the tool_call_id is orphaned and the DeepSeek API
 		// rejects the next request, permanently stalling the session.
 		content := result.Digest
-		if result.Status == "cancelled" {
+		if result.Status == "cancelled" || result.FinishReason == HandoffReasonCancelled {
 			content = "Sub-agent cancelled."
 		}
 		messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})

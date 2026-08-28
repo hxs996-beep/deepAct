@@ -125,13 +125,6 @@ type Engine struct {
 	stopHookRetryCount int
 	// stopHooks are checked when the model outputs text without tool calls.
 	stopHooks []StopHook
-	// verdictJudge classifies text-only replies into conclusion/question/
-	// intermediate. Extracted automatically from registered stop hooks that
-	// implement VerdictProvider (ZeroToolCallHook/StalledNarrationHook). The
-	// tool branch uses it to block destructive edits when the model asks the
-	// user a question in the same reply (self-answering guard). Nil skips the
-	// check (no judge wired → legacy behavior).
-	verdictJudge VerdictJudge
 	// intentJudge classifies user messages into analyze/continue/new_topic
 	// via a lightweight LLM call. Replaces the old keyword-based detection
 	// functions. Nil falls back to IntentContinue.
@@ -142,7 +135,11 @@ type Engine struct {
 	// into this run's summary when the model emits bare tool calls (empty
 	// Content) and never produces a final text body.
 	runStartHistoryLen int
-	runErrorCount      int
+	// persistedCount records how many history messages have been written as
+	// message events. persistHistory only writes history[persistedCount:];
+	// it resets to 0 when compression replaces history (out-of-bounds guard).
+	persistedCount int
+	runErrorCount  int
 
 	// isChinese is set once from the first user message in the session.
 	// All per-turn UI messages (skill list, activation prompts, etc.) use
@@ -230,10 +227,28 @@ func (e *Engine) SetOnProgress(fn ProgressFunc) {
 	}
 }
 
+// SetSessionID 切换会话 ID（/resume continue 语义：后续事件写入该文件）。
+func (e *Engine) SetSessionID(id string) {
+	e.config.SessionID = id
+	if e.state != nil {
+		e.state.TaskID = id
+	}
+}
+
+// SetHistory 预载恢复的会话历史（首次 Run() 前调用）。
+// 预载的消息不再重复落盘（persistedCount 同步）。
+func (e *Engine) SetHistory(h []Message) {
+	e.history = append([]Message(nil), h...)
+	e.persistedCount = len(e.history)
+}
+
 func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, error) {
 	if e.state == nil {
 		return nil, fmt.Errorf("state not initialized")
 	}
+	// Persist this Run's conversation history as message events on every exit
+	// path (Run has ~20 returns). tool messages are stored as brief digests.
+	defer e.persistHistory()
 	// Detect language once at session start, not per-turn.
 	// This prevents "ok"/"yes"/"confirm" from switching UI to English.
 	if !e.langDetected {
@@ -1134,11 +1149,36 @@ func (e *Engine) emitEvent(eventType string, stage Stage, payload any) error {
 	if err != nil {
 		return fmt.Errorf("marshal event payload: %w", err)
 	}
-	event := Event{SessionID: e.config.SessionID, Type: eventType, Stage: stage, Timestamp: time.Now(), Payload: data}
+	event := Event{SessionID: e.config.SessionID, WorkDir: e.config.WorkDir, Type: eventType, Stage: stage, Timestamp: time.Now(), Payload: data}
 	if err := e.session.AppendEvent(event); err != nil {
 		return fmt.Errorf("append event: %w", err)
 	}
 	return nil
+}
+
+// persistHistory writes this Run's new conversation messages as message
+// events. user/assistant are stored in full; tool messages keep only a
+// briefDigest; reasoning_content is not persisted.
+func (e *Engine) persistHistory() {
+	if e.session == nil {
+		return
+	}
+	if e.persistedCount > len(e.history) {
+		// Compression replaced history → rewrite from 0 (restores window
+		// semantics and avoids an out-of-bounds slice panic).
+		e.persistedCount = 0
+	}
+	for _, msg := range e.history[e.persistedCount:] {
+		persisted := msg
+		persisted.ReasoningContent = ""
+		if persisted.Role == "tool" {
+			persisted.Content = briefDigest(persisted.Content)
+		}
+		if err := e.emitEvent(EventTypeMessage, StageAct, persisted); err != nil {
+			loopLog.Printf("persist message event: %v", err)
+		}
+	}
+	e.persistedCount = len(e.history)
 }
 
 func (e *Engine) verifyAndCompact() error {

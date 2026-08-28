@@ -197,10 +197,18 @@ type ToolResult struct {
 	Digest      string `json:"digest"`
 	ArtifactRef string `json:"artifact_ref,omitempty"`
 	ExitCode    *int   `json:"exit_code,omitempty"`
+	// FinishReason carries a handoff's HandoffResult.FinishReason so the
+	// parent loop can react to why a sub-agent ended without text parsing.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
+
+// EventTypeMessage records conversation messages (user/assistant in full,
+// tool as a brief digest) for /resume session restoration.
+const EventTypeMessage = "message"
 
 type Event struct {
 	SessionID string          `json:"session_id"`
+	WorkDir   string          `json:"work_dir,omitempty"`
 	Type      string          `json:"type"`
 	Stage     Stage           `json:"stage"`
 	Timestamp time.Time       `json:"timestamp"`

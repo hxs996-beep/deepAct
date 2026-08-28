@@ -16,7 +16,7 @@ func NewDefaultRegistry(runner *SubAgentRunner) *AgentRegistry {
 	// by the main agent, so the critic's verdict comes from static review only.
 	reg.Register(&specialistAgent{
 		id:       AgentCritic,
-		spec:     AgentSpec{ID: AgentCritic, Description: "Adversarial verification — try to break the implementation before claiming completion", ToolNames: []string{"read", "grep", "glob", "lsp"}, ModelName: "flash", MaxIterations: 15},
+		spec:     AgentSpec{ID: AgentCritic, Description: "Adversarial verification — try to break the implementation before claiming completion", ToolNames: []string{"read", "grep", "glob", "lsp"}, ModelName: "flash", MaxIterations: 15, StructuredResult: true},
 		promptEn: criticPromptEn,
 		promptZh: criticPromptZh,
 		runner:   runner,
@@ -32,9 +32,10 @@ type genericSubAgent struct {
 
 func (a *genericSubAgent) ID() AgentID { return AgentSub }
 func (a *genericSubAgent) Spec() AgentSpec {
-	return AgentSpec{ID: AgentSub, Description: "Execute a well-defined subtask with specified tools"}
+	return AgentSpec{ID: AgentSub, Description: "Execute a well-defined subtask with specified tools", StructuredResult: true}
 }
 func (a *genericSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
+	input.StructuredResult = a.Spec().StructuredResult
 	return a.runner.Run(ctx, input)
 }
 func (a *genericSubAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }
@@ -63,6 +64,7 @@ func (a *specialistAgent) Run(ctx context.Context, input Handoff) (*HandoffResul
 	if maxIter <= 0 {
 		maxIter = maxSubAgentIterations
 	}
+	input.StructuredResult = a.spec.StructuredResult
 	return a.runner.runLoop(ctx, input, a.promptFor(zhFromLang(input.UserLanguage)), maxIter, a.spec.ModelName)
 }
 func (a *specialistAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }
