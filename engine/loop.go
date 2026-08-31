@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -434,6 +435,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 
 	e.updateGoalFromFirstMessage(userMsg)
+
+	// /confirm N — deterministic confirmation channel. Must run before
+	// handleAnalysisNudgeConfirmation so the state set here is what the agent
+	// sees in this same Run, and before intent detection so /confirm is never
+	// routed through the LLM classifier.
+	e.handleConfirmCommand(userMsg)
 
 	// Analysis report nudge: if the gate blocked in the previous Run() and the
 	// agent produced a text-only analysis report, handle the user's response
@@ -933,7 +940,31 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
 		e.runUsageAccum.CacheHitTokens, e.runUsageAccum.CacheMissTokens)
+	// Analysis gate confirmation: if the gate intercepted edits in this Run
+	// (agent produced a report but the user hasn't confirmed), present the
+	// confirmation options so the UI can show the popup. The report is already
+	// visible as Summary. analysisNudgeCount is > 0 only when the gate blocked
+	// this Run; it resets to 0 at the next Run's start (loop.go:298), so a
+	// confirmed /confirm N (which clears AnalysisMode) won't re-prompt.
+	if e.analysisNudgeCount > 0 {
+		return &EngineResponse{
+			Summary: summary,
+			Options: confirmOptions(),
+			Stage:   StageVerifyCompact,
+		}, nil
+	}
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
+}
+
+// confirmOptions returns the confirmation options for the analysis-gate popup.
+// The last item is the free-input entry — selecting it returns to the input box.
+func confirmOptions() []string {
+	return []string{
+		"方案A: 按报告执行修改",
+		"方案B: 调整方案后执行",
+		"方案C: 取消本次修改",
+		"其他（输入你的意见）",
+	}
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the
@@ -1564,7 +1595,8 @@ func (e *Engine) detectUserIntent(ctx context.Context, userMsg string) UserInten
 	msg := strings.ToLower(strings.TrimSpace(userMsg))
 
 	// Deterministic safety gate: pure confirmation continues the current task.
-	if isDangerousConfirmation(msg) {
+	// /confirm N is the UI confirmation channel — treat as continue, never LLM.
+	if isDangerousConfirmation(msg) || strings.HasPrefix(msg, "/confirm ") {
 		return IntentContinue
 	}
 
@@ -1586,6 +1618,54 @@ func (e *Engine) detectUserIntent(ctx context.Context, userMsg string) UserInten
 func isClearCommand(userMsg string) bool {
 	trimmed := strings.TrimSpace(userMsg)
 	return trimmed == "/clear" || strings.HasPrefix(trimmed, "/clear ")
+}
+
+// parseConfirmCommand extracts the option number from a "/confirm N" command.
+// N is 1-based. Returns (0, false) for anything that is not a valid "/confirm N".
+func parseConfirmCommand(userMsg string) (int, bool) {
+	trimmed := strings.TrimSpace(userMsg)
+	if !strings.HasPrefix(trimmed, "/confirm ") {
+		return 0, false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "/confirm "))
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
+// handleConfirmCommand processes a /confirm N message deterministically,
+// bypassing isDangerousConfirmation and the intent LLM classifier.
+//
+// N=1 (the "execute per report" option) is the only confirm-execute signal:
+// it flips AnalysisReportConfirmed + clears AnalysisMode so the agent's next
+// edit/write in this same Run passes the analysis gate.
+// N>=2 (adjust / cancel options) is feedback: cleared for the agent to revise,
+// without confirming execution.
+// Returns true if userMsg was a valid /confirm command.
+func (e *Engine) handleConfirmCommand(userMsg string) bool {
+	n, ok := parseConfirmCommand(userMsg)
+	if !ok {
+		return false
+	}
+	// Replace the user's bare command with contextual guidance for the agent.
+	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
+		if n == 1 {
+			e.state.AnalysisReportConfirmed = true
+			e.state.AnalysisMode = false
+			e.pendingAnalysisNudge = false
+			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（方案A：按报告执行修改），可以开始修改代码。"
+		} else {
+			e.state.AnalysisReportConfirmed = false
+			e.state.AnalysisMode = true
+			e.pendingAnalysisNudge = false
+			e.history[len(e.history)-1].Content = fmt.Sprintf(
+				"用户选择了方案（编号 %d）。请根据该方案调整分析，然后重新输出。", n)
+		}
+	}
+	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
+	return true
 }
 
 // handleAnalysisNudgeConfirmation processes the user's response to an analysis

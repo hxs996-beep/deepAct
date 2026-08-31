@@ -1224,10 +1224,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyEnter:
 			if !msg.Alt {
-				// Select option on plain Enter
-				m.inputBuf.SetValue(fmt.Sprintf("%d", m.selectedOption+1))
+				// 非末项（方案）→ 发内部 /confirm N 命令确定性确认；
+				// 末项"其他（输入你的意见）"→ 关闭弹出框回输入框自由输入。
+				n := m.selectedOption + 1
+				total := len(m.activeOptions)
 				m.activeOptions = nil
-				return m, nil
+				if n == total {
+					return m, nil
+				}
+				return m.submitConfirm(n)
 			}
 			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
@@ -1486,6 +1491,25 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
 	return m, tea.Batch(
 		m.engine.Run(content),
+		tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
+		waitForProgress(m.progressChan),
+	)
+}
+
+// submitConfirm sends an internal "/confirm N" command for the selected option.
+// It drives the same Run startup path as submitInput (state→running, spinner,
+// engine.Run) but never writes to the input buffer.
+func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
+	m.state = stateRunning
+	m.cancelled = false
+	m.runStartMsgIdx = len(m.messages)
+	m.toolTree = nil
+	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
+	m.streaming = ""
+	m.narration = ""
+	m.narrationPending = ""
+	return m, tea.Batch(
+		m.engine.Run(fmt.Sprintf("/confirm %d", n)),
 		tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
 		waitForProgress(m.progressChan),
 	)
