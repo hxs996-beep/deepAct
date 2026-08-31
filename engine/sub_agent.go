@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	maxSubAgentIterations  = 99
 	defaultSubAgentContext = 1_048_576 // ~1M — match main engine context window
 )
 
@@ -116,12 +115,10 @@ func (r *SubAgentRunner) contextLimit() int {
 }
 
 // Run executes a generic sub-agent with the given handoff.
+// MaxIterations <= 0 means no turn cap — the loop runs until a normal
+// completion or a built-in guard (stalled narration, loop detection, etc.).
 func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
-	iters := maxSubAgentIterations
-	if input.MaxIterations > 0 {
-		iters = input.MaxIterations
-	}
-	return r.runLoop(ctx, input, "", iters)
+	return r.runLoop(ctx, input, "", input.MaxIterations)
 }
 
 // RunWithPrompt runs a sub-agent with an extra system-level instruction prompt
@@ -129,16 +126,12 @@ func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult
 // that need a role-specific instruction (e.g. "你是一位安全工程师...") injected
 // as a high-priority user message after the stable system prompt.
 func (r *SubAgentRunner) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
-	iters := maxSubAgentIterations
-	if input.MaxIterations > 0 {
-		iters = input.MaxIterations
-	}
-	return r.runLoop(ctx, input, extraPrompt, iters)
+	return r.runLoop(ctx, input, extraPrompt, input.MaxIterations)
 }
 
 // runLoop is the core sub-agent execution loop.
 // extraPrompt is additional system-level instructions injected for specialist agents.
-// maxIterations caps the number of LLM turns for this agent.
+// maxIterations caps the number of LLM turns for this agent; 0 = no cap.
 // modelOverride, if non-empty, overrides the runner's default model for this run.
 // subAgentStreamer guards sub-agent stream_delta emission. Sub-agents use
 // non-streaming Complete, so resp.Message.Content is the full response text.
@@ -207,16 +200,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
 	}
 
-	// Conclusion classifier for the sub-agent's text-only turns. Unlike the
-	// main engine (which ends on any text-only reply — dsh structured
-	// completion), the sub-agent has no user to nudge it, so it keeps the
-	// LLM ConclusionClassifier to tell a genuine conclusion from narration.
-	// Uses the forked model + flash model name (cheaper).
-	classifierModelName := r.flashModelName
-	if classifierModelName == "" {
-		classifierModelName = r.modelName
-	}
-	conclusionClassifier := NewConclusionClassifier(model, classifierModelName, zhFromLang(input.UserLanguage))
+	// Deterministic completion (C5): no LLM ConclusionClassifier probe.
+	// A text-only reply never completes a sub-agent run through an LLM
+	// judgment call — completion is deterministic: submit_result (structured),
+	// the critic VERDICT line, NoNudge, or tool calls that lead to them.
+	// Narration is 3-strike nudged below and ends with stalled_narration.
 
 	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
 
@@ -248,7 +236,8 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	sameOpCount := 0
 	maxSameOp := 5
 	streamer := subAgentStreamer{}
-	for iter := 0; iter < maxIterations; iter++ {
+	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
+	for iter := 0; maxIterations <= 0 || iter < maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
 			return &HandoffResult{
@@ -408,37 +397,18 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				})
 				continue
 			}
-			// A text-only response that is a genuine conclusion (not forward-
-			// looking narration) ends the sub-agent. Uses the LLM
-			// ConclusionClassifier to tell conclusion from narration (the
-			// sub-agent has no user to nudge it, unlike the main engine).
-			// On classifier error, conservatively treat as narration (nudge)
-			// so the sub-agent never ends early on an uncertain call.
-			if msg.Content != "" {
+			// Deterministic completion (C5): a text-only reply NEVER completes
+			// through an LLM judgment call. The only text-only terminal is the
+			// critic's VERDICT line (a machine-parseable deterministic signal).
+			// Everything else is narration → 3-strike nudge → stalled_narration.
+			if msg.Content != "" && input.Agent == AgentCritic && parseCriticVerdict(msg.Content) != "" {
 				// Critic fast-path: a well-formed VERDICT line is a
-				// deterministic terminal signal — trust it and skip the
-				// classifier probe, so a genuine verdict is never nudged
-				// into another tool call (the critic run-on root cause).
-				if input.Agent == AgentCritic && parseCriticVerdict(msg.Content) != "" {
-					result := r.buildResult(msg.Content, input.Goal)
-					result.Usage = &totalUsage
-					return result, nil
-				}
-				isConc, err := conclusionClassifier.IsConclusion(ctx, ConclusionCheck{
-					Goal: input.Goal,
-					Text: msg.Content,
-				})
-				if err != nil {
-					turnLog.Printf("sub-agent conclusion classifier error: %v (conservative nudge)", err)
-				} else if isConc {
-					// Trust the LLM verdict. The keyword-based
-					// hasTrailingNextStepIntent guard was removed (dsh
-					// structured completion): the classifier is the sole
-					// judge for the sub-agent, which has no user to nudge it.
-					result := r.buildResult(msg.Content, input.Goal)
-					result.Usage = &totalUsage
-					return result, nil
-				}
+				// deterministic terminal signal — trust it, so a genuine
+				// verdict is never nudged into another tool call (the critic
+				// run-on root cause).
+				result := r.buildResult(msg.Content, input.Goal)
+				result.Usage = &totalUsage
+				return result, nil
 			}
 			consecutiveIntermediate++
 			if consecutiveIntermediate >= 3 {
@@ -743,29 +713,14 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
+	if input.ExpectedOutput != "" {
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Expected Output", "## 预期输出"), input.ExpectedOutput))
+	}
 	if input.Context != "" {
 		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
 	}
 	if len(input.Constraints) > 0 {
 		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
-	}
-	return sb.String()
-}
-
-// buildVariablePrompt assembles the per-call variable content (goal, context, constraints, extra).
-// This is appended as the first user message, after the stable system message.
-func (r *SubAgentRunner) buildVariablePrompt(input Handoff, extraPrompt string) string {
-	zh := zhFromLang(input.UserLanguage)
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
-	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
-	}
-	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
-	}
-	if extraPrompt != "" {
-		sb.WriteString(extraPrompt + "\n\n")
 	}
 	return sb.String()
 }
@@ -817,13 +772,14 @@ func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallReq
 	}
 
 	handoff := Handoff{
-		Agent:        AgentID(params.Agent),
-		Goal:         params.Goal,
-		Context:      params.Context,
-		Tools:        params.Tools,
-		Constraints:  params.Constraints,
-		Depth:        depth,
-		UserLanguage: userLang,
+		Agent:          AgentID(params.Agent),
+		Goal:           params.Goal,
+		Context:        params.Context,
+		Tools:          params.Tools,
+		Constraints:    params.Constraints,
+		ExpectedOutput: params.ExpectedOutput,
+		Depth:          depth,
+		UserLanguage:   userLang,
 	}
 
 	result, err := agent.Run(ctx, handoff)

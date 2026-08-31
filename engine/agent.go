@@ -39,14 +39,19 @@ const (
 
 // Handoff carries delegation parameters from parent to sub-agent.
 type Handoff struct {
-	Agent         AgentID  `json:"agent"`
-	Goal          string   `json:"goal"`
-	Context       string   `json:"context"`
-	Tools         []string `json:"tools,omitempty"`
-	Constraints   []string `json:"constraints,omitempty"`
-	Depth         int      `json:"depth"`
-	NoNudge       bool     `json:"no_nudge,omitempty"`
-	MaxIterations int      `json:"max_iterations,omitempty"`
+	Agent       AgentID  `json:"agent"`
+	Goal        string   `json:"goal"`
+	Context     string   `json:"context"`
+	Tools       []string `json:"tools,omitempty"`
+	Constraints []string `json:"constraints,omitempty"`
+	// ExpectedOutput states what a successful result looks like (acceptance
+	// criteria the delegating agent sets). Injected into the volatile prompt
+	// so the sub-agent knows the deliverable's shape instead of guessing.
+	ExpectedOutput string `json:"expected_output,omitempty"`
+	Depth          int    `json:"depth"`
+	NoNudge        bool   `json:"no_nudge,omitempty"`
+	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
+	MaxIterations  int    `json:"max_iterations,omitempty"`
 	// StructuredResult turns this run into a structured run: the loop injects
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
@@ -78,7 +83,7 @@ type AgentSpec struct {
 	Description   string
 	ToolNames     []string // default tool allowlist (empty = all tools)
 	ModelName     string   // if set, overrides runner's default model for this agent
-	MaxIterations int      // 0 = use default (99). Set lower for agents that should finish quickly.
+	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. critic: 15).
 	// StructuredResult injects a scoped submit_result tool: a text-only reply
 	// never completes the run — the agent MUST call submit_result with its
 	// final summary, so termination never depends on an LLM judgment call.
@@ -105,6 +110,9 @@ type HandoffToAgentParams struct {
 	Context     string   `json:"context,omitempty"`
 	Tools       []string `json:"tools,omitempty"`
 	Constraints []string `json:"constraints,omitempty"`
+	// ExpectedOutput states what a successful result looks like — acceptance
+	// criteria the delegating agent sets for the sub-agent.
+	ExpectedOutput string `json:"expected_output,omitempty"`
 }
 
 // TaskCompleteParams is the JSON schema for the task_complete tool call.
@@ -186,6 +194,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	ctxDesc := "Relevant context for the sub-agent"
 	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
 	constraintsDesc := "Constraints for the sub-agent (optional)"
+	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
 		agentDesc = "目标代理：sub（通用代理），critic（对抗性验证者）"
@@ -193,6 +202,7 @@ func handoffToolSpec(zh bool) ModelTool {
 		ctxDesc = "提供给子代理的相关上下文"
 		toolsDesc = "允许子代理使用的工具（可选）"
 		constraintsDesc = "对子代理的约束（可选）"
+		expectedOutputDesc = "什么样的结果算完成——验收标准、输出结构或子代理必须交付的格式（可选）"
 	}
 	params := fmt.Sprintf(`{
 				"type": "object",
@@ -219,10 +229,14 @@ func handoffToolSpec(zh bool) ModelTool {
 						"type": "array",
 						"items": {"type": "string"},
 						"description": %q
+					},
+					"expected_output": {
+						"type": "string",
+						"description": %q
 					}
 				},
 				"required": ["agent", "goal"]
-			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc)
+			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc)
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{

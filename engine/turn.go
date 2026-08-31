@@ -843,13 +843,14 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		userLang = "中文"
 	}
 	handoff := Handoff{
-		Agent:        AgentID(params.Agent),
-		Goal:         params.Goal,
-		Context:      params.Context,
-		Tools:        params.Tools,
-		Constraints:  params.Constraints,
-		Depth:        0, // main engine starts at depth 0
-		UserLanguage: userLang,
+		Agent:          AgentID(params.Agent),
+		Goal:           params.Goal,
+		Context:        params.Context,
+		Tools:          params.Tools,
+		Constraints:    params.Constraints,
+		ExpectedOutput: params.ExpectedOutput,
+		Depth:          0, // main engine starts at depth 0
+		UserLanguage:   userLang,
 	}
 
 	// Inject matched skill content into sub-agent context
@@ -1672,6 +1673,35 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 			content = "Sub-agent cancelled."
 		}
 		messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})
+
+		// C6: a sub-agent that ended WITHOUT delivering a result must not dump
+		// a partial digest on the user and wait for "继续". Pin a follow-up so
+		// the parent auto-continues within the same Run: it reads the partial
+		// result, fills gaps, and either completes or re-delegates.
+		if isHandoffFollowUpReason(result.FinishReason) {
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(e.isChinese))
+		}
 	}
 	return messages, ""
+}
+
+// isHandoffFollowUpReason reports whether a handoff's FinishReason is a
+// failure that needs the parent to continue. completed and cancelled are not:
+// the former delivered a real result, the latter was a user/context decision.
+func isHandoffFollowUpReason(reason string) bool {
+	switch reason {
+	case "", HandoffReasonCompleted, HandoffReasonCancelled:
+		return false
+	default:
+		return true
+	}
+}
+
+// buildHandoffFollowUp returns the pinned instruction that tells the parent
+// to continue after a sub-agent failed to deliver a complete result.
+func buildHandoffFollowUp(zh bool) string {
+	if zh {
+		return "以上子代理未给出完整结论。请基于其部分结果继续处理：补充缺失信息后给出最终结论，或重新委派合适的子代理。不要停在这里等待用户输入。"
+	}
+	return "The sub-agent above did not deliver a complete result. Continue from its partial findings: complete the remaining work and give your final conclusion, or re-delegate to a more suitable sub-agent. Do not stop and wait for user input."
 }

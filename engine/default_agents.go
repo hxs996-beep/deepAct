@@ -60,12 +60,9 @@ func (a *specialistAgent) promptFor(zh bool) string {
 }
 
 func (a *specialistAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
-	maxIter := a.spec.MaxIterations
-	if maxIter <= 0 {
-		maxIter = maxSubAgentIterations
-	}
 	input.StructuredResult = a.spec.StructuredResult
-	return a.runner.runLoop(ctx, input, a.promptFor(zhFromLang(input.UserLanguage)), maxIter, a.spec.ModelName)
+	// spec.MaxIterations <= 0 = no turn cap (default).
+	return a.runner.runLoop(ctx, input, a.promptFor(zhFromLang(input.UserLanguage)), a.spec.MaxIterations, a.spec.ModelName)
 }
 func (a *specialistAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }
 

@@ -8,7 +8,7 @@ import (
 )
 
 // TestRenderTodoList_ThreeStates verifies the three plain-text status markers:
-// [ ] pending, [~] in_progress, [x] completed. No emoji.
+// [ ] pending, [~] in_progress, [✓] completed. No emoji.
 func TestRenderTodoList_ThreeStates(t *testing.T) {
 	items := []engine.TodoItem{
 		{Content: "红灯 - 编写失败的测试", Status: "completed"},
@@ -20,8 +20,11 @@ func TestRenderTodoList_ThreeStates(t *testing.T) {
 		t.Fatal("expected non-empty rendered lines")
 	}
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "[x]") {
-		t.Errorf("missing [x] marker for completed item:\n%s", joined)
+	if !strings.Contains(joined, "[✓]") {
+		t.Errorf("missing [✓] marker for completed item:\n%s", joined)
+	}
+	if strings.Contains(joined, "[x]") {
+		t.Errorf("completed item must not use [x] (reads as failure):\n%s", joined)
 	}
 	if !strings.Contains(joined, "[~]") {
 		t.Errorf("missing [~] marker for in_progress item:\n%s", joined)

@@ -2569,7 +2569,8 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 }
 
 // renderTodoList renders the generic step-progress todo list above the input.
-// Plain-text markers: [ ] pending, [~] in_progress, [x] completed.
+// Plain-text markers: [ ] pending, [~] in_progress, [✓] completed.
+// [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
 // No emoji, no skill-specific theming — any skill drives it via todo_write.
 func renderTodoList(items []engine.TodoItem, width int) []string {
 	if len(items) == 0 {
@@ -2583,7 +2584,7 @@ func renderTodoList(items []engine.TodoItem, width int) []string {
 		case "in_progress":
 			content = append(content, fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content)))
 		case "completed":
-			content = append(content, fmt.Sprintf("  [x]  %s", SpinnerDoneStyle.Render(it.Content)))
+			content = append(content, fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content)))
 		default:
 			content = append(content, fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content)))
 		}

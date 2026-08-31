@@ -257,6 +257,78 @@ func TestDebateArena_VerdictDebateAgain(t *testing.T) {
 	}
 }
 
+// TestRun_VerdictExecutesInSameRun reproduces the "✓ 裁决已记录" bug:
+// delivering a verdict in AwaitingVerdict used to return the recorded-verdict
+// ack as its own Run, so the chosen proposal only started executing on a
+// follow-up message. Now the verdict Run falls through to the main agent
+// loop and executes the plan in the same Run().
+func TestRun_VerdictExecutesInSameRun(t *testing.T) {
+	e := &Engine{
+		model:           &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了选定方案。", FinishReason: "stop"}}},
+		context:         &stubContextBuilder{},
+		tools:           stubToolExecutor{},
+		state:           &TaskState{TaskID: "test-verdict-run"},
+		history:         []Message{},
+		config:          EngineConfig{ModelName: "test-model", MaxTurns: 10},
+		guards:          &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		readLoop:        NewReadLoopState(),
+		errorLoop:       NewErrorLoopState(0),
+		activatedSkills: make(map[string]bool),
+	}
+	e.roundtableHall = NewRoundtableHall(e)
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "修复登录页",
+		Phase:   RoundtableAwaitingVerdict,
+		Members: DefaultDebateMembers[:2],
+		DebateRounds: []DebateRound{
+			{
+				Phase: DebateProposal,
+				Outputs: []DebateOutput{
+					{MemberID: "radical", Content: "采用微服务架构拆分模块"},
+					{MemberID: "defender", Content: "保持单体架构渐进重构"},
+				},
+			},
+		},
+	}
+
+	resp, err := e.Run(context.Background(), "支持方案创新派")
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	// The run must execute the plan, not return the recorded-verdict ack.
+	if strings.Contains(resp.Summary, "裁决已记录") {
+		t.Errorf("verdict Run must execute the plan instead of returning the ack, got %q", resp.Summary)
+	}
+	if resp.Summary != "执行了选定方案。" {
+		t.Errorf("summary = %q, want the executed plan's conclusion", resp.Summary)
+	}
+	// Roundtable state cleared + gates skipped + verdict persisted as decision.
+	if e.state.Roundtable != nil {
+		t.Errorf("roundtable state should be cleared after the verdict Run, got phase %v", e.state.Roundtable.Phase)
+	}
+	if e.teamVerdictPending {
+		t.Error("teamVerdictPending should be consumed within the verdict Run")
+	}
+	if !e.state.PlanConfirmed {
+		t.Error("PlanConfirmed should be true after the verdict Run")
+	}
+	decisionFound := false
+	for _, d := range e.state.Decisions {
+		if d.ID == "team-verdict" {
+			decisionFound = true
+		}
+	}
+	if !decisionFound {
+		t.Error("expected a team-verdict decision to be persisted")
+	}
+	if len(e.pendingPinnedMessages) != 0 {
+		t.Errorf("pinned verdict should be consumed by the first turn, got %d left", len(e.pendingPinnedMessages))
+	}
+}
+
 func TestDebateArena_ProgressEvents(t *testing.T) {
 	e := newTestEngine(t)
 	e.state.Roundtable = &RoundtableState{

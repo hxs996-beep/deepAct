@@ -83,29 +83,39 @@ func TestSubAgentTruncation_DropsTruncatedToolCalls(t *testing.T) {
 }
 
 // TestSubAgentTruncation_RecoversOnNextTurn: a single truncation followed by
-// a normal completion must end cleanly (the "继续" turn resumes the model).
+// a structured submission must end cleanly with the submitted summary.
+// C5 removed the LLM ConclusionClassifier: a text-only reply never completes
+// a sub-agent — recovery means the model resumes and then calls submit_result.
 func TestSubAgentTruncation_RecoversOnNextTurn(t *testing.T) {
 	model := &stubSeqModel{
 		responses: []ModelResponse{
 			{Message: ModelMessage{Role: "assistant", Content: "未完"}, FinishReason: "length"},
-			{Message: ModelMessage{Role: "assistant", Content: "任务完成，测试通过。"}, FinishReason: "stop"},
+			{
+				Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+					ID: "s1", Type: "function",
+					Function: ModelFunctionCall{Name: SubmitResultToolName,
+						Arguments: `{"summary":"任务完成，测试通过。"}`},
+				}}},
+				FinishReason: "tool_calls",
+			},
 		},
-		classifierResp: `{"conclusion": true}`,
 	}
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "修复", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{
+		Agent: AgentSub, Goal: "修复", MaxIterations: 5, StructuredResult: true,
+	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
 	if result.FinishReason != HandoffReasonCompleted {
-		t.Errorf("expected FinishReason=%q after recovery, got %q", HandoffReasonCompleted, result.FinishReason)
+		t.Errorf("expected FinishReason=%q after recovery via submit_result, got %q", HandoffReasonCompleted, result.FinishReason)
 	}
 	if !strings.Contains(result.Summary, "任务完成") {
 		t.Errorf("expected recovered summary, got %q", result.Summary)
 	}
 	if model.calls != 2 {
-		t.Errorf("expected 2 calls (truncation + completion), got %d", model.calls)
+		t.Errorf("expected 2 calls (truncation + submission), got %d", model.calls)
 	}
 }
 

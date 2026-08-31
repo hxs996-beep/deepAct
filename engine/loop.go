@@ -433,35 +433,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 	}
 
-	// Debate Arena phase — execute the current debate round, then return
-	// the round result to the user. The engine continues to the next round
-	// on the next Run() call until AwaitingVerdict.
-	if e.state.Roundtable != nil {
-		phase := e.state.Roundtable.Phase
-		switch phase {
-		case RoundtableProposal, RoundtableChallenge, RoundtableRebuttal, RoundtableFinal:
-			response, err := e.roundtableHall.handleDebateArena(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("debate arena: %w", err)
-			}
-			if response != nil {
-				return response, nil
-			}
-		case RoundtableAwaitingVerdict:
-			response, err := e.roundtableHall.Advance(ctx, userMsg)
-			if err != nil {
-				return nil, fmt.Errorf("verdict: %w", err)
-			}
-			if response != nil {
-				return response, nil
-			}
-		case RoundtableDone:
-			// Debate complete — clear roundtable state so normal flow resumes.
-			// The verdict was already injected as a pinned message.
-			e.state.Roundtable = nil
-		}
-	}
-
 	e.updateGoalFromFirstMessage(userMsg)
 
 	// Analysis report nudge: if the gate blocked in the previous Run() and the
@@ -716,10 +687,50 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		loopLog.Printf("intent: continue, cleared AnalysisMode, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
 	}
 
+	// Debate Arena phase — execute the current debate round, then return
+	// the round result to the user. The engine continues to the next round
+	// on the next Run() call until AwaitingVerdict.
+	// Placed AFTER the intent switch (and before the team-verdict gate below):
+	// handleVerdict runs when the user delivers a verdict in this Run(), and
+	// the teamVerdictPending flag it sets is consumed in the SAME Run().
+	if e.state.Roundtable != nil {
+		phase := e.state.Roundtable.Phase
+		switch phase {
+		case RoundtableProposal, RoundtableChallenge, RoundtableRebuttal, RoundtableFinal:
+			response, err := e.roundtableHall.handleDebateArena(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("debate arena: %w", err)
+			}
+			if response != nil {
+				return response, nil
+			}
+		case RoundtableAwaitingVerdict:
+			response, err := e.roundtableHall.Advance(ctx, userMsg)
+			if err != nil {
+				return nil, fmt.Errorf("verdict: %w", err)
+			}
+			// "再辩一轮" restarts the debate: return its response and let the
+			// next Run() execute the rounds. A picked verdict (Phase becomes
+			// RoundtableDone) skips the "✓ 裁决已记录" ack and falls through
+			// to the main agent loop, which consumes the pinned verdict +
+			// teamVerdictPending flag set by handleVerdict and executes the
+			// chosen proposal in this same Run().
+			if e.state.Roundtable.Phase != RoundtableDone {
+				return response, nil
+			}
+		case RoundtableDone:
+			// Debate complete — clear roundtable state so normal flow resumes.
+			// The verdict was already injected as a pinned message.
+			e.state.Roundtable = nil
+		}
+	}
+
 	// Team verdict: the user already approved a plan through the debate process.
 	// Override intent detection to skip all confirmation gates (analysis-report
 	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
-	// reset by IntentNewTopic/IntentAnalyze.
+	// reset by IntentNewTopic/IntentAnalyze, and AFTER the roundtable block
+	// because handleVerdict (in the AwaitingVerdict case above) sets the flag
+	// during this same Run().
 	if e.teamVerdictPending {
 		e.state.PlanConfirmed = true
 		e.state.AnalysisReportConfirmed = true
