@@ -92,19 +92,26 @@ BlockedBy: "awaiting_confirmation",
 `turnResult` 增加 `Options []string` 字段（`turn.go:28-30`），透传到
 `loop.go:814-821` 的 `EngineResponse.Options`。
 
-### 3. 数据流：`/confirm N` → 执行选定方案
+### 3. 数据流：`/confirm N` → 确定性判定
 
-`pendingEditPlan.Calls` 当前为单组 tool calls。本次最小修正保持单组：
-`/confirm 1` 走 `loop.go:467` 现有确认执行（执行 `pendingEditPlan.Calls`）。
-方案 B/C 的差异化执行（调整/取消）属于 UI 呈现层语义，引擎侧：
-- `/confirm N`（N=1 或任意有效值）→ 执行 `pendingEditPlan.Calls`（与现在
-  `isDangerousConfirmation` 命中后行为一致）
-- 其余编号与"其他/输入" → 不执行，作为用户意见走反馈/分析
-  （`loop.go:443-464` 现有 pendingEditPlan 反馈分支）
+`pendingEditPlan.Calls` 当前为单组 tool calls，引擎没有多方案并存能力。
+选项的差异化语义（A 直接执行 / B 调整后执行 / C 取消）由 agent 在方案文本中
+说明。引擎侧确定性判定（此判定不经过 `isDangerousConfirmation` 与
+intentJudge）：
 
-> 说明：本设计将"选方案即执行"作为确认信号，选项的差异化语义
-> （A 直接执行 / B 调整 / C 取消）由 agent 在方案文本中说明，
-> 引擎只区分"确认执行"与"反馈"两类——保持最小改动。
+- `/confirm 1`（选"方案A: 按报告执行"）→ 确定性确认：设置
+  `AnalysisReportConfirmed=true`、`AnalysisMode=false`，并执行
+  `pendingEditPlan.Calls`（走 `loop.go:467` 现有确认执行路径，与现在
+  `isDangerousConfirmation` 命中后行为一致）。
+- `/confirm N`（N≥2，选"方案B 调整"/"方案C 取消"）→ **不执行**，把用户选择
+  （方案编号 + 对应文案）作为反馈注入 `pendingEditPlan` 反馈分支
+  （`loop.go:443-464`），让 agent 据此调整方案或确认取消。
+- 选"其他（输入你的意见）" → UI 回到输入框自由输入，走普通文本路径
+  （引擎按现有 analyze/continue 判定处理，即反馈语义）。
+
+> 说明：`/confirm 1` 是唯一"确认执行"信号；其余选择都是"反馈"信号。
+> 这保证只有用户明确选择第一项（按报告执行）时才真正动代码，消除
+> "选了取消却执行了"的歧义。
 
 ### 4. `ui/model.go` — Enter 选择直连引擎
 

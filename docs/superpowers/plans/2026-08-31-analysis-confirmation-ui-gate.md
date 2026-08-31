@@ -35,7 +35,7 @@
 - 修改：`engine/loop.go`（import 区 + Run 入口 + `detectUserIntent` fast-path）
 - 测试：`engine/confirm_command_test.go`（新建）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 新建 `engine/confirm_command_test.go`：
 
@@ -142,12 +142,12 @@ func TestDetectUserIntent_ConfirmCommandFastPath(t *testing.T) {
 }
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./engine -run 'TestParseConfirmCommand|TestHandleConfirmCommand_|TestDetectUserIntent_ConfirmCommandFastPath' -count=1`
 预期：FAIL（`parseConfirmCommand`/`handleConfirmCommand` 未定义）
 
-- [ ] **步骤 3：实现 — import + 两个新函数 + Run 入口接入 + fast-path**
+- [x] **步骤 3：实现 — import + 两个新函数 + Run 入口接入 + fast-path**
 
 `engine/loop.go` import 区（`"path/filepath"` 之后）新增 `"strconv"`：
 
@@ -241,7 +241,7 @@ Run 入口接入——在 `e.updateGoalFromFirstMessage(userMsg)`（`loop.go:436
 	}
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`go test ./engine -run 'TestParseConfirmCommand|TestHandleConfirmCommand_|TestDetectUserIntent_ConfirmCommandFastPath' -count=1`
 预期：PASS
@@ -250,7 +250,7 @@ Run 入口接入——在 `e.updateGoalFromFirstMessage(userMsg)`（`loop.go:436
 运行：`go test ./engine -run 'TestDetectUserIntent_|TestIsDangerousConfirmation' -count=1`
 预期：PASS
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add engine/loop.go engine/confirm_command_test.go
@@ -280,7 +280,7 @@ git commit -m "feat(engine): deterministic /confirm N confirmation channel"
 > → Run 结束 count=1 且未确认 → 挂载。用户确认后的下一次 `Run()` 开头重置为 0，
 > 不再挂载。测试预置 `analysisNudgeCount: 1` 即可精确复现"门控拦截过"的状态。
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 追加到 `engine/confirm_command_test.go`：
 
@@ -335,12 +335,12 @@ func TestConfirmOptions_NotReturnedWithoutGate(t *testing.T) {
 }
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./engine -run 'TestConfirmOptions_' -count=1`
 预期：FAIL（`confirmOptions` 未定义，Run 结束处未挂 Options）
 
-- [ ] **步骤 3：实现 — 新增 confirmOptions + Run 结束处挂载**
+- [x] **步骤 3：实现 — 新增 confirmOptions + Run 结束处挂载**
 
 新增辅助函数（放在 `buildRunSummary` 定义 `:948` 附近）：
 
@@ -376,7 +376,7 @@ func confirmOptions() []string {
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`go test ./engine -run 'TestConfirmOptions_' -count=1`
 预期：PASS
@@ -385,7 +385,7 @@ func confirmOptions() []string {
 运行：`go test ./engine -run 'TestExecuteTurn_AnalysisGateDegradation_BatchesEdits|TestHandleAnalysisNudgeConfirmation|TestConfirmOptions_' -count=1`
 预期：PASS
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add engine/loop.go engine/confirm_command_test.go
@@ -400,7 +400,7 @@ git commit -m "feat(engine): present /confirm options when analysis gate report 
 - 修改：`ui/model.go`（activeOptions 的 Enter 分支 + 新增 submitConfirm）
 - 测试：`ui/confirm_test.go`（新建）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 新建 `ui/confirm_test.go`：
 
@@ -492,12 +492,12 @@ func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 }
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./ui -run 'TestOptionsEnter_' -count=1`
 预期：FAIL（当前 Enter 分支写数字进输入框，不产生 `/confirm` 命令，`rr.prompts` 为空）
 
-- [ ] **步骤 3：实现 — Enter 分支改造 + submitConfirm**
+- [x] **步骤 3：实现 — Enter 分支改造 + submitConfirm**
 
 `ui/model.go:1225-1231` 的 activeOptions Enter 分支改为（注意先取 `total` 再清空，避免 `len` 归零）：
 
@@ -542,7 +542,7 @@ func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
 
 `spinnerRate`/`TickMsg`/`waitForProgress`/`AgentSpinner` 均在 `ui/model.go` 已定义（`submitInput` 同款启动路径），直接沿用。`fmt` 已在 `ui/model.go` import。
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`go test ./ui -run 'TestOptionsEnter_' -count=1`
 预期：PASS
@@ -551,7 +551,7 @@ func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
 运行：`go test ./ui -count=1`
 预期：PASS
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add ui/model.go ui/confirm_test.go
@@ -566,7 +566,7 @@ git commit -m "feat(ui): option popup Enter sends /confirm N, last item returns 
 - 修改：`context/builder.go:166-172`
 - 测试：`context/builder_test.go`（追加）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 追加到 `context/builder_test.go`（沿用 `:224-255` 既有 `TestBuild_AnalysisMode*` 的构造方式：`NewContextAssembler(".", nil)` + 设 `userLang`）：
 
@@ -596,12 +596,12 @@ func TestBuild_AnalysisModeConstraint_SoftWording(t *testing.T) {
 }
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./context -run 'TestBuild_AnalysisModeConstraint_SoftWording' -count=1`
 预期：FAIL（当前措辞含"禁止：edit"）
 
-- [ ] **步骤 3：实现 — 措辞软化**
+- [x] **步骤 3：实现 — 措辞软化**
 
 `context/builder.go:167` 改为：
 
@@ -615,7 +615,7 @@ func TestBuild_AnalysisModeConstraint_SoftWording(t *testing.T) {
 	}
 ```
 
-- [ ] **步骤 4：运行测试验证通过**
+- [x] **步骤 4：运行测试验证通过**
 
 运行：`go test ./context -run 'TestBuild_AnalysisModeConstraint_SoftWording' -count=1`
 预期：PASS
@@ -624,7 +624,7 @@ func TestBuild_AnalysisModeConstraint_SoftWording(t *testing.T) {
 运行：`go test ./context -count=1`
 预期：PASS
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add context/builder.go context/builder_test.go
@@ -635,7 +635,7 @@ git commit -m "feat(context): soften ANALYSIS MODE constraint to stage contract 
 
 ### 任务 5：端到端回归验证
 
-- [ ] **步骤 1：全量构建 + 测试**
+- [x] **步骤 1：全量构建 + 测试**
 
 运行：`go build ./... && go test ./engine ./ui ./context -count=1`
 预期：全部 PASS
@@ -644,7 +644,7 @@ git commit -m "feat(context): soften ANALYSIS MODE constraint to stage contract 
 
 `go run .` 启动 TUI，触发一次带 edit/write 的修改请求 → 分析门控弹出 4 项确认框 → 方向键选"方案A"→ Enter → agent 直接执行修改（同一 Run 重提交 edit，门控因 `AnalysisReportConfirmed=true` 跳过）。选末项"其他"→ 回到输入框可自由输入意见。
 
-- [ ] **步骤 3：Commit（如本任务产生测试/修复）**
+- [x] **步骤 3：Commit（如本任务产生测试/修复）**
 
 ```bash
 git add -A
