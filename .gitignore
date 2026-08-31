@@ -44,7 +44,6 @@ package_release.ps1
 .superpowers/
 
 # Runtime data (generated at runtime)
-memory/
 retrieval/
 .omo/
 
