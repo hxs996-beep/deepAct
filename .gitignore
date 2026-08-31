@@ -51,3 +51,6 @@ retrieval/
 BUILD_RESULT.txt
 BUILD_VERIFICATION.md
 *.tgz
+
+# Git worktrees (isolated dev environments)
+.worktrees/
