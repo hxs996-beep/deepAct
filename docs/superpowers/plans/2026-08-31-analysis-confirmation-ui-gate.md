@@ -10,8 +10,7 @@
 
 **关键前提（已核实，实现时无需再查）：**
 - `pendingEditPlan` 是死代码（全仓库只有 nil 赋值，从不非 nil）——`/confirm` 不依赖它，复用 `handleAnalysisNudgeConfirmation`（`engine/loop.go:1597`）现有确认机制：置 `AnalysisReportConfirmed=true` 后 agent 在同一 Run 重提交 edit，门控（`engine/turn.go:439` 条件 `!e.state.AnalysisReportConfirmed`）跳过。
-- `EngineResponse.Options`（`engine/types.go:105`）已存在、引擎从未赋值——直接复用为确认选项载体。
-- `TurnResult`（`engine/turn.go:26-43`）无 `Options` 字段——需新增并透传到 `EngineResponse.Options`（`engine/loop.go:814-821`）。
+- `EngineResponse.Options`（`engine/types.go:105`）已存在、引擎从未赋值——直接复用为确认选项载体，由 loop.go 单点构造填充（见任务 2），无需改动 `TurnResult`。
 - UI `activeOptions`/`selectedOption`/`renderOptionsPopup`（`ui/model.go:159-160, 2762-2790`）已存在；Enter 分支现为写数字进输入框（`ui/model.go:1225-1231`），改为内部命令直连引擎。
 - 测试构造：引擎侧 `stubIntentJudge`（`engine/loop_intent_test.go`）、`stubStreamModel`/`stubContextBuilder`/`stubToolExecutor`（各测试文件已定义）；UI 侧 `NewModel(runner, engine.PricingConfig{})` + `recordRunner`（本计划新建，实现 `EngineRunner` 全接口）。
 
@@ -21,8 +20,7 @@
 
 | 文件 | 职责 | 操作 |
 |---|---|---|
-| `engine/loop.go` | 新增 `parseConfirmCommand`/`handleConfirmCommand`；Run 入口接入；`detectUserIntent` fast-path 加前缀；Blocked 分支透传 Options | 修改 |
-| `engine/turn.go` | `TurnResult` 加 `Options` 字段；分析门控 return 填充 4 项选项 | 修改 |
+| `engine/loop.go` | 新增 `parseConfirmCommand`/`handleConfirmCommand`；Run 入口接入；`detectUserIntent` fast-path 加前缀；Run 结束处挂确认选项（任务 2） | 修改 |
 | `engine/confirm_command_test.go` | 任务 1、2 的测试（新建） | 创建 |
 | `ui/model.go` | activeOptions 的 Enter 分支改直连 `/confirm`；新增 `submitConfirm` | 修改 |
 | `ui/confirm_test.go` | 任务 3 的测试（新建） | 创建 |
@@ -261,131 +259,137 @@ git commit -m "feat(engine): deterministic /confirm N confirmation channel"
 
 ---
 
-### 任务 2：引擎 — 分析门控命中时返回确认选项
+### 任务 2：引擎 — Run 正常结束时（门控已拦截）挂载确认选项
 
 **文件：**
-- 修改：`engine/turn.go`（TurnResult 结构 + 分析门控 return）
-- 修改：`engine/loop.go`（Blocked 分支透传 Options）
+- 修改：`engine/loop.go`（新增 `confirmOptions()` + Run 结束 return 处挂 Options）
 - 测试：`engine/confirm_command_test.go`（追加）
+
+> 设计要点：确认框**不能**在 `turn.go:473` 门控 return 处弹出——那里是 agent 输出
+> 报告**之前**的瞬间，用户看不到报告。正确时机是 Run 正常结束（`loop.go:936`）：
+> agent 已输出报告（Summary 展示给用户），且本 Run 内门控拦截过。此时才挂 4 项
+> 确认选项供 UI 弹出。因此无需给 `TurnResult` 加 `Options` 字段、无需改动 Blocked
+> 分支透传——直接精简为 loop.go 单点构造。
+>
+> **挂载条件用 `e.analysisNudgeCount > 0`，不用 `pendingAnalysisNudge`**：
+> `Run()` 入口的 `handleAnalysisNudgeConfirmation`（`loop.go:441`）会无条件消费
+> `pendingAnalysisNudge`（确认词→置 `AnalysisReportConfirmed` 并清掉；非确认词→
+> feedback 分支清掉），预置后再调 `Run()` 结束时 nudge 必为 false，测试无法构造。
+> 而 `analysisNudgeCount` 只在 `Run()` 开头重置（`loop.go:298`）、由本 Run 内门控
+> 拦截递增（`turn.go:448`）——真实流程：turn1 拦截 count=1 → turn2 输出报告 Done
+> → Run 结束 count=1 且未确认 → 挂载。用户确认后的下一次 `Run()` 开头重置为 0，
+> 不再挂载。测试预置 `analysisNudgeCount: 1` 即可精确复现"门控拦截过"的状态。
 
 - [ ] **步骤 1：编写失败的测试**
 
 追加到 `engine/confirm_command_test.go`：
 
 ```go
-// 分析门控命中时，TurnResult 携带确认选项（4 项，末项为"其他"）。
-func TestConfirmOptions_ReturnedByAnalysisGate(t *testing.T) {
+// 本 Run 内门控拦截过（analysisNudgeCount>0）且 agent 已输出报告（Run 正常结束）
+// 时，EngineResponse 携带 4 项确认选项，供 UI 弹出确认框。
+func TestConfirmOptions_ReturnedWhenGateIntercepted(t *testing.T) {
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{
-			{
-				Delta: "修改代码",
-				ToolCalls: []ModelToolCall{
-					{ID: "call_1", Type: "function", Function: ModelFunctionCall{
-						Name:      "edit",
-						Arguments: `{"path":"engine/types.go","old_string":"old","new_string":"new"}`,
-					}},
-				},
-				FinishReason: "tool_calls",
-			},
+			{Delta: "分析完成，计划修改以下文件……", FinishReason: "stop"},
 		}},
-		context:            &stubContextBuilder{},
-		tools:              stubToolExecutor{},
-		state:              &TaskState{TurnNumber: 5},
-		history:            []Message{{Role: "user", Content: "修改代码"}},
-		config:             EngineConfig{ModelName: "test-model"},
-		isChinese:          true,
-		runToolCallCount:   3,
-		analysisNudgeCount: 0,
+		context:          &stubContextBuilder{},
+		tools:            stubToolExecutor{},
+		state:            &TaskState{TurnNumber: 0, AnalysisMode: true},
+		history:          []Message{{Role: "user", Content: "修改代码"}},
+		config:           EngineConfig{ModelName: "test-model"},
+		analysisNudgeCount: 1, // 本 Run 内门控拦截过，agent 已输出报告
 	}
 
-	result, err := e.executeTurn(context.Background())
+	resp, err := e.Run(context.Background(), "修改代码")
 	if err != nil {
-		t.Fatalf("executeTurn error: %v", err)
+		t.Fatalf("Run error: %v", err)
 	}
-	if !result.Blocked {
-		t.Fatal("expected Blocked=true from analysis gate")
+	if len(resp.Options) != 4 {
+		t.Fatalf("expected 4 options, got %d: %v", len(resp.Options), resp.Options)
 	}
-	if result.BlockedBy != "awaiting_confirmation" {
-		t.Errorf("BlockedBy = %q, want %q", result.BlockedBy, "awaiting_confirmation")
+	if !strings.Contains(resp.Options[len(resp.Options)-1], "其他") {
+		t.Errorf("last option should be the free-input item, got %q", resp.Options[len(resp.Options)-1])
 	}
-	if len(result.Options) != 4 {
-		t.Fatalf("expected 4 options, got %d: %v", len(result.Options), result.Options)
+}
+
+// 门控未拦截（analysisNudgeCount=0）时，正常结束不携带确认选项。
+func TestConfirmOptions_NotReturnedWithoutGate(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "任务已完成。", FinishReason: "stop"},
+		}},
+		context: &stubContextBuilder{},
+		tools:   stubToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "修改代码"}},
+		config:  EngineConfig{ModelName: "test-model"},
 	}
-	if !strings.Contains(result.Options[len(result.Options)-1], "其他") {
-		t.Errorf("last option should be the free-input item, got %q", result.Options[len(result.Options)-1])
+
+	resp, err := e.Run(context.Background(), "修改代码")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if len(resp.Options) != 0 {
+		t.Errorf("expected no options without gate interception, got %v", resp.Options)
 	}
 }
 ```
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`go test ./engine -run 'TestConfirmOptions_ReturnedByAnalysisGate' -count=1`
-预期：FAIL（`TurnResult.Options` 字段不存在）
+运行：`go test ./engine -run 'TestConfirmOptions_' -count=1`
+预期：FAIL（`confirmOptions` 未定义，Run 结束处未挂 Options）
 
-- [ ] **步骤 3：实现 — TurnResult 加字段 + 门控 return 填充 + 透传**
+- [ ] **步骤 3：实现 — 新增 confirmOptions + Run 结束处挂载**
 
-`engine/turn.go:26-43` 的 `TurnResult` 新增字段：
+新增辅助函数（放在 `buildRunSummary` 定义 `:948` 附近）：
 
 ```go
-type TurnResult struct {
-	Done         bool
-	Blocked      bool
-	BlockedBy    string
-	Questions    []string
-	Options      []string // confirmation options for the /confirm UI popup
-	FinishReason string
-	LastOp       string
-	LastOpError  bool
-	VerifyFailedSummary string
-	CompletionSummary string
+// confirmOptions returns the confirmation options for the analysis-gate popup.
+// The last item is the free-input entry — selecting it returns to the input box.
+func confirmOptions() []string {
+	return []string{
+		"方案A: 按报告执行修改",
+		"方案B: 调整方案后执行",
+		"方案C: 取消本次修改",
+		"其他（输入你的意见）",
+	}
 }
 ```
 
-分析门控 return（`turn.go:473`）改为：
+`engine/loop.go:936` 的 Run 结束 return 改为：
 
 ```go
-			return TurnResult{
-				Done:      false,
-				Blocked:   true,
-				BlockedBy: "awaiting_confirmation",
-				Options: []string{
-					"方案A: 按报告执行修改",
-					"方案B: 调整方案后执行",
-					"方案C: 取消本次修改",
-					"其他（输入你的意见）",
-				},
-				FinishReason: finish,
-			}, nil
-```
-
-`engine/loop.go` Blocked 分支（`loop.go:814-821`）`EngineResponse` 组装透传：
-
-```go
-			return &EngineResponse{
-				Summary:      summary,
-				Questions:    turnResult.Questions,
-				Options:      turnResult.Options,
-				Stage:        StageAct,
-				Blocked:      true,
-				BlockedBy:    turnResult.BlockedBy,
-				FinishReason: turnResult.FinishReason,
-			}, nil
+	// Analysis gate confirmation: if the gate intercepted edits in this Run
+	// (agent produced a report but the user hasn't confirmed), present the
+	// confirmation options so the UI can show the popup. The report is already
+	// visible as Summary. analysisNudgeCount is > 0 only when the gate blocked
+	// this Run; it resets to 0 at the next Run's start (loop.go:298), so a
+	// confirmed /confirm N (which clears AnalysisMode) won't re-prompt.
+	if e.analysisNudgeCount > 0 {
+		return &EngineResponse{
+			Summary: summary,
+			Options: confirmOptions(),
+			Stage:   StageVerifyCompact,
+		}, nil
+	}
+	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
 ```
 
 - [ ] **步骤 4：运行测试验证通过**
 
-运行：`go test ./engine -run 'TestConfirmOptions_ReturnedByAnalysisGate' -count=1`
+运行：`go test ./engine -run 'TestConfirmOptions_' -count=1`
 预期：PASS
 
-同时跑既有分析门控测试确认降级分支未破坏：
-运行：`go test ./engine -run 'TestExecuteTurn_AnalysisGateDegradation_BatchesEdits|TestHandleAnalysisNudgeConfirmation' -count=1`
+同时跑既有分析门控测试确认未破坏：
+运行：`go test ./engine -run 'TestExecuteTurn_AnalysisGateDegradation_BatchesEdits|TestHandleAnalysisNudgeConfirmation|TestConfirmOptions_' -count=1`
 预期：PASS
 
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add engine/turn.go engine/loop.go engine/confirm_command_test.go
-git commit -m "feat(engine): return /confirm options when analysis gate blocks edits"
+git add engine/loop.go engine/confirm_command_test.go
+git commit -m "feat(engine): present /confirm options when analysis gate report awaits confirmation"
 ```
 
 ---
@@ -430,6 +434,8 @@ func (r *recordRunner) ListSessions() []SessionSummary         { return nil }
 func (r *recordRunner) LoadHistory(id string) []engine.Message { return nil }
 
 // 选方案（非末项）Enter → 发送内部 /confirm N 命令，不写入输入框。
+// 注意：Update 与 handleKey 均为值接收者（ui/model.go:249, 949），
+// 修改发生在返回的 tea.Model 副本上，断言必须从 got 提取 Model。
 func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	rr := &recordRunner{}
 	m := NewModel(rr, engine.PricingConfig{})
@@ -446,23 +452,26 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	m.progressChan <- ProgressMsg{Type: "done"}
 
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_ = got
 	if cmd == nil {
 		t.Fatal("expected a command for option selection")
+	}
+	gotModel, ok := got.(Model)
+	if !ok {
+		t.Fatalf("expected Model from Update, got %T", got)
 	}
 	cmd() // 执行命令，触发 recordRunner.Run 与 waitForProgress
 	if len(rr.prompts) != 1 || rr.prompts[0] != "/confirm 1" {
 		t.Errorf("expected Run(\"/confirm 1\"), got prompts=%v", rr.prompts)
 	}
-	if m.inputBuf.Value() != "" {
-		t.Errorf("input buffer should NOT be filled with the option number, got %q", m.inputBuf.Value())
+	if gotModel.inputBuf.Value() != "" {
+		t.Errorf("input buffer should NOT be filled with the option number, got %q", gotModel.inputBuf.Value())
 	}
-	if len(m.activeOptions) != 0 {
-		t.Errorf("activeOptions should be cleared, got %v", m.activeOptions)
+	if len(gotModel.activeOptions) != 0 {
+		t.Errorf("activeOptions should be cleared, got %v", gotModel.activeOptions)
 	}
 }
 
-// 选末项"其他" Enter → 不发命令，回到输入框。
+// 选末项"其他" Enter → 不发命令，回到输入框（activeOptions 清空）。
 func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
@@ -470,12 +479,15 @@ func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m.selectedOption = 2 // 末项
 
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_ = got
 	if cmd != nil {
 		t.Error("expected NO command when selecting the free-input last item")
 	}
-	if len(m.activeOptions) != 0 {
-		t.Errorf("activeOptions should be cleared, got %v", m.activeOptions)
+	gotModel, ok := got.(Model)
+	if !ok {
+		t.Fatalf("expected Model from Update, got %T", got)
+	}
+	if len(gotModel.activeOptions) != 0 {
+		t.Errorf("activeOptions should be cleared, got %v", gotModel.activeOptions)
 	}
 }
 ```
@@ -645,7 +657,7 @@ git commit -m "test: e2e regression for /confirm UI confirmation channel"
 
 **1. 规格覆盖度：**
 - 规格 §1（`/confirm` 解析 + 确定性确认）→ 任务 1
-- 规格 §2（门控返回 Options + 透传）→ 任务 2
+- 规格 §2（门控拦截后 Run 结束挂确认选项 + 透传）→ 任务 2
 - 规格 §3（数据流：`/confirm 1` 确认执行 / N≥2 反馈）→ 任务 1（`handleConfirmCommand` 分支）
 - 规格 §4（UI Enter 直连 `/confirm`）→ 任务 3
 - 规格 §5（约束措辞软化）→ 任务 4
@@ -653,6 +665,6 @@ git commit -m "test: e2e regression for /confirm UI confirmation channel"
 
 **2. 占位符扫描：** 所有步骤含完整代码与精确命令，无"待定/TODO/适当错误处理/类似任务 N"类占位。UI 测试用了可精确构造的 `recordRunner`（实现 `EngineRunner` 全接口）与预填 `progressChan` 避免 `waitForProgress` 阻塞，无留白。
 
-**3. 类型一致性：** `parseConfirmCommand`/`handleConfirmCommand` 在任务 1 定义并被其测试引用；`TurnResult.Options` 任务 2 定义；`submitConfirm` 任务 3 定义并被其测试引用；`stubIntentJudge`/`stubStreamModel`/`stubContextBuilder`/`stubToolExecutor` 沿用既有测试文件定义；`recordRunner` 在本计划新建并完整实现接口。命名全程一致（`/confirm N`、`awaiting_confirmation`、`submitConfirm`）。
+**3. 类型一致性：** `parseConfirmCommand`/`handleConfirmCommand` 在任务 1 定义并被其测试引用；`confirmOptions` 在任务 2 定义并被其测试引用；`submitConfirm` 任务 3 定义并被其测试引用；`stubIntentJudge`/`stubStreamModel`/`stubContextBuilder`/`stubToolExecutor` 沿用既有测试文件定义；`recordRunner` 在本计划新建并完整实现接口。命名全程一致（`/confirm N`、`submitConfirm`、`confirmOptions`）。
 
 **4. 与规格的关键修正：** 规格 §3 原引用 `loop.go:467` 的 `pendingEditPlan` 确认执行路径——实现调研发现该字段是死代码（从不非 nil）。本计划改为复用 `handleAnalysisNudgeConfirmation` 现有机制（`/confirm 1` 置 `AnalysisReportConfirmed=true` 后 agent 同一 Run 重提交 edit 即放行），行为等价且更少改动。此修正不改变规格的目标与外部行为。
