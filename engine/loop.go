@@ -940,7 +940,31 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
 		e.runUsageAccum.CacheHitTokens, e.runUsageAccum.CacheMissTokens)
+	// Analysis gate confirmation: if the gate intercepted edits in this Run
+	// (agent produced a report but the user hasn't confirmed), present the
+	// confirmation options so the UI can show the popup. The report is already
+	// visible as Summary. analysisNudgeCount is > 0 only when the gate blocked
+	// this Run; it resets to 0 at the next Run's start (loop.go:298), so a
+	// confirmed /confirm N (which clears AnalysisMode) won't re-prompt.
+	if e.analysisNudgeCount > 0 {
+		return &EngineResponse{
+			Summary: summary,
+			Options: confirmOptions(),
+			Stage:   StageVerifyCompact,
+		}, nil
+	}
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
+}
+
+// confirmOptions returns the confirmation options for the analysis-gate popup.
+// The last item is the free-input entry — selecting it returns to the input box.
+func confirmOptions() []string {
+	return []string{
+		"方案A: 按报告执行修改",
+		"方案B: 调整方案后执行",
+		"方案C: 取消本次修改",
+		"其他（输入你的意见）",
+	}
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the
