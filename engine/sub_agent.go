@@ -388,9 +388,6 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 					return result, nil
 				}
 				content := getSubmitResultNudge(zhFromLang(input.UserLanguage))
-				if input.Agent == AgentCritic {
-					content = getCriticSubmitNudge(zhFromLang(input.UserLanguage))
-				}
 				history = append(history, ModelMessage{
 					Role:    "user",
 					Content: content,
@@ -398,18 +395,8 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				continue
 			}
 			// Deterministic completion (C5): a text-only reply NEVER completes
-			// through an LLM judgment call. The only text-only terminal is the
-			// critic's VERDICT line (a machine-parseable deterministic signal).
-			// Everything else is narration → 3-strike nudge → stalled_narration.
-			if msg.Content != "" && input.Agent == AgentCritic && parseCriticVerdict(msg.Content) != "" {
-				// Critic fast-path: a well-formed VERDICT line is a
-				// deterministic terminal signal — trust it, so a genuine
-				// verdict is never nudged into another tool call (the critic
-				// run-on root cause).
-				result := r.buildResult(msg.Content, input.Goal)
-				result.Usage = &totalUsage
-				return result, nil
-			}
+			// through an LLM judgment call. Text-only output is narration →
+			// 3-strike nudge → stalled_narration.
 			consecutiveIntermediate++
 			if consecutiveIntermediate >= 3 {
 				// Break — model keeps producing text without acting
@@ -429,14 +416,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				continue
 			}
 			// Give one more chance with a nudge
-			// For the critic, the generic "use tools" nudge would push it into
-			// more read calls — the opposite of convergence. A critic nudge
-			// forces a verdict instead, so the next text-only turn carries a
-			// VERDICT line and hits the critic fast-path above.
 			content := getNudgeMessage(input.Goal)
-			if input.Agent == AgentCritic {
-				content = getCriticNudgeMessage(zhFromLang(input.UserLanguage))
-			}
 			history = append(history, ModelMessage{
 				Role:    "user",
 				Content: content,
@@ -603,15 +583,6 @@ func getSubmitResultNudge(zh bool) string {
 		return "请立即调用 submit_result 提交你的最终结论（summary 必填）。不要继续输出纯文本或调用其他工具。"
 	}
 	return "Call submit_result now to report your final result (summary is required). Do not continue with plain text or further tool calls."
-}
-
-// getCriticSubmitNudge directs a structured critic's text-only turn to the
-// terminal tool with a verdict-shaped summary, so the FAIL gate stays reliable.
-func getCriticSubmitNudge(zh bool) string {
-	if zh {
-		return "评审完成。请立即调用 submit_result 提交最终评审结论，summary 必须包含一行 VERDICT: PASS / VERDICT: FAIL / VERDICT: PARTIAL。不要继续输出纯文本或调用其他工具。"
-	}
-	return "Review complete. Call submit_result now to submit your final review, with the summary containing one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL. Do not continue with plain text or further tool calls."
 }
 
 // summarizeHistory extracts the last meaningful assistant output from history
@@ -927,16 +898,4 @@ func getNudgeMessage(goal string) string {
 		return "请直接使用工具执行下一步，完成目标后给出最终结论。不要只描述计划。"
 	}
 	return "Use tools to take the next action. Complete the goal and give your final conclusions. Do not just describe a plan."
-}
-
-// getCriticNudgeMessage forces the critic to converge: stop reading and emit
-// a verdict. The generic nudge ("use tools") would push the static reviewer
-// into more read calls — the opposite of what we want. This command-style
-// nudge drives the next text-only turn to carry a VERDICT line, which the
-// runLoop critic fast-path terminates on deterministically.
-func getCriticNudgeMessage(zh bool) string {
-	if zh {
-		return "不要再读取或调用任何工具。立即给出最终评审结论，以一行结束：VERDICT: PASS 或 VERDICT: FAIL 或 VERDICT: PARTIAL。"
-	}
-	return "Do not read or call any more tools. Immediately produce your final review conclusion, ending with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL."
 }

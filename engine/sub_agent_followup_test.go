@@ -25,10 +25,7 @@ func TestProcessHandoffResults_FailedReasonPinsFollowUp(t *testing.T) {
 		FinishReason: HandoffReasonNoResult,
 	}}
 
-	msgs, criticFail := e.processHandoffResults(handoffCalls, results, nil)
-	if criticFail != "" {
-		t.Fatalf("unexpected criticFail: %q", criticFail)
-	}
+	msgs := e.processHandoffResults(handoffCalls, results)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool message, got %d", len(msgs))
 	}
@@ -58,7 +55,7 @@ func TestProcessHandoffResults_CompletedNoFollowUp(t *testing.T) {
 		FinishReason: HandoffReasonCompleted,
 	}}
 
-	msgs, _ := e.processHandoffResults(handoffCalls, results, nil)
+	msgs := e.processHandoffResults(handoffCalls, results)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool message, got %d", len(msgs))
 	}
@@ -83,7 +80,7 @@ func TestProcessHandoffResults_CancelledNoFollowUp(t *testing.T) {
 		FinishReason: HandoffReasonCancelled,
 	}}
 
-	msgs, _ := e.processHandoffResults(handoffCalls, results, nil)
+	msgs := e.processHandoffResults(handoffCalls, results)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool message, got %d", len(msgs))
 	}

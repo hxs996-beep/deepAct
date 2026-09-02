@@ -47,6 +47,11 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	}
 
 	ui.SetEngineFactory(func(key string) (ui.EngineRunner, error) {
+		// Persist the key entered in the TUI prompt so subsequent launches
+		// (and buildModelClient's loadAPIKey) pick it up from config.toml.
+		if err := deeplogconfig.SaveAPIKey(key); err != nil {
+			return nil, fmt.Errorf("save api key: %w", err)
+		}
 		r, _, err := buildRunner()
 		return r, err
 	})
@@ -253,6 +258,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	store, err := session.NewStore(defaultSessionDir())
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
+	}
+	// 启动时清理过期会话：仅保留最近 1 个月内有活动的会话。
+	// Prune 幂等且 best-effort，失败不影响启动。
+	if err := store.Prune(session.DefaultRetention); err != nil {
+		log.Printf("WARN: prune sessions: %v", err)
 	}
 
 	// Cross-session persistent memory, stored per-project under

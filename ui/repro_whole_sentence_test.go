@@ -16,7 +16,7 @@ type mockRunner struct {
 
 func (r *mockRunner) Run(prompt string) tea.Cmd {
 	return func() tea.Msg {
-		full := "按验证门要求，派出 critic代理审查本次改动"
+		full := "正在完成自检，整理本次审查结论"
 		r.progressCh <- ProgressMsg{Type: "content_delta", Detail: full}
 		time.Sleep(200 * time.Millisecond)
 		return EngineResponseMsg{
@@ -47,16 +47,16 @@ func TestReproWholeSentenceView(t *testing.T) {
 		{Role: "narration", Content: "完成初步分析，识别出 3 个风险点。"},
 		{Role: "toolsummary", Content: "● 2 tools executed, 1 files modified\n  [<>] agent/coordinator.go (全文)"},
 	}
-	m.narration = "按验证门要求，派出 critic代理审查本次改动"
+	m.narration = "正在完成自检，整理本次审查结论"
 	m.flushNarration()
 
 	out := m.View()
 	plain := stripAnsi(out)
-	if strings.Contains(plain, "验证要求门") {
-		t.Fatalf("View() output has swapped text '验证要求门':\n%q", truncateStr(plain, 300))
+	if strings.Contains(plain, "正在成完自检") {
+		t.Fatalf("View() output has swapped text '正在成完自检':\n%q", truncateStr(plain, 300))
 	}
-	if !strings.Contains(plain, "验证门要求") {
-		t.Errorf("View() output missing '验证门要求':\n%q", truncateStr(plain, 300))
+	if !strings.Contains(plain, "正在完成自检") {
+		t.Errorf("View() output missing '正在完成自检':\n%q", truncateStr(plain, 300))
 	}
 }
 
@@ -64,12 +64,12 @@ func TestReproWholeSentenceView(t *testing.T) {
 func TestReproWholeSentenceStreaming(t *testing.T) {
 	widths := []int{30, 40, 50, 60, 70, 78, 80, 100, 120, 160}
 	for _, w := range widths {
-		lines := renderStreaming("按验证门要求，派出 critic代理审查本次改动", w)
+		lines := renderStreaming("正在完成自检，整理本次审查结论", w)
 		joined := strings.Join(lines, "\n")
-		if strings.Contains(joined, "验证要求门") {
+		if strings.Contains(joined, "正在成完自检") {
 			t.Errorf("width=%d renderStreaming swapped: %q", w, joined)
 		}
-		if !strings.Contains(joined, "验证门要求") {
+		if !strings.Contains(joined, "正在完成自检") {
 			t.Errorf("width=%d renderStreaming missing: %q", w, joined)
 		}
 	}
@@ -79,13 +79,13 @@ func TestReproWholeSentenceStreaming(t *testing.T) {
 func TestReproWholeSentenceRenderMessage(t *testing.T) {
 	widths := []int{30, 40, 50, 60, 70, 78, 80, 100, 120, 160}
 	for _, w := range widths {
-		lines := renderMessage(DisplayMessage{Role: "narration", Content: "按验证门要求，派出 critic代理审查本次改动"}, w)
+		lines := renderMessage(DisplayMessage{Role: "narration", Content: "正在完成自检，整理本次审查结论"}, w)
 		joined := strings.Join(lines, "\n")
 		plain := stripAnsi(joined)
-		if strings.Contains(plain, "验证要求门") {
+		if strings.Contains(plain, "正在成完自检") {
 			t.Errorf("width=%d renderMessage swapped: %q", w, plain)
 		}
-		if !strings.Contains(plain, "验证门要求") {
+		if !strings.Contains(plain, "正在完成自检") {
 			t.Errorf("width=%d renderMessage missing: %q", w, plain)
 		}
 	}

@@ -532,19 +532,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		// Execute handoff calls — parallel when multiple, sequential when single.
 		if len(handoffCalls) > 0 {
 			results := e.executeHandoffsParallel(ctx, handoffCalls)
-			for i, call := range handoffCalls {
+			for i := range handoffCalls {
 				result := results[i]
-
-				// Hard gate: if critic returns FAIL, intercept and present to user.
-				if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
-					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-					zh := e.isChinese
-					return &EngineResponse{
-						Summary: buildCriticFailSummary(result.Digest, zh),
-						Stage:   StageVerifyFailed,
-					}, nil
-				}
-
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
 			}
 		}
@@ -795,12 +784,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			e.runErrorCount++
 			return nil, err
 		}
-		if turnResult.VerifyFailedSummary != "" {
-			return &EngineResponse{
-				Summary: turnResult.VerifyFailedSummary,
-				Stage:   StageVerifyFailed,
-			}, nil
-		}
 		if turnResult.Blocked {
 			e.runErrorCount++
 			summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
@@ -961,8 +944,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 func confirmOptions() []string {
 	return []string{
 		"方案A: 按报告执行修改",
-		"方案B: 调整方案后执行",
-		"方案C: 取消本次修改",
 		"其他（输入你的意见）",
 	}
 }
@@ -1537,7 +1518,7 @@ func parseSkillCommand(userMsg string) *skillCommand {
 	cmd := strings.ToLower(parts[0])
 
 	// Reserved commands that are handled elsewhere.
-	if cmd == "clear" {
+	if cmd == "clear" || cmd == "confirm" {
 		return nil
 	}
 

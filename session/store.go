@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 
 // firstMsgMaxRunes 是会话预览首条 user 消息的最大 rune 数（截断上限）。
 const firstMsgMaxRunes = 40
+
+// DefaultRetention 是会话文件的保留期限：最后活动时间早于该期限的会话
+// 会被 Prune 清理，仅保留最近 1 个月内有活动的会话。
+const DefaultRetention = 30 * 24 * time.Hour
 
 type Store struct {
 	dir string
@@ -118,7 +123,50 @@ func (s *Store) List() ([]SessionInfo, error) {
 		}
 		infos = append(infos, SessionInfo{ID: id, CreatedAt: created, UpdatedAt: updated, EventCount: count, FirstMsg: firstMsg})
 	}
+	// 按最后活动时间降序（由近到远），最新会话排最前。
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].UpdatedAt.After(infos[j].UpdatedAt)
+	})
 	return infos, nil
+}
+
+// Prune 删除最后活动时间早于 retention 的过期会话文件，仅保留最近 retention
+// 时间窗内的会话。幂等：重复调用无副作用。单个文件的统计/删除失败会被跳过
+// 并继续处理其余文件（best-effort，不因一个坏文件中断整个清理）。
+func (s *Store) Prune(retention time.Duration) error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("read session dir: %w", err)
+	}
+	cutoff := time.Now().Add(-retention)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		path := filepath.Join(s.dir, name)
+		_, updated, _, _, err := sessionStats(path)
+		if err != nil {
+			continue // 无法统计（坏文件）→ 跳过，不清除
+		}
+		if updated.IsZero() {
+			// 无时间戳的事件文件：以文件修改时间兜底。
+			if info, err := entry.Info(); err == nil && !info.ModTime().IsZero() {
+				updated = info.ModTime()
+			} else {
+				continue
+			}
+		}
+		if updated.Before(cutoff) {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				continue
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) sessionPath(sessionID string) string {

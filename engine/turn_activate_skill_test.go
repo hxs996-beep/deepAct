@@ -201,10 +201,7 @@ func TestProcessHandoffResults_CancelledGetsResponse(t *testing.T) {
 		{ToolCallID: "call_ok", Status: "ok", Digest: "done"},
 	}
 
-	msgs, criticFail := e.processHandoffResults(handoffCalls, results, nil)
-	if criticFail != "" {
-		t.Fatalf("expected no critic fail, got %q", criticFail)
-	}
+	msgs := e.processHandoffResults(handoffCalls, results)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -226,65 +223,8 @@ func TestProcessHandoffResults_CancelledGetsResponse(t *testing.T) {
 	}
 }
 
-// TestProcessHandoffResults_CriticFailNoOrphans verifies that when a critic
-// returns FAIL, tool responses are added for ALL calls — the critic, remaining
-// handoffs, and regular calls — so no tool_call_id is orphaned.
-func TestProcessHandoffResults_CriticFailNoOrphans(t *testing.T) {
-	e := &Engine{config: EngineConfig{}, state: &TaskState{}}
-
-	criticDigest := "VERDICT: FAIL\nIssues found."
-	handoffCalls := []ToolCallRequest{
-		{ID: "call_sub", Name: HandoffToolName, Input: json.RawMessage(`{"agent":"sub","goal":"review code"}`)},
-		{ID: "call_critic", Name: HandoffToolName, Input: json.RawMessage(`{"agent":"critic","goal":"verify"}`)},
-		{ID: "call_sub2", Name: HandoffToolName, Input: json.RawMessage(`{"agent":"sub","goal":"more work"}`)},
-	}
-	results := []ToolResult{
-		{ToolCallID: "call_sub", Status: "ok", Digest: "sub result"},
-		{ToolCallID: "call_critic", Status: "ok", Digest: criticDigest},
-		{ToolCallID: "call_sub2", Status: "ok", Digest: "sub2 result"},
-	}
-	regularCalls := []ToolCallRequest{
-		{ID: "call_read", Name: "read", Input: json.RawMessage(`{"path":"x.go"}`)},
-	}
-
-	msgs, criticFail := e.processHandoffResults(handoffCalls, results, regularCalls)
-
-	if criticFail == "" {
-		t.Fatal("expected non-empty criticFail")
-	}
-
-	// Every call (3 handoff + 1 regular) should have a response.
-	if len(msgs) != 4 {
-		t.Fatalf("expected 4 messages (3 handoff + 1 regular), got %d", len(msgs))
-	}
-
-	// Build a set of responded IDs.
-	responded := map[string]string{}
-	for _, m := range msgs {
-		responded[m.ToolCallID] = m.Content
-	}
-
-	// call_sub was processed before the critic — should have its digest.
-	if responded["call_sub"] != "sub result" {
-		t.Errorf("call_sub content = %q, want %q", responded["call_sub"], "sub result")
-	}
-	// call_critic should have the critic digest.
-	if responded["call_critic"] != criticDigest {
-		t.Errorf("call_critic content = %q, want %q", responded["call_critic"], criticDigest)
-	}
-	// call_sub2 was after the critic — should have its digest (from results).
-	if responded["call_sub2"] != "sub2 result" {
-		t.Errorf("call_sub2 content = %q, want %q", responded["call_sub2"], "sub2 result")
-	}
-	// call_read is a regular call — should be skipped.
-	if responded["call_read"] != "Skipped: critic returned FAIL." {
-		t.Errorf("call_read content = %q, want skipped message", responded["call_read"])
-	}
-}
-
-// TestProcessHandoffResults_NoOrphansNormal verifies the happy path: all
-// handoff calls get responses, criticFail is empty, and regular calls are
-// untouched (they're handled by the caller).
+// TestProcessHandoffResults_NoOrphansNormal verifies the happy path: every
+// handoff call gets a response message.
 func TestProcessHandoffResults_NoOrphansNormal(t *testing.T) {
 	e := &Engine{config: EngineConfig{}}
 
@@ -296,23 +236,10 @@ func TestProcessHandoffResults_NoOrphansNormal(t *testing.T) {
 		{ToolCallID: "call_1", Status: "ok", Digest: "result 1"},
 		{ToolCallID: "call_2", Status: "ok", Digest: "result 2"},
 	}
-	regularCalls := []ToolCallRequest{
-		{ID: "call_read", Name: "read", Input: json.RawMessage(`{"path":"x.go"}`)},
-	}
 
-	msgs, criticFail := e.processHandoffResults(handoffCalls, results, regularCalls)
+	msgs := e.processHandoffResults(handoffCalls, results)
 
-	if criticFail != "" {
-		t.Fatalf("expected empty criticFail, got %q", criticFail)
-	}
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages (handoff only), got %d", len(msgs))
-	}
-
-	// Regular calls should NOT appear in handoff messages.
-	for _, m := range msgs {
-		if m.ToolCallID == "call_read" {
-			t.Error("regular call should not get a response from processHandoffResults")
-		}
 	}
 }

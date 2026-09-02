@@ -35,8 +35,6 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	m.state = stateReady
 	m.activeOptions = []string{
 		"方案A: 按报告执行修改",
-		"方案B: 调整方案后执行",
-		"方案C: 取消本次修改",
 		"其他（输入你的意见）",
 	}
 	m.selectedOption = 0 // 方案A
@@ -68,8 +66,8 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
-	m.activeOptions = []string{"方案A", "方案B", "其他（输入你的意见）"}
-	m.selectedOption = 2 // 末项
+	m.activeOptions = []string{"方案A", "其他（输入你的意见）"}
+	m.selectedOption = 1 // 末项
 
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {

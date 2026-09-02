@@ -22,7 +22,6 @@ const (
 	StagePlan
 	StageDesignGuard
 	StageAct
-	StageVerifyFailed // critic adversarial verification returned FAIL — user must decide
 	StageVerifyCompact
 )
 

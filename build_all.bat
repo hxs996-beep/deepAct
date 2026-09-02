@@ -9,6 +9,7 @@ echo === Building windows/amd64 ===
 mkdir build\deepact_windows_amd64 2>nul
 go build -ldflags "%LDFLAGS%" -o build\deepact_windows_amd64\deepact.exe .
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+copy /y deepact.bat build\deepact_windows_amd64\deepact.bat >nul
 
 echo === Building linux/amd64 ===
 mkdir build\deepact_linux_amd64 2>nul

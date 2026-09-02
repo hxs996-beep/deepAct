@@ -11,9 +11,8 @@ import (
 type AgentID string
 
 const (
-	AgentSub          AgentID = "sub"
-	AgentCritic       AgentID = "critic"
-	AgentTeamLead     AgentID = "team-lead"
+	AgentSub AgentID = "sub"
+	AgentTeamLead AgentID = "team-lead"
 
 	HandoffToolName        = "handoff_to_agent"
 	ActivateSkillToolName  = "activate_skill"
@@ -189,7 +188,7 @@ func activateSkillToolSpec() ModelTool {
 // in an otherwise Chinese session.
 func handoffToolSpec(zh bool) ModelTool {
 	desc := "Delegate a sub-task to a specialized agent. Sub-agents can research code, brainstorm solutions, or critically review decisions."
-	agentDesc := "Target agent: sub (generic), critic (adversarial verifier)"
+	agentDesc := "Target agent: sub (generic)"
 	goalDesc := "What the agent should accomplish"
 	ctxDesc := "Relevant context for the sub-agent"
 	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
@@ -197,7 +196,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
-		agentDesc = "目标代理：sub（通用代理），critic（对抗性验证者）"
+		agentDesc = "目标代理：sub（通用代理）"
 		goalDesc = "代理需要完成的目标"
 		ctxDesc = "提供给子代理的相关上下文"
 		toolsDesc = "允许子代理使用的工具（可选）"
@@ -209,7 +208,7 @@ func handoffToolSpec(zh bool) ModelTool {
 				"properties": {
 					"agent": {
 						"type": "string",
-						"enum": ["sub", "critic"],
+						"enum": ["sub"],
 						"description": %q
 					},
 					"goal": {

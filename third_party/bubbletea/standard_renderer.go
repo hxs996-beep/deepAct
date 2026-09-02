@@ -797,9 +797,26 @@ func Printf(template string, args ...interface{}) Cmd {
 // incremental line diff mis-tracks wide characters (display width 2, rune
 // count 1) on terminals, causing swapped/stale characters during active
 // streaming. Forcing a full rewrite of wide lines eliminates the drift.
+//
+// The condition is pinned to EastAsianWidth=true to match DeepAct ui's sole
+// width convention (termWidthCond in ui/model.go): CJK terminals render
+// ambiguous-width runes (— • → ← “ ” ·) at 2 columns, while runewidth's
+// locale-dependent DefaultCondition measures them at 1 on non-CJK hosts,
+// letting those lines be skipped by the diff and drift. Box Drawing / Block
+// Elements (U+2500-0x259F) stay 1 column, mirroring ui's runeVisualWidth pin
+// (terminals render them as 1 column regardless of classification).
+var wideRuneCond = func() *runewidth.Condition {
+	c := runewidth.NewCondition()
+	c.EastAsianWidth = true
+	return c
+}()
+
 func lineHasWideRune(s string) bool {
 	for _, r := range s {
-		if runewidth.RuneWidth(r) > 1 {
+		if r >= 0x2500 && r <= 0x259F {
+			continue
+		}
+		if wideRuneCond.RuneWidth(r) > 1 {
 			return true
 		}
 	}

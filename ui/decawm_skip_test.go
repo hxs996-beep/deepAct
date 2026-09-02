@@ -207,13 +207,13 @@ func padWide(s string, w int) string {
 // CR+LF. A bare LF after a full-width line leaves the terminal in
 // wrap-pending state (cursor past the right margin); the LF keeps the column
 // and the NEXT rewritten line wraps one row early, transposing its content —
-// the iTerm2-class bug that produced "验证门要求" -> "验证要求门".
+// the iTerm2-class bug that produced "正在完成自检" -> "正在成完自检".
 func TestSkipLineCRLF_WrapPending(t *testing.T) {
 	width := 40
 	height := 6
 
 	frame1 := strings.Join([]string{
-		padWide("  按验证门要求，派出", width),
+		padWide("  正在逐项核对，检查", width),
 		padWide("  中间行不变", width),
 		padWide("  代理审查本次改动", width),
 		padWide("", width),
@@ -221,7 +221,7 @@ func TestSkipLineCRLF_WrapPending(t *testing.T) {
 		padWide("", width),
 	}, "\n")
 	frame2 := strings.Join([]string{
-		padWide("  按验证门要求，派出critic", width),
+		padWide("  正在逐项核对，检查进度", width),
 		padWide("  中间行不变", width),
 		padWide("  代理审查本次改动完成", width),
 		padWide("", width),
@@ -241,7 +241,7 @@ func TestSkipLineCRLF_WrapPending(t *testing.T) {
 	}
 
 	joined := run(true)
-	if !strings.Contains(joined, "按验证门要求，派出critic") || !strings.Contains(joined, "代理审查本次改动完成") {
+	if !strings.Contains(joined, "正在逐项核对，检查进度") || !strings.Contains(joined, "代理审查本次改动完成") {
 		t.Errorf("CRLF mode: rows corrupted:\n  %q", joined)
 	}
 	t.Logf("CRLF mode ok: %q", joined)
@@ -254,7 +254,7 @@ func TestSkipLineCRLF_BareLFReproducesBug(t *testing.T) {
 	height := 6
 
 	frame1 := strings.Join([]string{
-		padWide("  按验证门要求，派出", width),
+		padWide("  正在逐项核对，检查", width),
 		padWide("  中间行不变", width),
 		padWide("  代理审查本次改动", width),
 		padWide("", width),
@@ -262,7 +262,7 @@ func TestSkipLineCRLF_BareLFReproducesBug(t *testing.T) {
 		padWide("", width),
 	}, "\n")
 	frame2 := strings.Join([]string{
-		padWide("  按验证门要求，派出critic", width),
+		padWide("  正在逐项核对，检查进度", width),
 		padWide("  中间行不变", width),
 		padWide("  代理审查本次改动完成", width),
 		padWide("", width),

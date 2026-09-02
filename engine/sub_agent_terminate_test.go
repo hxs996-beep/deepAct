@@ -9,8 +9,7 @@ import (
 // stubSeqModel returns scripted ModelResponses in sequence on each Complete
 // call, cycling back to the first once exhausted. Sub-agents use Complete (not
 // Stream), so Stream is a no-op. The cycling simulates a model that alternates
-// between tool calls and text - the exact loop the critic falls into when its
-// verdict gets nudged.
+// between tool calls and text.
 type stubSeqModel struct {
 	responses       []ModelResponse
 	classifierResp  string // returned on JsonMode=true calls (ConclusionClassifier probes)
@@ -43,112 +42,8 @@ func (m *stubSeqModel) Complete(_ context.Context, req ModelRequest) (*ModelResp
 	return &resp, nil
 }
 
-// TestSubAgentRunLoop_TerminatesOnConclusionNotLoop reproduces the critic
-// "can't stop" bug. The sub-agent calls a verification tool, then emits its
-// verdict ("结论：失败 / VERDICT: FAIL") as a text-only response. That verdict
-// is a genuine conclusion, so the loop must terminate immediately.
-//
-// Before the fix, the text-only branch nudged unconditionally; the nudge
-// ("use tools to take the next action") goaded the critic into another tool
-// call, resetting consecutiveIntermediate, so the loop ran to maxIterations
-// (observed in production as "turn 90" of a 99-iteration cap).
-func TestSubAgentRunLoop_TerminatesOnConclusionNotLoop(t *testing.T) {
-	toolCall := ModelResponse{
-		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
-			ID:       "c1",
-			Type:     "function",
-			Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"go build ./..."}`},
-		}}},
-		FinishReason: "tool_calls",
-	}
-	verdict := ModelResponse{
-		Message: ModelMessage{
-			Role:    "assistant",
-			Content: "构建失败。结论：失败\n\nVERDICT: FAIL",
-		},
-		FinishReason: "stop",
-	}
-	// Cycle [tool, verdict, tool, verdict, ...]: with the bug this loops to
-	// maxIterations; with the fix it stops at the first verdict.
-	model := &stubSeqModel{responses: []ModelResponse{toolCall, verdict}, classifierResp: `{"conclusion": true}`}
-
-	runner := &SubAgentRunner{
-		model:     model,
-		tools:     stubToolExecutor{},
-		modelName: "test",
-	}
-
-	result, err := runner.Run(context.Background(), Handoff{
-		Agent:         AgentCritic,
-		Goal:          "验证实现",
-		MaxIterations: 8, // bounded well below 99 so the bug shows as a failed assertion, not a hang
-	})
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-
-	// Fix: tool (call 1) -> verdict terminates (call 2). Exactly 2 calls.
-	if model.calls != 2 {
-		t.Errorf("expected loop to terminate at the verdict (2 model calls), got %d - the critic looped to maxIterations", model.calls)
-	}
-	if result.TimedOut {
-		t.Errorf("expected TimedOut=false (terminated on conclusion), got TimedOut=true")
-	}
-	if !strings.Contains(result.Summary, "VERDICT: FAIL") {
-		t.Errorf("expected Summary to contain the verdict, got: %q", result.Summary)
-	}
-}
-
-func TestSubAgentRunLoop_CriticVerdictBypassesClassifier(t *testing.T) {
-	toolCall := ModelResponse{
-		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
-			ID:       "c1",
-			Type:     "function",
-			Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"go build ./..."}`},
-		}}},
-		FinishReason: "tool_calls",
-	}
-	verdict := ModelResponse{
-		Message: ModelMessage{
-			Role:    "assistant",
-			Content: "构建失败。\n\nVERDICT: FAIL",
-		},
-		FinishReason: "stop",
-	}
-	model := &stubSeqModel{responses: []ModelResponse{toolCall, verdict}, classifierResp: `{"conclusion": false}`}
-
-	runner := &SubAgentRunner{
-		model:     model,
-		tools:     stubToolExecutor{},
-		modelName: "test",
-	}
-
-	result, err := runner.Run(context.Background(), Handoff{
-		Agent:         AgentCritic,
-		Goal:          "验证实现",
-		MaxIterations: 8,
-	})
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-
-	if model.calls != 2 {
-		t.Errorf("expected loop to terminate at the verdict (2 model calls), got %d", model.calls)
-	}
-	if model.classifierCalls != 0 {
-		t.Errorf("expected classifier to be bypassed on a critic verdict, got %d probe(s)", model.classifierCalls)
-	}
-	if result.TimedOut {
-		t.Errorf("expected TimedOut=false, got true")
-	}
-	if !strings.Contains(result.Summary, "VERDICT: FAIL") {
-		t.Errorf("expected Summary to contain the verdict, got: %q", result.Summary)
-	}
-}
-
-// TestSubAgentRunLoop_NudgesOnNextStepNarration ensures the fix does not
-// over-terminate: a forward-looking narration (no tool calls) still gets
-// nudged rather than treated as a conclusion.
+// TestSubAgentRunLoop_NudgesOnNextStepNarration ensures a forward-looking
+// narration (no tool calls) gets nudged rather than treated as a conclusion.
 func TestSubAgentRunLoop_NudgesOnNextStepNarration(t *testing.T) {
 	narration := ModelResponse{
 		Message: ModelMessage{
@@ -180,33 +75,5 @@ func TestSubAgentRunLoop_NudgesOnNextStepNarration(t *testing.T) {
 	}
 	if !strings.Contains(result.Summary, "截断") {
 		t.Errorf("expected Summary to retain the narration content, got: %q", result.Summary)
-	}
-}
-
-// TestSubAgentStructured_CriticNudgeNamesVerdict: 结构化 critic 在 text-only
-// 轮次收到引导 VERDICT 的 nudge，3-strike 后以 no_result 结束（不误判为完成）。
-func TestSubAgentStructured_CriticNudgeNamesVerdict(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{
-		{Message: ModelMessage{Role: "assistant", Content: "我继续分析。"}, FinishReason: "stop"},
-	}}
-	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentCritic, Goal: "验证实现", MaxIterations: 8, StructuredResult: true,
-	})
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-	if model.calls != 3 {
-		t.Errorf("expected 3 calls (3-strike), got %d", model.calls)
-	}
-	if model.classifierCalls != 0 {
-		t.Errorf("expected classifier never probed in structured mode, got %d", model.classifierCalls)
-	}
-	if result.FinishReason != HandoffReasonNoResult {
-		t.Errorf("expected no_result, got %q", result.FinishReason)
-	}
-	last := model.lastReq.Messages[len(model.lastReq.Messages)-1].Content
-	if !strings.Contains(last, "VERDICT") {
-		t.Errorf("expected nudge to name VERDICT, last message=%q", last)
 	}
 }

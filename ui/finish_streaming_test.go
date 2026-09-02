@@ -7,11 +7,14 @@ import (
 	"github.com/deepact/deepact/engine"
 )
 
-// TestFinishStreaming_SummarySuppressesNarrationDuplication verifies that when
-// both narration (streaming content_delta) and Summary (from task_complete)
-// are present and match, the text appears exactly once. The narration is
-// snapshotted as a "narration" message and the Summary is skipped.
-func TestFinishStreaming_SummarySuppressesNarrationDuplication(t *testing.T) {
+// TestFinishStreaming_SummaryDuplicate_KeepsFormattedSummary verifies that when
+// both narration (streaming content_delta) and Summary (from task_complete) are
+// present and match, the FORMATTED assistant Summary is kept and the plain-text
+// narration copy is removed — the text appears exactly once. The streamed
+// narration is rendered as plain text (renderStreaming) and leaks raw markdown
+// (tables, ---, **); keeping it as the final report leaves the user with the
+// unformatted copy.
+func TestFinishStreaming_SummaryDuplicate_KeepsFormattedSummary(t *testing.T) {
 	m := &Model{
 		width:    80,
 		height:   24,
@@ -25,22 +28,33 @@ func TestFinishStreaming_SummarySuppressesNarrationDuplication(t *testing.T) {
 	})
 
 	count := 0
+	foundAssistant := false
 	for _, msg := range m.messages {
 		if (msg.Role == "assistant" || msg.Role == "narration") && msg.Content == dupText {
 			count++
+		}
+		if msg.Role == "assistant" && msg.Content == dupText {
+			foundAssistant = true
+		}
+		if msg.Role == "narration" && msg.Content == dupText {
+			t.Errorf("plain-text narration duplicating the Summary should be removed. messages: %+v", m.messages)
 		}
 	}
 	if count != 1 {
 		t.Errorf("expected duplicated text to appear exactly once, got %d. messages: %+v", count, m.messages)
 	}
+	if !foundAssistant {
+		t.Errorf("formatted assistant Summary should be kept. messages: %+v", m.messages)
+	}
 }
 
-// TestFinishStreaming_SummarySkipsWhenPreSnapshottedNarrationMatches verifies
+// TestFinishStreaming_SummaryDuplicate_PreSnapshottedNarrationRemoved verifies
 // that when narration was already snapshotted at tool_start (via
-// finalizeTurnBlocks) and matches the Summary, the narration is kept and the
-// Summary is skipped. Previously stripRunNarration removed all narration;
-// now the narration is preserved and Summary is conditionally suppressed.
-func TestFinishStreaming_SummarySkipsWhenPreSnapshottedNarrationMatches(t *testing.T) {
+// finalizeTurnBlocks) and matches the Summary, the plain-text narration is
+// removed and the formatted assistant Summary is kept instead. Only the
+// current run's narration (from runStartMsgIdx onward) is removed — earlier
+// messages are untouched.
+func TestFinishStreaming_SummaryDuplicate_PreSnapshottedNarrationRemoved(t *testing.T) {
 	m := &Model{
 		width:    80,
 		height:   24,
@@ -69,23 +83,28 @@ func TestFinishStreaming_SummarySkipsWhenPreSnapshottedNarrationMatches(t *testi
 	})
 
 	count := 0
+	foundAssistant := false
 	for _, msg := range m.messages {
 		if (msg.Role == "assistant" || msg.Role == "narration") && msg.Content == dupText {
 			count++
+		}
+		if msg.Role == "assistant" && msg.Content == dupText {
+			foundAssistant = true
+		}
+		if msg.Role == "narration" && msg.Content == dupText {
+			t.Errorf("plain-text narration duplicating the Summary should be removed. messages: %+v", m.messages)
 		}
 	}
 	if count != 1 {
 		t.Errorf("expected text to appear exactly once, got %d. messages: %+v", count, m.messages)
 	}
-
-	foundNarration := false
-	for _, msg := range m.messages {
-		if msg.Role == "narration" && msg.Content == dupText {
-			foundNarration = true
-		}
+	if !foundAssistant {
+		t.Errorf("formatted assistant Summary should be kept. messages: %+v", m.messages)
 	}
-	if !foundNarration {
-		t.Error("narration message should be preserved, not stripped")
+
+	// The user message before the run must be preserved.
+	if len(m.messages) == 0 || m.messages[0].Role != "user" || m.messages[0].Content != "OK" {
+		t.Errorf("user message before the run should be preserved. messages: %+v", m.messages)
 	}
 }
 
@@ -239,5 +258,36 @@ func TestFinishStreaming_NarrationUsedWhenNoSummary(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("narration should be snapshot when no Summary, messages: %+v", m.messages)
+	}
+}
+
+// TestFinishStreaming_NonBlockedOptionsShowPopup verifies that the analysis-gate
+// confirmation popup appears even when the engine returns Options on a
+// non-Blocked response. The engine attaches Options at Run end (loop.go:932)
+// without setting Blocked, so finishStreaming must consume them outside the
+// Blocked branch — otherwise the popup never renders and the user sees the
+// agent's "wait for confirmation" text with no way to confirm.
+func TestFinishStreaming_NonBlockedOptionsShowPopup(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{
+			Summary: "报告完毕，停止。请通过确认 UI 批准后，我立即执行全部删除。",
+			Options: []string{
+				"方案A: 按报告执行修改",
+				"其他（输入你的意见）",
+			},
+		},
+	})
+
+	if len(m.activeOptions) != 2 {
+		t.Errorf("expected activeOptions to be set from non-Blocked response, got %d: %v", len(m.activeOptions), m.activeOptions)
+	}
+	if m.selectedOption != 0 {
+		t.Errorf("expected selectedOption reset to 0, got %d", m.selectedOption)
 	}
 }

@@ -111,7 +111,7 @@ var helpTools = []Suggestion{
 	{Command: "web_search", Description: "Search the web (Tavily; needs TAVILY_API_KEY / [search].api_key)"},
 	{Command: "lsp", Description: "Code intelligence (definition/references/hover/symbols/callers)"},
 	{Command: "skill_install", Description: "Install a skill from the community registry"},
-	{Command: "handoff_to_agent", Description: "Delegate a sub-task to a sub or critic agent"},
+	{Command: "handoff_to_agent", Description: "Delegate a sub-task to a sub agent"},
 	{Command: "activate_skill", Description: "Activate a skill to govern the current task"},
 	{Command: "task_complete", Description: "Submit your final conclusion to the user"},
 	{Command: "todo_write", Description: "Report your step-by-step todo list"},
@@ -717,6 +717,11 @@ func (m Model) footerHeight() int {
 	}
 	if len(m.activeOptions) > 0 {
 		h += renderedHeight(renderOptionsPopup(m, m.width))
+	}
+	// Must stay in lockstep with View() Step 2: resume popup rows included,
+	// or screenToLine's bodyHeight drifts and click mapping shifts wholesale.
+	if p := renderResumePopup(m, m.width); p != "" {
+		h += renderedHeight(p)
 	}
 	return h
 }
@@ -1638,6 +1643,40 @@ func (m *Model) narrationDuplicatesSummary(summary string) bool {
 	return false
 }
 
+// removeNarrationDuplicate removes plain-text narration messages from the
+// current run that duplicate the given Summary text. The streamed narration is
+// rendered as plain text (renderStreaming) and leaks raw markdown (tables,
+// ---, **); when it duplicates the final Summary, it is dropped so the
+// formatted (glamour) Summary is the only copy. Only messages at or after
+// runStartMsgIdx are considered, and the message render cache is invalidated
+// because message indices shift.
+func (m *Model) removeNarrationDuplicate(summary string) {
+	ns := normalizeForCompare(summary)
+	if ns == "" {
+		return
+	}
+	start := m.runStartMsgIdx
+	if start < 0 {
+		start = 0
+	}
+	removed := false
+	kept := m.messages[:start]
+	for i := start; i < len(m.messages); i++ {
+		msg := m.messages[i]
+		if msg.Role == "narration" && normalizeForCompare(msg.Content) == ns {
+			removed = true
+			continue
+		}
+		kept = append(kept, msg)
+	}
+	if removed {
+		m.messages = kept
+		if m.msgCache != nil {
+			m.msgCache.lines = nil
+		}
+	}
+}
+
 func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	// Flush pending narration so the buffer is complete for comparison.
 	m.flushNarration()
@@ -1712,9 +1751,14 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 		return
 	}
 	if msg.Response.Summary != "" {
-		if !narrationDupesSummary {
-			m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: msg.Response.Summary})
+		if narrationDupesSummary {
+			// The streamed narration (plain text, leaks raw markdown) duplicates
+			// the final Summary. Remove the plain-text narration so the
+			// formatted (glamour) Summary below is the only copy — otherwise the
+			// final report stays unformatted.
+			m.removeNarrationDuplicate(msg.Response.Summary)
 		}
+		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: msg.Response.Summary})
 		m.streaming = ""
 		m.narration = ""
 	} else if m.narration != "" {
@@ -1726,6 +1770,13 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	}
 	if msg.Response.NextStep != "" {
 		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: msg.Response.NextStep})
+	}
+	// 非 Blocked 响应的 Options（分析门控确认选项）→ 同样触发弹框。
+	// 引擎在 Run 结束时挂载 Options（loop.go:932）不设 Blocked，UI 若只在
+	// Blocked 分支消费 Options，弹框永远不会出现。
+	if len(msg.Response.Options) > 0 {
+		m.activeOptions = msg.Response.Options
+		m.selectedOption = 0
 	}
 }
 
@@ -2548,8 +2599,6 @@ func agentIcon(agent string) string {
 	switch agent {
 	case "sub":
 		return "[s]"
-	case "critic":
-		return "[c]"
 	case "team-lead":
 		return "[t]"
 	default:
@@ -2656,12 +2705,12 @@ func renderOverlayStatus(todoItems []engine.TodoItem, members []MemberStatus, wi
 		for i := 0; i < maxLines; i++ {
 			l := leftLines[i]
 			r := rightLines[i]
-			// Truncate or pad left column
-			lStr := stripAnsi(l)
-			if len(lStr) > halfWidth {
+			// Pad/truncate by terminal columns (displayWidth), not byte len().
+			dw := displayWidth(l)
+			if dw > halfWidth {
 				l = truncateAnsi(l, halfWidth)
-			} else if len(lStr) < halfWidth {
-				l += strings.Repeat(" ", halfWidth-len(lStr))
+			} else if dw < halfWidth {
+				l += strings.Repeat(" ", halfWidth-dw)
 			}
 			combined[i] = l + divider + r
 		}
@@ -2699,11 +2748,12 @@ func truncateAnsi(s string, maxWidth int) string {
 			}
 			continue
 		}
-		if visible >= maxWidth {
+		w := runeWidth(r)
+		if visible+w > maxWidth {
 			continue
 		}
 		result.WriteRune(r)
-		visible++
+		visible += w
 	}
 	return result.String()
 }
@@ -2737,17 +2787,17 @@ func renderThinkingBox(activity string, width int) []string {
 			icon = ""
 		case "sub":
 			icon = "[s]"
-		case "critic":
-			icon = "[c]"
 		}
 		display = icon + " " + name + ": " + task
 	} else {
 		display = "[*] " + activity
 	}
 
-	// Truncate if too wide
-	if len(display) > blockWidth {
-		display = ansi.Truncate(display, blockWidth, "…")
+	// Truncate by terminal columns: displayWidth + truncateToWidth share the
+	// EastAsian convention (len() bytes over-triggers for CJK; ansi.Truncate
+	// counts ambiguous runes 1 col while the terminal renders 2, overflowing).
+	if displayWidth(display) > blockWidth {
+		display = truncateToWidth(display, blockWidth-2) + "…"
 	}
 
 	var lines []string

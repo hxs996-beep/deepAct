@@ -6,8 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ---- Types ----
@@ -146,7 +144,7 @@ func reverseHighlightLine(line string, colStart, colEnd int) string {
 			continue
 		}
 		r, size := decodeRuneAt(line, i)
-		rw := lipgloss.Width(string(r))
+		rw := runeWidth(r)
 		if !inHighlight && visualCol <= colStart && colStart < visualCol+rw {
 			sb.WriteString("\x1b[7m")
 			inHighlight = true
@@ -316,7 +314,7 @@ func sliceByVisualCol(s string, colStart, colEnd int) string {
 	var sb strings.Builder
 	visualCol := 0
 	for _, r := range s {
-		rw := lipgloss.Width(string(r))
+		rw := runeWidth(r)
 		if colEnd >= 0 && visualCol >= colEnd {
 			break
 		}
@@ -339,7 +337,9 @@ func sliceByVisualCol(s string, colStart, colEnd int) string {
 
 // truncateVisual truncates s to fit within maxW display columns, preserving
 // ANSI escape sequences (never splits a sequence mid-way) and wide runes
-// (CJK/emoji counted as width-2 via lipgloss.Width). Trailing ANSI sequences
+// (CJK and ambiguous-width runes counted as width-2 via runeWidth, matching
+// the terminal rendering that produced the clicked physical column).
+// Trailing ANSI sequences
 // that appear after the visual truncation point are preserved so that closing
 // sequences like \x1b[0m are not lost. It does NOT append a trailing marker —
 // callers decide whether to add "…" etc. Returns s unchanged if its visual
@@ -360,7 +360,7 @@ func truncateVisual(s string, maxW int) string {
 			continue
 		}
 		r, size := decodeRuneAt(s, i)
-		rw := lipgloss.Width(string(r))
+		rw := runeWidth(r)
 		if truncated || visualCol+rw > maxW {
 			truncated = true
 			i += size

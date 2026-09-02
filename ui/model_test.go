@@ -435,7 +435,7 @@ func TestWrapLineAnsi_WideChars(t *testing.T) {
 // between "Sub-Agents" and the agent row.
 func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
 	lines := renderSubAgentPanel([]SubAgentStatus{
-		{Agent: "critic", Goal: "批判性审查本次\"修复 narration 流式/快照渲染\"", Status: "running"},
+		{Agent: "sub", Goal: "批判性审查本次\"修复 narration 流式/快照渲染\"", Status: "running"},
 	}, 80)
 
 	plain := make([]string, len(lines))
@@ -448,7 +448,7 @@ func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
 		if strings.Contains(p, "Sub-Agents") {
 			headerIdx = i
 		}
-		if strings.Contains(p, "[c] critic") {
+		if strings.Contains(p, "[s] sub") {
 			agentIdx = i
 		}
 	}

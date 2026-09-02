@@ -34,9 +34,6 @@ type TurnResult struct {
 	// error status this turn. Used by ErrorLoopState to detect repeated
 	// failing operations that defeat the content-hash-based loop guards.
 	LastOpError bool
-	// VerifyFailedSummary is set when a critic handoff returns FAIL verdict.
-	// The caller (Engine.Run) must present this to the user and pause the agent loop.
-	VerifyFailedSummary string
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
@@ -616,15 +613,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Execute handoff calls (sub-agents) — parallel when multiple, sequential when single.
 	if len(handoffCalls) > 0 {
 		results := e.executeHandoffsParallel(ctx, handoffCalls)
-		msgs, criticFail := e.processHandoffResults(handoffCalls, results, regularCalls)
+		msgs := e.processHandoffResults(handoffCalls, results)
 		for _, msg := range msgs {
 			e.history = append(e.history, msg)
-		}
-		if criticFail != "" {
-			return TurnResult{
-				Done:                true,
-				VerifyFailedSummary: criticFail,
-			}, nil
 		}
 	}
 
@@ -751,60 +742,6 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
 	return specs
-}
-
-// buildCriticFailSummary formats the critic FAIL report for user presentation.
-func buildCriticFailSummary(digest string, zh bool) string {
-	var sb strings.Builder
-	if zh {
-		sb.WriteString("## ⚠ 对抗验证未通过\n\n")
-		sb.WriteString("Critic 代理对当前实现进行了对抗性验证，发现以下问题：\n\n")
-		sb.WriteString("---\n\n")
-		sb.WriteString(digest)
-		sb.WriteString("\n\n---\n\n")
-		sb.WriteString("### 请选择下一步操作\n\n")
-		sb.WriteString("- **修复**: 根据反馈继续修改代码，修改后重新验证\n")
-		sb.WriteString("- **说明/澄清**: 如果你认为某条反馈是误报或需要补充上下文，请直接回复\n")
-		sb.WriteString("- **跳过**: 忽略此验证结果，继续原方案\n")
-		sb.WriteString("- **放弃**: 放弃当前方案，重新考虑")
-	} else {
-		sb.WriteString("## ⚠ Adversarial Verification Failed\n\n")
-		sb.WriteString("The critic agent performed adversarial verification on the current implementation and found issues:\n\n")
-		sb.WriteString("---\n\n")
-		sb.WriteString(digest)
-		sb.WriteString("\n\n---\n\n")
-		sb.WriteString("### Choose Next Action\n\n")
-		sb.WriteString("- **Fix**: Continue modifying code based on feedback, then re-verify\n")
-		sb.WriteString("- **Clarify**: If you think a finding is a false positive or needs context, reply directly\n")
-		sb.WriteString("- **Skip**: Ignore this verification result and continue with the original plan\n")
-		sb.WriteString("- **Abandon**: Abandon the current approach and reconsider")
-	}
-	return sb.String()
-}
-
-// parseCriticVerdict extracts the VERDICT line from a critic agent's output.
-// Returns "PASS", "FAIL", "PARTIAL", or "" if no verdict found.
-func parseCriticVerdict(digest string) string {
-	for _, line := range strings.Split(digest, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "VERDICT:") {
-			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "VERDICT:"))
-			switch v {
-			case "PASS", "FAIL", "PARTIAL":
-				return v
-			}
-		}
-	}
-	return ""
-}
-
-// isCriticHandoff checks whether a handoff_to_agent call targets the critic agent.
-func isCriticHandoff(input json.RawMessage) bool {
-	var params HandoffToAgentParams
-	if err := json.Unmarshal(input, &params); err != nil {
-		return false
-	}
-	return params.Agent == string(AgentCritic)
 }
 
 // executeHandoff processes a handoff_to_agent tool call from the main agent loop.
@@ -1634,36 +1571,11 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 // processHandoffResults builds tool response messages for handoff call results.
 // Every handoff call receives a response — even cancelled ones — to prevent
 // orphaned tool_call_ids that would cause the DeepSeek API to reject the next
-// request. If a critic sub-agent returns FAIL, responses are also added for
-// all remaining handoff calls and regular calls (which won't execute), and
-// criticFail is set so the caller can return early with the failure summary.
-func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results []ToolResult, regularCalls []ToolCallRequest) (messages []Message, criticFail string) {
-	for i, call := range handoffCalls {
+// request.
+func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results []ToolResult) []Message {
+	messages := make([]Message, 0, len(handoffCalls))
+	for i := range handoffCalls {
 		result := results[i]
-
-		// Hard gate: if critic returns FAIL, intercept and present to user.
-		if isCriticHandoff(call.Input) && parseCriticVerdict(result.Digest) == "FAIL" {
-			messages = append(messages, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-
-			// Add tool responses for remaining handoff calls so their
-			// tool_call_ids are not orphaned (API requires every tool_call
-			// to have a matching tool response).
-			for j := i + 1; j < len(handoffCalls); j++ {
-				r := results[j]
-				content := r.Digest
-				if content == "" {
-					content = "Skipped: critic returned FAIL."
-				}
-				messages = append(messages, Message{Role: "tool", ToolCallID: r.ToolCallID, Content: content, Timestamp: time.Now()})
-			}
-			// Add placeholder responses for regular calls that won't execute.
-			for _, rc := range regularCalls {
-				messages = append(messages, Message{Role: "tool", ToolCallID: rc.ID, Content: "Skipped: critic returned FAIL.", Timestamp: time.Now()})
-			}
-
-			criticFail = buildCriticFailSummary(result.Digest, e.isChinese)
-			return messages, criticFail
-		}
 
 		// Always add a tool response — even for cancelled sub-agents.
 		// Without it, the tool_call_id is orphaned and the DeepSeek API
@@ -1682,7 +1594,7 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(e.isChinese))
 		}
 	}
-	return messages, ""
+	return messages
 }
 
 // isHandoffFollowUpReason reports whether a handoff's FinishReason is a

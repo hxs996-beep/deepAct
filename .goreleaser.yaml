@@ -36,6 +36,7 @@ archives:
       - README.md
       - README.zh.md
       - LICENSE
+      - src: "{{ if eq .Os \"windows\" }}deepact.bat{{ end }}"
 
 checksum:
   name_template: "checksums.txt"

@@ -152,8 +152,8 @@ func TestConfirmOptions_ReturnedWhenGateIntercepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if len(resp.Options) != 4 {
-		t.Fatalf("expected 4 options, got %d: %v", len(resp.Options), resp.Options)
+	if len(resp.Options) != 2 {
+		t.Fatalf("expected 2 options, got %d: %v", len(resp.Options), resp.Options)
 	}
 	if !strings.Contains(resp.Options[len(resp.Options)-1], "其他") {
 		t.Errorf("last option should be the free-input item, got %q", resp.Options[len(resp.Options)-1])

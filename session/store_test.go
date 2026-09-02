@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,5 +296,94 @@ func TestSessionPath(t *testing.T) {
 	want := filepath.Join(dir, "my-session.jsonl")
 	if path != want {
 		t.Errorf("sessionPath = %q, want %q", path, want)
+	}
+}
+
+// TestPrune 验证 Prune 删除最后活动时间早于 retention 的会话，
+// 保留期限内的会话，并跳过非 jsonl 文件。
+func TestPrune(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+
+	old := time.Now().Add(-60 * 24 * time.Hour)
+	recent := time.Now().Add(-24 * time.Hour)
+
+	s.AppendEvent(engine.Event{SessionID: "old-sess", Type: "user_message", Timestamp: old,
+		Payload: json.RawMessage(`"旧会话"`)})
+	s.AppendEvent(engine.Event{SessionID: "recent-sess", Type: "user_message", Timestamp: recent,
+		Payload: json.RawMessage(`"新会话"`)})
+	os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hello"), 0o644)
+
+	if err := s.Prune(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("Prune(): %v", err)
+	}
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("len(infos) = %d, want 1 (old-sess should be pruned)", len(infos))
+	}
+	if infos[0].ID != "recent-sess" {
+		t.Errorf("remaining session = %q, want 'recent-sess'", infos[0].ID)
+	}
+	// readme.txt 未被删除
+	if _, err := os.Stat(filepath.Join(dir, "readme.txt")); err != nil {
+		t.Errorf("non-jsonl file should not be pruned: %v", err)
+	}
+}
+
+// TestPrune_Idempotent 验证 Prune 可重复调用且无副作用。
+func TestPrune_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	old := time.Now().Add(-60 * 24 * time.Hour)
+	s.AppendEvent(engine.Event{SessionID: "old-sess", Type: "user_message", Timestamp: old,
+		Payload: json.RawMessage(`"旧会话"`)})
+
+	if err := s.Prune(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("Prune() #1: %v", err)
+	}
+	if err := s.Prune(30 * 24 * time.Hour); err != nil {
+		t.Fatalf("Prune() #2: %v", err)
+	}
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 0 {
+		t.Errorf("expected 0 sessions after repeated prune, got %d", len(infos))
+	}
+}
+
+// TestList_SortedByUpdatedDesc 验证 List() 按最后活动时间由近到远排序。
+func TestList_SortedByUpdatedDesc(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+
+	// 按时间从旧到新写入三个会话
+	for i, ago := range []time.Duration{48 * time.Hour, 2 * time.Hour, time.Minute} {
+		s.AppendEvent(engine.Event{SessionID: fmt.Sprintf("sess-%d", i), Type: "user_message",
+			Timestamp: time.Now().Add(-ago), Payload: json.RawMessage(`"消息"`)})
+	}
+
+	infos, err := s.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(infos) != 3 {
+		t.Fatalf("len(infos) = %d, want 3", len(infos))
+	}
+	// 期望顺序：sess-2（最新）→ sess-1 → sess-0（最旧）
+	want := []string{"sess-2", "sess-1", "sess-0"}
+	for i, id := range want {
+		if infos[i].ID != id {
+			t.Errorf("infos[%d].ID = %q, want %q", i, infos[i].ID, id)
+		}
+	}
+	if !infos[0].UpdatedAt.After(infos[1].UpdatedAt) || !infos[1].UpdatedAt.After(infos[2].UpdatedAt) {
+		t.Errorf("expected UpdatedAt strictly descending, got %v %v %v",
+			infos[0].UpdatedAt, infos[1].UpdatedAt, infos[2].UpdatedAt)
 	}
 }
