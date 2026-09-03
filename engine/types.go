@@ -469,13 +469,13 @@ type CollabStage struct {
 type CollabPhase int
 
 const (
-	CollabIdle            CollabPhase = iota
-	CollabReconPhase                  // 侦察
-	CollabDesignPhase                 // 设计
-	CollabDevPhase                    // 开发
-	CollabReviewPhase                 // 把关
-	CollabAwaitingConfirmation        // 等待用户确认汇总
-	CollabDone                        // 完成
+	CollabIdle                 CollabPhase = iota
+	CollabReconPhase                       // 侦察
+	CollabDesignPhase                      // 设计
+	CollabDevPhase                         // 开发
+	CollabReviewPhase                      // 把关
+	CollabAwaitingConfirmation             // 等待用户确认汇总
+	CollabDone                             // 完成
 )
 
 // CollabState tracks the current /collab pipeline within TaskState.
