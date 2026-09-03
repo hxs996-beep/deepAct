@@ -87,14 +87,8 @@ func (h *CollabHall) handleCollabArena(ctx context.Context) (*EngineResponse, er
 
 	state.Collab.Phase = CollabAwaitingConfirmation
 
-	// 占位响应：任务 3 会升级为 buildCollabSummary + buildCollabPrompt。
-	// 此处仅返回阶段完成的确认，避免引用任务 3 才定义的函数（类型一致性）。
-	return &EngineResponse{
-		Summary: pickPrompt(zh,
-			"Collaboration pipeline complete. Awaiting confirmation...",
-			"协作流水线完成，等待确认..."),
-		Stage: StageAct,
-	}, nil
+	summary := h.buildCollabSummary(ctx, goal, zh)
+	return h.buildCollabPrompt(goal, zh, summary), nil
 }
 
 // runCollabStage executes a single pipeline stage via AgentSub with a
@@ -238,4 +232,171 @@ func collabStageLabel(stage CollabStageName, zh bool) string {
 		return pickPrompt(zh, "Review", "把关")
 	}
 	return string(stage)
+}
+
+// buildCollabSummary runs a single LLM call that merges all pipeline stage
+// outputs into a concise collaboration summary for the user. Returns "" on
+// failure so the prompt falls back to showing raw stage outputs.
+func (h *CollabHall) buildCollabSummary(ctx context.Context, goal string, zh bool) string {
+	state := h.engine.state.Collab
+	if len(state.Stages) < 4 {
+		return ""
+	}
+
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "collab_summary",
+			Name:   "summary",
+			Detail: pickPrompt(zh, "Synthesizing collaboration summary...", "正在合成协作摘要..."),
+		})
+	}
+
+	var record strings.Builder
+	for _, s := range state.Stages {
+		record.WriteString(fmt.Sprintf("## %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
+	}
+
+	taskGoal := fmt.Sprintf(pickPrompt(zh,
+		"## Task\nYou are a team lead. Below are the outputs of a collaboration pipeline (recon → design → dev → review). Merge them into a concise summary the user can confirm: what will be built, key decisions, and any review concerns.\n\n## Requirement\n%s\n\n## Pipeline Outputs\n%s",
+		"## 任务\n你是协作团队负责人。下面是协作流水线（侦察 → 设计 → 开发 → 把关）各环节的产出。把它们合并成一份用户可直接确认的简洁摘要：要做什么、关键决策、把关发现的问题。\n\n## 需求\n%s\n\n## 流水线产出\n%s"), goal, record.String())
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          taskGoal,
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 3,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		if err != nil || result == nil {
+			return ""
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary
+	}
+
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+// buildCollabPrompt renders the /collab confirmation screen: pipeline outputs
+// per stage + the merged summary, ending with confirmation instructions.
+func (h *CollabHall) buildCollabPrompt(goal string, zh bool, summary string) *EngineResponse {
+	var sb strings.Builder
+
+	sb.WriteString(pickPrompt(zh,
+		"## Collaboration Complete - Review & Confirm\n\n",
+		"## 协作完成 - 请审阅并确认\n\n",
+	))
+	sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", pickPrompt(zh, "Goal", "需求"), goal))
+
+	state := h.engine.state.Collab
+
+	if summary != "" {
+		sb.WriteString(pickPrompt(zh, "### Collaboration Summary\n\n", "### 协作摘要\n\n"))
+		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString(pickPrompt(zh, "### Pipeline Outputs\n\n", "### 流水线产出\n\n"))
+	for _, s := range state.Stages {
+		sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
+	}
+
+	sb.WriteString("---\n\n")
+	sb.WriteString(pickPrompt(zh,
+		"**Your decision**: Type `support` to execute this plan, `but <condition>` to adjust, or `restart` to re-run the pipeline\n",
+		"**你的决定**: 输入 `支持` 执行此方案、`但要<条件>` 调整、或 `重新协作` 重跑流水线\n",
+	))
+
+	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
+}
+
+// Advance handles user input during the /collab AwaitingConfirmation phase.
+func (h *CollabHall) Advance(ctx context.Context, userMsg string) (*EngineResponse, error) {
+	state := h.engine.state
+	if state.Collab == nil {
+		return nil, nil
+	}
+
+	zh := msgIsChinese(userMsg)
+	if !zh && userMsg == "" {
+		zh = msgIsChinese(state.Collab.Goal)
+	}
+
+	lower := strings.ToLower(strings.TrimSpace(userMsg))
+
+	switch state.Collab.Phase {
+	case CollabAwaitingConfirmation:
+		return h.handleConfirmation(userMsg, lower, zh), nil
+	case CollabDone:
+		return nil, nil
+	default:
+		return nil, nil
+	}
+}
+
+// handleConfirmation processes the user's decision on the /collab summary.
+func (h *CollabHall) handleConfirmation(userMsg, lower string, zh bool) *EngineResponse {
+	state := h.engine.state
+
+	// "重新协作" / "restart" → clear stages and restart the pipeline.
+	if strings.Contains(lower, "重新协作") || strings.Contains(lower, "重新") ||
+		strings.Contains(lower, "restart") || lower == "restart" {
+		state.Collab.Phase = CollabReconPhase
+		state.Collab.Stages = nil
+		return &EngineResponse{
+			Summary: pickPrompt(zh, "Restarting collaboration pipeline...", "正在重新启动协作流水线..."),
+			Stage:   StageAct,
+		}
+	}
+
+	// User confirms (or adjusts). Include all stage outputs so the executing
+	// agent sees the full plan, not just the summary.
+	var record strings.Builder
+	for _, s := range state.Collab.Stages {
+		record.WriteString(fmt.Sprintf("## %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
+	}
+	pinned := fmt.Sprintf("[COLLAB PLAN: %s]\n\n%s\n\n%s\n%s",
+		state.Collab.Goal,
+		userMsg,
+		pickPrompt(zh,
+			"## Collaboration Pipeline Output (execute this plan)",
+			"## 协作流水线产出（请按此方案执行）"),
+		record.String())
+	h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
+	state.Collab.Phase = CollabDone
+
+	// Mark that the next Run() should skip confirmation gates — the user
+	// already approved the plan through the collaboration pipeline.
+	h.engine.collabVerdictPending = true
+
+	state.Decisions = append(state.Decisions, Decision{
+		ID:   "collab-plan",
+		Text: userMsg,
+	})
+
+	return &EngineResponse{
+		Summary: pickPrompt(zh,
+			fmt.Sprintf("✓ Collaboration confirmed. Proceeding with: %s", userMsg),
+			fmt.Sprintf("✓ 协作方案已确认。将按以下方向执行: %s", userMsg),
+		),
+		Stage: StageAct,
+	}
 }

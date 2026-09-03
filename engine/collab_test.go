@@ -98,8 +98,12 @@ type capturePromptRunner struct {
 func (c *capturePromptRunner) RunWithPrompt(_ context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
 	c.lastInput = input
 	c.lastExtra = extraPrompt
-	c.stageGoals = append(c.stageGoals, input.Goal)
-	c.stageTools = append(c.stageTools, input.Tools)
+	// 仅把"阶段运行"（携带 role prompt）计入 stageGoals/stageTools；
+	// buildCollabSummary 的汇总调用（extraPrompt==""）不计入，避免污染阶段计数。
+	if extraPrompt != "" {
+		c.stageGoals = append(c.stageGoals, input.Goal)
+		c.stageTools = append(c.stageTools, input.Tools)
+	}
 	return &HandoffResult{Summary: c.response, Conclusions: []string{c.response}}, nil
 }
 
@@ -266,5 +270,74 @@ func TestHandleCollabArena_ToolsAllowlist(t *testing.T) {
 		if got == "edit" || got == "write" {
 			t.Errorf("forbidden tool %q in first stage handoff: %v", got, captor.stageTools[0])
 		}
+	}
+}
+
+// --- Collab summary + confirmation ---
+
+func TestHandleCollabArena_SummaryGenerated(t *testing.T) {
+	e := newCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabReconPhase,
+	}
+	resp, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	// 汇总界面包含各阶段标题 + 协作摘要
+	if !strings.Contains(resp.Summary, "协作") {
+		t.Errorf("collab prompt should mention collaboration, got:\n%s", resp.Summary)
+	}
+	for _, label := range []string{"侦察", "设计", "开发", "把关"} {
+		if !strings.Contains(resp.Summary, label) {
+			t.Errorf("collab prompt should contain stage %q, got:\n%s", label, resp.Summary)
+		}
+	}
+}
+
+func TestCollab_AdvanceConfirm(t *testing.T) {
+	e := newCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:   "实现一个缓存层",
+		Phase:  CollabAwaitingConfirmation,
+		Stages: []CollabStage{{Name: CollabRecon, Content: "调研结果"}},
+	}
+	resp, err := e.collabHall.Advance(context.Background(), "支持")
+	if err != nil {
+		t.Fatalf("Advance() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if e.state.Collab.Phase != CollabDone {
+		t.Errorf("Phase = %v, want CollabDone", e.state.Collab.Phase)
+	}
+	if !e.collabVerdictPending {
+		t.Error("collabVerdictPending should be set after confirmation")
+	}
+	if len(e.pendingPinnedMessages) == 0 {
+		t.Error("expected pendingPinnedMessages after confirmation")
+	}
+}
+
+func TestCollab_AdvanceRestart(t *testing.T) {
+	e := newCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabAwaitingConfirmation,
+	}
+	_, err := e.collabHall.Advance(context.Background(), "重新协作")
+	if err != nil {
+		t.Fatalf("Advance() unexpected error: %v", err)
+	}
+	if e.state.Collab.Phase != CollabReconPhase {
+		t.Errorf("Phase = %v, want CollabReconPhase (restart)", e.state.Collab.Phase)
+	}
+	if len(e.state.Collab.Stages) != 0 {
+		t.Errorf("Stages should be cleared on restart, got %d", len(e.state.Collab.Stages))
 	}
 }
