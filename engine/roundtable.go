@@ -24,6 +24,11 @@ const roundtableMemberMaxIterations = 15
 // roundtableMemberMaxOutputTokens caps a single-shot member's reply length.
 const roundtableMemberMaxOutputTokens = 2500
 
+// roundtableSearchMaxIterations bounds the pre-debate shared search agent.
+// A single codebase scan needs a bit more budget than a debate member's
+// reasoning turn (15), but is still capped to bound wall-clock.
+const roundtableSearchMaxIterations = 25
+
 // RoundtableMember defines a single reviewer's identity and stance.
 // Name/Stance/Prompt hold the Chinese values (the historical defaults);
 // NameEn/StanceEn/PromptEn hold the English variants. The live value is picked
@@ -130,6 +135,74 @@ func NewRoundtableHall(e *Engine) *RoundtableHall {
 	return &RoundtableHall{engine: e}
 }
 
+// runSharedSearch runs a single code-search sub-agent that scans the repository
+// for context relevant to the debate goal, returning a structured report used
+// as the shared baseline for all debate members. Returns "" on failure so the
+// debate can proceed without it (members still have their own tools).
+func (h *RoundtableHall) runSharedSearch(ctx context.Context, goal string, zh bool) string {
+	if h.engine.config.OnProgress != nil {
+		// 事件类型用 "team_search" 而非 "debate_phase"：
+		// TestDebateArena_ProgressEvents (roundtable_test.go:355-362) 断言恰好
+		// 4 个 debate_phase 事件（4 轮辩论），预搜索不可计入该轮次计数。
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "team_search",
+			Name:   "search",
+			Detail: pickPrompt(zh, "Searching codebase...", "正在搜索代码库..."),
+		})
+	}
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          buildSearchGoal(goal, zh),
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: roundtableSearchMaxIterations,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+// buildSearchGoal instructs the pre-debate search agent to produce a structured
+// codebase report for the debate goal. Research-only: it must not propose solutions.
+func buildSearchGoal(goal string, zh bool) string {
+	return fmt.Sprintf(pickPrompt(zh,
+		`## Task
+Search the codebase for context relevant to the following requirement. Produce a concise, structured report that will be shared with multiple debate members as their baseline.
+
+## Requirement
+%s
+
+## Report Format
+- **Relevant files**: exact paths + one-line purpose each
+- **Key code**: short snippets or precise references (function/type names + file:line) that the requirement touches
+- **Constraints**: existing conventions, interfaces, callers that constrain changes
+- **Risks**: hotspots, edge cases, likely failure points
+
+Be factual and cite file paths. Do NOT propose solutions — this is research only.`,
+		`## 任务
+搜索代码库中与以下需求相关的上下文。产出一份简洁、结构化的调研报告，将作为多名辩论成员的共享基线。
+
+## 需求
+%s
+
+## 报告格式
+- **相关文件**：精确路径 + 每行一句话用途
+- **关键代码**：简短片段或精确引用（函数/类型名 + file:行号），说明需求涉及哪些代码
+- **约束**：现有约定、接口、调用方对改动的限制
+- **风险**：热点、边界情况、可能的失败点
+
+务必基于事实并引用文件路径。不要提方案——这只是调研。`), goal)
+}
+
 // handleDebateArena orchestrates the full 4-round debate arena.
 // It only executes rounds that haven't been completed yet (safe to re-enter
 // after a partial failure).
@@ -146,6 +219,13 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 		members = DefaultDebateMembers
 	}
 	state.Roundtable.Members = members
+
+	// Pre-search: run the codebase scan once as the shared baseline for all
+	// members. Idempotent — skipped if already populated (re-entry after a
+	// partial failure or a "debate again" round).
+	if state.Roundtable.SharedContext == "" {
+		state.Roundtable.SharedContext = h.runSharedSearch(ctx, goal, zh)
+	}
 
 	phase := state.Roundtable.Phase
 
@@ -304,7 +384,7 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		})
 	}
 
-	taskGoal := buildDebateGoal(goal, member, phase, allMembers, h.engine.state.Roundtable.DebateRounds, zh)
+	taskGoal := buildDebateGoal(goal, member, phase, allMembers, h.engine.state.Roundtable.DebateRounds, zh, h.engine.state.Roundtable.SharedContext)
 	targets := determineTargets(member.ID, phase, allMembers)
 
 	handoff := Handoff{
@@ -425,8 +505,14 @@ func memberRolePrompt(member RoundtableMember, zh bool) string {
 }
 
 // buildDebateGoal constructs the task prompt for a member in a specific debate phase.
-func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhase, allMembers []RoundtableMember, rounds []DebateRound, zh bool) string {
+func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhase, allMembers []RoundtableMember, rounds []DebateRound, zh bool, sharedContext string) string {
 	var sb strings.Builder
+
+	if sharedContext != "" {
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Shared Code Research\nShared findings from a code-search agent. Use as a baseline, but verify with your own tools before relying on them.\n\n%s\n\n",
+			"## 共享代码调研\n代码搜索 agent 的共享调研结果。作为基线使用，但请用你自己的工具核实后再依赖。\n\n%s\n\n"), sharedContext))
+	}
 
 	switch phase {
 	case DebateProposal:

@@ -440,4 +440,10 @@ type RoundtableState struct {
 	Phase        RoundtablePhase    `json:"phase"`
 	Members      []RoundtableMember `json:"members"`
 	DebateRounds []DebateRound      `json:"debate_rounds"` // 替代 Proposals + Reviews
+	// SharedContext 是预搜索子 agent 产出的代码调研报告，作为所有辩论成员的共享基线。
+	SharedContext string `json:"shared_context,omitempty"`
+	// WinnerID 是终陈后判定的平均分最高成员 ID。
+	WinnerID string `json:"winner_id,omitempty"`
+	// Blueprint 是胜者方案的详细实施蓝图（LLM 生成）。
+	Blueprint string `json:"blueprint,omitempty"`
 }

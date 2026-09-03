@@ -545,7 +545,7 @@ func TestBuildDebateGoal_FinalRoundInstructsMemberID(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildDebateGoal("测试需求", DefaultDebateMembers[0], DebateFinal, DefaultDebateMembers[:2], rounds, true)
+	prompt := buildDebateGoal("测试需求", DefaultDebateMembers[0], DebateFinal, DefaultDebateMembers[:2], rounds, true, "")
 	if !strings.Contains(prompt, "member_id") {
 		t.Errorf("final round prompt should instruct using member_id, got:\n%s", prompt)
 	}
@@ -642,4 +642,64 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// --- SharedContext pre-search ---
+
+func TestRunSharedSearch_StoresContext(t *testing.T) {
+	e := newTestEngine(t)
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "实现缓存层",
+		Phase:   RoundtableProposal,
+		Members: DefaultDebateMembers[:2],
+	}
+
+	resp, err := e.roundtableHall.handleDebateArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleDebateArena() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if e.state.Roundtable.SharedContext == "" {
+		t.Error("expected SharedContext to be populated by pre-search")
+	}
+	// mockPromptRunner.Run returns the fixed response text (含"采用微服务架构")
+	if !strings.Contains(e.state.Roundtable.SharedContext, "采用微服务架构") {
+		t.Errorf("SharedContext should contain the mock search result, got %q", e.state.Roundtable.SharedContext)
+	}
+}
+
+func TestRunSharedSearch_RunsOnce(t *testing.T) {
+	e := newTestEngine(t)
+	e.state.Roundtable = &RoundtableState{
+		Goal:          "实现缓存层",
+		Phase:         RoundtableProposal,
+		Members:       DefaultDebateMembers[:1],
+		SharedContext: "already-searched", // 模拟已搜索过
+	}
+
+	// 手动把 SharedContext 置为已存在值后，pre-search 应跳过（幂等）
+	// handleDebateArena 不再复写 SharedContext
+	_, err := e.roundtableHall.handleDebateArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleDebateArena() unexpected error: %v", err)
+	}
+	if e.state.Roundtable.SharedContext != "already-searched" {
+		t.Errorf("SharedContext overwritten: got %q, want %q", e.state.Roundtable.SharedContext, "already-searched")
+	}
+}
+
+func TestBuildDebateGoal_IncludesSharedContext(t *testing.T) {
+	prompt := buildDebateGoal("测试需求", DefaultDebateMembers[0], DebateProposal,
+		DefaultDebateMembers[:1], nil, true, "共享调研: cache.go 已有 TTL 相关代码")
+	if !strings.Contains(prompt, "共享调研") {
+		t.Errorf("prompt should include shared context, got:\n%s", prompt)
+	}
+	// 空上下文不注入共享区
+	prompt2 := buildDebateGoal("测试需求", DefaultDebateMembers[0], DebateProposal,
+		DefaultDebateMembers[:1], nil, true, "")
+	if strings.Contains(prompt2, "共享代码调研") {
+		t.Errorf("prompt should not include shared section when context is empty, got:\n%s", prompt2)
+	}
 }
