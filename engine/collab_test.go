@@ -367,3 +367,58 @@ func TestCollab_AdvanceConfirmWithAdjustment_NotRestart(t *testing.T) {
 		t.Error("expected pinned plan after confirmation")
 	}
 }
+
+// --- Run() integration ---
+
+func TestRun_CollabExecutesAndConfirms(t *testing.T) {
+	e := &Engine{
+		model:           &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了协作方案。", FinishReason: "stop"}}},
+		context:         &stubContextBuilder{},
+		tools:           stubToolExecutor{},
+		state:           &TaskState{TaskID: "test-collab-run"},
+		history:         []Message{},
+		config:          EngineConfig{ModelName: "test-model", MaxTurns: 10},
+		guards:          &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		readLoop:        NewReadLoopState(),
+		errorLoop:       NewErrorLoopState(0),
+		activatedSkills: make(map[string]bool),
+	}
+	reg := NewAgentRegistry()
+	reg.Register(&mockPromptRunner{
+		mockSimpleAgent: mockSimpleAgent{id: AgentSub, response: "## 产出\n采用微服务架构。"},
+	})
+	e.agents = reg
+	e.collabHall = NewCollabHall(e)
+	e.state.Collab = &CollabState{
+		Goal:   "实现缓存层",
+		Phase:  CollabAwaitingConfirmation,
+		Stages: []CollabStage{{Name: CollabRecon, Content: "调研结果"}},
+	}
+
+	resp, err := e.Run(context.Background(), "支持")
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	// 确认后同一 Run 执行方案（而非只返回确认 ack）
+	if strings.Contains(resp.Summary, "已确认") {
+		t.Errorf("collab confirm Run must execute the plan, got ack %q", resp.Summary)
+	}
+	if e.state.Collab != nil {
+		t.Errorf("collab state should be cleared after confirm Run, got phase %v", e.state.Collab.Phase)
+	}
+	if e.collabVerdictPending {
+		t.Error("collabVerdictPending should be consumed within the confirm Run")
+	}
+	decisionFound := false
+	for _, d := range e.state.Decisions {
+		if d.ID == "collab-plan" {
+			decisionFound = true
+		}
+	}
+	if !decisionFound {
+		t.Error("expected a collab-plan decision to be persisted")
+	}
+}

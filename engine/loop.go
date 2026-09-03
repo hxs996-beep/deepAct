@@ -744,6 +744,36 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Collab pipeline phase — execute pipeline stages, then await confirmation.
+	if e.state.Collab != nil {
+		phase := e.state.Collab.Phase
+		switch phase {
+		case CollabReconPhase, CollabDesignPhase, CollabDevPhase, CollabReviewPhase:
+			response, err := e.collabHall.handleCollabArena(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("collab arena: %w", err)
+			}
+			if response != nil {
+				return response, nil
+			}
+		case CollabAwaitingConfirmation:
+			response, err := e.collabHall.Advance(ctx, userMsg)
+			if err != nil {
+				return nil, fmt.Errorf("collab confirm: %w", err)
+			}
+			// "重新协作" restarts the pipeline (return its response); a picked
+			// plan (Phase becomes CollabDone) falls through so the main agent
+			// loop consumes the pinned plan + collabVerdictPending flag and
+			// executes in this same Run().
+			if e.state.Collab.Phase != CollabDone {
+				return response, nil
+			}
+		case CollabDone:
+			// Pipeline complete — clear collab state so normal flow resumes.
+			e.state.Collab = nil
+		}
+	}
+
 	// Team verdict: the user already approved a plan through the debate process.
 	// Override intent detection to skip all confirmation gates (analysis-report
 	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
@@ -756,6 +786,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.AnalysisMode = false
 		e.teamVerdictPending = false
 		loopLog.Printf("team verdict: PlanConfirmed=true, skipping confirmation gates")
+	}
+
+	// Collab verdict: the user already approved a plan through the pipeline.
+	if e.collabVerdictPending {
+		e.state.PlanConfirmed = true
+		e.state.AnalysisReportConfirmed = true
+		e.state.AnalysisMode = false
+		e.collabVerdictPending = false
+		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping confirmation gates")
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -917,6 +956,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Run() call's context; subsequent turns don't need stale roundtable data.
 	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableDone {
 		e.state.Roundtable = nil
+	}
+
+	// Clean up a completed collab pipeline the same way: the pinned plan was
+	// already consumed by this Run()'s agent loop.
+	if e.state.Collab != nil && e.state.Collab.Phase == CollabDone {
+		e.state.Collab = nil
 	}
 
 	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
