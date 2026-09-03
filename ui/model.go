@@ -1230,7 +1230,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			if !msg.Alt {
 				// 非末项（方案）→ 发内部 /confirm N 命令确定性确认；
-				// 末项"其他（输入你的意见）"→ 关闭弹出框回输入框自由输入。
+				// 末项"输入你的意见"→ 关闭弹出框回输入框自由输入。
 				n := m.selectedOption + 1
 				total := len(m.activeOptions)
 				m.activeOptions = nil

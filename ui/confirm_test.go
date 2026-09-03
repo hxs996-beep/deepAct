@@ -37,7 +37,7 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 		"按报告执行",
 		"输入你的意见",
 	}
-	m.selectedOption = 0 // 方案A
+	m.selectedOption = 0 // 选中第一项（按报告执行）
 	// 让 submitConfirm 启动路径中的 waitForProgress 不阻塞：预填一条消息。
 	m.progressChan = make(chan ProgressMsg, 1)
 	m.progressChan <- ProgressMsg{Type: "done"}
@@ -62,7 +62,7 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	}
 }
 
-// 选末项"其他" Enter → 不发命令，回到输入框（activeOptions 清空）。
+// 选末项"输入你的意见" Enter → 不发命令，回到输入框（activeOptions 清空）。
 func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
