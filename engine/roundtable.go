@@ -884,27 +884,39 @@ func countHighConfidenceTargeting(memberID string, rounds []DebateRound) int {
 	return n
 }
 
-// buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
-// When synthesis is non-empty, shows a compact LLM-generated summary (总分 structure:
-// score overview + vote tally as 总, synthesis as 分).
-// When synthesis is empty (LLM call failed), falls back to verbose member viewpoints.
+// buildVerdictPrompt generates the verdict prompt shown to the user after the
+// debate: declares the most-accepted proposal (highest average score), shows
+// the score overview table, and renders the detailed implementation blueprint.
+// When the blueprint is empty (LLM call failed) it falls back to the concise
+// synthesis; when both are empty it falls back to verbose member viewpoints +
+// high-confidence challenges.
 func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool, synthesis string) *EngineResponse {
 	var sb strings.Builder
 
+	state := h.engine.state
+	rounds := state.Roundtable.DebateRounds
+
 	// Header
 	sb.WriteString(pickPrompt(zh,
-		"## Debate Complete - Your Verdict\n\n",
-		"## 辩论完成 - 请裁决\n\n",
+		"## Debate Complete - Most Accepted Proposal\n\n",
+		"## 辩论完成 - 最被大家接受的方案\n\n",
 	))
 	sb.WriteString(pickPrompt(zh,
 		fmt.Sprintf("**Goal**: %s\n\n", goal),
 		fmt.Sprintf("**需求**: %s\n\n", goal),
 	))
 
-	state := h.engine.state
-	rounds := state.Roundtable.DebateRounds
+	// ── 胜者区块 ──
+	winner := findMember(members, state.Roundtable.WinnerID)
+	if winner != nil {
+		sb.WriteString(fmt.Sprintf("### 🏆 %s %s", winner.Avatar, winner.displayName(zh)))
+		if avg := winnerAvgScore(winner.ID, rounds, members); avg >= 0 {
+			sb.WriteString(fmt.Sprintf("（平均分 %.1f）", avg))
+		}
+		sb.WriteString("\n\n")
+	}
 
-	// ── 总: Score overview table (sorted, top highlighted) + vote tally ──
+	// ── 评分总览 ──
 	if len(rounds) >= 4 {
 		table := buildScoreTable(rounds[3].Outputs, members, zh)
 		if table != "" {
@@ -912,31 +924,21 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 			sb.WriteString(table)
 			sb.WriteString("\n")
 		}
-
-		tally := parseVerdicts(rounds[3].Outputs, members, zh)
-		if len(tally) > 0 {
-			sb.WriteString(pickPrompt(zh, "### Vote Tally\n\n", "### 投票统计\n\n"))
-			var parts []string
-			for _, v := range tally {
-				parts = append(parts, fmt.Sprintf("%s %s %d%s",
-					v.avatar, v.name, v.votes,
-					pickPrompt(zh, " votes", "票")))
-			}
-			sb.WriteString(strings.Join(parts, " | "))
-			sb.WriteString("\n\n")
-		}
 	}
 
-	if synthesis != "" {
-		// ── 分: LLM synthesis summary ──
+	// ── 蓝图（优先）→ synthesis → 观点 fallback ──
+	switch {
+	case state.Roundtable.Blueprint != "":
+		sb.WriteString(pickPrompt(zh, "### Implementation Blueprint\n\n", "### 实施蓝图\n\n"))
+		sb.WriteString(state.Roundtable.Blueprint)
+		sb.WriteString("\n\n")
+	case synthesis != "":
 		sb.WriteString(pickPrompt(zh, "### Debate Summary\n\n", "### 辩论摘要\n\n"))
 		sb.WriteString(synthesis)
 		sb.WriteString("\n\n")
-	} else {
-		// ── Fallback: verbose member viewpoints + high-confidence challenges ──
+	default:
 		if len(rounds) > 0 {
 			sb.WriteString(pickPrompt(zh, "### Member Viewpoints\n\n", "### 各角色观点\n\n"))
-
 			for _, out := range rounds[0].Outputs {
 				m := findMember(members, out.MemberID)
 				avatar := ""
@@ -947,13 +949,10 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 					name = m.displayName(zh)
 					stance = m.displayStance(zh)
 				}
-
 				sb.WriteString(fmt.Sprintf("#### %s %s\n", avatar, name))
 				if stance != "" {
 					sb.WriteString(fmt.Sprintf("*%s*\n\n", stance))
 				}
-
-				// Prefer final position (round 3); fall back to original proposal (round 0)
 				viewpoint := ""
 				if len(rounds) >= 4 {
 					finalOut := getMemberOutput(out.MemberID, rounds[3].Outputs)
@@ -968,7 +967,6 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 				sb.WriteString("\n\n")
 			}
 		}
-
 		challenges := extractHighConfidenceChallenges(rounds, members, zh)
 		if len(challenges) > 0 {
 			sb.WriteString(pickPrompt(zh, "### High-Confidence Challenges\n\n", "### 高置信度挑战\n\n"))
@@ -987,8 +985,8 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 	// ── Footer: Verdict instructions ──
 	sb.WriteString("---\n\n")
 	sb.WriteString(pickPrompt(zh,
-		"**Your verdict**: Type `support <role>`, `<role> but <condition>`, `none, should <your approach>`, or `debate again`\n",
-		"**你的裁决**: 输入 `支持方案<角色名>`、`方案<角色名>但要<条件>`、`都不行，应该<你的方案>`、或 `再辩一轮`\n",
+		"**Your verdict**: Type `support` to execute this blueprint, `but <condition>` to adjust, or `debate again`\n",
+		"**你的裁决**: 输入 `支持` 执行此蓝图、`但要<条件>` 调整、或 `再辩一轮`\n",
 	))
 
 	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
@@ -1097,6 +1095,42 @@ func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool
 	}
 
 	return sb.String()
+}
+
+// winnerAvgScore returns the winner's average score across all members' final
+// round SCORE lines, or -1 if none parse.
+func winnerAvgScore(memberID string, rounds []DebateRound, members []RoundtableMember) float64 {
+	if len(rounds) < 4 {
+		return -1
+	}
+	var sum, count float64
+	for _, out := range rounds[3].Outputs {
+		for _, line := range strings.Split(out.Content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			lower := strings.ToLower(trimmed)
+			if !strings.HasPrefix(lower, "score:") {
+				continue
+			}
+			rest := strings.TrimSpace(trimmed[len("score:"):])
+			parts := strings.SplitN(rest, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if strings.TrimSpace(parts[0]) != memberID {
+				continue
+			}
+			s, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+			if err != nil {
+				continue
+			}
+			sum += s
+			count++
+		}
+	}
+	if count == 0 {
+		return -1
+	}
+	return sum / count
 }
 
 // challengeBlock represents a single high-confidence challenge from the challenge round.

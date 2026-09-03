@@ -400,6 +400,10 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 		},
 	}
 
+	// 模拟任务 3/4 已生成的产物：胜者与蓝图
+	e.state.Roundtable.WinnerID = "radical"
+	e.state.Roundtable.Blueprint = "## 方案概述\n蓝图正文：采用微服务架构。\n\n## 实现步骤\n1. 新建 internal/svc\n2. 迁移调用方"
+
 	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers[:2], true, "")
 	if resp == nil {
 		t.Fatal("expected non-nil response")
@@ -410,39 +414,76 @@ func TestDebateArena_BuildVerdictPrompt(t *testing.T) {
 	if !strings.Contains(resp.Summary, "创新派") || !strings.Contains(resp.Summary, "防守派") {
 		t.Errorf("verdict prompt should mention member names")
 	}
-	if !strings.Contains(resp.Summary, "评分") {
-		t.Errorf("verdict prompt should contain scores")
+	if !strings.Contains(resp.Summary, "最被大家接受的方案") {
+		t.Errorf("verdict prompt should declare the most-accepted proposal")
 	}
-	// Score table should contain average column
+	if !strings.Contains(resp.Summary, "评分总览") {
+		t.Errorf("verdict prompt should contain score overview")
+	}
 	if !strings.Contains(resp.Summary, "平均") {
 		t.Errorf("verdict prompt should contain average column in score table")
 	}
-	// Score table should be sorted by average (radical avg 82.5 > defender avg 77.5)
-	// and top row should have ★
 	if !strings.Contains(resp.Summary, "★") {
 		t.Errorf("verdict prompt should highlight top-scoring proposal with ★")
 	}
-	// Vote tally should be shown
-	if !strings.Contains(resp.Summary, "投票统计") {
-		t.Errorf("verdict prompt should contain vote tally section")
+	if !strings.Contains(resp.Summary, "实施蓝图") {
+		t.Errorf("verdict prompt should contain the implementation blueprint section")
 	}
-	if !strings.Contains(resp.Summary, "1票") {
-		t.Errorf("verdict prompt should show vote counts")
+	if !strings.Contains(resp.Summary, "蓝图正文") {
+		t.Errorf("verdict prompt should render the blueprint content")
 	}
-	// High-confidence challenge (0.9) should be shown in fallback mode
+	// 投票统计已移除（用户只要得分）
+	if strings.Contains(resp.Summary, "投票统计") {
+		t.Errorf("verdict prompt should NOT contain vote tally")
+	}
+	// 蓝图分支：观点/挑战/最终立场已折叠进蓝图，不应单独展示
+	if strings.Contains(resp.Summary, "各角色观点") {
+		t.Errorf("blueprint branch should NOT show member viewpoints")
+	}
+	if strings.Contains(resp.Summary, "高置信度挑战") {
+		t.Errorf("blueprint branch should NOT show high-confidence challenges")
+	}
+}
+
+func TestBuildVerdictPrompt_FallbackWithoutBlueprint(t *testing.T) {
+	e := newTestEngine(t)
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "测试裁决界面",
+		Phase:   RoundtableAwaitingVerdict,
+		Members: DefaultDebateMembers[:2],
+		DebateRounds: []DebateRound{
+			{Phase: DebateProposal, Outputs: []DebateOutput{{MemberID: "radical", Content: "创新派方案"}, {MemberID: "defender", Content: "防守派方案"}}},
+			{Phase: DebateChallenge, Outputs: []DebateOutput{{MemberID: "radical", Content: "### 挑战: 防守派\n方案过于保守\nCONFIDENCE: 0.9", Targets: []string{"defender"}}}},
+			{Phase: DebateRebuttal, Outputs: []DebateOutput{{MemberID: "radical", Content: "反驳"}, {MemberID: "defender", Content: "反驳"}}},
+			{Phase: DebateFinal, Outputs: []DebateOutput{{MemberID: "radical", Content: "最终立场\nSCORE: radical = 90\nSCORE: defender = 70"}, {MemberID: "defender", Content: "最终立场\nSCORE: radical = 75\nSCORE: defender = 85"}}},
+		},
+	}
+	// WinnerID 未设置、Blueprint 为空、synthesis 为空 → 走 fallback（观点+高置信挑战）
+	resp := e.roundtableHall.buildVerdictPrompt("测试裁决界面", DefaultDebateMembers[:2], true, "")
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if !strings.Contains(resp.Summary, "最被大家接受的方案") {
+		t.Errorf("verdict prompt should still declare the section header")
+	}
+	// fallback 展示成员观点
+	if !strings.Contains(resp.Summary, "各角色观点") {
+		t.Errorf("fallback should show member viewpoints")
+	}
+	// 高置信(0.9)挑战显示
 	if !strings.Contains(resp.Summary, "高置信度挑战") {
-		t.Errorf("verdict prompt should contain high-confidence challenges section in fallback")
+		t.Errorf("fallback should show high-confidence challenges")
 	}
 	if !strings.Contains(resp.Summary, "置信度 90%") {
-		t.Errorf("verdict prompt should show confidence percentage for high-confidence challenge")
+		t.Errorf("fallback should show confidence percentage for high-confidence challenge")
 	}
-	// Low-confidence challenge (0.5) should NOT be shown
+	// 低置信(0.5)挑战不显示
 	if strings.Contains(resp.Summary, "重构风险太高") {
-		t.Errorf("verdict prompt should not contain low-confidence challenges")
+		t.Errorf("fallback should not contain low-confidence challenges")
 	}
-	// Final position should be shown instead of raw proposal
+	// fallback 展示最终立场而非原始提案
 	if !strings.Contains(resp.Summary, "最终立场") {
-		t.Errorf("verdict prompt should contain final position from final round")
+		t.Errorf("fallback should contain final position from final round")
 	}
 }
 
@@ -620,12 +661,13 @@ func TestBuildVerdictPrompt_WithSynthesis(t *testing.T) {
 	if !strings.Contains(resp.Summary, "综合推荐") {
 		t.Errorf("verdict prompt should contain synthesis content")
 	}
-	// Score table + vote tally should still be shown (总)
+	// Score table should still be shown (总)
 	if !strings.Contains(resp.Summary, "评分总览") {
 		t.Errorf("verdict prompt should contain score overview even with synthesis")
 	}
-	if !strings.Contains(resp.Summary, "投票统计") {
-		t.Errorf("verdict prompt should contain vote tally even with synthesis")
+	// 投票统计已移除（用户只要得分）
+	if strings.Contains(resp.Summary, "投票统计") {
+		t.Errorf("verdict prompt should NOT contain vote tally even with synthesis")
 	}
 	// Fallback sections should NOT be shown
 	if strings.Contains(resp.Summary, "各角色观点") {
