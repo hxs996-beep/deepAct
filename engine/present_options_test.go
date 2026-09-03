@@ -14,8 +14,8 @@ func TestPresentOptionsToolSpec(t *testing.T) {
 		t.Error("description should not be empty")
 	}
 	var params struct {
-		Type     string `json:"type"`
-		Required []string `json:"required"`
+		Type       string   `json:"type"`
+		Required   []string `json:"required"`
 		Properties struct {
 			Options struct {
 				Type     string `json:"type"`
