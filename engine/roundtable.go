@@ -259,11 +259,16 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 	}
 
 	// Determine the winner by average score (ties broken by challenge data).
+	var synthesis string
 	if w := determineWinner(members, state.Roundtable.DebateRounds); w != nil {
 		state.Roundtable.WinnerID = w.ID
+		// Generate the detailed blueprint; only fall back to the concise
+		// synthesis LLM call if the blueprint generation fails (saves tokens).
+		state.Roundtable.Blueprint = h.buildBlueprint(ctx, goal, members, zh, *w, state.Roundtable.DebateRounds)
 	}
-
-	synthesis := h.synthesizeDebate(ctx, goal, members, zh)
+	if state.Roundtable.Blueprint == "" {
+		synthesis = h.synthesizeDebate(ctx, goal, members, zh)
+	}
 	return h.buildVerdictPrompt(goal, members, zh, synthesis), nil
 }
 
@@ -289,6 +294,110 @@ func (h *RoundtableHall) synthesizeDebate(ctx context.Context, goal string, memb
 		"## Task\nYou are the debate arena judge's assistant. Below is the complete debate record. Produce a concise summary to help the user decide quickly.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\nFollow this format strictly:\n\n**Top Recommendation**: <winning member name> (avg score X, Y votes)\n<1-2 sentences explaining why>\n\n**One-liner per proposal**:\n- <avatar> <member name>: <core approach>. <main concern raised>\n(one line per proposal, ordered by score descending)\n\n**Strongest Challenge**: <challenger> -> <challenged> (confidence X)\n<challenge summary, 1-2 sentences>\n\n**Best Rebuttal**: <rebuttal author>\n<rebuttal summary, 1-2 sentences>\n\n**Key Disagreements**: <2-3 sentences summarizing core disagreements>",
 		"## 任务\n你是辩论场裁判助理。以下是完整的辩论记录。请产出一份精简摘要，帮助用户快速决策。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n请严格按以下格式输出：\n\n**综合推荐**: <获胜方案角色名>（平均分 X，获 Y 票）\n<1-2句话说明推荐理由>\n\n**各方案一句话**:\n- <avatar> <角色名>: <方案核心思路>。<主要被质疑的问题>\n（每个方案一行，按评分从高到低排列）\n\n**最强挑战**: <挑战者> -> <被挑战者>（置信度 X）\n<挑战内容摘要，1-2句>\n\n**最佳反驳**: <反驳者>\n<反驳要点，1-2句>\n\n**关键分歧**: <2-3句话总结辩论中的核心分歧点>",
 	), goal, record)
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          taskGoal,
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 3,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		if err != nil || result == nil {
+			return ""
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary
+	}
+
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+// buildBlueprint runs a single LLM call that rewrites the winning proposal into
+// a detailed, executable implementation blueprint, absorbing reasonable
+// corrections raised during the challenge/rebuttal rounds (the LLM judges which
+// corrections to absorb from the full debate record). Returns "" on failure so
+// the verdict screen falls back to the concise synthesis.
+func (h *RoundtableHall) buildBlueprint(ctx context.Context, goal string, members []RoundtableMember, zh bool, winner RoundtableMember, rounds []DebateRound) string {
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "synthesis",
+			Name:   "blueprint",
+			Detail: pickPrompt(zh, "Writing implementation blueprint...", "正在撰写实施蓝图..."),
+		})
+	}
+	record := formatDebateRecord(rounds, members, zh)
+	winnerProposal := getMemberOutput(winner.ID, rounds[0].Outputs)
+	if winnerProposal == "" {
+		return ""
+	}
+
+	taskGoal := fmt.Sprintf(pickPrompt(zh,
+		`## Task
+You are a senior engineer. Rewrite the winning proposal below into a detailed, executable implementation blueprint that a coding agent can follow directly. Absorb any reasonable corrections raised in the challenges (mark absorbed corrections explicitly).
+
+## Requirement
+%s
+
+## Winning Proposal
+%s
+
+## Complete Debate Record
+%s
+
+## Output Format
+## 方案概述
+<2-3 sentences>
+
+## 关键设计决策
+<numbered list: each decision + rationale; mark absorbed corrections as (来自质询修正)>
+
+## 实现步骤
+<numbered list: each step = what to change + where (file/function)>
+
+## 风险与回滚
+<bullet list: risk -> mitigation; rollback plan>`,
+		`## 任务
+你是一位资深工程师。把下面的获胜方案重写为一份详细的、可直接执行的实施蓝图，供编码 agent 直接照做。吸收质询中提出的合理修正（被吸收的修正请明确标注）。
+
+## 需求
+%s
+
+## 获胜方案
+%s
+
+## 完整辩论记录
+%s
+
+## 输出格式
+## 方案概述
+<2-3句>
+
+## 关键设计决策
+<编号列表：每个决策+理由；被吸收的修正标注 (来自质询修正)>
+
+## 实现步骤
+<编号列表：每步=改什么+改哪里（文件/函数）>
+
+## 风险与回滚
+<列表：风险 -> 缓解；回滚方案>`), goal, winnerProposal, record)
 
 	handoff := Handoff{
 		Agent:         AgentSub,

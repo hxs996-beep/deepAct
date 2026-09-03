@@ -812,3 +812,18 @@ func TestDetermineWinner_NoScoresReturnsNil(t *testing.T) {
 		t.Errorf("expected nil winner when no SCORE lines, got %q", w.ID)
 	}
 }
+
+// --- Task 4: Blueprint generation ---
+
+func TestBuildBlueprint_GeneratesBlueprint(t *testing.T) {
+	e := newTestEngine(t)
+	rounds := buildFinalRounds()
+	bp := e.roundtableHall.buildBlueprint(context.Background(), "测试需求", DefaultDebateMembers[:2], true, DefaultDebateMembers[0], rounds)
+	if bp == "" {
+		t.Fatal("expected non-empty blueprint")
+	}
+	// mockPromptRunner.RunWithPrompt 返回固定 response（含"采用微服务架构"）
+	if !strings.Contains(bp, "采用微服务架构") {
+		t.Errorf("blueprint should contain mock LLM output, got %q", bp)
+	}
+}
