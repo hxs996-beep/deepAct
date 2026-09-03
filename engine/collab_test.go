@@ -341,3 +341,29 @@ func TestCollab_AdvanceRestart(t *testing.T) {
 		t.Errorf("Stages should be cleared on restart, got %d", len(e.state.Collab.Stages))
 	}
 }
+
+func TestCollab_AdvanceConfirmWithAdjustment_NotRestart(t *testing.T) {
+	e := newCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:   "实现一个缓存层",
+		Phase:  CollabAwaitingConfirmation,
+		Stages: []CollabStage{{Name: CollabRecon, Content: "调研结果"}},
+	}
+	// "支持但要重新审视设计" 是确认+调整指令，不应被误判为 restart
+	resp, err := e.collabHall.Advance(context.Background(), "支持但要重新审视设计")
+	if err != nil {
+		t.Fatalf("Advance() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if e.state.Collab.Phase != CollabDone {
+		t.Errorf("Phase = %v, want CollabDone (confirmed, not restart)", e.state.Collab.Phase)
+	}
+	if len(e.state.Collab.Stages) != 1 {
+		t.Errorf("Stages should NOT be cleared (len 1), got %d", len(e.state.Collab.Stages))
+	}
+	if len(e.pendingPinnedMessages) == 0 {
+		t.Error("expected pinned plan after confirmation")
+	}
+}

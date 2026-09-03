@@ -357,8 +357,8 @@ func (h *CollabHall) handleConfirmation(userMsg, lower string, zh bool) *EngineR
 	state := h.engine.state
 
 	// "重新协作" / "restart" → clear stages and restart the pipeline.
-	if strings.Contains(lower, "重新协作") || strings.Contains(lower, "重新") ||
-		strings.Contains(lower, "restart") || lower == "restart" {
+	// 用前缀/精确匹配收窄判定，避免误吞"支持但要重新审视..."类确认+调整指令。
+	if strings.HasPrefix(lower, "重新") || lower == "restart" || lower == "重新协作" {
 		state.Collab.Phase = CollabReconPhase
 		state.Collab.Stages = nil
 		return &EngineResponse{
