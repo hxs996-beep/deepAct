@@ -454,6 +454,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// (confirmation or feedback) before any other processing.
 	e.handleAnalysisNudgeConfirmation(userMsg)
 
+	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
+	// 回输入框），本组待决方案作废，避免残留到下一轮门控拦截时再次弹出。
+	if len(e.pendingConfirmOptions) > 0 {
+		e.pendingConfirmOptions = nil
+	}
+
 	if e.pendingEditPlan != nil {
 		if !isDangerousConfirmation(userMsg) {
 			// User is providing feedback/instruction on the proposed plan, not confirming it.
@@ -1643,32 +1649,35 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 // handleConfirmCommand processes a /confirm N message deterministically,
 // bypassing isDangerousConfirmation and the intent LLM classifier.
 //
-// N=1 (the "execute per report" option) is the only confirm-execute signal:
-// it flips AnalysisReportConfirmed + clears AnalysisMode so the agent's next
-// edit/write in this same Run passes the analysis gate.
-// N>=2 (adjust / cancel options) is feedback: cleared for the agent to revise,
-// without confirming execution.
+// Any /confirm N flips AnalysisReportConfirmed + clears AnalysisMode so the
+// agent's next edit/write in this same Run passes the analysis gate.
+// When the agent declared options via present_options (pendingConfirmOptions
+// non-empty), /confirm N selects 方案N and the choice is injected into history
+// so the agent implements the selected plan. When no options were declared,
+// /confirm 1 confirms the report ("按报告执行"). The last popup item
+// ("输入你的意见") never reaches here — the UI returns to the input box.
 // Returns true if userMsg was a valid /confirm command.
 func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	n, ok := parseConfirmCommand(userMsg)
 	if !ok {
 		return false
 	}
-	// Replace the user's bare command with contextual guidance for the agent.
+	// 置确认态（任何 /confirm N 都确认执行）。
+	e.state.AnalysisReportConfirmed = true
+	e.state.AnalysisMode = false
+	e.pendingAnalysisNudge = false
+
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-		if n == 1 {
-			e.state.AnalysisReportConfirmed = true
-			e.state.AnalysisMode = false
-			e.pendingAnalysisNudge = false
-			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（方案A：按报告执行修改），可以开始修改代码。"
-		} else {
-			e.state.AnalysisReportConfirmed = false
-			e.state.AnalysisMode = true
-			e.pendingAnalysisNudge = false
+		if len(e.pendingConfirmOptions) > 0 && n >= 1 && n <= len(e.pendingConfirmOptions) {
+			label := confirmOptionLabel(n-1, e.pendingConfirmOptions[n-1])
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"用户选择了方案（编号 %d）。请根据该方案调整分析，然后重新输出。", n)
+				"用户选择了方案：%s，请按该方案执行修改。", label)
+		} else {
+			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（按报告执行），可以开始修改代码。"
 		}
 	}
+	// 本组方案已消费（用户已选择或确认），清除避免残留到无关 Run。
+	e.pendingConfirmOptions = nil
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
 	return true
 }
