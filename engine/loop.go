@@ -107,11 +107,18 @@ type Engine struct {
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
+	// collabHall orchestrates the /collab pipeline (recon → design → dev → review).
+	collabHall *CollabHall
+
 	// teamVerdictPending is set when the user's roundtable verdict is processed.
 	// On the next Run(), it causes PlanConfirmed + AnalysisReportConfirmed to be
 	// set, skipping the analysis-report gate and edit-plan guard - the user
 	// already approved the plan through the debate process.
 	teamVerdictPending bool
+
+	// collabVerdictPending is set when the user confirms the /collab summary,
+	// skipping confirmation gates so the plan lands directly.
+	collabVerdictPending bool
 
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
@@ -194,6 +201,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
+	e.collabHall = NewCollabHall(e)
 
 	// Load cross-session persistent memory for this project and merge it into
 	// TaskState. These fields (memory_markers, decisions, open_questions,
@@ -344,6 +352,21 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				"辩论模式已启动：%s\n\n请等待团队成员完成辩论。",
 				tc.Goal)
 			userMsg = fmt.Sprintf("辩论模式已启动：%s\n\n请等待团队成员完成辩论。", tc.Goal)
+		}
+	}
+
+	// Collab command handling — /collab <goal>
+	// Activates the collaboration pipeline: recon → design → dev → review.
+	if cc := parseCollabCommand(userMsg); cc != nil {
+		e.state.Collab = &CollabState{
+			Goal:  cc.Goal,
+			Phase: CollabReconPhase,
+		}
+		// Replace raw "/collab <goal>" so the main agent loop sees a proper prompt.
+		if len(e.history) > 0 {
+			e.history[len(e.history)-1].Content = fmt.Sprintf(
+				"协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
+			userMsg = fmt.Sprintf("协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
 		}
 	}
 

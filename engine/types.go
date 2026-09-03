@@ -252,6 +252,7 @@ type TaskState struct {
 	ActiveSkillContent   string           `json:"active_skill_content,omitempty"`   // full content of the activated skill
 	SkillGatePassed      bool             `json:"skill_gate_passed,omitempty"`      // active skill's pre-implementation gate has been passed (user approval or NextSkills transition), allowing edits
 	Roundtable           *RoundtableState `json:"roundtable,omitempty"`
+	Collab               *CollabState     `json:"collab,omitempty"`
 
 	// ReadHistory records each file read this session (path + scope) for the
 	// loop guard to count repeated reads of the same (path, scope) and block
@@ -446,4 +447,40 @@ type RoundtableState struct {
 	WinnerID string `json:"winner_id,omitempty"`
 	// Blueprint 是胜者方案的详细实施蓝图（LLM 生成）。
 	Blueprint string `json:"blueprint,omitempty"`
+}
+
+// CollabStageName labels a single stage of the /collab pipeline.
+type CollabStageName string
+
+const (
+	CollabRecon  CollabStageName = "recon"  // 侦察：扫描代码库
+	CollabDesign CollabStageName = "design" // 设计：出技术方案
+	CollabDev    CollabStageName = "dev"    // 开发：产实现内容
+	CollabReview CollabStageName = "review" // 把关：评审挑问题
+)
+
+// CollabStage captures one pipeline stage's output.
+type CollabStage struct {
+	Name    CollabStageName `json:"name"`
+	Content string          `json:"content"`
+}
+
+// CollabPhase describes which stage of the /collab pipeline we are in.
+type CollabPhase int
+
+const (
+	CollabIdle            CollabPhase = iota
+	CollabReconPhase                  // 侦察
+	CollabDesignPhase                 // 设计
+	CollabDevPhase                    // 开发
+	CollabReviewPhase                 // 把关
+	CollabAwaitingConfirmation        // 等待用户确认汇总
+	CollabDone                        // 完成
+)
+
+// CollabState tracks the current /collab pipeline within TaskState.
+type CollabState struct {
+	Goal   string        `json:"goal"`
+	Phase  CollabPhase   `json:"phase"`
+	Stages []CollabStage `json:"stages"` // 各流水线段产出，按执行顺序
 }
