@@ -83,3 +83,188 @@ func newCollabTestEngine(t *testing.T) *Engine {
 	e.collabHall = NewCollabHall(e)
 	return e
 }
+
+// capturePromptRunner implements RunWithPrompt and records the last input +
+// extraPrompt, returning a fixed response. Used to assert stage goal content
+// and the Tools safety allowlist.
+type capturePromptRunner struct {
+	mockSimpleAgent
+	lastInput  Handoff
+	lastExtra  string
+	stageGoals []string
+	stageTools [][]string // Tools captured per stage run
+}
+
+func (c *capturePromptRunner) RunWithPrompt(_ context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
+	c.lastInput = input
+	c.lastExtra = extraPrompt
+	c.stageGoals = append(c.stageGoals, input.Goal)
+	c.stageTools = append(c.stageTools, input.Tools)
+	return &HandoffResult{Summary: c.response, Conclusions: []string{c.response}}, nil
+}
+
+func newCaptureCollabTestEngine(t *testing.T) (*Engine, *capturePromptRunner) {
+	t.Helper()
+	captor := &capturePromptRunner{mockSimpleAgent: mockSimpleAgent{
+		id:       AgentSub,
+		response: "## 产出\n采用微服务架构。",
+	}}
+	reg := NewAgentRegistry()
+	reg.Register(captor)
+	e := &Engine{
+		agents:          reg,
+		state:           &TaskState{TaskID: "test-collab-capture"},
+		config:          EngineConfig{},
+		activatedSkills: make(map[string]bool),
+	}
+	e.collabHall = NewCollabHall(e)
+	return e, captor
+}
+
+// TestCollabStageGoal_CarriesPriorOutputs (C2): downstream stages must receive
+// the rendered outputs of already-completed stages; recon ignores prior.
+func TestCollabStageGoal_CarriesPriorOutputs(t *testing.T) {
+	prior := "### 侦察\n扫描发现 engine/collab.go。"
+	designGoal := buildCollabStageGoal(CollabDesign, "目标", prior, true)
+	if !strings.Contains(designGoal, "## 前序阶段产出") || !strings.Contains(designGoal, prior) {
+		t.Errorf("design goal must embed prior, got:\n%s", designGoal)
+	}
+	devGoal := buildCollabStageGoal(CollabDev, "目标", prior, false)
+	if !strings.Contains(devGoal, "## Previous Stage Outputs") || !strings.Contains(devGoal, prior) {
+		t.Errorf("dev goal must embed prior (en), got:\n%s", devGoal)
+	}
+	reviewGoal := buildCollabStageGoal(CollabReview, "目标", prior, true)
+	if !strings.Contains(reviewGoal, "## 前序阶段产出") || !strings.Contains(reviewGoal, prior) {
+		t.Errorf("review goal must embed prior, got:\n%s", reviewGoal)
+	}
+	// recon ignores prior entirely.
+	reconGoal := buildCollabStageGoal(CollabRecon, "目标", prior, true)
+	if strings.Contains(reconGoal, prior) || strings.Contains(reconGoal, "前序阶段产出") {
+		t.Errorf("recon goal must NOT embed prior, got:\n%s", reconGoal)
+	}
+	// Empty prior is harmless — no dangling prior section header.
+	emptyDesign := buildCollabStageGoal(CollabDesign, "目标", "", true)
+	if strings.Contains(emptyDesign, "前序阶段产出") {
+		t.Errorf("design goal with empty prior must not include a prior section, got:\n%s", emptyDesign)
+	}
+	if !strings.Contains(emptyDesign, "## 需求\n目标") {
+		t.Errorf("design goal with empty prior must still carry the requirement, got:\n%s", emptyDesign)
+	}
+}
+
+// TestRenderCollabPrior renders completed stages as labeled blocks.
+func TestRenderCollabPrior(t *testing.T) {
+	if got := renderCollabPrior(nil, true); got != "" {
+		t.Errorf("empty stages should render \"\", got %q", got)
+	}
+	stages := []CollabStage{
+		{Name: CollabRecon, Content: "文件 A"},
+		{Name: CollabDesign, Content: "方案 B"},
+	}
+	got := renderCollabPrior(stages, true)
+	want := "### 侦察\n文件 A\n\n### 设计\n方案 B"
+	if got != want {
+		t.Errorf("renderCollabPrior() = %q, want %q", got, want)
+	}
+}
+
+// TestHandleCollabArena_IdempotentResume (I1): starting from CollabDesignPhase
+// with an existing recon output must only run design/dev/review, advance to
+// AwaitingConfirmation, keep 4 total stages, and NOT rewrite the recon stage.
+func TestHandleCollabArena_IdempotentResume(t *testing.T) {
+	e, captor := newCaptureCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabDesignPhase,
+		Stages: []CollabStage{
+			{Name: CollabRecon, Content: "recon 已完成的内容"},
+		},
+	}
+	_, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() unexpected error: %v", err)
+	}
+	if e.state.Collab.Phase != CollabAwaitingConfirmation {
+		t.Errorf("Phase = %v, want CollabAwaitingConfirmation", e.state.Collab.Phase)
+	}
+	if len(e.state.Collab.Stages) != 4 {
+		t.Fatalf("got %d stages, want 4", len(e.state.Collab.Stages))
+	}
+	// recon must be preserved verbatim — not re-run/rewritten.
+	if e.state.Collab.Stages[0].Content != "recon 已完成的内容" {
+		t.Errorf("recon stage was rewritten, got %q", e.state.Collab.Stages[0].Content)
+	}
+	// Only design/dev/review ran — 3 stage goals captured.
+	if len(captor.stageGoals) != 3 {
+		t.Fatalf("expected 3 stage runs (design/dev/review), got %d", len(captor.stageGoals))
+	}
+	for _, name := range []CollabStageName{CollabDesign, CollabDev, CollabReview} {
+		found := false
+		for _, s := range e.state.Collab.Stages[1:] {
+			if s.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing stage %q in output", name)
+		}
+	}
+}
+
+// TestHandleCollabArena_DesignGoalHasReconOutput (C2): when the pipeline
+// resumes at design, the design goal must contain the recon output.
+func TestHandleCollabArena_DesignGoalHasReconOutput(t *testing.T) {
+	e, captor := newCaptureCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabDesignPhase,
+		Stages: []CollabStage{
+			{Name: CollabRecon, Content: "recon 已完成的内容"},
+		},
+	}
+	_, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() unexpected error: %v", err)
+	}
+	if len(captor.stageGoals) == 0 {
+		t.Fatal("expected at least one stage goal captured")
+	}
+	// First captured goal = design, must carry the recon output.
+	if !strings.Contains(captor.stageGoals[0], "recon 已完成的内容") {
+		t.Errorf("design goal must carry recon output, got:\n%s", captor.stageGoals[0])
+	}
+}
+
+// TestHandleCollabArena_ToolsAllowlist (I3): every stage handoff must use
+// exactly the read-only safety allowlist [read grep glob lsp], never edit/write.
+func TestHandleCollabArena_ToolsAllowlist(t *testing.T) {
+	e, captor := newCaptureCollabTestEngine(t)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabReconPhase,
+	}
+	_, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() unexpected error: %v", err)
+	}
+	if len(captor.stageGoals) != 4 {
+		t.Fatalf("expected 4 stage runs, got %d", len(captor.stageGoals))
+	}
+	allowed := map[string]bool{"read": true, "grep": true, "glob": true, "lsp": true}
+	for i, tools := range captor.stageTools {
+		if len(tools) != len(allowed) {
+			t.Errorf("stage %d tools = %v, want exactly %d allowlisted tools", i, tools, len(allowed))
+		}
+		for _, got := range tools {
+			if !allowed[got] {
+				t.Errorf("stage %d leaked forbidden tool %q into handoff: %v", i, got, tools)
+			}
+		}
+	}
+	for _, got := range captor.stageTools[0] {
+		if got == "edit" || got == "write" {
+			t.Errorf("forbidden tool %q in first stage handoff: %v", got, captor.stageTools[0])
+		}
+	}
+}
