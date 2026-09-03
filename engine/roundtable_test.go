@@ -733,3 +733,82 @@ func TestDebateMember_UsesSubAgentPathWithModel(t *testing.T) {
 		t.Errorf("expected mock sub-agent output, got %q", out.Content)
 	}
 }
+
+// --- Task 3: Winner determination ---
+
+func buildFinalRounds() []DebateRound {
+	return []DebateRound{
+		{Phase: DebateProposal, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "创新派方案"},
+			{MemberID: "defender", Content: "防守派方案"},
+		}},
+		{Phase: DebateChallenge, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "### 挑战: 防守派\n过于保守\nCONFIDENCE: 0.9", Targets: []string{"defender"}},
+			{MemberID: "defender", Content: "### 挑战: 创新派\n重构风险\nCONFIDENCE: 0.5", Targets: []string{"radical"}},
+		}},
+		{Phase: DebateRebuttal, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "反驳"},
+			{MemberID: "defender", Content: "反驳"},
+		}},
+		{Phase: DebateFinal, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "最终立场\nSCORE: radical = 90\nSCORE: defender = 70\nVERDICT: radical"},
+			{MemberID: "defender", Content: "最终立场\nSCORE: radical = 75\nSCORE: defender = 85\nVERDICT: defender"},
+		}},
+	}
+}
+
+func TestDetermineWinner_ByAverageScore(t *testing.T) {
+	rounds := []DebateRound{
+		{Phase: DebateProposal, Outputs: []DebateOutput{{MemberID: "radical", Content: "A"}, {MemberID: "defender", Content: "B"}}},
+		{Phase: DebateChallenge, Outputs: []DebateOutput{{MemberID: "radical", Content: "c", Targets: []string{"defender"}}}},
+		{Phase: DebateRebuttal, Outputs: []DebateOutput{{MemberID: "radical", Content: "r"}, {MemberID: "defender", Content: "r"}}},
+		{Phase: DebateFinal, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "SCORE: radical = 90\nSCORE: defender = 70"},
+			{MemberID: "defender", Content: "SCORE: radical = 80\nSCORE: defender = 90"},
+			{MemberID: "pragmatic", Content: "SCORE: radical = 85\nSCORE: defender = 75"},
+		}},
+	}
+	w := determineWinner(DefaultDebateMembers[:2], rounds)
+	if w == nil {
+		t.Fatal("expected a winner")
+	}
+	// radical avg = (90+80+85)/3 = 85 > defender avg = (70+90+75)/3 = 78.3
+	if w.ID != "radical" {
+		t.Errorf("winner = %q, want radical", w.ID)
+	}
+}
+
+func TestDetermineWinner_TiebreakByFewerChallenges(t *testing.T) {
+	rounds := []DebateRound{
+		{Phase: DebateProposal, Outputs: []DebateOutput{{MemberID: "radical", Content: "A"}, {MemberID: "defender", Content: "B"}}},
+		{Phase: DebateChallenge, Outputs: []DebateOutput{
+			// radical 被 1 个高置信(0.9)挑战；defender 无
+			{MemberID: "pragmatic", Content: "### 挑战: radical\n风险高\nCONFIDENCE: 0.9", Targets: []string{"radical"}},
+		}},
+		{Phase: DebateRebuttal, Outputs: []DebateOutput{{MemberID: "radical", Content: "r"}, {MemberID: "defender", Content: "r"}}},
+		{Phase: DebateFinal, Outputs: []DebateOutput{
+			{MemberID: "radical", Content: "SCORE: radical = 80\nSCORE: defender = 80"},
+			{MemberID: "defender", Content: "SCORE: radical = 80\nSCORE: defender = 80"},
+		}},
+	}
+	w := determineWinner(DefaultDebateMembers[:2], rounds)
+	if w == nil {
+		t.Fatal("expected a winner")
+	}
+	// 平均分相同(80=80)，radical 被高置信挑战更多 → defender 胜
+	if w.ID != "defender" {
+		t.Errorf("winner = %q, want defender (fewer high-confidence challenges)", w.ID)
+	}
+}
+
+func TestDetermineWinner_NoScoresReturnsNil(t *testing.T) {
+	rounds := []DebateRound{
+		{Phase: DebateProposal, Outputs: []DebateOutput{{MemberID: "radical", Content: "A"}}},
+		{Phase: DebateChallenge, Outputs: nil},
+		{Phase: DebateRebuttal, Outputs: nil},
+		{Phase: DebateFinal, Outputs: []DebateOutput{{MemberID: "radical", Content: "无评分输出"}}},
+	}
+	if w := determineWinner(DefaultDebateMembers[:1], rounds); w != nil {
+		t.Errorf("expected nil winner when no SCORE lines, got %q", w.ID)
+	}
+}

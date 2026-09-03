@@ -258,6 +258,11 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 		state.Roundtable.Phase = RoundtableAwaitingVerdict
 	}
 
+	// Determine the winner by average score (ties broken by challenge data).
+	if w := determineWinner(members, state.Roundtable.DebateRounds); w != nil {
+		state.Roundtable.WinnerID = w.ID
+	}
+
 	synthesis := h.synthesizeDebate(ctx, goal, members, zh)
 	return h.buildVerdictPrompt(goal, members, zh, synthesis), nil
 }
@@ -687,6 +692,87 @@ func parseVerdicts(outputs []DebateOutput, members []RoundtableMember, zh bool) 
 		return result[i].votes > result[j].votes
 	})
 	return result
+}
+
+// determineWinner returns the member with the highest average score from the
+// final round's SCORE lines. On a tie for first place, the member facing fewer
+// high-confidence (>=0.7) challenges in the challenge round wins; if still
+// tied, the earliest in member order wins. Returns nil if no SCORE lines parse.
+func determineWinner(members []RoundtableMember, rounds []DebateRound) *RoundtableMember {
+	if len(rounds) < 4 {
+		return nil
+	}
+	type avg struct {
+		member RoundtableMember
+		sum    float64
+		count  int
+	}
+	var avgs []avg
+	for _, m := range members {
+		a := avg{member: m}
+		for _, out := range rounds[3].Outputs {
+			for _, line := range strings.Split(out.Content, "\n") {
+				trimmed := strings.TrimSpace(line)
+				lower := strings.ToLower(trimmed)
+				if !strings.HasPrefix(lower, "score:") {
+					continue
+				}
+				rest := strings.TrimSpace(trimmed[len("score:"):])
+				parts := strings.SplitN(rest, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				if strings.TrimSpace(parts[0]) != m.ID {
+					continue
+				}
+				s, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+				if err != nil {
+					continue
+				}
+				a.sum += s
+				a.count++
+			}
+		}
+		if a.count > 0 {
+			avgs = append(avgs, a)
+		}
+	}
+	if len(avgs) == 0 {
+		return nil
+	}
+	sort.SliceStable(avgs, func(i, j int) bool {
+		ai := avgs[i].sum / float64(avgs[i].count)
+		aj := avgs[j].sum / float64(avgs[j].count)
+		if ai != aj {
+			return ai > aj
+		}
+		// 平均分并列：被高置信挑战更少者胜
+		return countHighConfidenceTargeting(avgs[i].member.ID, rounds) <
+			countHighConfidenceTargeting(avgs[j].member.ID, rounds)
+	})
+	return &avgs[0].member
+}
+
+// countHighConfidenceTargeting returns how many high-confidence (>=0.7)
+// challenges in the challenge round (index 1) target the given member.
+func countHighConfidenceTargeting(memberID string, rounds []DebateRound) int {
+	if len(rounds) < 2 {
+		return 0
+	}
+	n := 0
+	for _, out := range rounds[1].Outputs {
+		for _, target := range out.Targets {
+			if target != memberID {
+				continue
+			}
+			for _, block := range splitChallengeBlocks(out.Content) {
+				if extractConfidence(block) >= 0.7 {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 // buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
