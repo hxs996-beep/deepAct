@@ -310,7 +310,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
 
-	// Team command handling — /team <goal>
+	// Team command handling — /debate <goal>
 	// Activates the debate arena: 4-round structured debate → user verdict.
 	if tc := parseTeamCommand(userMsg); tc != nil {
 		e.state.Roundtable = &RoundtableState{
@@ -338,7 +338,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				e.state.Roundtable.Members = append(e.state.Roundtable.Members, *added)
 			}
 		}
-		// Replace raw "/team <goal>" so the main agent loop sees a proper prompt
+		// Replace raw "/debate <goal>" so the main agent loop sees a proper prompt
 		if len(e.history) > 0 {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"辩论模式已启动：%s\n\n请等待团队成员完成辩论。",

@@ -90,7 +90,7 @@ type SubAgentStatus struct {
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/team", Args: "<需求>", Description: "开启多角色团队协作，并行分析需求并生成统一方案"},
+	{Command: "/debate", Args: "<需求>", Description: "开启多角色辩论，并行提出方案并产出最被接受的实施方案"},
 	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
 }
 
@@ -2954,7 +2954,7 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 	b.WriteString("- (MCP) — tools registered by configured MCP servers\n")
 	b.WriteString("- (skills) — tools exposed by the active skill\n\n")
 
-	b.WriteString("Type a natural language request to start, or use `/team <需求>` for multi-role debate.\n")
+	b.WriteString("Type a natural language request to start, or use `/debate <需求>` for multi-role debate.\n")
 	return b.String()
 }
 

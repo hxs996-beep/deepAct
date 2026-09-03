@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// --- /team command parsing ---
+// --- /debate command parsing ---
 
 func TestParseTeamCommand_Valid(t *testing.T) {
-	cmd := parseTeamCommand("/team 实现一个代码评审功能")
+	cmd := parseTeamCommand("/debate 实现一个代码评审功能")
 	if cmd == nil {
 		t.Fatal("expected non-nil TeamCommand")
 	}
@@ -21,7 +21,7 @@ func TestParseTeamCommand_Valid(t *testing.T) {
 }
 
 func TestParseTeamCommand_WithExtraWhitespace(t *testing.T) {
-	cmd := parseTeamCommand("  /team   设计用户权限系统  ")
+	cmd := parseTeamCommand("  /debate   设计用户权限系统  ")
 	if cmd == nil {
 		t.Fatal("expected non-nil TeamCommand")
 	}
@@ -31,7 +31,7 @@ func TestParseTeamCommand_WithExtraWhitespace(t *testing.T) {
 }
 
 func TestParseTeamCommand_WithMembers(t *testing.T) {
-	cmd := parseTeamCommand("/team --members radical,defender 重构认证")
+	cmd := parseTeamCommand("/debate --members radical,defender 重构认证")
 	if cmd == nil {
 		t.Fatal("expected non-nil TeamCommand")
 	}
@@ -44,7 +44,7 @@ func TestParseTeamCommand_WithMembers(t *testing.T) {
 }
 
 func TestParseTeamCommand_WithAdd(t *testing.T) {
-	cmd := parseTeamCommand("/team --add ~/.deepact/members/perf.toml 优化查询")
+	cmd := parseTeamCommand("/debate --add ~/.deepact/members/perf.toml 优化查询")
 	if cmd == nil {
 		t.Fatal("expected non-nil TeamCommand")
 	}
@@ -57,11 +57,11 @@ func TestParseTeamCommand_WithAdd(t *testing.T) {
 }
 
 func TestParseTeamCommand_NoGoal(t *testing.T) {
-	cmd := parseTeamCommand("/team")
+	cmd := parseTeamCommand("/debate")
 	if cmd != nil {
 		t.Errorf("expected nil for empty goal, got %+v", cmd)
 	}
-	cmd = parseTeamCommand("/team ")
+	cmd = parseTeamCommand("/debate ")
 	if cmd != nil {
 		t.Errorf("expected nil for whitespace-only goal, got %+v", cmd)
 	}

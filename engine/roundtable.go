@@ -65,14 +65,14 @@ func (m RoundtableMember) displayPrompt(zh bool) string {
 	return m.PromptEn
 }
 
-// TeamCommand represents a parsed /team command.
+// TeamCommand represents a parsed /debate command.
 type TeamCommand struct {
 	Goal          string
 	MemberIDs     []string // from --members flag
 	AddMemberPath string   // from --add flag
 }
 
-// parseTeamCommand checks if userMsg is a /team command.
+// parseTeamCommand checks if userMsg is a /debate command.
 func parseTeamCommand(userMsg string) *TeamCommand {
 	trimmed := strings.TrimSpace(userMsg)
 	if trimmed == "" {
@@ -89,7 +89,7 @@ func parseTeamCommand(userMsg string) *TeamCommand {
 		return nil
 	}
 	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
-	if cmd != "team" {
+	if cmd != "debate" {
 		return nil
 	}
 
