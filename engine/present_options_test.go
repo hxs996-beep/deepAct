@@ -95,6 +95,21 @@ func TestProcessPresentOptionsCalls_RejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestToolSpecsWithHandoff_IncludesPresentOptions(t *testing.T) {
+	e := &Engine{tools: stubToolExecutor{}, isChinese: true}
+	specs := e.toolSpecsWithHandoff()
+	found := false
+	for _, s := range specs {
+		if s.Function.Name == PresentOptionsToolName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("toolSpecsWithHandoff should include present_options")
+	}
+}
+
 func TestProcessPresentOptionsCalls_IgnoresOtherTools(t *testing.T) {
 	e := &Engine{}
 	msgs := e.processPresentOptionsCalls([]ToolCallRequest{

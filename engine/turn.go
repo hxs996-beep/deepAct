@@ -579,6 +579,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// followed by tool messages responding to each tool_call_id.
 	pendingActivateMsgs := e.processActivateSkillCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
+	pendingOptionsMsgs := e.processPresentOptionsCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -588,6 +589,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingTodoMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingOptionsMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -604,6 +608,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == ActivateSkillToolName {
 			continue
 		} else if call.Name == TodoWriteToolName {
+			continue
+		} else if call.Name == PresentOptionsToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -741,6 +747,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, activateSkillToolSpec())
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
+	specs = append(specs, presentOptionsToolSpec(e.isChinese))
 	return specs
 }
 
