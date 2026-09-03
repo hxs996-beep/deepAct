@@ -104,13 +104,13 @@ deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.
 
 `exec` 常用参数：`--auto` 跳过确认 · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`。
 
-### 多角色团队协作（/team）
+### 多角色辩论模式（/debate）
 
 ```bash
-deepact exec "/team 给订单模块加幂等控制"
+deepact exec "/debate 给订单模块加幂等控制"
 ```
 
-主代理先出 2-3 个实现方案，架构师、安全工程师等角色**并行评审、独立打分**，输出方案×角色评分矩阵；你选定方案后代理直接落地。支持 `--members` 指定成员、`--add` 加载自定义角色（TOML）。
+先由一个搜索 agent 扫描代码库，把调研结果共享给所有辩论成员；随后四个性格角色**并行辩论**（提案 → 质询 → 反驳 → 终陈），各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。支持 `--members` 指定成员、`--add` 加载自定义角色（TOML）。
 
 ### 项目规范与技能（Skills）
 

@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildHelpText_IncludesSections(t *testing.T) {
-	cmds := []Suggestion{{Command: "/team", Args: "<需求>", Description: "multi-role debate"}}
+	cmds := []Suggestion{{Command: "/debate", Args: "<需求>", Description: "multi-role debate"}}
 	skills := []Suggestion{{Command: "brainstorming", Description: "explore intent"}}
 	tools := []Suggestion{
 		{Command: "read", Description: "read a file"},
@@ -23,7 +23,7 @@ func TestBuildHelpText_IncludesSections(t *testing.T) {
 }
 
 func TestBuildHelpText_ListsCommandsSkillsAndTools(t *testing.T) {
-	cmds := []Suggestion{{Command: "/team", Args: "<需求>", Description: "x"}, {Command: "/clear", Description: "y"}}
+	cmds := []Suggestion{{Command: "/debate", Args: "<需求>", Description: "x"}, {Command: "/clear", Description: "y"}}
 	skills := []Suggestion{{Command: "brainstorming", Description: "explore intent"}}
 	tools := []Suggestion{
 		{Command: "read", Description: "read"},
@@ -32,7 +32,7 @@ func TestBuildHelpText_ListsCommandsSkillsAndTools(t *testing.T) {
 	}
 	out := buildHelpText(cmds, skills, tools)
 
-	for _, want := range []string{"/team", "/clear", "/brainstorming", "web_search", "handoff_to_agent", "read"} {
+	for _, want := range []string{"/debate", "/clear", "/brainstorming", "web_search", "handoff_to_agent", "read"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help text missing %q:\n%s", want, out)
 		}

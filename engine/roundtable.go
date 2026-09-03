@@ -16,7 +16,7 @@ import (
 // roundtableMemberMaxIterations bounds each debate member's sub-agent loop.
 // A debate lens reasons about the requirement rather than exhaustively editing,
 // so a high cap wastes time/tokens (4 members × 4 rounds × up-to-N iterations
-// dominates the /team latency). 15 is enough for a member to grep/read a couple
+// dominates the /debate latency). 15 is enough for a member to grep/read a couple
 // of files for grounding without looping; it cuts the debate wall-clock
 // substantially while keeping analysis quality.
 const roundtableMemberMaxIterations = 15
