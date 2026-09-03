@@ -595,35 +595,6 @@ func TestBuildDebateGoal_FinalRoundInstructsMemberID(t *testing.T) {
 	}
 }
 
-func TestParseVerdicts(t *testing.T) {
-	outputs := []DebateOutput{
-		{MemberID: "radical", Content: "立场\nSCORE: radical = 90\nVERDICT: radical"},
-		{MemberID: "defender", Content: "立场\nSCORE: radical = 75\nVERDICT: defender"},
-		{MemberID: "pragmatic", Content: "立场\nSCORE: radical = 80\nVERDICT: radical"},
-	}
-	tally := parseVerdicts(outputs, DefaultDebateMembers[:3], true)
-	if len(tally) != 2 {
-		t.Fatalf("expected 2 tally entries, got %d", len(tally))
-	}
-	// radical should have 2 votes (sorted first), defender 1 vote
-	if tally[0].memberID != "radical" || tally[0].votes != 2 {
-		t.Errorf("first tally = %s %d votes, want radical 2", tally[0].memberID, tally[0].votes)
-	}
-	if tally[1].memberID != "defender" || tally[1].votes != 1 {
-		t.Errorf("second tally = %s %d votes, want defender 1", tally[1].memberID, tally[1].votes)
-	}
-}
-
-func TestParseVerdicts_NoVerdicts(t *testing.T) {
-	outputs := []DebateOutput{
-		{MemberID: "radical", Content: "no verdict here"},
-	}
-	tally := parseVerdicts(outputs, DefaultDebateMembers[:1], true)
-	if tally != nil {
-		t.Errorf("expected nil tally when no VERDICT lines, got %v", tally)
-	}
-}
-
 func TestBuildVerdictPrompt_WithSynthesis(t *testing.T) {
 	e := newTestEngine(t)
 	e.state.Roundtable = &RoundtableState{

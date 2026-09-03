@@ -756,53 +756,6 @@ func loadMemberFromFile(path string) (*RoundtableMember, error) {
 	}, nil
 }
 
-// verdictTally represents one member's vote count from the final round.
-type verdictTally struct {
-	memberID string
-	avatar   string
-	name     string
-	votes    int
-}
-
-// parseVerdicts extracts VERDICT: lines from final round outputs and returns
-// a tally sorted by vote count descending.
-func parseVerdicts(outputs []DebateOutput, members []RoundtableMember, zh bool) []verdictTally {
-	votes := make(map[string]int)
-	for _, out := range outputs {
-		for _, line := range strings.Split(out.Content, "\n") {
-			trimmed := strings.TrimSpace(line)
-			lower := strings.ToLower(trimmed)
-			if strings.HasPrefix(lower, "verdict:") {
-				val := strings.TrimSpace(trimmed[len("verdict:"):])
-				if val != "" {
-					votes[val]++
-				}
-				break // only first VERDICT per member
-			}
-		}
-	}
-
-	if len(votes) == 0 {
-		return nil
-	}
-
-	var result []verdictTally
-	for id, count := range votes {
-		vt := verdictTally{memberID: id, votes: count}
-		if m := findMember(members, id); m != nil {
-			vt.avatar = m.Avatar
-			vt.name = m.displayName(zh)
-		} else {
-			vt.name = id
-		}
-		result = append(result, vt)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].votes > result[j].votes
-	})
-	return result
-}
-
 // determineWinner returns the member with the highest average score from the
 // final round's SCORE lines. On a tie for first place, the member facing fewer
 // high-confidence (>=0.7) challenges in the challenge round wins; if still
