@@ -156,8 +156,8 @@ func TestConfirmOptions_DeclaredOptions_ABCPrefixed(t *testing.T) {
 // 无声明方案时，/confirm 1 确认报告（"按报告执行"）并清除 nudge。
 func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
 	e := &Engine{
-		state:    &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
-		history:  []Message{{Role: "user", Content: "/confirm 1"}},
+		state:     &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		history:   []Message{{Role: "user", Content: "/confirm 1"}},
 		isChinese: true,
 	}
 	e.pendingAnalysisNudge = true
@@ -180,9 +180,9 @@ func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
 // 有声明方案时，/confirm N 选择方案N并注入方案描述。
 func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	e := &Engine{
-		state:    &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
-		history:  []Message{{Role: "user", Content: "/confirm 2"}},
-		isChinese: true,
+		state:                 &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		history:               []Message{{Role: "user", Content: "/confirm 2"}},
+		isChinese:             true,
 		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
 	}
 
@@ -205,9 +205,9 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 // 注入无效选择反馈，且仍置确认态。
 func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	e := &Engine{
-		state:    &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
-		history:  []Message{{Role: "user", Content: "/confirm 5"}},
-		isChinese: true,
+		state:                 &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		history:               []Message{{Role: "user", Content: "/confirm 5"}},
+		isChinese:             true,
 		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
 	}
 
@@ -231,18 +231,23 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 
 // 自由输入路径：用户未发 /confirm N（走"输入你的意见"回输入框），Run 主逻辑
 // 中的清除块（loop.go:459-461）应清空本组待决方案，避免残留到下一轮再次弹出。
+// 设 pendingAnalysisNudge=true 模拟门控拦截过的真实场景：handleConfirmCommand
+// 只命中 /confirm 前缀（这里不命中、不清除），handleAnalysisNudgeConfirmation 对
+// 普通消息走反馈分支（只改 history/状态、不清 pendingConfirmOptions），随后才
+// 触达 :459-461 自由输入清除块，确保清空确实由该块完成而非 handleConfirmCommand。
 func TestConfirmOptions_ClearedOnFreeInputRun(t *testing.T) {
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{
 			{Delta: "任务已完成。", FinishReason: "stop"},
 		}},
-		context: &stubContextBuilder{},
-		tools:   stubToolExecutor{},
-		state:   &TaskState{TurnNumber: 0},
-		history: []Message{{Role: "user", Content: "修改代码"}},
-		config:  EngineConfig{ModelName: "test-model"},
+		context:               &stubContextBuilder{},
+		tools:                 stubToolExecutor{},
+		state:                 &TaskState{TurnNumber: 0},
+		history:               []Message{{Role: "user", Content: "修改代码"}},
+		config:                EngineConfig{ModelName: "test-model"},
 		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
 	}
+	e.pendingAnalysisNudge = true
 
 	if _, err := e.Run(context.Background(), "修改代码"); err != nil {
 		t.Fatalf("Run error: %v", err)
