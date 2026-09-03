@@ -112,6 +112,14 @@ deepact exec "/debate add idempotency control to the order module"
 
 A search agent first scans the codebase and shares its findings with all debate members. Four personality roles then **debate in parallel** (proposal → challenge → rebuttal → final) with their own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. Supports `--members` for custom roles and `--add` to load TOML role files.
 
+### Multi-Agent Collaboration Pipeline (/collab)
+
+```bash
+deepact exec "/collab add a cache layer"
+```
+
+A pipeline of four Chinese-named roles works in sequence: **侦察 (Recon)** scans the codebase, **设计 (Designer)** produces a technical design, **开发 (Builder)** writes concrete implementation content, **把关 (Reviewer)** flags risks and bugs. The merged summary is shown for your confirmation before the main agent executes.
+
 ### Project Rules & Skills
 
 Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent **auto-activates** the most relevant skill by semantically matching your message against each skill's `name`/`description` (silently falls back on mismatch). You can also switch manually with the `activate_skill` tool.
