@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -197,5 +198,56 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	}
 	if len(e.pendingConfirmOptions) != 0 {
 		t.Errorf("pendingConfirmOptions should be cleared after selection, got %v", e.pendingConfirmOptions)
+	}
+}
+
+// 有声明方案但编号越界（n > len(options)）时，不静默降级为"按报告执行"，
+// 注入无效选择反馈，且仍置确认态。
+func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
+	e := &Engine{
+		state:    &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		history:  []Message{{Role: "user", Content: "/confirm 5"}},
+		isChinese: true,
+		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
+	}
+
+	if !e.handleConfirmCommand("/confirm 5") {
+		t.Fatal("handleConfirmCommand should handle /confirm 5")
+	}
+	if e.state.AnalysisMode || !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisMode should be false / AnalysisReportConfirmed true after out-of-range confirm")
+	}
+	last := e.history[len(e.history)-1].Content
+	if !strings.Contains(last, "无效") {
+		t.Errorf("history should mention invalid option for out-of-range N, got %q", last)
+	}
+	if strings.Contains(last, "按报告执行") {
+		t.Errorf("out-of-range N must NOT degrade to 按报告执行, got %q", last)
+	}
+	if len(e.pendingConfirmOptions) != 0 {
+		t.Errorf("pendingConfirmOptions should be cleared after out-of-range confirm, got %v", e.pendingConfirmOptions)
+	}
+}
+
+// 自由输入路径：用户未发 /confirm N（走"输入你的意见"回输入框），Run 主逻辑
+// 中的清除块（loop.go:459-461）应清空本组待决方案，避免残留到下一轮再次弹出。
+func TestConfirmOptions_ClearedOnFreeInputRun(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "任务已完成。", FinishReason: "stop"},
+		}},
+		context: &stubContextBuilder{},
+		tools:   stubToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "修改代码"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
+	}
+
+	if _, err := e.Run(context.Background(), "修改代码"); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if len(e.pendingConfirmOptions) != 0 {
+		t.Errorf("pendingConfirmOptions should be cleared after a free-input Run, got %v", e.pendingConfirmOptions)
 	}
 }

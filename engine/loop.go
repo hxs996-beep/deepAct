@@ -304,9 +304,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
 	e.analysisNudgeCount = 0
-	// AnalysisReportConfirmed is scoped to a single Run: it is set true only by
-	// handleAnalysisNudgeConfirmation (below) when the user confirms a report,
-	// and only needs to skip the analysis gate within that same Run so the
+	// AnalysisReportConfirmed is scoped to a single Run: it is set true by
+	// handleConfirmCommand or handleAnalysisNudgeConfirmation when the user
+	// confirms a report / selects a plan, and only needs to skip the analysis
+	// gate within that same Run so the
 	// edit-plan guard can take over. After this Run, either pendingEditPlan or
 	// PlanConfirmed independently skips the gate, so the flag must NOT persist -
 	// otherwise a stale confirmation leaks from a prior task and the agent
@@ -1653,9 +1654,11 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 // agent's next edit/write in this same Run passes the analysis gate.
 // When the agent declared options via present_options (pendingConfirmOptions
 // non-empty), /confirm N selects 方案N and the choice is injected into history
-// so the agent implements the selected plan. When no options were declared,
-// /confirm 1 confirms the report ("按报告执行"). The last popup item
-// ("输入你的意见") never reaches here — the UI returns to the input box.
+// so the agent implements the selected plan; an out-of-range N injects an
+// "invalid option number" feedback instead of silently degrading to report
+// confirmation. When no options were declared, /confirm 1 confirms the report
+// ("按报告执行"). The last popup item ("输入你的意见") never reaches here — the
+// UI returns to the input box.
 // Returns true if userMsg was a valid /confirm command.
 func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	n, ok := parseConfirmCommand(userMsg)
@@ -1668,15 +1671,22 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	e.pendingAnalysisNudge = false
 
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-		if len(e.pendingConfirmOptions) > 0 && n >= 1 && n <= len(e.pendingConfirmOptions) {
+		switch {
+		case len(e.pendingConfirmOptions) > 0 && n >= 1 && n <= len(e.pendingConfirmOptions):
 			label := confirmOptionLabel(n-1, e.pendingConfirmOptions[n-1])
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"用户选择了方案：%s，请按该方案执行修改。", label)
-		} else {
+				"用户选择了：%s，请按该方案执行修改。", label)
+		case len(e.pendingConfirmOptions) > 0:
+			// 有声明方案但编号越界（n < 1 或 n > len(options)）：不静默降级为
+			// "按报告执行"，明确告知 agent 用户选择无效，由其决定下一步。
+			e.history[len(e.history)-1].Content = fmt.Sprintf(
+				"用户选择了无效的方案编号 %d，请重新选择。", n)
+			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(e.pendingConfirmOptions))
+		default:
 			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（按报告执行），可以开始修改代码。"
 		}
 	}
-	// 本组方案已消费（用户已选择或确认），清除避免残留到无关 Run。
+	// 本组方案已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
 	e.pendingConfirmOptions = nil
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
 	return true
