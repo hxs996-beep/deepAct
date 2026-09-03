@@ -939,7 +939,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.analysisNudgeCount > 0 {
 		return &EngineResponse{
 			Summary: summary,
-			Options: confirmOptions(),
+			Options: e.confirmOptions(),
 			Stage:   StageVerifyCompact,
 		}, nil
 	}
@@ -947,12 +947,29 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 }
 
 // confirmOptions returns the confirmation options for the analysis-gate popup.
-// The last item is the free-input entry — selecting it returns to the input box.
-func confirmOptions() []string {
-	return []string{
-		"方案A: 按报告执行修改",
-		"其他（输入你的意见）",
+// No declared options → fixed two items (按报告执行 / 输入你的意见). Declared
+// options → 方案A/B/C... plus the free-input entry. The last item is always
+// the free-input entry — selecting it returns to the input box.
+func (e *Engine) confirmOptions() []string {
+	if len(e.pendingConfirmOptions) == 0 {
+		return []string{
+			"按报告执行",
+			"输入你的意见",
+		}
 	}
+	opts := make([]string, 0, len(e.pendingConfirmOptions)+1)
+	for i, o := range e.pendingConfirmOptions {
+		opts = append(opts, confirmOptionLabel(i, o))
+	}
+	opts = append(opts, "输入你的意见")
+	return opts
+}
+
+// confirmOptionLabel renders the 方案X: <desc> label for a declared option at
+// 0-based index i. Shared by confirmOptions (popup display) and
+// handleConfirmCommand (history injection) so both agree on the label.
+func confirmOptionLabel(i int, opt string) string {
+	return fmt.Sprintf("方案%c: %s", 'A'+i, opt)
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the

@@ -122,3 +122,31 @@ func TestProcessPresentOptionsCalls_IgnoresOtherTools(t *testing.T) {
 		t.Errorf("pendingConfirmOptions should stay empty, got %v", e.pendingConfirmOptions)
 	}
 }
+
+func TestConfirmOptions_NoDeclaredOptions_FixedTwo(t *testing.T) {
+	e := &Engine{}
+	got := e.confirmOptions()
+	want := []string{"按报告执行", "输入你的意见"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("option %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestConfirmOptions_DeclaredOptions_ABCPrefixed(t *testing.T) {
+	e := &Engine{pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"}}
+	got := e.confirmOptions()
+	want := []string{"方案A: 用 Redis 缓存", "方案B: 改用 MySQL", "输入你的意见"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("option %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
