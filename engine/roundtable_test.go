@@ -703,3 +703,33 @@ func TestBuildDebateGoal_IncludesSharedContext(t *testing.T) {
 		t.Errorf("prompt should not include shared section when context is empty, got:\n%s", prompt2)
 	}
 }
+
+// --- Task 2: members always use the sub-agent tool loop, never the fast path ---
+
+func TestDebateMember_UsesSubAgentPathWithModel(t *testing.T) {
+	e := newTestEngine(t)
+	// 即使设置了 model（旧 fast path 的触发条件），成员也必须走 sub-agent
+	// 工具循环（mockPromptRunner 返回"采用微服务架构"），而非单次推理 fast path
+	//（stubStreamModel.Complete 返回空响应 → fast path 会产生 "(empty)"）。
+	e.model = &stubStreamModel{chunks: []ModelChunk{{Delta: "fast-path-would-be-here", FinishReason: "stop"}}}
+	e.state.Roundtable = &RoundtableState{
+		Goal:    "测试",
+		Phase:   RoundtableProposal,
+		Members: DefaultDebateMembers[:1],
+	}
+
+	_, err := e.roundtableHall.handleDebateArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleDebateArena() unexpected error: %v", err)
+	}
+	if len(e.state.Roundtable.DebateRounds) == 0 {
+		t.Fatal("expected at least one debate round")
+	}
+	out := e.state.Roundtable.DebateRounds[0].Outputs[0]
+	if strings.Contains(out.Content, "(empty)") {
+		t.Error("member used single-shot fast path instead of the sub-agent tool loop")
+	}
+	if !strings.Contains(out.Content, "采用微服务架构") {
+		t.Errorf("expected mock sub-agent output, got %q", out.Content)
+	}
+}

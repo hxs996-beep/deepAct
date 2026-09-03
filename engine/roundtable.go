@@ -21,9 +21,6 @@ import (
 // substantially while keeping analysis quality.
 const roundtableMemberMaxIterations = 15
 
-// roundtableMemberMaxOutputTokens caps a single-shot member's reply length.
-const roundtableMemberMaxOutputTokens = 2500
-
 // roundtableSearchMaxIterations bounds the pre-debate shared search agent.
 // A single codebase scan needs a bit more budget than a debate member's
 // reasoning turn (15), but is still capped to bound wall-clock.
@@ -397,25 +394,6 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 
-	// FAST PATH (production): reasoning-only single model call. The value of the
-	// debate is divergent reasoning, not repo exploration — so one compact call
-	// (small prompt, no growing history, no tool loop) is orders of magnitude
-	// faster than a sub-agent that iterates with an ever-larger prompt. The
-	// sub-agent path below is kept only for tests / when the model is unset.
-	if h.engine.model != nil {
-		content := h.runMemberSingleShot(ctx, member, taskGoal, zh)
-		if h.engine.config.OnProgress != nil {
-			h.engine.config.OnProgress(ProgressEvent{
-				Type:   "member_done",
-				Name:   member.ID,
-				Detail: fmt.Sprintf("%s ✓", member.displayName(zh)),
-			})
-		}
-		fmt.Fprintf(os.Stderr, "[debate]   member %s (%s) done in %.1fs, contentLen=%d\n",
-			member.ID, phaseLabel(phase, zh), time.Since(memberStart).Seconds(), len(content))
-		return DebateOutput{MemberID: member.ID, Content: content, Targets: targets}
-	}
-
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
 		if h.engine.config.OnProgress != nil {
@@ -466,42 +444,6 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		Content:  content,
 		Targets:  targets,
 	}
-}
-
-// runMemberSingleShot makes one reasoning-only model call for a debate member:
-// a compact role system prompt + the phase task, no tools, no history growth.
-// This is far faster than a tool-iterating sub-agent and the debate's value is
-// divergent reasoning, not repo exploration. Empty model name falls back to the
-// Pro model via EngineConfig defaults applied by the caller's client.
-func (h *RoundtableHall) runMemberSingleShot(ctx context.Context, member RoundtableMember, taskGoal string, zh bool) string {
-	modelName := h.engine.config.FlashModelName
-	if modelName == "" {
-		modelName = h.engine.config.ModelName
-	}
-	req := ModelRequest{
-		Model:     modelName,
-		Messages:  []ModelMessage{{Role: "system", Content: memberRolePrompt(member, zh)}, {Role: "user", Content: taskGoal}},
-		MaxTokens: roundtableMemberMaxOutputTokens,
-	}
-	resp, err := h.engine.model.Complete(ctx, req)
-	if err != nil {
-		return fmt.Sprintf("analysis failed: %v", err)
-	}
-	if resp != nil && resp.Message.Content != "" {
-		return resp.Message.Content
-	}
-	return "(empty)"
-}
-
-// memberRolePrompt is a compact system prompt identifying the member's debate
-// role. Intentionally tiny (the debate doesn't need the full coding system
-// prompt), so every single-shot call is cheap and fast.
-func memberRolePrompt(member RoundtableMember, zh bool) string {
-	return pickPrompt(zh,
-		"You are "+member.displayName(false)+" in a multi-role debate. "+member.displayStance(false)+
-			" Give a direct, structured analysis for the task. Be concise and specific.",
-		"你是「"+member.displayName(true)+"」——多角色辩论中的评审者。"+member.displayStance(true)+
-			" 直接给出结构化的分析，保持简洁、具体。")
 }
 
 // buildDebateGoal constructs the task prompt for a member in a specific debate phase.
