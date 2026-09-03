@@ -278,8 +278,8 @@ func TestFinishStreaming_NonBlockedOptionsShowPopup(t *testing.T) {
 		Response: &engine.EngineResponse{
 			Summary: "报告完毕，停止。请通过确认 UI 批准后，我立即执行全部删除。",
 			Options: []string{
-				"方案A: 按报告执行修改",
-				"其他（输入你的意见）",
+				"按报告执行",
+				"输入你的意见",
 			},
 		},
 	})

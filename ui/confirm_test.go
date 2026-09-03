@@ -34,8 +34,8 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	m := NewModel(rr, engine.PricingConfig{})
 	m.state = stateReady
 	m.activeOptions = []string{
-		"方案A: 按报告执行修改",
-		"其他（输入你的意见）",
+		"按报告执行",
+		"输入你的意见",
 	}
 	m.selectedOption = 0 // 方案A
 	// 让 submitConfirm 启动路径中的 waitForProgress 不阻塞：预填一条消息。
@@ -66,7 +66,7 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
-	m.activeOptions = []string{"方案A", "其他（输入你的意见）"}
+	m.activeOptions = []string{"按报告执行", "输入你的意见"}
 	m.selectedOption = 1 // 末项
 
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
