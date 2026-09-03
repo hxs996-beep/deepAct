@@ -16,13 +16,15 @@ import (
 // roundtableMemberMaxIterations bounds each debate member's sub-agent loop.
 // A debate lens reasons about the requirement rather than exhaustively editing,
 // so a high cap wastes time/tokens (4 members × 4 rounds × up-to-N iterations
-// dominates the /team latency). 15 is enough for a member to grep/read a couple
+// dominates the /debate latency). 15 is enough for a member to grep/read a couple
 // of files for grounding without looping; it cuts the debate wall-clock
 // substantially while keeping analysis quality.
 const roundtableMemberMaxIterations = 15
 
-// roundtableMemberMaxOutputTokens caps a single-shot member's reply length.
-const roundtableMemberMaxOutputTokens = 2500
+// roundtableSearchMaxIterations bounds the pre-debate shared search agent.
+// A single codebase scan needs a bit more budget than a debate member's
+// reasoning turn (15), but is still capped to bound wall-clock.
+const roundtableSearchMaxIterations = 25
 
 // RoundtableMember defines a single reviewer's identity and stance.
 // Name/Stance/Prompt hold the Chinese values (the historical defaults);
@@ -63,14 +65,14 @@ func (m RoundtableMember) displayPrompt(zh bool) string {
 	return m.PromptEn
 }
 
-// TeamCommand represents a parsed /team command.
+// TeamCommand represents a parsed /debate command.
 type TeamCommand struct {
 	Goal          string
 	MemberIDs     []string // from --members flag
 	AddMemberPath string   // from --add flag
 }
 
-// parseTeamCommand checks if userMsg is a /team command.
+// parseTeamCommand checks if userMsg is a /debate command.
 func parseTeamCommand(userMsg string) *TeamCommand {
 	trimmed := strings.TrimSpace(userMsg)
 	if trimmed == "" {
@@ -87,7 +89,7 @@ func parseTeamCommand(userMsg string) *TeamCommand {
 		return nil
 	}
 	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
-	if cmd != "team" {
+	if cmd != "debate" {
 		return nil
 	}
 
@@ -130,6 +132,74 @@ func NewRoundtableHall(e *Engine) *RoundtableHall {
 	return &RoundtableHall{engine: e}
 }
 
+// runSharedSearch runs a single code-search sub-agent that scans the repository
+// for context relevant to the debate goal, returning a structured report used
+// as the shared baseline for all debate members. Returns "" on failure so the
+// debate can proceed without it (members still have their own tools).
+func (h *RoundtableHall) runSharedSearch(ctx context.Context, goal string, zh bool) string {
+	if h.engine.config.OnProgress != nil {
+		// 事件类型用 "team_search" 而非 "debate_phase"：
+		// TestDebateArena_ProgressEvents (roundtable_test.go:355-362) 断言恰好
+		// 4 个 debate_phase 事件（4 轮辩论），预搜索不可计入该轮次计数。
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "team_search",
+			Name:   "search",
+			Detail: pickPrompt(zh, "Searching codebase...", "正在搜索代码库..."),
+		})
+	}
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          buildSearchGoal(goal, zh),
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: roundtableSearchMaxIterations,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+// buildSearchGoal instructs the pre-debate search agent to produce a structured
+// codebase report for the debate goal. Research-only: it must not propose solutions.
+func buildSearchGoal(goal string, zh bool) string {
+	return fmt.Sprintf(pickPrompt(zh,
+		`## Task
+Search the codebase for context relevant to the following requirement. Produce a concise, structured report that will be shared with multiple debate members as their baseline.
+
+## Requirement
+%s
+
+## Report Format
+- **Relevant files**: exact paths + one-line purpose each
+- **Key code**: short snippets or precise references (function/type names + file:line) that the requirement touches
+- **Constraints**: existing conventions, interfaces, callers that constrain changes
+- **Risks**: hotspots, edge cases, likely failure points
+
+Be factual and cite file paths. Do NOT propose solutions — this is research only.`,
+		`## 任务
+搜索代码库中与以下需求相关的上下文。产出一份简洁、结构化的调研报告，将作为多名辩论成员的共享基线。
+
+## 需求
+%s
+
+## 报告格式
+- **相关文件**：精确路径 + 每行一句话用途
+- **关键代码**：简短片段或精确引用（函数/类型名 + file:行号），说明需求涉及哪些代码
+- **约束**：现有约定、接口、调用方对改动的限制
+- **风险**：热点、边界情况、可能的失败点
+
+务必基于事实并引用文件路径。不要提方案——这只是调研。`), goal)
+}
+
 // handleDebateArena orchestrates the full 4-round debate arena.
 // It only executes rounds that haven't been completed yet (safe to re-enter
 // after a partial failure).
@@ -146,6 +216,13 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 		members = DefaultDebateMembers
 	}
 	state.Roundtable.Members = members
+
+	// Pre-search: run the codebase scan once as the shared baseline for all
+	// members. Idempotent — skipped if already populated (re-entry after a
+	// partial failure or a "debate again" round).
+	if state.Roundtable.SharedContext == "" {
+		state.Roundtable.SharedContext = h.runSharedSearch(ctx, goal, zh)
+	}
 
 	phase := state.Roundtable.Phase
 
@@ -181,7 +258,17 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 		state.Roundtable.Phase = RoundtableAwaitingVerdict
 	}
 
-	synthesis := h.synthesizeDebate(ctx, goal, members, zh)
+	// Determine the winner by average score (ties broken by challenge data).
+	var synthesis string
+	if w := determineWinner(members, state.Roundtable.DebateRounds); w != nil {
+		state.Roundtable.WinnerID = w.ID
+		// Generate the detailed blueprint; only fall back to the concise
+		// synthesis LLM call if the blueprint generation fails (saves tokens).
+		state.Roundtable.Blueprint = h.buildBlueprint(ctx, goal, members, zh, *w, state.Roundtable.DebateRounds)
+	}
+	if state.Roundtable.Blueprint == "" {
+		synthesis = h.synthesizeDebate(ctx, goal, members, zh)
+	}
 	return h.buildVerdictPrompt(goal, members, zh, synthesis), nil
 }
 
@@ -207,6 +294,110 @@ func (h *RoundtableHall) synthesizeDebate(ctx context.Context, goal string, memb
 		"## Task\nYou are the debate arena judge's assistant. Below is the complete debate record. Produce a concise summary to help the user decide quickly.\n\n## Requirement\n%s\n\n## Complete Debate Record\n%s\n\n## Output Format\nFollow this format strictly:\n\n**Top Recommendation**: <winning member name> (avg score X, Y votes)\n<1-2 sentences explaining why>\n\n**One-liner per proposal**:\n- <avatar> <member name>: <core approach>. <main concern raised>\n(one line per proposal, ordered by score descending)\n\n**Strongest Challenge**: <challenger> -> <challenged> (confidence X)\n<challenge summary, 1-2 sentences>\n\n**Best Rebuttal**: <rebuttal author>\n<rebuttal summary, 1-2 sentences>\n\n**Key Disagreements**: <2-3 sentences summarizing core disagreements>",
 		"## 任务\n你是辩论场裁判助理。以下是完整的辩论记录。请产出一份精简摘要，帮助用户快速决策。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n请严格按以下格式输出：\n\n**综合推荐**: <获胜方案角色名>（平均分 X，获 Y 票）\n<1-2句话说明推荐理由>\n\n**各方案一句话**:\n- <avatar> <角色名>: <方案核心思路>。<主要被质疑的问题>\n（每个方案一行，按评分从高到低排列）\n\n**最强挑战**: <挑战者> -> <被挑战者>（置信度 X）\n<挑战内容摘要，1-2句>\n\n**最佳反驳**: <反驳者>\n<反驳要点，1-2句>\n\n**关键分歧**: <2-3句话总结辩论中的核心分歧点>",
 	), goal, record)
+
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          taskGoal,
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: 3,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		if err != nil || result == nil {
+			return ""
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary
+	}
+
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+// buildBlueprint runs a single LLM call that rewrites the winning proposal into
+// a detailed, executable implementation blueprint, absorbing reasonable
+// corrections raised during the challenge/rebuttal rounds (the LLM judges which
+// corrections to absorb from the full debate record). Returns "" on failure so
+// the verdict screen falls back to the concise synthesis.
+func (h *RoundtableHall) buildBlueprint(ctx context.Context, goal string, members []RoundtableMember, zh bool, winner RoundtableMember, rounds []DebateRound) string {
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "synthesis",
+			Name:   "blueprint",
+			Detail: pickPrompt(zh, "Writing implementation blueprint...", "正在撰写实施蓝图..."),
+		})
+	}
+	record := formatDebateRecord(rounds, members, zh)
+	winnerProposal := getMemberOutput(winner.ID, rounds[0].Outputs)
+	if winnerProposal == "" {
+		return ""
+	}
+
+	taskGoal := fmt.Sprintf(pickPrompt(zh,
+		`## Task
+You are a senior engineer. Rewrite the winning proposal below into a detailed, executable implementation blueprint that a coding agent can follow directly. Absorb any reasonable corrections raised in the challenges (mark absorbed corrections explicitly).
+
+## Requirement
+%s
+
+## Winning Proposal
+%s
+
+## Complete Debate Record
+%s
+
+## Output Format
+## 方案概述
+<2-3 sentences>
+
+## 关键设计决策
+<numbered list: each decision + rationale; mark absorbed corrections as (来自质询修正)>
+
+## 实现步骤
+<numbered list: each step = what to change + where (file/function)>
+
+## 风险与回滚
+<bullet list: risk -> mitigation; rollback plan>`,
+		`## 任务
+你是一位资深工程师。把下面的获胜方案重写为一份详细的、可直接执行的实施蓝图，供编码 agent 直接照做。吸收质询中提出的合理修正（被吸收的修正请明确标注）。
+
+## 需求
+%s
+
+## 获胜方案
+%s
+
+## 完整辩论记录
+%s
+
+## 输出格式
+## 方案概述
+<2-3句>
+
+## 关键设计决策
+<编号列表：每个决策+理由；被吸收的修正标注 (来自质询修正)>
+
+## 实现步骤
+<编号列表：每步=改什么+改哪里（文件/函数）>
+
+## 风险与回滚
+<列表：风险 -> 缓解；回滚方案>`), goal, winnerProposal, record)
 
 	handoff := Handoff{
 		Agent:         AgentSub,
@@ -304,7 +495,7 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		})
 	}
 
-	taskGoal := buildDebateGoal(goal, member, phase, allMembers, h.engine.state.Roundtable.DebateRounds, zh)
+	taskGoal := buildDebateGoal(goal, member, phase, allMembers, h.engine.state.Roundtable.DebateRounds, zh, h.engine.state.Roundtable.SharedContext)
 	targets := determineTargets(member.ID, phase, allMembers)
 
 	handoff := Handoff{
@@ -315,25 +506,6 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		NoNudge:       true,
 		MaxIterations: roundtableMemberMaxIterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	// FAST PATH (production): reasoning-only single model call. The value of the
-	// debate is divergent reasoning, not repo exploration — so one compact call
-	// (small prompt, no growing history, no tool loop) is orders of magnitude
-	// faster than a sub-agent that iterates with an ever-larger prompt. The
-	// sub-agent path below is kept only for tests / when the model is unset.
-	if h.engine.model != nil {
-		content := h.runMemberSingleShot(ctx, member, taskGoal, zh)
-		if h.engine.config.OnProgress != nil {
-			h.engine.config.OnProgress(ProgressEvent{
-				Type:   "member_done",
-				Name:   member.ID,
-				Detail: fmt.Sprintf("%s ✓", member.displayName(zh)),
-			})
-		}
-		fmt.Fprintf(os.Stderr, "[debate]   member %s (%s) done in %.1fs, contentLen=%d\n",
-			member.ID, phaseLabel(phase, zh), time.Since(memberStart).Seconds(), len(content))
-		return DebateOutput{MemberID: member.ID, Content: content, Targets: targets}
 	}
 
 	agent, err := h.engine.agents.Get(AgentSub)
@@ -388,45 +560,15 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 	}
 }
 
-// runMemberSingleShot makes one reasoning-only model call for a debate member:
-// a compact role system prompt + the phase task, no tools, no history growth.
-// This is far faster than a tool-iterating sub-agent and the debate's value is
-// divergent reasoning, not repo exploration. Empty model name falls back to the
-// Pro model via EngineConfig defaults applied by the caller's client.
-func (h *RoundtableHall) runMemberSingleShot(ctx context.Context, member RoundtableMember, taskGoal string, zh bool) string {
-	modelName := h.engine.config.FlashModelName
-	if modelName == "" {
-		modelName = h.engine.config.ModelName
-	}
-	req := ModelRequest{
-		Model:     modelName,
-		Messages:  []ModelMessage{{Role: "system", Content: memberRolePrompt(member, zh)}, {Role: "user", Content: taskGoal}},
-		MaxTokens: roundtableMemberMaxOutputTokens,
-	}
-	resp, err := h.engine.model.Complete(ctx, req)
-	if err != nil {
-		return fmt.Sprintf("analysis failed: %v", err)
-	}
-	if resp != nil && resp.Message.Content != "" {
-		return resp.Message.Content
-	}
-	return "(empty)"
-}
-
-// memberRolePrompt is a compact system prompt identifying the member's debate
-// role. Intentionally tiny (the debate doesn't need the full coding system
-// prompt), so every single-shot call is cheap and fast.
-func memberRolePrompt(member RoundtableMember, zh bool) string {
-	return pickPrompt(zh,
-		"You are "+member.displayName(false)+" in a multi-role debate. "+member.displayStance(false)+
-			" Give a direct, structured analysis for the task. Be concise and specific.",
-		"你是「"+member.displayName(true)+"」——多角色辩论中的评审者。"+member.displayStance(true)+
-			" 直接给出结构化的分析，保持简洁、具体。")
-}
-
 // buildDebateGoal constructs the task prompt for a member in a specific debate phase.
-func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhase, allMembers []RoundtableMember, rounds []DebateRound, zh bool) string {
+func buildDebateGoal(goal string, member RoundtableMember, phase DebateRoundPhase, allMembers []RoundtableMember, rounds []DebateRound, zh bool, sharedContext string) string {
 	var sb strings.Builder
+
+	if sharedContext != "" {
+		sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+			"## Shared Code Research\nShared findings from a code-search agent. Use as a baseline, but verify with your own tools before relying on them.\n\n%s\n\n",
+			"## 共享代码调研\n代码搜索 agent 的共享调研结果。作为基线使用，但请用你自己的工具核实后再依赖。\n\n%s\n\n"), sharedContext))
+	}
 
 	switch phase {
 	case DebateProposal:
@@ -614,74 +756,120 @@ func loadMemberFromFile(path string) (*RoundtableMember, error) {
 	}, nil
 }
 
-// verdictTally represents one member's vote count from the final round.
-type verdictTally struct {
-	memberID string
-	avatar   string
-	name     string
-	votes    int
+// determineWinner returns the member with the highest average score from the
+// final round's SCORE lines. On a tie for first place, the member facing fewer
+// high-confidence (>=0.7) challenges in the challenge round wins; if still
+// tied, the earliest in member order wins. Returns nil if no SCORE lines parse.
+func determineWinner(members []RoundtableMember, rounds []DebateRound) *RoundtableMember {
+	if len(rounds) < 4 {
+		return nil
+	}
+	type avg struct {
+		member RoundtableMember
+		sum    float64
+		count  int
+	}
+	var avgs []avg
+	for _, m := range members {
+		a := avg{member: m}
+		for _, out := range rounds[3].Outputs {
+			for _, line := range strings.Split(out.Content, "\n") {
+				trimmed := strings.TrimSpace(line)
+				lower := strings.ToLower(trimmed)
+				if !strings.HasPrefix(lower, "score:") {
+					continue
+				}
+				rest := strings.TrimSpace(trimmed[len("score:"):])
+				parts := strings.SplitN(rest, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				if strings.TrimSpace(parts[0]) != m.ID {
+					continue
+				}
+				s, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+				if err != nil {
+					continue
+				}
+				a.sum += s
+				a.count++
+			}
+		}
+		if a.count > 0 {
+			avgs = append(avgs, a)
+		}
+	}
+	if len(avgs) == 0 {
+		return nil
+	}
+	sort.SliceStable(avgs, func(i, j int) bool {
+		ai := avgs[i].sum / float64(avgs[i].count)
+		aj := avgs[j].sum / float64(avgs[j].count)
+		if ai != aj {
+			return ai > aj
+		}
+		// 平均分并列：被高置信挑战更少者胜
+		return countHighConfidenceTargeting(avgs[i].member.ID, rounds) <
+			countHighConfidenceTargeting(avgs[j].member.ID, rounds)
+	})
+	return &avgs[0].member
 }
 
-// parseVerdicts extracts VERDICT: lines from final round outputs and returns
-// a tally sorted by vote count descending.
-func parseVerdicts(outputs []DebateOutput, members []RoundtableMember, zh bool) []verdictTally {
-	votes := make(map[string]int)
-	for _, out := range outputs {
-		for _, line := range strings.Split(out.Content, "\n") {
-			trimmed := strings.TrimSpace(line)
-			lower := strings.ToLower(trimmed)
-			if strings.HasPrefix(lower, "verdict:") {
-				val := strings.TrimSpace(trimmed[len("verdict:"):])
-				if val != "" {
-					votes[val]++
+// countHighConfidenceTargeting returns how many high-confidence (>=0.7)
+// challenges in the challenge round (index 1) target the given member.
+func countHighConfidenceTargeting(memberID string, rounds []DebateRound) int {
+	if len(rounds) < 2 {
+		return 0
+	}
+	n := 0
+	for _, out := range rounds[1].Outputs {
+		for _, target := range out.Targets {
+			if target != memberID {
+				continue
+			}
+			for _, block := range splitChallengeBlocks(out.Content) {
+				if extractConfidence(block) >= 0.7 {
+					n++
 				}
-				break // only first VERDICT per member
 			}
 		}
 	}
-
-	if len(votes) == 0 {
-		return nil
-	}
-
-	var result []verdictTally
-	for id, count := range votes {
-		vt := verdictTally{memberID: id, votes: count}
-		if m := findMember(members, id); m != nil {
-			vt.avatar = m.Avatar
-			vt.name = m.displayName(zh)
-		} else {
-			vt.name = id
-		}
-		result = append(result, vt)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].votes > result[j].votes
-	})
-	return result
+	return n
 }
 
-// buildVerdictPrompt generates the verdict prompt shown to the user after the debate.
-// When synthesis is non-empty, shows a compact LLM-generated summary (总分 structure:
-// score overview + vote tally as 总, synthesis as 分).
-// When synthesis is empty (LLM call failed), falls back to verbose member viewpoints.
+// buildVerdictPrompt generates the verdict prompt shown to the user after the
+// debate: declares the most-accepted proposal (highest average score), shows
+// the score overview table, and renders the detailed implementation blueprint.
+// When the blueprint is empty (LLM call failed) it falls back to the concise
+// synthesis; when both are empty it falls back to verbose member viewpoints +
+// high-confidence challenges.
 func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMember, zh bool, synthesis string) *EngineResponse {
 	var sb strings.Builder
 
+	state := h.engine.state
+	rounds := state.Roundtable.DebateRounds
+
 	// Header
 	sb.WriteString(pickPrompt(zh,
-		"## Debate Complete - Your Verdict\n\n",
-		"## 辩论完成 - 请裁决\n\n",
+		"## Debate Complete - Most Accepted Proposal\n\n",
+		"## 辩论完成 - 最被大家接受的方案\n\n",
 	))
 	sb.WriteString(pickPrompt(zh,
 		fmt.Sprintf("**Goal**: %s\n\n", goal),
 		fmt.Sprintf("**需求**: %s\n\n", goal),
 	))
 
-	state := h.engine.state
-	rounds := state.Roundtable.DebateRounds
+	// ── 胜者区块 ──
+	winner := findMember(members, state.Roundtable.WinnerID)
+	if winner != nil {
+		sb.WriteString(fmt.Sprintf("### 🏆 %s %s", winner.Avatar, winner.displayName(zh)))
+		if avg := winnerAvgScore(winner.ID, rounds, members); avg >= 0 {
+			sb.WriteString(fmt.Sprintf("（平均分 %.1f）", avg))
+		}
+		sb.WriteString("\n\n")
+	}
 
-	// ── 总: Score overview table (sorted, top highlighted) + vote tally ──
+	// ── 评分总览 ──
 	if len(rounds) >= 4 {
 		table := buildScoreTable(rounds[3].Outputs, members, zh)
 		if table != "" {
@@ -689,31 +877,21 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 			sb.WriteString(table)
 			sb.WriteString("\n")
 		}
-
-		tally := parseVerdicts(rounds[3].Outputs, members, zh)
-		if len(tally) > 0 {
-			sb.WriteString(pickPrompt(zh, "### Vote Tally\n\n", "### 投票统计\n\n"))
-			var parts []string
-			for _, v := range tally {
-				parts = append(parts, fmt.Sprintf("%s %s %d%s",
-					v.avatar, v.name, v.votes,
-					pickPrompt(zh, " votes", "票")))
-			}
-			sb.WriteString(strings.Join(parts, " | "))
-			sb.WriteString("\n\n")
-		}
 	}
 
-	if synthesis != "" {
-		// ── 分: LLM synthesis summary ──
+	// ── 蓝图（优先）→ synthesis → 观点 fallback ──
+	switch {
+	case state.Roundtable.Blueprint != "":
+		sb.WriteString(pickPrompt(zh, "### Implementation Blueprint\n\n", "### 实施蓝图\n\n"))
+		sb.WriteString(state.Roundtable.Blueprint)
+		sb.WriteString("\n\n")
+	case synthesis != "":
 		sb.WriteString(pickPrompt(zh, "### Debate Summary\n\n", "### 辩论摘要\n\n"))
 		sb.WriteString(synthesis)
 		sb.WriteString("\n\n")
-	} else {
-		// ── Fallback: verbose member viewpoints + high-confidence challenges ──
+	default:
 		if len(rounds) > 0 {
 			sb.WriteString(pickPrompt(zh, "### Member Viewpoints\n\n", "### 各角色观点\n\n"))
-
 			for _, out := range rounds[0].Outputs {
 				m := findMember(members, out.MemberID)
 				avatar := ""
@@ -724,13 +902,10 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 					name = m.displayName(zh)
 					stance = m.displayStance(zh)
 				}
-
 				sb.WriteString(fmt.Sprintf("#### %s %s\n", avatar, name))
 				if stance != "" {
 					sb.WriteString(fmt.Sprintf("*%s*\n\n", stance))
 				}
-
-				// Prefer final position (round 3); fall back to original proposal (round 0)
 				viewpoint := ""
 				if len(rounds) >= 4 {
 					finalOut := getMemberOutput(out.MemberID, rounds[3].Outputs)
@@ -745,7 +920,6 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 				sb.WriteString("\n\n")
 			}
 		}
-
 		challenges := extractHighConfidenceChallenges(rounds, members, zh)
 		if len(challenges) > 0 {
 			sb.WriteString(pickPrompt(zh, "### High-Confidence Challenges\n\n", "### 高置信度挑战\n\n"))
@@ -764,8 +938,8 @@ func (h *RoundtableHall) buildVerdictPrompt(goal string, members []RoundtableMem
 	// ── Footer: Verdict instructions ──
 	sb.WriteString("---\n\n")
 	sb.WriteString(pickPrompt(zh,
-		"**Your verdict**: Type `support <role>`, `<role> but <condition>`, `none, should <your approach>`, or `debate again`\n",
-		"**你的裁决**: 输入 `支持方案<角色名>`、`方案<角色名>但要<条件>`、`都不行，应该<你的方案>`、或 `再辩一轮`\n",
+		"**Your verdict**: Type `support` to execute this blueprint, `but <condition>` to adjust, or `debate again`\n",
+		"**你的裁决**: 输入 `支持` 执行此蓝图、`但要<条件>` 调整、或 `再辩一轮`\n",
 	))
 
 	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
@@ -874,6 +1048,42 @@ func buildScoreTable(outputs []DebateOutput, members []RoundtableMember, zh bool
 	}
 
 	return sb.String()
+}
+
+// winnerAvgScore returns the winner's average score across all members' final
+// round SCORE lines, or -1 if none parse.
+func winnerAvgScore(memberID string, rounds []DebateRound, members []RoundtableMember) float64 {
+	if len(rounds) < 4 {
+		return -1
+	}
+	var sum, count float64
+	for _, out := range rounds[3].Outputs {
+		for _, line := range strings.Split(out.Content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			lower := strings.ToLower(trimmed)
+			if !strings.HasPrefix(lower, "score:") {
+				continue
+			}
+			rest := strings.TrimSpace(trimmed[len("score:"):])
+			parts := strings.SplitN(rest, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if strings.TrimSpace(parts[0]) != memberID {
+				continue
+			}
+			s, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+			if err != nil {
+				continue
+			}
+			sum += s
+			count++
+		}
+	}
+	if count == 0 {
+		return -1
+	}
+	return sum / count
 }
 
 // challengeBlock represents a single high-confidence challenge from the challenge round.
@@ -1035,6 +1245,13 @@ func (h *RoundtableHall) handleVerdict(userMsg, lower string, zh bool) *EngineRe
 	if strings.Contains(lower, "再辩") || strings.Contains(lower, "继续") ||
 		strings.Contains(lower, "debate again") || lower == "again" {
 		state.Roundtable.Phase = RoundtableProposal
+		// Reset per-round state so the restarted debate starts fresh: without
+		// this, runDebateRound appends to the old DebateRounds and challenge/
+		// rebuttal rounds read stale rounds[0]/rounds[1]. SharedContext is kept
+		// so the second debate reuses the already-gathered code research.
+		state.Roundtable.DebateRounds = nil
+		state.Roundtable.WinnerID = ""
+		state.Roundtable.Blueprint = ""
 		return &EngineResponse{
 			Summary: pickPrompt(zh, "Starting another debate round...", "开始新一轮辩论..."),
 			Stage:   StageAct,

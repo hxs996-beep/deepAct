@@ -104,13 +104,21 @@ deepact exec "review the last 5 commits for potential bugs" --output jsonl > rev
 
 Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`.
 
-### Multi-Agent Team Mode (/team)
+### Multi-Agent Debate Mode (/debate)
 
 ```bash
-deepact exec "/team add idempotency control to the order module"
+deepact exec "/debate add idempotency control to the order module"
 ```
 
-The main agent first produces 2–3 implementation plans; then roles like architect and security engineer **review in parallel and score independently**, producing a plan × role score matrix. Once you pick a plan, the agent lands it directly. Supports `--members` for custom roles and `--add` to load TOML role files.
+A search agent first scans the codebase and shares its findings with all debate members. Four personality roles then **debate in parallel** (proposal → challenge → rebuttal → final) with their own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. Supports `--members` for custom roles and `--add` to load TOML role files.
+
+### Multi-Agent Collaboration Pipeline (/collab)
+
+```bash
+deepact exec "/collab add a cache layer"
+```
+
+A pipeline of four Chinese-named roles works in sequence: **侦察 (Recon)** scans the codebase, **设计 (Designer)** produces a technical design, **开发 (Builder)** writes concrete implementation content, **把关 (Reviewer)** flags risks and bugs. The merged summary is shown for your confirmation before the main agent executes.
 
 ### Project Rules & Skills
 

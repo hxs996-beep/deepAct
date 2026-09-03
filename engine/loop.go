@@ -107,11 +107,18 @@ type Engine struct {
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
+	// collabHall orchestrates the /collab pipeline (recon → design → dev → review).
+	collabHall *CollabHall
+
 	// teamVerdictPending is set when the user's roundtable verdict is processed.
 	// On the next Run(), it causes PlanConfirmed + AnalysisReportConfirmed to be
 	// set, skipping the analysis-report gate and edit-plan guard - the user
 	// already approved the plan through the debate process.
 	teamVerdictPending bool
+
+	// collabVerdictPending is set when the user confirms the /collab summary,
+	// skipping confirmation gates so the plan lands directly.
+	collabVerdictPending bool
 
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
@@ -194,6 +201,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
+	e.collabHall = NewCollabHall(e)
 
 	// Load cross-session persistent memory for this project and merge it into
 	// TaskState. These fields (memory_markers, decisions, open_questions,
@@ -310,7 +318,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
 
-	// Team command handling — /team <goal>
+	// Team command handling — /debate <goal>
 	// Activates the debate arena: 4-round structured debate → user verdict.
 	if tc := parseTeamCommand(userMsg); tc != nil {
 		e.state.Roundtable = &RoundtableState{
@@ -338,12 +346,27 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				e.state.Roundtable.Members = append(e.state.Roundtable.Members, *added)
 			}
 		}
-		// Replace raw "/team <goal>" so the main agent loop sees a proper prompt
+		// Replace raw "/debate <goal>" so the main agent loop sees a proper prompt
 		if len(e.history) > 0 {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"辩论模式已启动：%s\n\n请等待团队成员完成辩论。",
 				tc.Goal)
 			userMsg = fmt.Sprintf("辩论模式已启动：%s\n\n请等待团队成员完成辩论。", tc.Goal)
+		}
+	}
+
+	// Collab command handling — /collab <goal>
+	// Activates the collaboration pipeline: recon → design → dev → review.
+	if cc := parseCollabCommand(userMsg); cc != nil {
+		e.state.Collab = &CollabState{
+			Goal:  cc.Goal,
+			Phase: CollabReconPhase,
+		}
+		// Replace raw "/collab <goal>" so the main agent loop sees a proper prompt.
+		if len(e.history) > 0 {
+			e.history[len(e.history)-1].Content = fmt.Sprintf(
+				"协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
+			userMsg = fmt.Sprintf("协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
 		}
 	}
 
@@ -721,6 +744,40 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
+	// Collab pipeline phase — execute pipeline stages, then await confirmation.
+	if e.state.Collab != nil {
+		phase := e.state.Collab.Phase
+		switch phase {
+		case CollabReconPhase, CollabDesignPhase, CollabDevPhase, CollabReviewPhase:
+			response, err := e.collabHall.handleCollabArena(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("collab arena: %w", err)
+			}
+			if response != nil {
+				return response, nil
+			}
+		case CollabAwaitingConfirmation:
+			response, err := e.collabHall.Advance(ctx, userMsg)
+			if err != nil {
+				return nil, fmt.Errorf("collab confirm: %w", err)
+			}
+			// 这里 return 的是"重新协作"的重启响应：流水线回到 CollabReconPhase，
+			// 由下一次 Run() 继续执行各阶段。若用户选定方案（"支持"/调整），
+			// handleConfirmation 把 Phase 置为 CollabDone——此 case 不 return，
+			// 直接 fall-through 到下方主 agent loop：在本 Run 内消费 pinned
+			// [COLLAB PLAN] 与 collabVerdictPending，执行方案并返回执行结论。
+			if e.state.Collab.Phase != CollabDone {
+				return response, nil
+			}
+		case CollabDone:
+			// 调度块处理上一 Run 遗留的 pre-existing CollabDone（本 Run 入口时
+			// 状态已是 Done，本 Run 未触发确认）：清空 collab 状态恢复普通流程。
+			// 本 Run 内 fall-through 产生的 CollabDone 不在此清理——由 Run()
+			// 末尾的清理逻辑处理（见下方 loop.go 末尾），两者互补不重复。
+			e.state.Collab = nil
+		}
+	}
+
 	// Team verdict: the user already approved a plan through the debate process.
 	// Override intent detection to skip all confirmation gates (analysis-report
 	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
@@ -733,6 +790,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.AnalysisMode = false
 		e.teamVerdictPending = false
 		loopLog.Printf("team verdict: PlanConfirmed=true, skipping confirmation gates")
+	}
+
+	// Collab verdict: the user already approved a plan through the pipeline.
+	if e.collabVerdictPending {
+		e.state.PlanConfirmed = true
+		e.state.AnalysisReportConfirmed = true
+		e.state.AnalysisMode = false
+		e.collabVerdictPending = false
+		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping confirmation gates")
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -894,6 +960,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Run() call's context; subsequent turns don't need stale roundtable data.
 	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableDone {
 		e.state.Roundtable = nil
+	}
+
+	// Clean up a completed collab pipeline the same way: the pinned plan was
+	// already consumed by this Run()'s agent loop.
+	// Run 末尾清理处理本 Run 内 fall-through 产生的 CollabDone（上方调度块
+	// AwaitingConfirmation case 确认后置位）；上一 Run 遗留的 pre-existing
+	// CollabDone 已在调度块 CollabDone case 清空，两者互补不重复。
+	if e.state.Collab != nil && e.state.Collab.Phase == CollabDone {
+		e.state.Collab = nil
 	}
 
 	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
