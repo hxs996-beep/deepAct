@@ -91,6 +91,13 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
+	// pendingConfirmOptions holds the options the agent declared via
+	// present_options in its analysis report. Non-empty means the popup shows
+	// 方案A/B/C... for the user to choose instead of the fixed "按报告执行".
+	// NOT reset at Run start — it must survive until the next Run's
+	// handleConfirmCommand reads it. Cleared once consumed.
+	pendingConfirmOptions []string
+
 	// pendingAnalysisNudge is true when the analysis report gate has blocked
 	// edit/write calls, waiting for the agent to output a text-only analysis
 	// report. Persists across Run() calls (set in one Run, checked in the next

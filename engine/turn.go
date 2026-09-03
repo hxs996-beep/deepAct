@@ -1568,6 +1568,66 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 	return msgs
 }
 
+// processPresentOptionsCalls intercepts present_options tool calls from the
+// assistant's response. Each call declares a set of mutually exclusive options
+// the user can choose from; the engine stores them (2-6 non-empty strings) for
+// the analysis-gate popup. Every call receives a tool response message
+// (satisfying the DeepSeek API requirement that every tool_call_id has a
+// matching tool response).
+func (e *Engine) processPresentOptionsCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != PresentOptionsToolName {
+			continue
+		}
+		var params struct {
+			Options []string `json:"options"`
+		}
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid present_options arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if len(params.Options) < 2 || len(params.Options) > 6 {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "Error: present_options requires 2 to 6 options. A single option should be presented as a normal report, not via present_options.",
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		valid := true
+		for _, o := range params.Options {
+			if strings.TrimSpace(o) == "" {
+				msgs = append(msgs, Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    "Error: present_options requires non-empty option strings",
+					Timestamp:  time.Now(),
+				})
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		e.pendingConfirmOptions = append([]string(nil), params.Options...)
+		msgs = append(msgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    fmt.Sprintf("✓ 已记录 %d 个可选方案，等待用户选择。", len(params.Options)),
+			Timestamp:  time.Now(),
+		})
+	}
+	return msgs
+}
+
 // processHandoffResults builds tool response messages for handoff call results.
 // Every handoff call receives a response — even cancelled ones — to prevent
 // orphaned tool_call_ids that would cause the DeepSeek API to reject the next

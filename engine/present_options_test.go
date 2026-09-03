@@ -47,3 +47,63 @@ func TestPresentOptionsToolSpec(t *testing.T) {
 		t.Errorf("items.type = %q, want string", params.Properties.Options.Items.Type)
 	}
 }
+
+func TestProcessPresentOptionsCalls_CapturesValid(t *testing.T) {
+	e := &Engine{}
+	msgs := e.processPresentOptionsCalls([]ToolCallRequest{
+		{ID: "call_opt", Name: PresentOptionsToolName, Input: json.RawMessage(
+			`{"options":["用 Redis 缓存","改用 MySQL"]}`)},
+	})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 tool response, got %d", len(msgs))
+	}
+	if msgs[0].Content != "✓ 已记录 2 个可选方案，等待用户选择。" {
+		t.Errorf("tool response = %q", msgs[0].Content)
+	}
+	if len(e.pendingConfirmOptions) != 2 || e.pendingConfirmOptions[1] != "改用 MySQL" {
+		t.Errorf("pendingConfirmOptions = %v, want [用 Redis 缓存 改用 MySQL]", e.pendingConfirmOptions)
+	}
+}
+
+func TestProcessPresentOptionsCalls_RejectsInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"empty array", `{"options":[]}`},
+		{"single option", `{"options":["only one"]}`},
+		{"too many", `{"options":["a","b","c","d","e","f","g"]}`},
+		{"blank item", `{"options":["a","  "]} `},
+		{"bad json", `{invalid}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := &Engine{}
+			msgs := e.processPresentOptionsCalls([]ToolCallRequest{
+				{ID: "call_opt", Name: PresentOptionsToolName, Input: json.RawMessage(c.input)},
+			})
+			if len(msgs) != 1 {
+				t.Fatalf("expected 1 error response, got %d", len(msgs))
+			}
+			if msgs[0].Content[:6] != "Error:" {
+				t.Errorf("expected Error response, got %q", msgs[0].Content)
+			}
+			if len(e.pendingConfirmOptions) != 0 {
+				t.Errorf("pendingConfirmOptions should stay empty, got %v", e.pendingConfirmOptions)
+			}
+		})
+	}
+}
+
+func TestProcessPresentOptionsCalls_IgnoresOtherTools(t *testing.T) {
+	e := &Engine{}
+	msgs := e.processPresentOptionsCalls([]ToolCallRequest{
+		{ID: "call_grep", Name: "grep", Input: json.RawMessage(`{}`)},
+	})
+	if len(msgs) != 0 {
+		t.Errorf("expected no responses for non-present_options, got %d", len(msgs))
+	}
+	if len(e.pendingConfirmOptions) != 0 {
+		t.Errorf("pendingConfirmOptions should stay empty, got %v", e.pendingConfirmOptions)
+	}
+}
