@@ -19,6 +19,7 @@ const (
 	TaskCompleteToolName   = "task_complete"
 	TodoWriteToolName      = "todo_write"
 	SubmitResultToolName   = "submit_result"
+	PresentOptionsToolName = "present_options"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -279,6 +280,40 @@ func todoWriteToolSpec() ModelTool {
 				},
 				"required": ["todos"]
 			}`),
+		},
+	}
+}
+
+// presentOptionsToolSpec returns the tool definition for declaring mutually
+// exclusive options in an analysis report. When the agent has 2+ real plans to
+// offer, calling this makes the confirmation popup show 方案A/B/C... choices.
+// Single-plan reports must NOT call it — they use the fixed "按报告执行" path.
+func presentOptionsToolSpec(zh bool) ModelTool {
+	desc := "After your analysis report, if you have multiple mutually exclusive options to offer, call this tool to declare them; the engine will present them as \"方案A/B/C\" for the user to choose. Do NOT call it when there is only one option or no options."
+	optionsDesc := "The list of options (2-6 non-empty strings). Each element is the raw text of a plan; the engine prefixes 方案A/B/C."
+	if zh {
+		desc = "分析报告后，若你有多个互斥的可选方案，调用本工具声明；引擎将按'方案A/B/C'展示供用户选择。只有一个方案或只是分析报告（无多方案）时不要调用。"
+		optionsDesc = "可选方案列表（2~6 个非空字符串）。每个元素是方案的原始文本；引擎会加上'方案A/B/C'前缀。"
+	}
+	params := fmt.Sprintf(`{
+				"type": "object",
+				"properties": {
+					"options": {
+						"type": "array",
+						"items": {"type": "string", "minLength": 1},
+						"minItems": 2,
+						"maxItems": 6,
+						"description": %q
+					}
+				},
+				"required": ["options"]
+			}`, optionsDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        PresentOptionsToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
 		},
 	}
 }

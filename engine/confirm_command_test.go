@@ -59,30 +59,32 @@ func TestHandleConfirmCommand_ConfirmExecutes(t *testing.T) {
 	}
 }
 
-// /confirm N (N>=2) 是反馈语义：不确认执行，AnalysisMode 保持，清除 nudge。
-func TestHandleConfirmCommand_FeedbackVariant(t *testing.T) {
+// 多方案模式下 /confirm 1 → 选择方案A，确认执行并注入方案描述。
+func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	e := &Engine{
 		state: &TaskState{
 			Goal:                    "修改 .gitignore 并提交 memory/",
 			AnalysisMode:            true,
 			AnalysisReportConfirmed: false,
 		},
-		history:   []Message{{Role: "user", Content: "/confirm 2"}},
-		isChinese: true,
+		history:              []Message{{Role: "user", Content: "/confirm 1"}},
+		isChinese:            true,
+		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
 	}
 	e.pendingAnalysisNudge = true
 
-	if !e.handleConfirmCommand("/confirm 2") {
-		t.Fatal("handleConfirmCommand should handle /confirm 2")
+	if !e.handleConfirmCommand("/confirm 1") {
+		t.Fatal("handleConfirmCommand should handle /confirm 1")
 	}
-	if e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should stay false for /confirm N (N>=2)")
+	if e.state.AnalysisMode {
+		t.Error("AnalysisMode should be false after selecting 方案A")
 	}
-	if !e.state.AnalysisMode {
-		t.Error("AnalysisMode should stay true for /confirm N (N>=2)")
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after selecting 方案A")
 	}
-	if e.pendingAnalysisNudge {
-		t.Error("pendingAnalysisNudge should be false after /confirm N")
+	last := e.history[len(e.history)-1].Content
+	if !strings.Contains(last, "方案A: 用 Redis 缓存") {
+		t.Errorf("history should mention 方案A: 用 Redis 缓存, got %q", last)
 	}
 }
 
@@ -155,7 +157,7 @@ func TestConfirmOptions_ReturnedWhenGateIntercepted(t *testing.T) {
 	if len(resp.Options) != 2 {
 		t.Fatalf("expected 2 options, got %d: %v", len(resp.Options), resp.Options)
 	}
-	if !strings.Contains(resp.Options[len(resp.Options)-1], "其他") {
+	if !strings.Contains(resp.Options[len(resp.Options)-1], "意见") {
 		t.Errorf("last option should be the free-input item, got %q", resp.Options[len(resp.Options)-1])
 	}
 }
