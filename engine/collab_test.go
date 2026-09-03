@@ -302,9 +302,14 @@ func TestHandleCollabArena_SummaryGenerated(t *testing.T) {
 func TestCollab_AdvanceConfirm(t *testing.T) {
 	e := newCollabTestEngine(t)
 	e.state.Collab = &CollabState{
-		Goal:   "实现一个缓存层",
-		Phase:  CollabAwaitingConfirmation,
-		Stages: []CollabStage{{Name: CollabRecon, Content: "调研结果"}},
+		Goal:  "实现一个缓存层",
+		Phase: CollabAwaitingConfirmation,
+		Stages: []CollabStage{
+			{Name: CollabRecon, Content: "调研结果A"},
+			{Name: CollabDesign, Content: "设计方案B"},
+			{Name: CollabDev, Content: "实现代码C"},
+			{Name: CollabReview, Content: "评审意见D"},
+		},
 	}
 	resp, err := e.collabHall.Advance(context.Background(), "支持")
 	if err != nil {
@@ -319,8 +324,19 @@ func TestCollab_AdvanceConfirm(t *testing.T) {
 	if !e.collabVerdictPending {
 		t.Error("collabVerdictPending should be set after confirmation")
 	}
-	if len(e.pendingPinnedMessages) == 0 {
-		t.Error("expected pendingPinnedMessages after confirmation")
+	if len(e.pendingPinnedMessages) != 1 {
+		t.Fatalf("expected exactly 1 pinned message after confirmation, got %d", len(e.pendingPinnedMessages))
+	}
+	// /collab 的关键特性：确认时把全部阶段产出拼进 [COLLAB PLAN] pinned，
+	// 供主 agent 在执行方案时看到完整产出，而非只看到汇总。
+	pinned := e.pendingPinnedMessages[0]
+	if !strings.Contains(pinned, "[COLLAB PLAN: 实现一个缓存层]") {
+		t.Errorf("pinned should carry the [COLLAB PLAN] header, got:\n%s", pinned)
+	}
+	for _, want := range []string{"调研结果A", "设计方案B", "实现代码C", "评审意见D"} {
+		if !strings.Contains(pinned, want) {
+			t.Errorf("pinned plan should contain stage output %q, got:\n%s", want, pinned)
+		}
 	}
 }
 
@@ -402,9 +418,13 @@ func TestRun_CollabExecutesAndConfirms(t *testing.T) {
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
-	// 确认后同一 Run 执行方案（而非只返回确认 ack）
+	// 确认后同一 Run 执行方案（而非只返回确认 ack）：正向断言——Summary 必须是
+	// stub model 执行方案的结论"执行了协作方案。"（"不含'已确认' ack"仅作辅助）。
+	if !strings.Contains(resp.Summary, "执行了协作方案。") {
+		t.Errorf("collab confirm Run must execute the plan and report the conclusion, got %q", resp.Summary)
+	}
 	if strings.Contains(resp.Summary, "已确认") {
-		t.Errorf("collab confirm Run must execute the plan, got ack %q", resp.Summary)
+		t.Errorf("collab confirm Run must not return a confirmation ack, got %q", resp.Summary)
 	}
 	if e.state.Collab != nil {
 		t.Errorf("collab state should be cleared after confirm Run, got phase %v", e.state.Collab.Phase)

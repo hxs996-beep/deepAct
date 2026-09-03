@@ -761,15 +761,19 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if err != nil {
 				return nil, fmt.Errorf("collab confirm: %w", err)
 			}
-			// "重新协作" restarts the pipeline (return its response); a picked
-			// plan (Phase becomes CollabDone) falls through so the main agent
-			// loop consumes the pinned plan + collabVerdictPending flag and
-			// executes in this same Run().
+			// 这里 return 的是"重新协作"的重启响应：流水线回到 CollabReconPhase，
+			// 由下一次 Run() 继续执行各阶段。若用户选定方案（"支持"/调整），
+			// handleConfirmation 把 Phase 置为 CollabDone——此 case 不 return，
+			// 直接 fall-through 到下方主 agent loop：在本 Run 内消费 pinned
+			// [COLLAB PLAN] 与 collabVerdictPending，执行方案并返回执行结论。
 			if e.state.Collab.Phase != CollabDone {
 				return response, nil
 			}
 		case CollabDone:
-			// Pipeline complete — clear collab state so normal flow resumes.
+			// 调度块处理上一 Run 遗留的 pre-existing CollabDone（本 Run 入口时
+			// 状态已是 Done，本 Run 未触发确认）：清空 collab 状态恢复普通流程。
+			// 本 Run 内 fall-through 产生的 CollabDone 不在此清理——由 Run()
+			// 末尾的清理逻辑处理（见下方 loop.go 末尾），两者互补不重复。
 			e.state.Collab = nil
 		}
 	}
@@ -960,6 +964,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 	// Clean up a completed collab pipeline the same way: the pinned plan was
 	// already consumed by this Run()'s agent loop.
+	// Run 末尾清理处理本 Run 内 fall-through 产生的 CollabDone（上方调度块
+	// AwaitingConfirmation case 确认后置位）；上一 Run 遗留的 pre-existing
+	// CollabDone 已在调度块 CollabDone case 清空，两者互补不重复。
 	if e.state.Collab != nil && e.state.Collab.Phase == CollabDone {
 		e.state.Collab = nil
 	}
