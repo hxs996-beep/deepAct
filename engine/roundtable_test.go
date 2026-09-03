@@ -246,6 +246,15 @@ func TestDebateArena_VerdictDebateAgain(t *testing.T) {
 		Goal:    "测试再辩",
 		Phase:   RoundtableAwaitingVerdict,
 		Members: DefaultDebateMembers,
+		// Simulate a completed first debate so the restart must clear it.
+		DebateRounds: []DebateRound{
+			{Phase: DebateProposal, Outputs: []DebateOutput{{MemberID: "radical", Content: "提案"}}},
+			{Phase: DebateChallenge, Outputs: []DebateOutput{{MemberID: "defender", Content: "质询"}}},
+			{Phase: DebateRebuttal, Outputs: []DebateOutput{{MemberID: "radical", Content: "反驳"}}},
+			{Phase: DebateFinal, Outputs: []DebateOutput{{MemberID: "defender", Content: "终陈"}}},
+		},
+		WinnerID:  "defender",
+		Blueprint: "旧蓝图",
 	}
 
 	_, err := e.roundtableHall.Advance(context.Background(), "再辩一轮")
@@ -254,6 +263,17 @@ func TestDebateArena_VerdictDebateAgain(t *testing.T) {
 	}
 	if e.state.Roundtable.Phase != RoundtableProposal {
 		t.Errorf("Phase = %v, want RoundtableProposal", e.state.Roundtable.Phase)
+	}
+	// The restart must reset per-round state so the second debate starts fresh
+	// (runDebateRound appends to DebateRounds; challenge/rebuttal read rounds[0]/rounds[1]).
+	if len(e.state.Roundtable.DebateRounds) != 0 {
+		t.Errorf("DebateRounds = %d rounds, want 0 after restart", len(e.state.Roundtable.DebateRounds))
+	}
+	if e.state.Roundtable.WinnerID != "" {
+		t.Errorf("WinnerID = %q, want empty after restart", e.state.Roundtable.WinnerID)
+	}
+	if e.state.Roundtable.Blueprint != "" {
+		t.Errorf("Blueprint = %q, want empty after restart", e.state.Roundtable.Blueprint)
 	}
 }
 

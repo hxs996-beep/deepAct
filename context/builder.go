@@ -256,6 +256,7 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		ConsecutiveFails int                 `json:"consecutive_failures"`
 		EditScopeFiles   int                 `json:"edit_scope_files"`
 		Roundtable       *roundtableVolatile `json:"roundtable,omitempty"`
+		Collab           *collabVolatile     `json:"collab,omitempty"`
 	}{
 		Goal:             state.Goal,
 		ActiveSkillName:  state.ActiveSkillName,
@@ -271,6 +272,7 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
 		Roundtable:       flattenRoundtable(state.Roundtable),
+		Collab:           flattenCollab(state.Collab),
 	}
 	data, err := json.Marshal(volatile)
 	if err != nil {
@@ -361,6 +363,48 @@ func flattenRoundtable(rt *engine.RoundtableState) *roundtableVolatile {
 		}
 	}
 	return v
+}
+
+// collabVolatile is a compact representation of the /collab pipeline state
+// injected into Block B so the main agent can tell that the active plan is
+// a collab-pipeline output across all execution turns, not just the first.
+type collabVolatile struct {
+	Phase  string `json:"phase"`
+	Goal   string `json:"goal,omitempty"`
+	Stages int    `json:"stages,omitempty"`
+}
+
+// flattenCollab converts engine.CollabState to the compact volatile form.
+func flattenCollab(c *engine.CollabState) *collabVolatile {
+	if c == nil {
+		return nil
+	}
+	return &collabVolatile{
+		Phase:  collabPhaseName(c.Phase),
+		Goal:   truncString(c.Goal, 120),
+		Stages: len(c.Stages),
+	}
+}
+
+// collabPhaseName maps an engine.CollabPhase to a readable string for the
+// volatile context. CollabPhase has no String() method (unlike RoundtablePhase).
+func collabPhaseName(p engine.CollabPhase) string {
+	switch p {
+	case engine.CollabReconPhase:
+		return "recon"
+	case engine.CollabDesignPhase:
+		return "design"
+	case engine.CollabDevPhase:
+		return "dev"
+	case engine.CollabReviewPhase:
+		return "review"
+	case engine.CollabAwaitingConfirmation:
+		return "awaiting_confirmation"
+	case engine.CollabDone:
+		return "done"
+	default:
+		return "idle"
+	}
 }
 
 func truncString(s string, max int) string {

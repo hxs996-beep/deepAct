@@ -1245,6 +1245,13 @@ func (h *RoundtableHall) handleVerdict(userMsg, lower string, zh bool) *EngineRe
 	if strings.Contains(lower, "再辩") || strings.Contains(lower, "继续") ||
 		strings.Contains(lower, "debate again") || lower == "again" {
 		state.Roundtable.Phase = RoundtableProposal
+		// Reset per-round state so the restarted debate starts fresh: without
+		// this, runDebateRound appends to the old DebateRounds and challenge/
+		// rebuttal rounds read stale rounds[0]/rounds[1]. SharedContext is kept
+		// so the second debate reuses the already-gathered code research.
+		state.Roundtable.DebateRounds = nil
+		state.Roundtable.WinnerID = ""
+		state.Roundtable.Blueprint = ""
 		return &EngineResponse{
 			Summary: pickPrompt(zh, "Starting another debate round...", "开始新一轮辩论..."),
 			Stage:   StageAct,

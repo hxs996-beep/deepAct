@@ -207,6 +207,43 @@ func TestFlattenRoundtable(t *testing.T) {
 	}
 }
 
+// TestFormatTaskStateVolatile_Collab asserts that a live /collab pipeline is
+// rendered into the volatile context (Block B) so the main agent can see the
+// collab-produced plan across all execution turns, mirroring roundtable.
+func TestFormatTaskStateVolatile_Collab(t *testing.T) {
+	state := &engine.TaskState{
+		TurnNumber: 3,
+		Collab: &engine.CollabState{
+			Goal:  "实现登录页改造",
+			Phase: engine.CollabAwaitingConfirmation,
+			Stages: []engine.CollabStage{
+				{Name: engine.CollabRecon, Content: "recon out"},
+				{Name: engine.CollabDesign, Content: "design out"},
+				{Name: engine.CollabDev, Content: "dev out"},
+				{Name: engine.CollabReview, Content: "review out"},
+			},
+		},
+	}
+	got := formatTaskStateVolatile(state)
+	for _, want := range []string{
+		`"collab":{`,
+		`"phase":"awaiting_confirmation"`,
+		`"goal":"实现登录页改造"`,
+		`"stages":4`,
+	} {
+		if !strContains(got, want) {
+			t.Errorf("output should contain %q, got %q", want, got)
+		}
+	}
+}
+
+// TestFlattenCollab_Nil asserts a nil CollabState renders as no collab field.
+func TestFlattenCollab_Nil(t *testing.T) {
+	if got := flattenCollab(nil); got != nil {
+		t.Errorf("flattenCollab(nil) = %+v, want nil", got)
+	}
+}
+
 func strContains(s, substr string) bool {
 	return len(s) >= len(substr) && indexOfStr(s, substr) >= 0
 }
