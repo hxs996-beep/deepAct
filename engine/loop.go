@@ -1625,7 +1625,7 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 }
 
 // handleConfirmCommand processes a /confirm N message deterministically,
-// bypassing isDangerousConfirmation and the intent LLM classifier.
+// bypassing isDangerousConfirmation.
 //
 // Any /confirm N flips AnalysisReportConfirmed so the agent's next edit/write
 // in this same Run passes the analysis gate.

@@ -9,7 +9,7 @@ import (
 func TestHandleAnalysisNudgeConfirmation(t *testing.T) {
 	// Case 1: user confirms the analysis report
 	e := &Engine{
-		state:                 &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		state:                 &TaskState{AnalysisReportConfirmed: false},
 		pendingAnalysisNudge:  true,
 		isChinese:             true,
 		history:               []Message{{Role: "user", Content: "确认"}},
@@ -21,16 +21,13 @@ func TestHandleAnalysisNudgeConfirmation(t *testing.T) {
 	if !e.state.AnalysisReportConfirmed {
 		t.Error("AnalysisReportConfirmed should be true after confirmation")
 	}
-	if e.state.AnalysisMode {
-		t.Error("AnalysisMode should be false after confirmation")
-	}
 	if e.pendingAnalysisNudge {
 		t.Error("pendingAnalysisNudge should be false after confirmation")
 	}
 
 	// Case 2: user gives feedback (not a confirmation)
 	e2 := &Engine{
-		state:                &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		state:                &TaskState{AnalysisReportConfirmed: false},
 		pendingAnalysisNudge: true,
 		isChinese:            true,
 		history:              []Message{{Role: "user", Content: "不对"}},

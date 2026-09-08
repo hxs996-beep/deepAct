@@ -28,12 +28,11 @@ func TestParseConfirmCommand(t *testing.T) {
 	}
 }
 
-// /confirm 1 确定性确认：置 AnalysisReportConfirmed、清 AnalysisMode。
+// /confirm 1 确定性确认：置 AnalysisReportConfirmed。
 func TestHandleConfirmCommand_ConfirmExecutes(t *testing.T) {
 	e := &Engine{
 		state: &TaskState{
 			Goal:                    "修改 .gitignore 并提交 memory/",
-			AnalysisMode:            true,
 			AnalysisReportConfirmed: false,
 		},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
@@ -43,9 +42,6 @@ func TestHandleConfirmCommand_ConfirmExecutes(t *testing.T) {
 
 	if !e.handleConfirmCommand("/confirm 1") {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
-	}
-	if e.state.AnalysisMode {
-		t.Error("AnalysisMode should be false after /confirm 1")
 	}
 	if !e.state.AnalysisReportConfirmed {
 		t.Error("AnalysisReportConfirmed should be true after /confirm 1")
@@ -64,7 +60,6 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	e := &Engine{
 		state: &TaskState{
 			Goal:                    "修改 .gitignore 并提交 memory/",
-			AnalysisMode:            true,
 			AnalysisReportConfirmed: false,
 		},
 		history:              []Message{{Role: "user", Content: "/confirm 1"}},
@@ -76,28 +71,12 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	if !e.handleConfirmCommand("/confirm 1") {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
 	}
-	if e.state.AnalysisMode {
-		t.Error("AnalysisMode should be false after selecting 方案A")
-	}
 	if !e.state.AnalysisReportConfirmed {
 		t.Error("AnalysisReportConfirmed should be true after selecting 方案A")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "方案A: 用 Redis 缓存") {
 		t.Errorf("history should mention 方案A: 用 Redis 缓存, got %q", last)
-	}
-}
-
-// detectUserIntent 对 /confirm 前缀走确定性 fast-path，不调用 intentJudge。
-func TestDetectUserIntent_ConfirmCommandFastPath(t *testing.T) {
-	judge := &stubIntentJudge{intent: IntentAnalyze} // 即使 judge 判 analyze 也不该被调用
-	e := &Engine{state: &TaskState{Goal: "g"}, intentJudge: judge}
-
-	if got := e.detectUserIntent(context.Background(), "/confirm 1"); got != IntentContinue {
-		t.Errorf("detectUserIntent(/confirm 1) = %v, want IntentContinue", got)
-	}
-	if judge.called {
-		t.Error("intentJudge must NOT be called for /confirm (deterministic channel)")
 	}
 }
 
@@ -141,7 +120,7 @@ func TestConfirmOptions_ReturnedWhenGateIntercepted(t *testing.T) {
 		model:    model,
 		tools:    stubToolExecutor{},
 		context:  steerContextBuilder{},
-		state:    &TaskState{TaskID: "test", ConfirmedScope: true, AnalysisMode: true},
+		state:    &TaskState{TaskID: "test", ConfirmedScope: true},
 		config:   EngineConfig{ModelName: "test-model"},
 		isChinese: true,
 		// 必须完整初始化 guards：loop 供 turn.go:514、scope 供 turn.go:558

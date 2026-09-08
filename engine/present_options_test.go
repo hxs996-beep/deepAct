@@ -156,7 +156,7 @@ func TestConfirmOptions_DeclaredOptions_ABCPrefixed(t *testing.T) {
 // 无声明方案时，/confirm 1 确认报告（"按报告执行"）并清除 nudge。
 func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
 	e := &Engine{
-		state:     &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		state:     &TaskState{AnalysisReportConfirmed: false},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
 		isChinese: true,
 	}
@@ -165,8 +165,8 @@ func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
 	if !e.handleConfirmCommand("/confirm 1") {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
 	}
-	if e.state.AnalysisMode || !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisMode should be false / AnalysisReportConfirmed true after confirm")
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after confirm")
 	}
 	if e.pendingAnalysisNudge {
 		t.Error("pendingAnalysisNudge should be false after confirm")
@@ -180,7 +180,7 @@ func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
 // 有声明方案时，/confirm N 选择方案N并注入方案描述。
 func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	e := &Engine{
-		state:                 &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		state:                 &TaskState{AnalysisReportConfirmed: false},
 		history:               []Message{{Role: "user", Content: "/confirm 2"}},
 		isChinese:             true,
 		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
@@ -189,8 +189,8 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	if !e.handleConfirmCommand("/confirm 2") {
 		t.Fatal("handleConfirmCommand should handle /confirm 2")
 	}
-	if e.state.AnalysisMode || !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisMode should be false / AnalysisReportConfirmed true after selecting a plan")
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after selecting a plan")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "方案B: 改用 MySQL") {
@@ -205,7 +205,7 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 // 注入无效选择反馈，且仍置确认态。
 func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	e := &Engine{
-		state:                 &TaskState{AnalysisMode: true, AnalysisReportConfirmed: false},
+		state:                 &TaskState{AnalysisReportConfirmed: false},
 		history:               []Message{{Role: "user", Content: "/confirm 5"}},
 		isChinese:             true,
 		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
@@ -214,8 +214,8 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	if !e.handleConfirmCommand("/confirm 5") {
 		t.Fatal("handleConfirmCommand should handle /confirm 5")
 	}
-	if e.state.AnalysisMode || !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisMode should be false / AnalysisReportConfirmed true after out-of-range confirm")
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after out-of-range confirm")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "无效") {

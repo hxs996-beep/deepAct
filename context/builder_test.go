@@ -257,64 +257,6 @@ func indexOfStr(s, sub string) int {
 	return -1
 }
 
-func TestBuild_AnalysisModeConstraint(t *testing.T) {
-	assembler := NewContextAssembler(".", nil)
-	assembler.userLang = "中文"
-	assembler.userLangSet = true
-	assembler.stableSessionBlock = "stable"
-
-	// AnalysisMode=true: constraint should be present
-	state := &engine.TaskState{
-		Goal:         "test goal",
-		AnalysisMode: true,
-	}
-	msgs := assembler.Build(state, nil, nil)
-	found := false
-	for _, msg := range msgs {
-		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Build with AnalysisMode=true should include [ANALYSIS MODE] constraint")
-	}
-
-	// AnalysisMode=false: constraint should NOT be present
-	state.AnalysisMode = false
-	msgs = assembler.Build(state, nil, nil)
-	for _, msg := range msgs {
-		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
-			t.Errorf("Build with AnalysisMode=false should NOT include [ANALYSIS MODE] constraint")
-			break
-		}
-	}
-}
-
-// ANALYSIS MODE 约束应从"引擎级硬禁令"措辞改为"分析阶段契约"措辞，
-// 避免 agent 把约束误读为"系统禁止修改、要用户去界面解除模式"。
-func TestBuild_AnalysisModeConstraint_SoftWording(t *testing.T) {
-	assembler := NewContextAssembler(".", nil)
-	assembler.userLang = "中文"
-	assembler.userLangSet = true
-	assembler.stableSessionBlock = "stable"
-
-	state := &engine.TaskState{Goal: "test goal", AnalysisMode: true}
-	msgs := assembler.Build(state, nil, nil)
-	for _, msg := range msgs {
-		if strings.Contains(msg.Content, "[ANALYSIS MODE]") {
-			if strings.Contains(msg.Content, "禁止：edit") {
-				t.Error("constraint must not use hard-ban wording (禁止：edit)")
-			}
-			if !strings.Contains(msg.Content, "等待用户") {
-				t.Error("constraint should frame analysis as a stage awaiting user confirmation")
-			}
-			return
-		}
-	}
-	t.Fatal("expected an [ANALYSIS MODE] constraint message")
-}
-
 func TestFormatTaskStateVolatile_EngineOnlyFields(t *testing.T) {
 	// read_history / full modified_files / full decisions are engine-layer state,
 	// NOT rendered to the prompt. The rendered Block B exposes a count + recent

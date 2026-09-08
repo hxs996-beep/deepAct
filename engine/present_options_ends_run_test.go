@@ -45,7 +45,7 @@ func TestPresentOptions_EndsRunWithReportSummary(t *testing.T) {
 		model:     model,
 		tools:     stubToolExecutor{},
 		context:   steerContextBuilder{},
-		state:     &TaskState{TaskID: "test", ConfirmedScope: true, AnalysisMode: true},
+		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
 		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
