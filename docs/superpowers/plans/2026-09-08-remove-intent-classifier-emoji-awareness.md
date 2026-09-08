@@ -110,10 +110,7 @@ git commit -m "test: move errBoom/stubCompleteModel to shared stubs file"
 ```go
 package engine
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestDetectNegativeFeedback_Hits(t *testing.T) {
 	positives := []string{
