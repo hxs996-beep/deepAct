@@ -1614,17 +1614,59 @@ func (m *Model) finalizeTurnBlocks(toolsFirst bool) {
 // normalizeForCompare strips whitespace and markdown syntax characters
 // from a string for duplicate comparison. This allows detecting when
 // narration text (with markdown formatting) matches a Summary (which
-// may have different or no markdown).
+// may have different or no markdown). It also normalizes glamour
+// rendering glyph differences: table bars (| → │), separator rows
+// (|------| → ────┼────), and bullet glyphs (- → •).
 func normalizeForCompare(s string) string {
 	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case ' ', '\t', '\n', '\r', '*', '#', '`', '~', '_':
-		default:
-			b.WriteRune(r)
+	for _, line := range strings.Split(s, "\n") {
+		if isTableSeparatorRow(line) {
+			continue
+		}
+		for _, r := range line {
+			switch r {
+			case ' ', '\t', '\r', '*', '#', '`', '~', '_', '|', '│', '─', '┼', '├', '┤', '┬', '┴', '┌', '┐', '└', '┘':
+				// 剥 markdown 语法、空白与表格框线（与原实现一致 + 框线）
+			case '•': // glamour 无序列表圆点 → markdown "-" 等价
+				b.WriteRune('-')
+			default:
+				b.WriteRune(r)
+			}
 		}
 	}
 	return b.String()
+}
+
+// isTableSeparatorRow reports whether a line is a table separator row:
+// markdown "|------|------|" or glamour "─────┼────". After stripping the
+// box-drawing/pipe runes the row is either empty or contains only '-' / ':',
+// so it is skipped entirely — otherwise the leftover '-'s break the
+// bidirectional containment match between narration and Summary.
+func isTableSeparatorRow(line string) bool {
+	if !strings.ContainsAny(line, "|│─┼├┤┬┴┌┐└┘") {
+		return false
+	}
+	core := strings.TrimSpace(strings.Map(stripTableBoxRunes, line))
+	if core == "" {
+		return true
+	}
+	for _, r := range core {
+		if r != '-' && r != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// stripTableBoxRunes removes glamour table box-drawing runes so a separator
+// row ("─────┼────") collapses to empty for comparison.
+func stripTableBoxRunes(r rune) rune {
+	switch r {
+	case '|', '│', '─', '┼', '├', '┤', '┬', '┴', '┌', '┐', '└', '┘':
+		return -1
+	default:
+		return r
+	}
 }
 
 // narrationDuplicatesSummary checks whether narration content from the
@@ -1709,8 +1751,13 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	// keep the narration (already shown during streaming) and skip the
 	// Summary to avoid duplication. If different, keep both so the user
 	// sees intermediate narration AND the final formatted Summary.
+	// Blocked responses are checked too (scope guard / loop guard /
+	// max_turns / ...): the engine's buildRunSummary returns the last
+	// assistant content, which is usually the same text already streamed
+	// as narration — without dedup the user sees it twice (format 前 +
+	// format 后).
 	narrationDupesSummary := false
-	if msg.Err == nil && msg.Response != nil && !msg.Response.Blocked && msg.Response.Summary != "" {
+	if msg.Err == nil && msg.Response != nil && msg.Response.Summary != "" {
 		narrationDupesSummary = m.narrationDuplicatesSummary(msg.Response.Summary)
 	}
 	// Run end: tools already executed, so finalize tools before the concluding
@@ -1769,6 +1816,15 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 			// Store options on model for popup rendering (like slash suggestions)
 			m.activeOptions = msg.Response.Options
 			m.selectedOption = 0
+		}
+		// Non-awaiting_user Blocked paths (scope guard / loop guard / max_turns /
+		// ...): the engine's Summary (buildRunSummary) is usually the same text
+		// already streamed and snapshotted as narration. Remove the plain-text
+		// narration snapshot so the formatted Summary in `content` below is the
+		// only copy — otherwise the same report appears twice (format 前 +
+		// format 后).
+		if narrationDupesSummary && msg.Response.Summary != "" {
+			m.removeNarrationDuplicate(msg.Response.Summary)
 		}
 		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: content})
 		m.streaming = ""

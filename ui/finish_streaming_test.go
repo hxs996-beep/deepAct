@@ -291,3 +291,71 @@ func TestFinishStreaming_NonBlockedOptionsShowPopup(t *testing.T) {
 		t.Errorf("expected selectedOption reset to 0, got %d", m.selectedOption)
 	}
 }
+
+// TestFinishStreaming_Blocked_DedupsNarrationWhenSameSummary verifies that a
+// non-awaiting_user Blocked response (scope guard, loop guard, max_turns, ...)
+// also dedups narration that matches the Summary. Previously only awaiting_user
+// was handled; other Blocked paths appended the formatted Summary on top of the
+// already-snapshotted plain-text narration, showing the same report twice
+// (format 前 + format 后) — exactly the duplication the user reported.
+func TestFinishStreaming_Blocked_DedupsNarrationWhenSameSummary(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	m.runStartMsgIdx = 0
+	m.messages = []DisplayMessage{{Role: "user", Content: "修改 x.go"}}
+
+	report := "分析完成：问题在 x.go 第 10 行。建议修复。"
+	m.narration = report
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{
+			Summary:   report,
+			Blocked:   true,
+			BlockedBy: "scope", // 例如 scope guard 拦截 edit
+		},
+	})
+
+	count := 0
+	for _, msg := range m.messages {
+		if (msg.Role == "narration" || msg.Role == "assistant") && strings.Contains(msg.Content, "分析完成") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("Blocked+同内容: 报告出现 %d 次（期望 1 次）: %+v", count, m.messages)
+	}
+}
+
+// TestFinishStreaming_TableNarrationMatchesFormattedSummary verifies the
+// glamour 渲染字形差异也判重复：narration（markdown 表格源码 |、列表 -）与
+// Summary（表格框线 │、列表 •、分隔 ─┼）内容相同但字形不同时仍去重。
+func TestFinishStreaming_TableNarrationMatchesFormattedSummary(t *testing.T) {
+	m := &Model{
+		width:    80,
+		height:   24,
+		state:    stateReady,
+		msgCache: &messageRenderCache{},
+	}
+	m.runStartMsgIdx = 0
+	m.messages = []DisplayMessage{{Role: "user", Content: "分析方案"}}
+
+	narration := "| 输出 | 效果 |\n|------|------|\n| analyze | 设 AnalysisMode=true → 先出报告等确认 |\n\n- A. Prompt 注入式（轻，推荐）"
+	summary := "输出 │ 效果\n───────┼────\n analyze │ 设  AnalysisMode=true → 先出报告等确认 \n\n• A. Prompt 注入式（轻，推荐）"
+	m.narration = narration
+	m.finishStreaming(EngineResponseMsg{
+		Response: &engine.EngineResponse{Summary: summary},
+	})
+
+	count := 0
+	for _, msg := range m.messages {
+		if (msg.Role == "narration" || msg.Role == "assistant") && strings.Contains(msg.Content, "AnalysisMode") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("表格/列表字形差异: 报告出现 %d 次（期望 1 次）: %+v", count, m.messages)
+	}
+}
