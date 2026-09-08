@@ -5,16 +5,6 @@ import (
 	"time"
 )
 
-// UserIntent classifies the user's intention for the current message,
-// used to control analysis-only constraints.
-type UserIntent int
-
-const (
-	IntentContinue UserIntent = iota // continuing previous task —
-	IntentNewTopic                   // new topic, different from previous goal —
-	IntentAnalyze                    // analysis/explanation only, no modifications — reset + inject constraint
-)
-
 type Stage int
 
 const (
@@ -260,13 +250,6 @@ type TaskState struct {
 	// guard enforce re-read prevention in-engine, and rendering the full list
 	// leaked stale all-session state and grew the volatile tail.
 	ReadHistory []ReadRecord `json:"read_history"`
-
-	// AnalysisMode is set when the user's intent is analysis-only. When true,
-	// the context builder injects a [ANALYSIS MODE] constraint every turn,
-	// persisting across turns (unlike the former pendingPinnedMessages approach
-	// which was cleared after the first turn). Cleared when the user confirms
-	// the analysis report or starts a new topic.
-	AnalysisMode bool `json:"analysis_mode,omitempty"`
 
 	// AnalysisReportConfirmed is set when the user confirms the analysis report
 	// presented by the agent. When true, the analysis report gate is skipped,

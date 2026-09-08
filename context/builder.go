@@ -160,20 +160,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
 
-	// Analysis mode constraint: when the user's intent is analysis-only, inject
-	// the constraint on every Build call so it persists across turns. The former
-	// approach used pendingPinnedMessages which was cleared after the first turn.
-	// Wording is a stage contract (await user confirmation), NOT an engine-level
-	// hard ban — a hard-ban phrasing made agents refuse to edit even after the
-	// user confirmed, claiming "the engine forbids modifications".
-	if state != nil && state.AnalysisMode {
-		constraint := "[ANALYSIS MODE] 本任务处于分析阶段：请先输出分析报告 / 方案，等待用户通过确认选项确认后，再执行修改。"
-		if a.userLang != "中文" {
-			constraint = "[ANALYSIS MODE] This task is in the analysis stage: present your analysis report / plan first, then wait for the user to confirm via the option popup before making changes."
-		}
-		messages = append(messages, engine.ModelMessage{Role: "user", Content: constraint})
-	}
-
 	return messages
 }
 

@@ -140,10 +140,6 @@ type Engine struct {
 	stopHookRetryCount int
 	// stopHooks are checked when the model outputs text without tool calls.
 	stopHooks []StopHook
-	// intentJudge classifies user messages into analyze/continue/new_topic
-	// via a lightweight LLM call. Replaces the old keyword-based detection
-	// functions. Nil falls back to IntentContinue.
-	intentJudge IntentJudge
 	// runStartHistoryLen is the index in e.history where the current Run()'s
 	// turn loop began. buildRunSummary only considers assistant messages at
 	// or after this index, so a stale narration from a prior run cannot leak
@@ -454,14 +450,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// The matcher (wired in cmd/run.go) sends the user message + all skill
 	// descriptions to the flash model and returns the one best-matching skill,
 	// or nil. When no matcher is wired, skill matching is disabled.
-	skillJustActivated := false
 	if e.state.ActiveSkillName == "" && e.skillMatcher != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		matched := e.skillMatcher.Match(ctx, userMsg, e.skills.All())
 		cancel()
 		if matched != nil {
 			e.activateSkill(matched, "semantic match")
-			skillJustActivated = true
 		}
 	}
 
@@ -697,45 +691,17 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Detect user intent: analysis-only vs new-topic vs continue.
-	// Resets PlanConfirmed when the user starts a new topic or asks for
-	// analysis only, preventing edit-plan-guard bypass across Run() calls.
-	// When a skill was just auto-activated via keyword matching, the skill's
-	// methodology takes priority over analysis-only classification.
-	intent := e.detectUserIntent(ctx, userMsg)
-	switch intent {
-	case IntentAnalyze:
-		if skillJustActivated {
-			loopLog.Printf("intent: analyze skipped — skill activation takes priority")
-		} else {
-			e.state.PlanConfirmed = false
-			e.state.AnalysisMode = true
-			e.state.AnalysisReportConfirmed = false
-			loopLog.Printf("intent: analyze-only, set AnalysisMode=true (persistent)")
-		}
-	case IntentNewTopic:
-		e.state.PlanConfirmed = false
-		e.state.AnalysisMode = false
-		e.state.AnalysisReportConfirmed = false
-		e.state.SkillGatePassed = false
-		e.pendingAnalysisNudge = false
-		loopLog.Printf("intent: new topic, reset PlanConfirmed + AnalysisMode")
-	default: // IntentContinue
-		// Clear analysis mode - the user is continuing with implementation.
-		// AnalysisReportConfirmed was already reset per-Run above (and is only
-		// re-set this Run by handleAnalysisNudgeConfirmation on a report
-		// confirmation); it no longer leaks across tasks. PlanConfirmed is kept
-		// so the edit-plan guard stays bypassed for the rest of this task.
-		e.state.AnalysisMode = false
-		loopLog.Printf("intent: continue, cleared AnalysisMode, keeping PlanConfirmed=%v", e.state.PlanConfirmed)
-	}
+	// 用户负面反馈：暂停当前路径，反思并重新规划执行路线。
+	// 改写 history 最后一条 user 消息（照 pendingEditPlan 反馈路径模式），
+	// 让主 agent 本轮自行反思，不引入新状态。纯关键词检测，零 LLM 调用。
+	applyNegativeFeedbackRewrite(e.history, userMsg, zh)
 
 	// Debate Arena phase — execute the current debate round, then return
 	// the round result to the user. The engine continues to the next round
 	// on the next Run() call until AwaitingVerdict.
-	// Placed AFTER the intent switch (and before the team-verdict gate below):
-	// handleVerdict runs when the user delivers a verdict in this Run(), and
-	// the teamVerdictPending flag it sets is consumed in the SAME Run().
+	// Placed after the negative-feedback rewrite (and before the team-verdict
+	// gate below): handleVerdict runs when the user delivers a verdict in this
+	// Run(), and the teamVerdictPending flag it sets is consumed in the SAME Run().
 	if e.state.Roundtable != nil {
 		phase := e.state.Roundtable.Phase
 		switch phase {
@@ -805,13 +771,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Team verdict: the user already approved a plan through the debate process.
 	// Override intent detection to skip all confirmation gates (analysis-report
 	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
-	// reset by IntentNewTopic/IntentAnalyze, and AFTER the roundtable block
+	// and AFTER the roundtable block
 	// because handleVerdict (in the AwaitingVerdict case above) sets the flag
 	// during this same Run().
 	if e.teamVerdictPending {
 		e.state.PlanConfirmed = true
 		e.state.AnalysisReportConfirmed = true
-		e.state.AnalysisMode = false
 		e.teamVerdictPending = false
 		loopLog.Printf("team verdict: PlanConfirmed=true, skipping confirmation gates")
 	}
@@ -820,7 +785,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.collabVerdictPending {
 		e.state.PlanConfirmed = true
 		e.state.AnalysisReportConfirmed = true
-		e.state.AnalysisMode = false
 		e.collabVerdictPending = false
 		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping confirmation gates")
 	}
@@ -1023,7 +987,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// confirmation options so the UI can show the popup. The report is already
 	// visible as Summary. analysisNudgeCount is > 0 only when the gate blocked
 	// this Run; it resets to 0 at the next Run's start (loop.go:298), so a
-	// confirmed /confirm N (which clears AnalysisMode) won't re-prompt.
+	// confirmed /confirm N won't re-prompt.
 	if e.analysisNudgeCount > 0 {
 		return &EngineResponse{
 			Summary: summary,
@@ -1556,16 +1520,6 @@ func (e *Engine) deactivateSkill() {
 	}
 }
 
-// SetIntentJudge registers the intent classifier used by detectUserIntent.
-func (e *Engine) SetIntentJudge(j IntentJudge) { e.intentJudge = j }
-
-// NewIntentClassifier constructs an IntentClassifier bound to the engine's
-// model, flash model name, and language preference. Used by callers (e.g.
-// cmd/exec.go) to wire detectUserIntent without exposing e.model.
-func (e *Engine) NewIntentClassifier() *IntentClassifier {
-	return NewIntentClassifier(e.model, e.config.FlashModelName, e.isChinese)
-}
-
 func msgIsChinese(msg string) bool {
 	for _, r := range msg {
 		if unicode.Is(unicode.Han, r) {
@@ -1651,38 +1605,6 @@ func extractTaskTextAfterSkillCmd(userMsg string, skillName string) string {
 	return rest
 }
 
-// detectUserIntent classifies the user's message relative to the current goal.
-// isDangerousConfirmation is a deterministic fast-path (safety gate, not fuzzy
-// intent detection). All other messages go through the LLM IntentJudge; nil
-// judge or classify error falls back conservatively to IntentContinue (does not
-// reset PlanConfirmed, avoiding spurious edit-plan re-confirmation).
-func (e *Engine) detectUserIntent(ctx context.Context, userMsg string) UserIntent {
-	if e.state == nil || e.state.Goal == "" {
-		return IntentContinue
-	}
-
-	msg := strings.ToLower(strings.TrimSpace(userMsg))
-
-	// Deterministic safety gate: pure confirmation continues the current task.
-	// /confirm N is the UI confirmation channel — treat as continue, never LLM.
-	if isDangerousConfirmation(msg) || strings.HasPrefix(msg, "/confirm ") {
-		return IntentContinue
-	}
-
-	// Wiring bug guard: nil judge falls back to IntentContinue.
-	if e.intentJudge == nil {
-		loopLog.Printf("intentJudge not set (wiring bug), falling back to continue")
-		return IntentContinue
-	}
-
-	intent, err := e.intentJudge.Classify(ctx, IntentCheck{Goal: e.state.Goal, Message: userMsg})
-	if err != nil {
-		loopLog.Printf("intent classify error: %v (conservative fallback to continue)", err)
-		return IntentContinue
-	}
-	return intent
-}
-
 // isClearCommand detects the /clear signal that resets all session state.
 func isClearCommand(userMsg string) bool {
 	trimmed := strings.TrimSpace(userMsg)
@@ -1707,8 +1629,8 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 // handleConfirmCommand processes a /confirm N message deterministically,
 // bypassing isDangerousConfirmation and the intent LLM classifier.
 //
-// Any /confirm N flips AnalysisReportConfirmed + clears AnalysisMode so the
-// agent's next edit/write in this same Run passes the analysis gate.
+// Any /confirm N flips AnalysisReportConfirmed so the agent's next edit/write
+// in this same Run passes the analysis gate.
 // When the agent declared options via present_options (pendingConfirmOptions
 // non-empty), /confirm N selects 方案N and the choice is injected into history
 // so the agent implements the selected plan; an out-of-range N injects an
@@ -1724,7 +1646,6 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	}
 	// 置确认态（任何 /confirm N 都确认执行）。
 	e.state.AnalysisReportConfirmed = true
-	e.state.AnalysisMode = false
 	e.pendingAnalysisNudge = false
 
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
@@ -1761,7 +1682,6 @@ func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
 	}
 	if isDangerousConfirmation(userMsg) {
 		e.state.AnalysisReportConfirmed = true
-		e.state.AnalysisMode = false
 		e.pendingAnalysisNudge = false
 		// Replace the user's bare confirmation with a contextual message so
 		// the agent knows the analysis was approved and can proceed to edit.
@@ -1886,7 +1806,6 @@ func (e *Engine) clearSessionState() {
 	e.pendingEditPlan = nil
 	e.pendingAnalysisNudge = false
 	e.analysisNudgeCount = 0
-	e.state.AnalysisMode = false
 	e.state.AnalysisReportConfirmed = false
 
 	e.steerMu.Lock()

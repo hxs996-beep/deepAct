@@ -24,7 +24,6 @@ func runHeadless(cmd *cobra.Command, args []string) error {
 	}
 	agent := engine.NewEngine(config, deps)
 	// 无内建 stop hook：纯文本即结束（dsh 化）。StopHook 框架保留供未来扩展。
-	agent.SetIntentJudge(agent.NewIntentClassifier())
 
 	prompt := strings.Join(args, " ")
 	response, err := agent.Run(ctx, prompt)

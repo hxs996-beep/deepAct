@@ -15,7 +15,6 @@ type StopHookContext struct {
 	IsChinese          bool   // language preference for nudge message
 	Goal               string // current Run's user goal (e.state.Goal)
 	ToolCallSummary    string // brief summary of tools called this Run() (e.g. "grep×3, read×2")
-	AnalysisMode       bool   // true when user intent is analysis-only; text output IS the report
 }
 
 // StopHookResult is what a stop hook returns.

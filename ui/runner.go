@@ -113,7 +113,6 @@ func (r *ProgressEngineRunner) getEngine() *engine.Engine {
 	r.once.Do(func() {
 		r.eng = engine.NewEngine(r.Config, r.Deps)
 		// 无内建 stop hook：纯文本即结束（dsh 化）。StopHook 框架保留供未来扩展。
-		r.eng.SetIntentJudge(r.eng.NewIntentClassifier())
 	})
 	return r.eng
 }

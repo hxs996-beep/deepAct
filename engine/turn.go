@@ -275,7 +275,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			StopHookRetryCount: e.stopHookRetryCount,
 			IsChinese:          e.isChinese,
 			Goal:               e.state.Goal,
-			AnalysisMode:       e.state.AnalysisMode,
 		})
 		// The model asked the user a question. Stop the loop and present the
 		// question instead of nudging the model to continue — the model must
