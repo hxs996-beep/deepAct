@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -57,4 +58,26 @@ func detectNegativeFeedback(userMsg string) bool {
 		}
 	}
 	return false
+}
+
+// applyNegativeFeedbackRewrite 在用户负面反馈时改写最后一条 user 消息，
+// 注入反思重规划指引，让主 agent 本轮自行反思。返回是否触发了改写。
+// 照 pendingEditPlan 反馈路径模式（loop.go 的 pendingEditPlan 分支），零新状态。
+func applyNegativeFeedbackRewrite(history []Message, userMsg string, zh bool) bool {
+	if !detectNegativeFeedback(userMsg) {
+		return false
+	}
+	if len(history) == 0 || history[len(history)-1].Role != "user" {
+		return false
+	}
+	if zh {
+		history[len(history)-1].Content = fmt.Sprintf(
+			"用户对当前进展给出了负面反馈：%s\n\n请暂停当前执行，反思此前的路径是否正确、是否符合用户需求。找出偏离点，然后重新规划执行路线，向用户说明你的新计划。",
+			userMsg)
+	} else {
+		history[len(history)-1].Content = fmt.Sprintf(
+			"The user expressed negative feedback about the current progress: %s\n\nPause the current work, reflect on whether the previous path was correct and matched the user's needs. Identify where it went off track, then re-plan the execution route and explain your new plan to the user.",
+			userMsg)
+	}
+	return true
 }

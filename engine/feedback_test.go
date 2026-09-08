@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDetectNegativeFeedback_Hits(t *testing.T) {
 	positives := []string{
@@ -54,5 +57,40 @@ func TestDetectNegativeFeedback_Misses(t *testing.T) {
 		if detectNegativeFeedback(msg) {
 			t.Errorf("detectNegativeFeedback(%q) = true, want false", msg)
 		}
+	}
+}
+
+func TestApplyNegativeFeedbackRewrite_Chinese(t *testing.T) {
+	history := []Message{{Role: "user", Content: "不对，这没用"}}
+	ok := applyNegativeFeedbackRewrite(history, "不对，这没用", true)
+	if !ok {
+		t.Fatal("expected rewrite to trigger")
+	}
+	got := history[len(history)-1].Content
+	if !strings.Contains(got, "负面反馈") || !strings.Contains(got, "反思") || !strings.Contains(got, "重新规划") {
+		t.Errorf("Chinese rewrite missing reflection guidance: %q", got)
+	}
+}
+
+func TestApplyNegativeFeedbackRewrite_English(t *testing.T) {
+	history := []Message{{Role: "user", Content: "this sucks"}}
+	ok := applyNegativeFeedbackRewrite(history, "this sucks", false)
+	if !ok {
+		t.Fatal("expected rewrite to trigger")
+	}
+	got := history[len(history)-1].Content
+	if !strings.Contains(got, "negative feedback") || !strings.Contains(got, "re-plan") {
+		t.Errorf("English rewrite missing reflection guidance: %q", got)
+	}
+}
+
+func TestApplyNegativeFeedbackRewrite_NonNegativeNoop(t *testing.T) {
+	history := []Message{{Role: "user", Content: "帮我加个按钮"}}
+	ok := applyNegativeFeedbackRewrite(history, "帮我加个按钮", true)
+	if ok {
+		t.Error("expected no rewrite for non-negative message")
+	}
+	if history[0].Content != "帮我加个按钮" {
+		t.Errorf("history must stay unchanged, got %q", history[0].Content)
 	}
 }
