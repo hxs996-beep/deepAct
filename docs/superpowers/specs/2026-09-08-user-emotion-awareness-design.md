@@ -62,8 +62,10 @@
 **测试文件**：
 - `intent_classifier_test.go`：删 6 个 `TestIntentClassifier_*`；**保留** `errBoom` / `stubCompleteModel`（compressor_test、roundtable_test 在用）
 - `loop_intent_test.go`：整个文件删除（`stubIntentJudge` + 8 个测试全是 detectUserIntent）
-- `confirm_command_test.go`：删 `TestDetectUserIntent_ConfirmCommandFastPath`（91-101）
-- `analysis_gate_test.go` / `confirm_command_test.go` / `present_options_test.go` / `present_options_ends_run_test.go`：删测试中 `AnalysisMode: true` 的 state 字段（保留其余断言；确认后 `AnalysisReportConfirmed` 相关断言不变）
+- `confirm_command_test.go`：删 `TestDetectUserIntent_ConfirmCommandFastPath`（91-101）；`TestHandleConfirmCommand_ConfirmExecutes` 与 `TestHandleConfirmCommand_WithOptions_FirstPlanInjected` 中删 `AnalysisMode: true` 字段、删 `if e.state.AnalysisMode { t.Error(...) }` 断言块及其"清 AnalysisMode"注释（保留 `AnalysisReportConfirmed` 断言）
+- `analysis_gate_test.go`：`TestHandleAnalysisNudgeConfirmation` 两个 case 删 `AnalysisMode: true` 字段、删 `if e.state.AnalysisMode { t.Error(...) }` 断言块（保留 `AnalysisReportConfirmed` / `pendingAnalysisNudge` 断言）
+- `present_options_test.go`：3 个 `TestHandleConfirmCommand_*` 删 `AnalysisMode: true` 字段、删 `if e.state.AnalysisMode || !e.state.AnalysisReportConfirmed` 中 `e.state.AnalysisMode ||` 部分（保留 `!e.state.AnalysisReportConfirmed` 断言）
+- `present_options_ends_run_test.go`：`TestPresentOptions_EndsRunWithReportSummary` 的 state 删 `AnalysisMode: true`（此测试只读 `AnalysisReportConfirmed`）
 
 ### 第 2 节：负面情绪感知
 
