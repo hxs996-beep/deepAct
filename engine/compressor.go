@@ -246,7 +246,35 @@ func buildArchivePrompt(state *TaskState, history []Message, zh bool) string {
 // findSafeSplitPoint walks backward from the end of history to find a safe split
 // index that doesn't break a turn boundary.
 func findSafeSplitPoint(history []Message, minFresh int) int {
-	if len(history) <= minFresh {
+	if minFresh < 0 || len(history) <= minFresh {
+		return 0
+	}
+	start := len(history) - minFresh
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role == "user" || msg.Role == "system" {
+			return i + 1
+		}
+		if msg.Role == "assistant" && len(msg.ToolCalls) == 0 {
+			if i > 0 && history[i-1].Role == "user" {
+				return i - 1
+			}
+			return i
+		}
+	}
+	return 0
+}
+
+// findSafeModelSplitPoint is the ModelMessage variant of findSafeSplitPoint.
+// It walks backward from the end of history to find a split index that does not
+// break a turn boundary (never splits between an assistant tool-call message
+// and its tool responses, and never leaves a trailing assistant-without-tool-
+// calls orphaned from its preceding user message).
+func findSafeModelSplitPoint(history []ModelMessage, minFresh int) int {
+	if minFresh < 0 || len(history) <= minFresh {
 		return 0
 	}
 	start := len(history) - minFresh
@@ -334,12 +362,21 @@ func (c *CompressionOrchestrator) compressModelArchive(goal string, history []Mo
 	if err != nil {
 		return history, nil
 	}
-	result := make([]ModelMessage, 0, len(history))
+	// Mirror the main-agent compressArchive semantics: keep a fresh tail of the
+	// conversation verbatim and collapse the rest into the archive summary.
+	// Without the trim, [SESSION ARCHIVE] + full history is longer than the
+	// input, so every subsequent ShouldCompress estimate grows and the sub-agent
+	// context expands without bound (C8 regression — see compressor_test.go).
+	freshStart := findSafeModelSplitPoint(history, len(history)-10)
+	if freshStart < 0 {
+		freshStart = 0
+	}
+	result := make([]ModelMessage, 0, len(history)-freshStart+1)
 	result = append(result, ModelMessage{
 		Role:    "system",
 		Content: "[SESSION ARCHIVE]\n" + summary,
 	})
-	result = append(result, history...)
+	result = append(result, history[freshStart:]...)
 	return result, nil
 }
 

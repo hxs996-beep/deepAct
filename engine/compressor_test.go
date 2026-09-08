@@ -2,6 +2,8 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,11 +30,11 @@ func TestSetFlashModelName(t *testing.T) {
 
 func TestShouldCompress(t *testing.T) {
 	tests := []struct {
-		name     string
-		current  int
-		max      int
+		name      string
+		current   int
+		max       int
 		wantLayer CompressionLayer
-		wantOk   bool
+		wantOk    bool
 	}{
 		{"zero max", 1000, 0, LayerToolGovernance, false},
 		{"negative max", 1000, -1, LayerToolGovernance, false},
@@ -79,16 +81,16 @@ func TestCompress_NoModel(t *testing.T) {
 
 func TestFindSafeSplitPoint(t *testing.T) {
 	tests := []struct {
-		name      string
-		history   []Message
-		minFresh  int
-		wantIdx   int // split before this index
+		name     string
+		history  []Message
+		minFresh int
+		wantIdx  int // split before this index
 	}{
 		{
-			name: "empty",
-			history: []Message{},
+			name:     "empty",
+			history:  []Message{},
 			minFresh: 10,
-			wantIdx: 0,
+			wantIdx:  0,
 		},
 		{
 			name: "short history, no minFresh match",
@@ -96,7 +98,7 @@ func TestFindSafeSplitPoint(t *testing.T) {
 				{Role: "user", Content: "hi"},
 			},
 			minFresh: 10,
-			wantIdx: 0,
+			wantIdx:  0,
 		},
 		{
 			name: "user message boundary",
@@ -108,7 +110,7 @@ func TestFindSafeSplitPoint(t *testing.T) {
 				{Role: "user", Content: "third"},
 			},
 			minFresh: 3,
-			wantIdx: 3, // split before assistant "response2" (after user "second")
+			wantIdx:  3, // split before assistant "response2" (after user "second")
 		},
 		{
 			name: "assistant without tool calls after user",
@@ -117,7 +119,7 @@ func TestFindSafeSplitPoint(t *testing.T) {
 				{Role: "assistant", Content: "reply"},
 			},
 			minFresh: 1,
-			wantIdx: 0, // split before user; assistant follows user so returns i-1=0
+			wantIdx:  0, // split before user; assistant follows user so returns i-1=0
 		},
 		{
 			name: "tool call assistant not a safe split",
@@ -126,7 +128,7 @@ func TestFindSafeSplitPoint(t *testing.T) {
 				{Role: "assistant", Content: "reply", ToolCalls: []MessageToolCall{{ID: "c1"}}},
 			},
 			minFresh: 1,
-			wantIdx: 1, // can't split on assistant with tool calls, falls through to user boundary
+			wantIdx:  1, // can't split on assistant with tool calls, falls through to user boundary
 		},
 	}
 	for _, tt := range tests {
@@ -184,32 +186,32 @@ func TestExtractPreviousArchive(t *testing.T) {
 
 func TestParseArchiveSummary(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		wantOK  bool
+		name     string
+		input    string
+		wantOK   bool
 		wantGoal string
 	}{
 		{
-			name:    "valid json",
-			input:   `{"goal":"fix bug","decisions":["use X"],"key_findings":["found Y"],"open_issues":[]}`,
-			wantOK:  true,
+			name:     "valid json",
+			input:    `{"goal":"fix bug","decisions":["use X"],"key_findings":["found Y"],"open_issues":[]}`,
+			wantOK:   true,
 			wantGoal: "fix bug",
 		},
 		{
-			name:    "wrapped in markdown",
-			input:   "```json\n{\"goal\":\"refactor\"}\n```",
-			wantOK:  true,
+			name:     "wrapped in markdown",
+			input:    "```json\n{\"goal\":\"refactor\"}\n```",
+			wantOK:   true,
 			wantGoal: "refactor",
 		},
 		{
-			name:    "invalid json",
-			input:   `not json`,
-			wantOK:  false,
+			name:   "invalid json",
+			input:  `not json`,
+			wantOK: false,
 		},
 		{
-			name:    "empty object",
-			input:   `{}`,
-			wantOK:  true,
+			name:   "empty object",
+			input:  `{}`,
+			wantOK: true,
 		},
 	}
 	for _, tt := range tests {
@@ -228,10 +230,10 @@ func TestParseArchiveSummary(t *testing.T) {
 
 func TestContainsDecisionText(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		decisions []Decision
-		text     string
-		want     bool
+		text      string
+		want      bool
 	}{
 		{"empty", nil, "foo", false},
 		{"found", []Decision{{ID: "d1", Text: "use X"}}, "use X", true},
@@ -410,3 +412,80 @@ func indexOfStr(s, sub string) int {
 // Ensure imports are used
 var _ = json.RawMessage{}
 var _ = time.Nanosecond
+
+// --- C8 回归测试：sub-agent 压缩必须裁剪旧历史 ---
+
+// TestCompressModelMessages_TrimsOldHistory 回归 C8 缺陷：compressModelArchive
+// 把 [SESSION ARCHIVE] 摘要拼在全量历史之前而不裁剪，导致压缩后上下文反而
+// 变长，下一轮 ShouldCompress 估算更大 → sub-agent 上下文无界膨胀。
+func TestCompressModelMessages_TrimsOldHistory(t *testing.T) {
+	mock := &stubCompleteModel{resp: `{"goal":"g","decisions":[],"key_findings":["k1"]}`}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+	history := make([]ModelMessage, 0, 40)
+	for i := 0; i < 40; i++ {
+		history = append(history, ModelMessage{Role: "user", Content: fmt.Sprintf("message-%d", i)})
+	}
+	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) >= len(history) {
+		t.Errorf("compression must shrink history: len(result)=%d, len(history)=%d", len(result), len(history))
+	}
+	// 摘要必须保留在头部
+	if !strings.HasPrefix(result[0].Content, "[SESSION ARCHIVE]") {
+		t.Errorf("result[0] must be the archive summary, got %q", result[0].Content)
+	}
+}
+
+// TestCompressModelMessages_ShortHistoryNoOp 验证短历史不触发压缩（返回原历史）。
+func TestCompressModelMessages_ShortHistoryNoOp(t *testing.T) {
+	mock := &stubCompleteModel{resp: `{"goal":"g"}`}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+	history := []ModelMessage{{Role: "user", Content: "hi"}}
+	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 || result[0].Content != "hi" {
+		t.Errorf("short history must be returned unchanged, got %+v", result)
+	}
+}
+
+// TestCompressModelMessages_ModelErrorKeepsHistory 验证摘要生成失败时返回原历史（best-effort）。
+func TestCompressModelMessages_ModelErrorKeepsHistory(t *testing.T) {
+	mock := &stubCompleteModel{err: fmt.Errorf("flash down")}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+	history := make([]ModelMessage, 0, 40)
+	for i := 0; i < 40; i++ {
+		history = append(history, ModelMessage{Role: "user", Content: "x"})
+	}
+	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != len(history) {
+		t.Errorf("model failure must keep history unchanged: got %d, want %d", len(result), len(history))
+	}
+}
+
+// --- findSafeSplitPoint 边界：负数 / 超大 minFresh 不得越界 panic ---
+
+func TestFindSafeSplitPoint_NegativeMinFresh(t *testing.T) {
+	history := []Message{{Role: "user", Content: "hi"}}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("findSafeSplitPoint panicked with negative minFresh: %v", r)
+		}
+	}()
+	if got := findSafeSplitPoint(history, -1); got != 0 {
+		t.Errorf("findSafeSplitPoint(history, -1) = %d, want 0", got)
+	}
+}
+
+func TestFindSafeSplitPoint_MinFreshExceedsLen(t *testing.T) {
+	history := []Message{{Role: "user", Content: "hi"}}
+	if got := findSafeSplitPoint(history, 100); got != 0 {
+		t.Errorf("findSafeSplitPoint(history, 100) = %d, want 0", got)
+	}
+}

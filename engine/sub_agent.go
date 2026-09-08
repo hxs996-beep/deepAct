@@ -629,37 +629,21 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 			return "(analysis timed out, partial result)\n" + content
 		}
 	}
-	// Fallback: compile tool discoveries — CONCISELY. Dumping every tool result
-	// floods the context/UI with hundreds of discovery lines; keep only the
-	// first line of each distinct discovery, capped.
-	var sb strings.Builder
-	count := 0
-	seen := make(map[string]bool)
-	var shown []string
+	// Fallback: no substantive assistant text was produced (per-call timeout,
+	// loop guard, or iteration cap). Return a concise readable failure instead
+	// of dumping the first line of every raw tool result — those file paths
+	// and code lines flooded /collab's stage outputs and summary, making them
+	// unreadable.
+	var count int
 	for _, msg := range history {
-		if msg.Role != "tool" || msg.Content == "" {
-			continue
-		}
-		count++
-		line := firstLine(strings.TrimSpace(msg.Content), 100)
-		if line == "" || seen[line] {
-			continue
-		}
-		seen[line] = true
-		shown = append(shown, "- "+line)
-		if len(shown) >= 12 {
-			break
+		if msg.Role == "tool" && msg.Content != "" {
+			count++
 		}
 	}
-	if count == 0 {
-		return "(analysis timed out — no partial discoveries)"
+	if msgIsChinese(goal) {
+		return fmt.Sprintf("子代理未产出最终结论（已执行 %d 次工具调用后中断）。请重试或缩小任务范围。", count)
 	}
-	sb.WriteString(fmt.Sprintf("(analysis timed out — %d tool calls; showing first discoveries)\n", count))
-	for _, l := range shown {
-		sb.WriteString(l)
-		sb.WriteString("\n")
-	}
-	return sb.String()
+	return fmt.Sprintf("Sub-agent produced no final conclusion (interrupted after %d tool calls). Retry or narrow the task.", count)
 }
 
 // stableSystemPrompt returns the full system prompt shared by all sub-agents.

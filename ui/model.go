@@ -1227,7 +1227,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Select the highlighted option: type its number into the input
 			m.inputBuf.SetValue(fmt.Sprintf("%d", m.selectedOption+1))
 			m.activeOptions = nil
-			return m, nil
+			// Popup disappears → force a full repaint so its background doesn't
+			// linger at the input-box top (iTerm2 incremental diff; previously
+			// only a terminal resize recovered it).
+			return m, m.repaintCmd()
 		case tea.KeyEnter:
 			if !msg.Alt {
 				// 非末项（方案）→ 发内部 /confirm N 命令确定性确认；
@@ -1236,7 +1239,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				total := len(m.activeOptions)
 				m.activeOptions = nil
 				if n == total {
-					return m, nil
+					// Last item closes the popup back to free input → repaint
+					// so the popup background doesn't linger.
+					return m, m.repaintCmd()
 				}
 				return m.submitConfirm(n)
 			}
@@ -1262,7 +1267,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputBuf.SetValue(sel.Command + " ")
 			m.showSuggestions = false
 			m.suggestions = nil
-			return m, nil
+			// Popup disappears → force a full repaint so its background doesn't
+			// linger at the input-box top (previously only a resize recovered).
+			return m, m.repaintCmd()
 		case tea.KeyEnter:
 			if !msg.Alt {
 				// Autocomplete on plain Enter
@@ -1270,7 +1277,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.inputBuf.SetValue(sel.Command + " ")
 				m.showSuggestions = false
 				m.suggestions = nil
-				return m, nil
+				// Popup disappears → force a full repaint so its background
+				// doesn't linger (previously only a resize recovered).
+				return m, m.repaintCmd()
 			}
 			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
@@ -1621,15 +1630,22 @@ func normalizeForCompare(s string) string {
 // narrationDuplicatesSummary checks whether narration content from the
 // current run (both the active buffer and messages snapshotted at
 // tool_start) duplicates the Summary text. Comparison normalizes
-// whitespace and markdown syntax so formatted narration matches plain text.
+// whitespace and markdown syntax so formatted narration matches plain text,
+// and uses bidirectional containment so a narration that is a SUPERSET of the
+// Summary (residual intermediate text + final report — e.g. when an earlier
+// turn was blocked by the analysis gate without a tool_start to flush the
+// narration buffer) is still recognized as a duplicate and removed.
 func (m *Model) narrationDuplicatesSummary(summary string) bool {
 	ns := normalizeForCompare(summary)
 	if ns == "" {
 		return false
 	}
 	// Check active narration buffer
-	if m.narration != "" && normalizeForCompare(m.narration) == ns {
-		return true
+	if m.narration != "" {
+		nn := normalizeForCompare(m.narration)
+		if nn != "" && (strings.Contains(nn, ns) || strings.Contains(ns, nn)) {
+			return true
+		}
 	}
 	// Check snapshotted narration messages from this run
 	start := m.runStartMsgIdx
@@ -1637,8 +1653,11 @@ func (m *Model) narrationDuplicatesSummary(summary string) bool {
 		start = 0
 	}
 	for i := start; i < len(m.messages); i++ {
-		if m.messages[i].Role == "narration" && normalizeForCompare(m.messages[i].Content) == ns {
-			return true
+		if m.messages[i].Role == "narration" {
+			nc := normalizeForCompare(m.messages[i].Content)
+			if nc != "" && (strings.Contains(nc, ns) || strings.Contains(ns, nc)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1647,7 +1666,8 @@ func (m *Model) narrationDuplicatesSummary(summary string) bool {
 // removeNarrationDuplicate removes plain-text narration messages from the
 // current run that duplicate the given Summary text. The streamed narration is
 // rendered as plain text (renderStreaming) and leaks raw markdown (tables,
-// ---, **); when it duplicates the final Summary, it is dropped so the
+// ---, **); when it duplicates the final Summary — including as a SUPERSET
+// (residual intermediate text + final report) — it is dropped so the
 // formatted (glamour) Summary is the only copy. Only messages at or after
 // runStartMsgIdx are considered, and the message render cache is invalidated
 // because message indices shift.
@@ -1664,9 +1684,12 @@ func (m *Model) removeNarrationDuplicate(summary string) {
 	kept := m.messages[:start]
 	for i := start; i < len(m.messages); i++ {
 		msg := m.messages[i]
-		if msg.Role == "narration" && normalizeForCompare(msg.Content) == ns {
-			removed = true
-			continue
+		if msg.Role == "narration" {
+			nc := normalizeForCompare(msg.Content)
+			if nc != "" && (strings.Contains(nc, ns) || strings.Contains(ns, nc)) {
+				removed = true
+				continue
+			}
 		}
 		kept = append(kept, msg)
 	}
@@ -3524,6 +3547,13 @@ func displayWidth(s string) int {
 // runewidth so ambiguous-width runes are counted at their real (terminal)
 // width. ansi.Truncate underestimates them, leaving a line that still overflows
 // the terminal by one column per ambiguous rune.
+//
+// If the cut lands after an SGR that is not a reset (e.g. mid way through the
+// trailing padding segment of a lipgloss-styled block line, whose background
+// SGR + spaces + reset are all zero-width escapes), the active style would be
+// left open and leak into the next rendered row — the next row (often plain
+// body text) suddenly inherits the block's background color. To keep each row
+// style-isolated we append a reset when the last written SGR isn't one.
 func truncateToWidth(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -3531,11 +3561,16 @@ func truncateToWidth(s string, w int) string {
 	var b strings.Builder
 	col := 0
 	i := 0
+	lastSGR := ""
 	for i < len(s) {
 		if s[i] == '\x1b' {
 			// Copy the whole ANSI escape sequence verbatim (zero width).
 			end := findAnsiSeqEnd(s, i)
-			b.WriteString(s[i:end])
+			seq := s[i:end]
+			b.WriteString(seq)
+			if isSGR(seq) {
+				lastSGR = seq
+			}
 			i = end
 			continue
 		}
@@ -3547,6 +3582,9 @@ func truncateToWidth(s string, w int) string {
 		b.WriteString(s[i : i+size])
 		col += rw
 		i += size
+	}
+	if lastSGR != "" && lastSGR != "\x1b[0m" && lastSGR != "\x1b[m" {
+		b.WriteString("\x1b[0m")
 	}
 	return b.String()
 }

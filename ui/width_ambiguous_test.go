@@ -89,10 +89,16 @@ func TestTruncateToWidth_PreservesANSI(t *testing.T) {
 	if !strings.Contains(truncated, "\x1b[31m") {
 		t.Fatalf("opening SGR lost in truncation: %q", truncated)
 	}
-	// No stray ESC byte may remain after removing the complete opening
-	// sequence — a split sequence would leave a partial ESC prefix behind.
-	rest := strings.Replace(truncated, "\x1b[31m", "", 1)
-	if strings.Contains(rest, "\x1b") {
+	// The truncated line must close the active style: every escape sequence
+	// must be complete, and the line must end with a reset so the style does
+	// not leak into the next rendered row.
+	if !strings.HasSuffix(truncated, "\x1b[0m") {
+		t.Errorf("truncated line must end with a reset to close the active style: %q", truncated)
+	}
+	// After removing the complete opening SGR and the trailing reset, no stray
+	// ESC byte may remain — a split sequence would leave a partial prefix.
+	middle := strings.TrimSuffix(strings.Replace(truncated, "\x1b[31m", "", 1), "\x1b[0m")
+	if strings.Contains(middle, "\x1b") {
 		t.Errorf("truncation split an ANSI sequence: %q", truncated)
 	}
 	// Width must respect the limit (ANSI is zero-width).
@@ -129,4 +135,60 @@ func TestDisplayWidth_BoxDrawing_IsOneColumn(t *testing.T) {
 	if got != len([]rune(logoLine)) {
 		t.Errorf("logo line displayWidth = %d, want %d (one column per box-drawing rune)", got, len([]rune(logoLine)))
 	}
+}
+
+// TestTruncateToWidth_ClosesSGROnCut guards against unclosed SGR leaking to
+// the next row. Background-colored block lines (Search/Exec/Diff blocks) are
+// rendered by lipgloss (measured with ansi.StringWidth, ambiguous=1) but
+// truncated by View Step 7/11 with truncateToWidth (displayWidth, ambiguous=2),
+// so lines containing ambiguous runes (→ — ·) are judged wider than the
+// terminal and cut. When the cut lands inside the trailing padding segment
+// (background SGR + spaces + reset), truncateToWidth must close the active
+// style — an unclosed background SGR leaks the block's gray onto the next
+// plain body row, flickering between black and gray as streaming toggles the cut.
+func TestTruncateToWidth_ClosesSGROnCut(t *testing.T) {
+	// lipgloss-styled block line structure: text segment (SGR + text + reset)
+	// followed by a padding segment (SGR + spaces + reset). The → (ambiguous)
+	// runes measure 2 cols under displayWidth but 1 under ansi.StringWidth, so
+	// the padded line is judged wider than the terminal and View Step 7 cuts it.
+	line := "\x1b[48;5;235m▍ [>_] Execute 搜索 → 定位 → 读取 → 分析完成\x1b[0m\x1b[48;5;235m                \x1b[0m"
+
+	// Width contract sanity: the whole line is wider than any plausible
+	// terminal column target, so truncation will trigger.
+	if d := displayWidth(line); d <= 40 {
+		t.Fatalf("test setup: displayWidth %d not > 40, truncation won't trigger", d)
+	}
+
+	// 40 cols lands the cut inside the padding segment (after the text reset).
+	truncated := truncateToWidth(line, 40)
+
+	// The last SGR on the truncated line must be a reset; an unclosed
+	// background SGR leaks the block color into the next row.
+	if last := lastSGRSequence(truncated); last != "\x1b[0m" {
+		t.Errorf("truncateToWidth left unclosed SGR %q at end of line (bg color leaks to next row):\n  %q", last, truncated)
+	}
+
+	// Width contract must still hold after appending the reset (reset is zero-width).
+	if got := runewidth.StringWidth(stripAnsi(truncated)); got > 40 {
+		t.Errorf("truncated real width %d exceeds 40", got)
+	}
+}
+
+// lastSGRSequence returns the last SGR (Select Graphic Rendition) escape
+// sequence in s, or "" if none is present.
+func lastSGRSequence(s string) string {
+	last := ""
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			end := findAnsiSeqEnd(s, i)
+			seq := s[i:end]
+			if isSGR(seq) {
+				last = seq
+			}
+			i = end
+			continue
+		}
+		i++
+	}
+	return last
 }

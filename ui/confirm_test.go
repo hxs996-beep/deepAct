@@ -62,7 +62,9 @@ func TestOptionsEnter_SendsConfirmCommand(t *testing.T) {
 	}
 }
 
-// 选末项"输入你的意见" Enter → 不发命令，回到输入框（activeOptions 清空）。
+// 选末项"输入你的意见" Enter → 不发引擎命令，回到输入框（activeOptions 清空）。
+// 允许渲染命令 repaintCmd（触发 WindowSizeMsg 全量重绘，清除弹窗背景残留）——
+// 它返回 WindowSizeMsg，与引擎命令可区分。
 func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
@@ -70,14 +72,19 @@ func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 	m.selectedOption = 1 // 末项
 
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Error("expected NO command when selecting the free-input last item")
-	}
 	gotModel, ok := got.(Model)
 	if !ok {
 		t.Fatalf("expected Model from Update, got %T", got)
 	}
 	if len(gotModel.activeOptions) != 0 {
 		t.Errorf("activeOptions should be cleared, got %v", gotModel.activeOptions)
+	}
+	// 末项只关闭弹窗回输入框：不得发送引擎命令（/confirm N）。
+	// repaintCmd 是渲染命令（返回 WindowSizeMsg），允许。
+	if cmd != nil {
+		msg := cmd()
+		if _, isRepaint := msg.(tea.WindowSizeMsg); !isRepaint && msg != nil {
+			t.Errorf("expected no engine command on free-input last item; got %T", msg)
+		}
 	}
 }

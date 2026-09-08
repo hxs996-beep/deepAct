@@ -162,6 +162,11 @@ type Engine struct {
 	// to English when the user types "ok"/"yes" to confirm.
 	isChinese    bool
 	langDetected bool
+
+	// memoryLoaded guards lazy persistent-memory loading. Memory is restored
+	// only on /resume (SetHistory), never at startup, so a fresh session
+	// starts clean of cross-task markers/decisions.
+	memoryLoaded bool
 }
 
 // PendingEditPlan captures the agent's proposed changes before execution.
@@ -210,11 +215,11 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	e.roundtableHall = NewRoundtableHall(e)
 	e.collabHall = NewCollabHall(e)
 
-	// Load cross-session persistent memory for this project and merge it into
-	// TaskState. These fields (memory_markers, decisions, open_questions,
-	// assumptions) flow into Block B on every turn, so prior-session findings
-	// survive process restarts.
-	e.loadPersistentMemory()
+	// Persistent memory (memory_markers, decisions, open_questions,
+	// assumptions) is loaded lazily on /resume (see SetHistory), NOT at
+	// startup. A fresh session must not inherit the project's cross-task
+	// memory — that stale state leaked into Block B every turn and biased the
+	// model. Only a manual /resume restores prior-session findings.
 
 	// Initialize eval store
 	evalPath := cfg.EvalStoreDir
@@ -256,6 +261,11 @@ func (e *Engine) SetSessionID(id string) {
 func (e *Engine) SetHistory(h []Message) {
 	e.history = append([]Message(nil), h...)
 	e.persistedCount = len(e.history)
+	// /resume path: only a manual resume restores the project's persistent
+	// memory. Lazy here so a fresh session starts with an empty memory slice
+	// (no stale cross-task markers/decisions in Block B). loadPersistentMemory
+	// is idempotent, so repeat calls are no-ops.
+	e.loadPersistentMemory()
 }
 
 func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, error) {
@@ -1004,10 +1014,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if summary == "" {
 		summary = buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
 	}
-	// The engine derives the authoritative set of modified files from state, so
-	// the model never has to track it in the prompt window — and a long task is
-	// never under-reported from stale prompt state.
-	summary = appendModifiedFilesSummary(summary, e.state.ModifiedFiles, zh)
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
@@ -1091,30 +1097,6 @@ func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool
 		return fmt.Sprintf("（本轮未生成回复文本，已执行 %d 次工具调用）", toolCallCount)
 	}
 	return fmt.Sprintf("(no text reply generated; %d tool calls executed this run)", toolCallCount)
-}
-
-// appendModifiedFilesSummary appends the engine-derived authoritative list of
-// modified files to a Run's summary. The model no longer carries the full list
-// in the prompt (only a count + recent window), so the completion report is
-// computed from state to never under-report a long task.
-func appendModifiedFilesSummary(summary string, files []string, zh bool) string {
-	if len(files) == 0 {
-		return summary
-	}
-	var b strings.Builder
-	b.WriteString(summary)
-	if summary != "" {
-		b.WriteString("\n\n")
-	}
-	if zh {
-		b.WriteString(fmt.Sprintf("修改文件（%d 个）：\n", len(files)))
-	} else {
-		b.WriteString(fmt.Sprintf("Files modified (%d):\n", len(files)))
-	}
-	for _, f := range files {
-		b.WriteString("- " + f + "\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // isSubstantiveSummary checks whether a summary string contains meaningful
@@ -1816,13 +1798,16 @@ func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
 }
 
 // loadPersistentMemory loads the cross-session memory snapshot for this
-// project (if any) and merges it into TaskState. Called once at engine
-// startup. Failures are non-fatal: a corrupt/missing memory file must not
-// prevent the agent from starting.
+// project (if any) and merges it into TaskState. Called lazily on /resume
+// (SetHistory), not at startup, so a fresh session never inherits the
+// project's cross-task memory. Idempotent: after the first load, subsequent
+// calls are no-ops. Failures are non-fatal: a corrupt/missing memory file
+// must not prevent the agent from starting.
 func (e *Engine) loadPersistentMemory() {
-	if e.memory == nil {
+	if e.memory == nil || e.memoryLoaded {
 		return
 	}
+	e.memoryLoaded = true
 	snap, err := e.memory.Load()
 	if err != nil {
 		loopLog.Printf("load persistent memory: %v", err)

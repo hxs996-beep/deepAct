@@ -690,6 +690,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
+	// B: 模型声明了互斥方案（present_options 有效调用）→ 本 turn 的报告文本
+	// 即最终结论，立即结束 Run 并将报告全文作为 CompletionSummary。避免 Run
+	// 循环继续调用模型（污染 Summary、浪费一次调用），UI 收到干净的报告 + Options。
+	if len(e.pendingConfirmOptions) > 0 {
+		result.Done = true
+		result.CompletionSummary = content
+	}
 	// Record the first operation for loop detection.
 	// For destructive tools (edit/write), include content hash so different edits
 	// on the same file are recognized as distinct operations.

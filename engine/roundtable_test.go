@@ -152,6 +152,7 @@ func newTestEngine(t *testing.T) *Engine {
 	})
 
 	e := &Engine{
+		model:           &stubCompleteModel{}, // 蓝图/合成走单次 Complete；其他测试按需覆盖
 		agents:          reg,
 		state:           &TaskState{TaskID: "test-debate"},
 		config:          EngineConfig{},
@@ -846,17 +847,57 @@ func TestDetermineWinner_NoScoresReturnsNil(t *testing.T) {
 	}
 }
 
-// --- Task 4: Blueprint generation ---
+// --- Task 4: Blueprint generation (single no-tool LLM call) ---
 
-func TestBuildBlueprint_GeneratesBlueprint(t *testing.T) {
+// TestBuildBlueprint_SingleNoToolCall locks Solution A: buildBlueprint must be a
+// single Complete() call with NO tools (pure text rewrite), not a tool-using
+// sub-agent that burns its iteration budget "verifying code anchors" and times
+// out into a "(analysis timed out, partial result)" garbage blueprint.
+func TestBuildBlueprint_SingleNoToolCall(t *testing.T) {
 	e := newTestEngine(t)
+	stub := &stubCompleteModel{resp: "## 方案概述\n单次调用蓝图：采用事件溯源。"}
+	e.model = stub
 	rounds := buildFinalRounds()
 	bp := e.roundtableHall.buildBlueprint(context.Background(), "测试需求", DefaultDebateMembers[:2], true, DefaultDebateMembers[0], rounds)
-	if bp == "" {
-		t.Fatal("expected non-empty blueprint")
+	if !strings.Contains(bp, "单次调用蓝图") {
+		t.Fatalf("blueprint must come from the single Complete() call, got %q", bp)
 	}
-	// mockPromptRunner.RunWithPrompt 返回固定 response（含"采用微服务架构"）
-	if !strings.Contains(bp, "采用微服务架构") {
-		t.Errorf("blueprint should contain mock LLM output, got %q", bp)
+	if len(stub.last.Tools) != 0 {
+		t.Errorf("blueprint call must not expose tools, got %d tool specs", len(stub.last.Tools))
+	}
+	if len(stub.last.Messages) < 2 {
+		t.Errorf("blueprint call must send system+user messages, got %d", len(stub.last.Messages))
+	}
+	if stub.last.Messages[0].Role != "system" {
+		t.Errorf("first message should be the system prompt, got role %q", stub.last.Messages[0].Role)
+	}
+}
+
+// TestBuildBlueprint_EmptyOnError: an LLM failure must yield "" so
+// handleDebateArena falls back to the synthesis, never a partial-result garbage
+// blueprint.
+func TestBuildBlueprint_EmptyOnError(t *testing.T) {
+	e := newTestEngine(t)
+	e.model = &stubCompleteModel{err: errBoom}
+	rounds := buildFinalRounds()
+	bp := e.roundtableHall.buildBlueprint(context.Background(), "测试需求", DefaultDebateMembers[:2], true, DefaultDebateMembers[0], rounds)
+	if bp != "" {
+		t.Errorf("blueprint must be empty on LLM error, got %q", bp)
+	}
+}
+
+// TestSynthesizeDebate_SingleNoToolCall mirrors the same fix for the synthesis
+// fallback: a single no-tool Complete() call, not a tool-using sub-agent.
+func TestSynthesizeDebate_SingleNoToolCall(t *testing.T) {
+	e := newTestEngine(t)
+	stub := &stubCompleteModel{resp: "**综合推荐**: 务实派（平均分 87.5）"}
+	e.model = stub
+	e.state.Roundtable = &RoundtableState{DebateRounds: buildFinalRounds()}
+	s := e.roundtableHall.synthesizeDebate(context.Background(), "测试", DefaultDebateMembers[:2], true)
+	if !strings.Contains(s, "综合推荐") {
+		t.Fatalf("synthesis must come from the single Complete() call, got %q", s)
+	}
+	if len(stub.last.Tools) != 0 {
+		t.Errorf("synthesis call must not expose tools, got %d tool specs", len(stub.last.Tools))
 	}
 }

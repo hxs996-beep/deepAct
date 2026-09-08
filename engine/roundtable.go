@@ -26,6 +26,16 @@ const roundtableMemberMaxIterations = 15
 // reasoning turn (15), but is still capped to bound wall-clock.
 const roundtableSearchMaxIterations = 25
 
+// blueprint/synthesis 单次 LLM 调用的系统提示。这两个任务是"纯文本重写"——
+// 完整辩论记录已注入 prompt，无需工具。走子代理反而因工具全开 + 轮次上限导致
+// 超时，产出 "(analysis timed out, partial result)" 垃圾蓝图（方案A 根治）。
+const (
+	blueprintSystemPromptEn = "You are a senior engineer. Rewrite the winning proposal below into a detailed, executable implementation blueprint that a coding agent can follow directly. Absorb any reasonable corrections raised in the challenges. Output ONLY the blueprint in the exact format the task requires — do not use tools and do not add extra sections."
+	blueprintSystemPromptZh = "你是一位资深工程师。把下面的获胜方案重写为一份详细的、可直接执行的实施蓝图，供编码 agent 直接照做。吸收质询中提出的合理修正。只输出任务要求格式的蓝图——不要使用工具，不要添加额外章节。"
+	synthesisSystemPromptEn = "You are the debate arena judge's assistant. Produce a concise summary of the complete debate record to help the user decide quickly. Output ONLY the summary in the exact format the task requires."
+	synthesisSystemPromptZh = "你是辩论场裁判助理。根据完整辩论记录产出一份精简摘要，帮助用户快速决策。只输出任务要求格式的摘要。"
+)
+
 // RoundtableMember defines a single reviewer's identity and stance.
 // Name/Stance/Prompt hold the Chinese values (the historical defaults);
 // NameEn/StanceEn/PromptEn hold the English variants. The live value is picked
@@ -272,6 +282,29 @@ func (h *RoundtableHall) handleDebateArena(ctx context.Context) (*EngineResponse
 	return h.buildVerdictPrompt(goal, members, zh, synthesis), nil
 }
 
+// runSingleLLM runs a single no-tool Complete() call and returns the model's
+// text content, or "" on error/empty. The blueprint and synthesis rewrites are
+// pure-text tasks — the full debate record is already in the prompt, so they
+// never need tools. Running them through a tool-using sub-agent instead made the
+// model burn its iteration budget "verifying code anchors" and time out into a
+// "(analysis timed out, partial result)" garbage blueprint (Solution A).
+func (h *RoundtableHall) runSingleLLM(ctx context.Context, zh bool, sysPromptEn, sysPromptZh, taskGoal string) string {
+	req := ModelRequest{
+		Model: h.engine.selectModel(),
+		Messages: []ModelMessage{
+			{Role: "system", Content: pickPrompt(zh, sysPromptEn, sysPromptZh)},
+			{Role: "user", Content: taskGoal},
+		},
+		MaxTokens: h.engine.maxOutputTokens(),
+	}
+	resp, err := h.engine.model.Complete(ctx, req)
+	if err != nil || resp == nil || strings.TrimSpace(resp.Message.Content) == "" {
+		return ""
+	}
+	h.engine.accumulateUsage(&resp.Usage)
+	return resp.Message.Content
+}
+
 // synthesizeDebate runs a final LLM call to produce a concise structured summary
 // of the entire debate. Returns empty string on failure (caller falls back to
 // verbose member viewpoints).
@@ -295,39 +328,7 @@ func (h *RoundtableHall) synthesizeDebate(ctx context.Context, goal string, memb
 		"## 任务\n你是辩论场裁判助理。以下是完整的辩论记录。请产出一份精简摘要，帮助用户快速决策。\n\n## 需求\n%s\n\n## 完整辩论记录\n%s\n\n## 输出格式\n请严格按以下格式输出：\n\n**综合推荐**: <获胜方案角色名>（平均分 X，获 Y 票）\n<1-2句话说明推荐理由>\n\n**各方案一句话**:\n- <avatar> <角色名>: <方案核心思路>。<主要被质疑的问题>\n（每个方案一行，按评分从高到低排列）\n\n**最强挑战**: <挑战者> -> <被挑战者>（置信度 X）\n<挑战内容摘要，1-2句>\n\n**最佳反驳**: <反驳者>\n<反驳要点，1-2句>\n\n**关键分歧**: <2-3句话总结辩论中的核心分歧点>",
 	), goal, record)
 
-	handoff := Handoff{
-		Agent:         AgentSub,
-		Goal:          taskGoal,
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 3,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		return ""
-	}
-
-	type promptRunner interface {
-		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
-	}
-
-	if pr, ok := agent.(promptRunner); ok {
-		result, err := pr.RunWithPrompt(ctx, handoff, "")
-		if err != nil || result == nil {
-			return ""
-		}
-		h.engine.accumulateUsage(result.Usage)
-		return result.Summary
-	}
-
-	result, err := agent.Run(ctx, handoff)
-	if err != nil || result == nil {
-		return ""
-	}
-	h.engine.accumulateUsage(result.Usage)
-	return result.Summary
+	return h.runSingleLLM(ctx, zh, synthesisSystemPromptEn, synthesisSystemPromptZh, taskGoal)
 }
 
 // buildBlueprint runs a single LLM call that rewrites the winning proposal into
@@ -399,39 +400,7 @@ You are a senior engineer. Rewrite the winning proposal below into a detailed, e
 ## 风险与回滚
 <列表：风险 -> 缓解；回滚方案>`), goal, winnerProposal, record)
 
-	handoff := Handoff{
-		Agent:         AgentSub,
-		Goal:          taskGoal,
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 3,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		return ""
-	}
-
-	type promptRunner interface {
-		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
-	}
-
-	if pr, ok := agent.(promptRunner); ok {
-		result, err := pr.RunWithPrompt(ctx, handoff, "")
-		if err != nil || result == nil {
-			return ""
-		}
-		h.engine.accumulateUsage(result.Usage)
-		return result.Summary
-	}
-
-	result, err := agent.Run(ctx, handoff)
-	if err != nil || result == nil {
-		return ""
-	}
-	h.engine.accumulateUsage(result.Usage)
-	return result.Summary
+	return h.runSingleLLM(ctx, zh, blueprintSystemPromptEn, blueprintSystemPromptZh, taskGoal)
 }
 
 // runDebateRound executes one round of the debate: all members run in parallel,
