@@ -473,8 +473,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 	// /confirm N — deterministic confirmation channel. Must run before
 	// handleAnalysisNudgeConfirmation so the state set here is what the agent
-	// sees in this same Run, and before intent detection so /confirm is never
-	// routed through the LLM classifier.
+	// sees in this same Run, and before the negative-feedback rewrite so a
+	// bare "/confirm N" is never treated as user feedback.
 	e.handleConfirmCommand(userMsg)
 
 	// Analysis report nudge: if the gate blocked in the previous Run() and the
@@ -769,11 +769,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 
 	// Team verdict: the user already approved a plan through the debate process.
-	// Override intent detection to skip all confirmation gates (analysis-report
-	// gate + edit-plan guard). Must come AFTER the intent switch so it isn't
-	// and AFTER the roundtable block
-	// because handleVerdict (in the AwaitingVerdict case above) sets the flag
-	// during this same Run().
+	// Override the confirmation gates (analysis-report gate + edit-plan guard).
+	// Must come AFTER the roundtable block because handleVerdict (in the
+	// AwaitingVerdict case above) sets the flag during this same Run().
 	if e.teamVerdictPending {
 		e.state.PlanConfirmed = true
 		e.state.AnalysisReportConfirmed = true
