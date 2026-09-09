@@ -6,22 +6,12 @@
 // so the model can decide which methodology to apply.
 package skill
 
-// GateConfig defines a pre-implementation gate for a skill. When non-nil,
-// the engine blocks edit/write calls until the gate is passed (user approval
-// or NextSkills transition). Gates are provided by gates.go defaults, not
-// by skill files.
-type GateConfig struct {
-	Type         string   // "path_filter" or "block_all"
-	AllowedPaths []string // for "path_filter": paths allowed during gate
-}
-
 type Skill struct {
 	Name        string   // Unique identifier, e.g. "debugging"
 	Description string   // Short description for matching
 	Content     string   // Full skill instructions injected into prompt
 	Keywords    []string // Retained as metadata (matching is LLM-semantic)
 	NextSkills  []string // Skill names suggested after this skill completes
-	Gate        *GateConfig // Pre-implementation gate; nil = no gate
 
 	// AutoActivateThreshold is retained as metadata.
 	// Unused since keyword-based auto-activation was removed in favor of

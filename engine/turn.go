@@ -369,62 +369,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Skill HARD-GATE: when the active skill has a pre-implementation gate
-	// (declared in its TOML [gate] section) and the gate has not been passed,
-	// block edit/write calls according to the gate type:
-	//   - "path_filter": block edits to paths NOT in AllowedPaths
-	//   - "block_all": block ALL edits
-	// SkillGatePassed is set to true when the LLM calls activate_skill for a
-	// NextSkills skill (terminal state) or when the user signals approval
-	// (detected in loop.go's Run).
-	if e.state.ActiveSkillName != "" && e.skills != nil {
-		if currentSkill := e.skills.Get(e.state.ActiveSkillName); currentSkill != nil && currentSkill.Gate != nil && !e.state.SkillGatePassed {
-			var blockedCalls []ToolCallRequest
-			for _, call := range calls {
-				if call.Name == "edit" || call.Name == "write" {
-					path := extractPathFromArgs(call.Input, e.config.WorkDir)
-					relPath := strings.TrimPrefix(path, e.config.WorkDir+"/")
-					allowed := false
-					switch currentSkill.Gate.Type {
-					case "block_all":
-						allowed = false
-					case "path_filter":
-						for _, p := range currentSkill.Gate.AllowedPaths {
-							if strings.HasPrefix(relPath, p) {
-								allowed = true
-								break
-							}
-						}
-					}
-					if !allowed {
-						blockedCalls = append(blockedCalls, call)
-					}
-				}
-			}
-			if len(blockedCalls) > 0 {
-				turnLog.Printf("skill HARD-GATE: blocking %d edit/write call(s) (skill=%s, gate=%s, SkillGatePassed=%v)",
-					len(blockedCalls), e.state.ActiveSkillName, currentSkill.Gate.Type, e.state.SkillGatePassed)
-				nudgeMsg := fmt.Sprintf("[HARD-GATE] skill `%s` 活跃中，前置阶段尚未完成。\n", e.state.ActiveSkillName) +
-					"在完成前置阶段前，不能修改代码。完成调查/设计后，输出报告并等待用户确认。\n" +
-					"或调用 activate_skill 激活下一个 skill 以转入实现阶段。"
-				if !e.isChinese {
-					nudgeMsg = fmt.Sprintf("[HARD-GATE] skill `%s` is active and its pre-implementation phase is not complete.\n", e.state.ActiveSkillName) +
-						"You cannot modify code until the pre-implementation phase is complete. After investigation/design, output a report and wait for user confirmation.\n" +
-						"Or call activate_skill to activate the next skill to transition to implementation."
-				}
-				e.history = append(e.history, assistant)
-				for _, c := range calls {
-					e.history = append(e.history, Message{
-						Role:       "tool",
-						ToolCallID: c.ID,
-						Content:    "Blocked: " + nudgeMsg,
-						Timestamp:  time.Now(),
-					})
-				}
-				return TurnResult{Done: false, FinishReason: finish}, nil
-			}
-		}
-	}
+	// Skill HARD-GATE removed (2026-09-08): the engine no longer blocks
+	// edit/write calls while a skill with a pre-implementation gate is active.
+	// The skill's own methodology prompt is the authority — the harness stays
+	// thin. This eliminates the "agent spins in the red phase without acting"
+	// deadlock: an agent under TDD/systematic-debugging trying to write its
+	// failing test was HARD-GATE-blocked and could only loop on todo_write/read.
 
 	// Analysis report gate: before allowing edit/write, require the agent to
 	// present a text-only analysis report and get user confirmation. This gate
@@ -1480,9 +1430,6 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 			})
 			continue
 		}
-		// Terminal state detection: when transitioning to a skill that's in the
-		// current skill's NextSkills, mark the current skill's gate as passed.
-		e.markSkillGatePassed(s.Name)
 		prevSkill := e.lastActivatedSkill
 		e.activatedSkills[s.Name] = true
 		e.lastActivatedSkill = s.Name

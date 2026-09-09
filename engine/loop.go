@@ -675,22 +675,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Skill gate approval detection: when a skill with a pre-implementation
-	// gate is active and the user signals approval, mark the gate as passed
-	// and trigger the skill chain via deactivateSkill (auto-activates NextSkills).
-	if e.state.ActiveSkillName != "" && !strings.HasPrefix(strings.TrimSpace(userMsg), "/") {
-		if e.detectSkillGateApproval(userMsg) {
-			skillName := e.state.ActiveSkillName
-			e.deactivateSkill()
-			msg := fmt.Sprintf("✓ 已确认，自动转入下一个 skill（%s）。", skillName)
-			if !zh {
-				msg = fmt.Sprintf("✓ Confirmed, auto-activating next skill (%s).", skillName)
-			}
-			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
-			loopLog.Printf("skill gate approved: deactivating %s, auto-activating next skill", skillName)
-		}
-	}
-
 	// 用户负面反馈：暂停当前路径，反思并重新规划执行路线。
 	// 改写 history 最后一条 user 消息（照 pendingEditPlan 反馈路径模式），
 	// 让主 agent 本轮自行反思，不引入新状态。纯关键词检测，零 LLM 调用。
@@ -1388,61 +1372,6 @@ func (e *Engine) detectIntentShift(userMsg string) bool {
 	return hasOp && !hasDev
 }
 
-// markSkillGatePassed marks the skill-specific gate as passed when the LLM
-// transitions to a skill that's in the current skill's NextSkills chain.
-// This indicates the pre-implementation phase is complete and the HARD-GATE
-// should release. Sets SkillGatePassed = true for any skill with a Gate config.
-func (e *Engine) markSkillGatePassed(newSkillName string) {
-	if e.state.ActiveSkillName == "" || e.skills == nil {
-		return
-	}
-	current := e.skills.Get(e.state.ActiveSkillName)
-	if current == nil {
-		return
-	}
-	for _, next := range current.NextSkills {
-		if newSkillName == next {
-			if current.Gate != nil {
-				e.state.SkillGatePassed = true
-			}
-			return
-		}
-	}
-}
-
-// detectSkillGateApproval checks if the user's message signals approval of
-// the active skill's pre-implementation gate (any skill with a [gate] config).
-func (e *Engine) detectSkillGateApproval(userMsg string) bool {
-	msg := strings.ToLower(strings.TrimSpace(userMsg))
-	approvalPhrases := []string{
-		"approved", "looks good", "lgtm", "go ahead",
-		"start implementing", "start coding", "start development",
-		"start fixing", "proceed with the fix", "root cause found",
-		"没问题", "可以了", "同意", "批准", "通过了",
-		"开始实现", "开始写代码", "开始开发", "方案可以", "设计可以",
-		"开始修复", "找到根因", "根因确认", "修复吧", "继续修复",
-	}
-	matched := false
-	for _, p := range approvalPhrases {
-		if strings.Contains(msg, p) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		return false
-	}
-	if e.state.ActiveSkillName == "" || e.skills == nil {
-		return false
-	}
-	current := e.skills.Get(e.state.ActiveSkillName)
-	if current == nil || current.Gate == nil || e.state.SkillGatePassed {
-		return false
-	}
-	e.state.SkillGatePassed = true
-	return true
-}
-
 // accumulateUsage adds a sub-agent's token usage to the main engine's
 // per-Run accumulator. Thread-safe: uses usageMu for concurrent goroutine access.
 func (e *Engine) accumulateUsage(usage *ModelUsage) {
@@ -1486,8 +1415,6 @@ func (e *Engine) deactivateSkill() {
 	e.context.SetActiveSkill("", "")
 	// Keep lastActivatedSkill for chain tracking purposes
 	// Keep activatedSkills map for deduplication purposes
-	// Reset skill gate flag
-	e.state.SkillGatePassed = false
 
 	// Auto-activate next skill in chain
 	if nextSkill != nil {
@@ -1947,9 +1874,6 @@ func describeScope(scope string, zh bool) string {
 // activateSkill activates a skill and injects its methodology into the stable zone.
 // reason is a human-readable description of why the skill was activated (for logging/progress).
 func (e *Engine) activateSkill(s *skill.Skill, reason string) {
-	// Terminal state detection: when transitioning to a skill that's in the
-	// current skill's NextSkills, mark the current skill's gate as passed.
-	e.markSkillGatePassed(s.Name)
 	e.activatedSkills[s.Name] = true
 	e.lastActivatedSkill = s.Name
 	e.state.ActiveSkillName = s.Name

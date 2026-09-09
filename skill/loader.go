@@ -76,7 +76,7 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 }
 
 // SkillFromSkillFile converts a parsed SkillFile into a Skill, applying
-// default gate config (from gates.go) and default UserInvocable=true.
+// default UserInvocable=true.
 func SkillFromSkillFile(sf SkillFile) *Skill {
 	s := &Skill{
 		Name:                   sf.Name,
@@ -105,7 +105,6 @@ func SkillFromSkillFile(sf SkillFile) *Skill {
 	} else {
 		s.UserInvocable = true
 	}
-	s.Gate = DefaultGateFor(sf.Name)
 	return s
 }
 
