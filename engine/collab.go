@@ -48,11 +48,9 @@ func NewCollabHall(e *Engine) *CollabHall {
 	return &CollabHall{engine: e}
 }
 
-// collabStageMaxIterations bounds each pipeline stage's sub-agent loop.
-// A stage produces focused output (research/design/dev-content/review), so a
-// modest cap keeps the pipeline fast while allowing tool-based grounding.
-const collabStageMaxIterations = 20
-
+// collabStageMaxIterations 已移除：流水线阶段子代理不设轮数上限（MaxIterations
+// 默认 0 = 无上限）。阶段产出聚焦、靠 LLM 遵循 submit_result 收尾；不再用硬性
+// 轮数截断防跑飞（用户决策：关注指令遵循而非成本护栏）。
 // handleCollabArena runs the /collab pipeline through all stages until the
 // final review output is complete, then leaves the state AwaitingConfirmation
 // for the user to confirm the synthesized summary. Idempotent: completed
@@ -110,7 +108,6 @@ func (h *CollabHall) runCollabStage(ctx context.Context, stage CollabStageName, 
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: collabStageMaxIterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 

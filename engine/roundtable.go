@@ -13,18 +13,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// roundtableMemberMaxIterations bounds each debate member's sub-agent loop.
-// A debate lens reasons about the requirement rather than exhaustively editing,
-// so a high cap wastes time/tokens (4 members × 4 rounds × up-to-N iterations
-// dominates the /debate latency). 15 is enough for a member to grep/read a couple
-// of files for grounding without looping; it cuts the debate wall-clock
-// substantially while keeping analysis quality.
-const roundtableMemberMaxIterations = 15
-
-// roundtableSearchMaxIterations bounds the pre-debate shared search agent.
-// A single codebase scan needs a bit more budget than a debate member's
-// reasoning turn (15), but is still capped to bound wall-clock.
-const roundtableSearchMaxIterations = 25
+// roundtableMemberMaxIterations 已移除：辩论成员子代理不设轮数上限（MaxIterations
+// 默认 0 = 无上限）。靠成员遵循角色提示产出结论；不再用硬性轮数截断防跑飞
+// （用户决策：关注指令遵循而非成本护栏，与 /collab 阶段一致）。
+// roundtableSearchMaxIterations 已移除：共享搜索 agent 同样不设轮数上限。
 
 // blueprint/synthesis 单次 LLM 调用的系统提示。这两个任务是"纯文本重写"——
 // 完整辩论记录已注入 prompt，无需工具。走子代理反而因工具全开 + 轮次上限导致
@@ -163,7 +155,6 @@ func (h *RoundtableHall) runSharedSearch(ctx context.Context, goal string, zh bo
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: roundtableSearchMaxIterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 	agent, err := h.engine.agents.Get(AgentSub)
@@ -473,7 +464,6 @@ func (h *RoundtableHall) runMemberDebateTurn(ctx context.Context, member Roundta
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
-		MaxIterations: roundtableMemberMaxIterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
 

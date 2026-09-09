@@ -89,10 +89,11 @@ func newCollabTestEngine(t *testing.T) *Engine {
 // and the Tools safety allowlist.
 type capturePromptRunner struct {
 	mockSimpleAgent
-	lastInput  Handoff
-	lastExtra  string
-	stageGoals []string
-	stageTools [][]string // Tools captured per stage run
+	lastInput          Handoff
+	lastExtra          string
+	stageGoals         []string
+	stageTools         [][]string // Tools captured per stage run
+	stageMaxIterations []int      // MaxIterations captured per stage run
 }
 
 func (c *capturePromptRunner) RunWithPrompt(_ context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
@@ -103,6 +104,7 @@ func (c *capturePromptRunner) RunWithPrompt(_ context.Context, input Handoff, ex
 	if extraPrompt != "" {
 		c.stageGoals = append(c.stageGoals, input.Goal)
 		c.stageTools = append(c.stageTools, input.Tools)
+		c.stageMaxIterations = append(c.stageMaxIterations, input.MaxIterations)
 	}
 	return &HandoffResult{Summary: c.response, Conclusions: []string{c.response}}, nil
 }
@@ -264,6 +266,14 @@ func TestHandleCollabArena_ToolsAllowlist(t *testing.T) {
 			if !allowed[got] {
 				t.Errorf("stage %d leaked forbidden tool %q into handoff: %v", i, got, tools)
 			}
+		}
+	}
+	// 阶段子代理不设轮数上限（MaxIterations=0）：用户决策放开轮数限制，
+	// 让 LLM 遵循 submit_result 收尾而非被硬性轮数截断（"/collab 阶段超时"
+	// 根因之一是 20 轮上限烧完仍无结论）。
+	for i, mi := range captor.stageMaxIterations {
+		if mi != 0 {
+			t.Errorf("stage %d MaxIterations = %d, want 0 (unlimited)", i, mi)
 		}
 	}
 	for _, got := range captor.stageTools[0] {

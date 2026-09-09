@@ -236,6 +236,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	sameOpCount := 0
 	maxSameOp := 5
 	streamer := subAgentStreamer{}
+	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
 	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
 	for iter := 0; maxIterations <= 0 || iter < maxIterations; iter++ {
 		select {
@@ -268,6 +269,24 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		if r.onProgress != nil {
 			r.onProgress(ProgressEvent{Type: "thinking", Name: agentName, Detail: fmt.Sprintf("%s: turn %d", agentName, iter)})
 		}
+
+		// Budget-tail wrap-up nudge: when the run has a finite iteration cap, a
+		// research-type sub-agent that keeps exploring with tools will otherwise
+		// exhaust the budget into a fallback "(analysis timed out, partial
+		// result)" / "子代理未产出最终结论" summary with no real conclusion.
+		// Near the end of the budget, tell it to stop exploring and wrap up so
+		// it converges before the hard cap. Injected at most once; the message
+		// stays in history for the remaining turns. The structured variant
+		// directs the model to submit_result (plain text never completes a
+		// structured run).
+		if maxIterations > 0 && iter >= maxIterations-2 && !budgetNudged {
+			history = append(history, ModelMessage{
+				Role:    "user",
+				Content: budgetTailNudge(zhFromLang(input.UserLanguage), maxIterations-iter, structured),
+			})
+			budgetNudged = true
+		}
+
 		req := ModelRequest{
 			Model:           modelName,
 			Messages:        history,
@@ -294,11 +313,14 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			}()
 		}
 
-		// Derive a per-call deadline to prevent sub-agent from hanging indefinitely.
-		// 120s is generous for a single LLM call (including thinking).
-		callCtx, callCancel := context.WithTimeout(ctx, 120*time.Second)
-		resp, err := model.Complete(callCtx, req)
-		callCancel()
+		// No synthetic per-call deadline: Complete is streaming, and a
+		// TOTAL-duration limit mis-kills normal slow streams (large context,
+		// long generation) as "(sub-agent error: context deadline exceeded)" —
+		// a stream that keeps returning content can still exceed 120s total.
+		// Real hangs are caught by the client's own guards: SSE idle timeout
+		// (DefaultIdleTimeout=60s, aborts only when no data line arrives),
+		// ResponseHeaderTimeout, and DialTimeout.
+		resp, err := model.Complete(ctx, req)
 		close(heartbeatDone)
 		if err != nil {
 			// Don't crash the parent session — return a graceful degradation.
@@ -906,6 +928,25 @@ func compressSubHistory(history []ModelMessage) []ModelMessage {
 	}
 
 	return result
+}
+
+// budgetTailNudge returns a user message telling a research sub-agent to stop
+// exploring and wrap up with its findings when the iteration budget is about
+// to run out. Without it, a finite-budget research agent burns all its turns
+// on tools and falls into the "(analysis timed out, partial result)" fallback
+// with no real conclusion. The structured variant directs the model to the
+// submit_result terminal tool (plain text never completes a structured run).
+func budgetTailNudge(zh bool, remaining int, structured bool) string {
+	if zh {
+		if structured {
+			return fmt.Sprintf("你的子代理迭代预算只剩 %d 轮。请立即停止新的探索，基于已有发现总结最终结论，并调用 submit_result 提交（summary 必填）。", remaining)
+		}
+		return fmt.Sprintf("你的子代理迭代预算只剩 %d 轮。请立即停止新的探索，基于已有发现直接产出最终结论。", remaining)
+	}
+	if structured {
+		return fmt.Sprintf("You have only %d iterations left. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
+	}
+	return fmt.Sprintf("You have only %d iterations left. Stop exploring now and produce your final conclusion from what you have found.", remaining)
 }
 
 // getNudgeMessage returns a language-appropriate nudge when the sub-agent
