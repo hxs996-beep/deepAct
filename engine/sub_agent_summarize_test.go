@@ -84,3 +84,65 @@ func TestSummarizeHistory_SubstantiveAssistant_KeptVerbatim(t *testing.T) {
 		t.Errorf("substantive assistant message must be kept as the summary, got %q", got)
 	}
 }
+
+// TestSummarizeHistory_SkipsIntentStatement locks the "/collab output shows
+// an intent statement as the conclusion" bug. The user's collab report showed
+// "(analysis timed out, partial result) 让我深入了解 codex 的 skills 模型..."
+// — the "让我..." line is an INTENT statement ("let me look into..."), not a
+// conclusion. summarizeHistory walked backward and returned it as the last
+// substantive assistant message. It must skip intent statements (using the
+// existing isIntermediateText heuristic) and fall back to a real finding, so
+// the collab stage shows substance instead of a plan-to-do-more line.
+func TestSummarizeHistory_SkipsIntentStatement(t *testing.T) {
+	r := &SubAgentRunner{}
+	history := []ModelMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "调研 codex 与 deepact 的区别"},
+		{Role: "assistant", Content: "核心区别已定位：codex 使用原生 worktree 隔离与 hooks 事件机制，deepact 使用 stop hooks 与 guard 系统。这是实质性结论。"},
+		{Role: "tool", Content: "read codex/hooks/..."},
+		{Role: "assistant", Content: "让我深入了解 codex 的 skills 模型（与 deepact 的 skill 差异）、worktree、execpolicy、hooks、memory、realtime 等核心模块。"},
+	}
+	got := r.summarizeHistory(history, "调研 codex 与 deepact 的区别")
+
+	if strings.Contains(got, "让我深入了解") {
+		t.Errorf("summarizeHistory must skip intent statements, got %q", got)
+	}
+	if !strings.Contains(got, "核心区别已定位") {
+		t.Errorf("summarizeHistory should fall back to the real substantive message, got %q", got)
+	}
+}
+
+// TestSummarizeHistory_SkipsPlanStatementVariants locks the remaining
+// "plan statement as conclusion" cases the user reproduced in /collab:
+//   - "现在读取关键的实际设计（agent-graph-store、skills 接口、guardian
+//     审查流程、execpolicy），以及 deepact 的核心 loop/turn/guards，来完成对比。"  (recon)
+//   - "Now let me look at the multi_agents_v2 spawn tool ..."  (design)
+//   - "I now understand deepact's engine architecture well. Let me examine the
+//     codex side — the key crates mentioned: ..."  (dev)
+// All three describe what the agent PLANS to do next, not a finding.
+// summarizeHistory must skip them and fall back to a real conclusion, or to
+// the readable no-result message when none exists.
+func TestSummarizeHistory_SkipsPlanStatementVariants(t *testing.T) {
+	r := &SubAgentRunner{}
+	history := []ModelMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "研究 codex 与当前项目的区别"},
+		{Role: "assistant", Content: "codex 使用 agent-graph-store 管理状态，deepact 使用 TaskState；这是已定位的核心差异。"},
+		{Role: "tool", Content: "read codex/skills/..."},
+		{Role: "assistant", Content: "现在读取关键的实际设计（agent-graph-store、skills 接口、guardian 审查流程、execpolicy），以及 deepact 的核心 loop/turn/guards，来完成对比。"},
+		{Role: "tool", Content: "read codex/hooks/..."},
+		{Role: "assistant", Content: "Now let me look at the multi_agents_v2 spawn tool (codex's sub-agent spawning) and the network_approval to understand the key design differences, plus deepact's session/store.go."},
+		{Role: "tool", Content: "read codex/multi_agents_v2/..."},
+		{Role: "assistant", Content: "I now understand deepact's engine architecture well. Let me examine the codex side — the key crates mentioned: agent-graph-store, skills, guardian, execpolicy, multi_agents_v2."},
+	}
+	got := r.summarizeHistory(history, "研究 codex 与当前项目的区别")
+
+	for _, plan := range []string{"现在读取", "Now let me", "Let me examine", "I now understand"} {
+		if strings.Contains(got, plan) {
+			t.Errorf("summarizeHistory must skip plan statement %q, got %q", plan, got)
+		}
+	}
+	if !strings.Contains(got, "agent-graph-store") {
+		t.Errorf("summarizeHistory should fall back to the real finding, got %q", got)
+	}
+}

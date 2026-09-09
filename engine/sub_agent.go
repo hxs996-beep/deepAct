@@ -626,6 +626,15 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 			if !strings.Contains(trimmed, "\n") && strings.HasSuffix(trimmed, ":") {
 				continue
 			}
+			// Plan statement ("让我...", "Let me...", "现在读取...",
+			// "I now understand... Let me examine...") → the agent stating
+			// what it will do next, not a conclusion. Skip so a timed-out
+			// run falls back to a real finding instead of the agent's
+			// "next step" line (the "/collab shows plan statement as
+			// conclusion" bug).
+			if isPlanStatement(trimmed) {
+				continue
+			}
 			return "(analysis timed out, partial result)\n" + content
 		}
 	}
@@ -644,6 +653,30 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 		return fmt.Sprintf("子代理未产出最终结论（已执行 %d 次工具调用后中断）。请重试或缩小任务范围。", count)
 	}
 	return fmt.Sprintf("Sub-agent produced no final conclusion (interrupted after %d tool calls). Retry or narrow the task.", count)
+}
+
+// isPlanStatement reports whether an assistant message states what the agent
+// PLANS to do next ("let me...", "现在读取...", "I now understand... Let me
+// examine...") rather than a finding. Plan statements are the last messages a
+// timed-out agent leaves behind, so summarizeHistory must skip them when
+// picking the partial-result summary.
+func isPlanStatement(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, p := range []string{"让我", "我来", "现在读取", "现在检查", "接下来"} {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	for _, p := range []string{"let me", "now let me", "i now understand"} {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // stableSystemPrompt returns the full system prompt shared by all sub-agents.
