@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	maxReadBytes    = 1 << 20 // 1MB safety cap — refuse to read larger files
-	maxReadTokens   = 25000   // max tokens to return inline; beyond this → truncate with offset/limit hint
-	charsPerToken   = 4       // rough estimate: 4 chars ≈ 1 token for code
+	maxReadBytes  = 1 << 20 // 1MB safety cap — refuse to read larger files
+	maxReadTokens = 25000   // max tokens to return inline; beyond this → truncate with offset/limit hint
+	charsPerToken = 4       // rough estimate: 4 chars ≈ 1 token for code
 
 	fileUnchangedStub = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
 
@@ -83,9 +83,23 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		if err != nil {
 			return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
 		}
-		// Update mtime cache only for full reads (no offset/limit).
+		// When the file is unchanged since the last full read, prefix a
+		// do-not-re-read hint: repeated identical reads give the model no new
+		// information and fuel narration+read loops. The content is still
+		// returned so nothing is lost, but the hint steers the model to act
+		// on what it already has.
+		unchanged := false
 		if info, statErr := os.Stat(safePath); statErr == nil {
-			t.mtimeCache.Store(safePath, info.ModTime().UnixMilli())
+			mtime := info.ModTime().UnixMilli()
+			if prev, ok := t.mtimeCache.Load(safePath); ok && prev == mtime {
+				unchanged = true
+			}
+			t.mtimeCache.Store(safePath, mtime)
+		}
+		if unchanged {
+			content = "File unchanged since your last full read — its content is already in the conversation. " +
+				"Do not re-read it; act on what you already have or read a different section. " +
+				"文件自上次完整读取后未变更，内容已在对话中，请勿重读；请基于已有内容行动或读取其他部分。\n\n" + content
 		}
 		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 	}
