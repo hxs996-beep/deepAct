@@ -63,6 +63,7 @@ type Engine struct {
 	guards       *GuardSystem
 	readLoop     *ReadLoopState
 	errorLoop    *ErrorLoopState
+	progressLoop *ProgressLoopState
 	evalStore    EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
@@ -208,6 +209,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		guards:          guard,
 		readLoop:        NewReadLoopState(),
 		errorLoop:       NewErrorLoopState(0),
+		progressLoop:    NewProgressLoopState(6),
 		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
@@ -314,6 +316,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 	if e.readLoop != nil {
 		e.readLoop.Reset()
+	}
+	if e.progressLoop != nil {
+		e.progressLoop.Reset()
 	}
 	e.matchedSkillsContent = ""
 	e.runStartAt = time.Now()
@@ -915,6 +920,31 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 					consecutiveSameOp = 0
 				}
 				lastOp = turnResult.LastOp
+			}
+		}
+
+		// Progress guard: N consecutive turns without a progress signal
+		// (successful edit/write/revert/bash or handoff) → nudge then block.
+		// Catches the "narration + read + todo_write" loop that bypasses all
+		// operation-repeat guards: every turn is a *different* operation, so
+		// ReadLoopState / consecutiveSameOp / ErrorLoopState never fire.
+		if e.progressLoop != nil {
+			action := e.progressLoop.Check(turnResult.MadeProgress)
+			switch action.Type {
+			case GuardDiagnose:
+				nudge := buildProgressNudge(zh)
+				e.pendingPinnedMessages = append(e.pendingPinnedMessages, nudge)
+				loopLog.Printf("progress-loop nudge pinned")
+			case GuardBlock:
+				msg := buildProgressBlockMsg(zh)
+				loopLog.Printf("progress-loop block")
+				return &EngineResponse{
+					Summary:      msg,
+					Stage:        StageAct,
+					Blocked:      true,
+					BlockedBy:    "loop_guard",
+					FinishReason: "loop_detected",
+				}, nil
 			}
 		}
 
@@ -1837,6 +1867,28 @@ func buildReadLoopBlockMsg(key string, zh bool) string {
 	}
 	return fmt.Sprintf("Repeated read loop detected: %s (%s) has been read repeatedly despite a nudge. "+
 		"The agent may be stuck. Please clarify: do you want to view an un-read section, or conclude from existing content?", path, scopeDesc)
+}
+
+// buildProgressNudge builds the nudge message for the 4th consecutive
+// no-progress turn.
+func buildProgressNudge(zh bool) string {
+	if zh {
+		return "[进度提示] 你已连续多轮只读/规划（读取、更新 todo 等），未产生任何代码修改或结论。" +
+			"请直接执行下一步（写测试、改代码或输出结论），不要继续复述当前状态或重复读取。"
+	}
+	return "[PROGRESS NUDGE] You have spent several turns on read-only/planning work without any code change or conclusion. " +
+		"Take the next concrete action (write a test, modify code, or produce a conclusion) instead of re-stating state or re-reading."
+}
+
+// buildProgressBlockMsg builds the block message for the 6th consecutive
+// no-progress turn.
+func buildProgressBlockMsg(zh bool) string {
+	if zh {
+		return "检测到无进展循环：你已连续多轮只读/规划，未产生任何代码修改或结论，nudge 后仍未改善。" +
+			"Agent 可能卡住了。请澄清：是想让我基于已有内容直接给出结论，还是调整任务方向？"
+	}
+	return "Detected a no-progress loop: you have spent many turns on read-only/planning work without a code change or conclusion, despite a nudge. " +
+		"The agent may be stuck. Please clarify: conclude from existing content, or adjust the task direction?"
 }
 
 // splitReadKey splits "read:path::scope" into (path, scope).

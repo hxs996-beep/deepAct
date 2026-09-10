@@ -37,6 +37,12 @@ type TurnResult struct {
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
+	// MadeProgress is true when this turn produced a progress signal (a
+	// successful edit/write/revert/bash call, or a handoff). Read-only,
+	// todo_write, ask_user and planning calls are NOT progress. The
+	// ProgressLoopState guard uses it to detect "N turns without progress"
+	// loops (narration + read/todo) that bypass operation-repeat guards.
+	MadeProgress bool
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
@@ -676,6 +682,25 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// failures on the same (tool, path) that defeat content-hash guards.
 		result.LastOpError = statusByID[c.ID] == "error"
 		break
+	}
+	// Progress signal for ProgressLoopState: a successful destructive call
+	// (edit/write/revert/bash) or a handoff counts as progress; read-only
+	// exploration and planning (read/grep/glob/lsp/todo_write) do not. This
+	// detects "N turns narrate but never act" loops regardless of which
+	// read-only tools the model uses as cover.
+	for _, c := range regularCalls {
+		switch c.Name {
+		case "edit", "write", "revert", "bash":
+			if statusByID[c.ID] == "ok" {
+				result.MadeProgress = true
+			}
+		}
+		if result.MadeProgress {
+			break
+		}
+	}
+	if !result.MadeProgress && len(handoffCalls) > 0 {
+		result.MadeProgress = true
 	}
 	return result, nil
 }

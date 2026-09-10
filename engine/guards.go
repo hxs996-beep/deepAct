@@ -369,7 +369,7 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 
 			g.dangerousPending = normalized
 			return GuardAction{
-				Type:    GuardAskUser,
+				Type: GuardAskUser,
 				Message: pickPrompt(g.isChinese,
 					fmt.Sprintf("⚠ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", dp.reason, cmd),
 					fmt.Sprintf("⚠ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", dp.reason, cmd),
@@ -490,4 +490,63 @@ func (s *ErrorLoopState) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.counts = make(map[string]int)
+}
+
+// ProgressLoopState tracks consecutive turns without a progress signal and
+// applies a two-tier policy: 4th no-progress turn → nudge (GuardDiagnose);
+// 6th → block. A progress signal (successful edit/write/revert/bash call or
+// a handoff) resets the streak. Different from the operation-repeat guards
+// (ReadLoopState/consecutiveSameOp/ErrorLoopState), which only fire when the
+// SAME operation repeats: ProgressLoopState fires when the agent spends many
+// turns on read-only/planning work (narration + read + todo_write) without
+// ever modifying code or reaching a conclusion — the loop form that bypassed
+// all prior guards.
+type ProgressLoopState struct {
+	mu      sync.Mutex
+	count   int
+	nudgeAt int // 4th no-progress turn → nudge
+	blockAt int // 6th no-progress turn → block
+}
+
+func NewProgressLoopState(blockAt int) *ProgressLoopState {
+	if blockAt <= 0 {
+		blockAt = 6
+	}
+	return &ProgressLoopState{
+		count:   0,
+		nudgeAt: blockAt - 2,
+		blockAt: blockAt,
+	}
+}
+
+// Check returns GuardAllow, GuardDiagnose (nudge), or GuardBlock based on the
+// accumulated no-progress streak. progress=true resets the streak.
+func (s *ProgressLoopState) Check(progress bool) GuardAction {
+	if s == nil {
+		return GuardAction{Type: GuardAllow}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if progress {
+		s.count = 0
+		return GuardAction{Type: GuardAllow}
+	}
+	s.count++
+	switch {
+	case s.count >= s.blockAt:
+		return GuardAction{Type: GuardBlock, Message: "progress-loop-block"}
+	case s.count == s.nudgeAt:
+		return GuardAction{Type: GuardDiagnose, Message: "progress-loop-nudge"}
+	default:
+		return GuardAction{Type: GuardAllow}
+	}
+}
+
+func (s *ProgressLoopState) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count = 0
 }
