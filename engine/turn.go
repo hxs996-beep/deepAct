@@ -529,6 +529,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingActivateMsgs := e.processActivateSkillCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingOptionsMsgs := e.processPresentOptionsCalls(calls)
+	pendingAskUserMsgs := e.processAskUserCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -541,6 +542,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingOptionsMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingAskUserMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -559,6 +563,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == TodoWriteToolName {
 			continue
 		} else if call.Name == PresentOptionsToolName {
+			continue
+		} else if call.Name == AskUserToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -704,6 +710,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, presentOptionsToolSpec(e.isChinese))
+	specs = append(specs, askUserToolSpec(e.isChinese))
 	return specs
 }
 
@@ -1582,6 +1589,80 @@ func (e *Engine) processPresentOptionsCalls(calls []ToolCallRequest) []Message {
 			Role:       "tool",
 			ToolCallID: call.ID,
 			Content:    fmt.Sprintf("✓ 已记录 %d 个可选方案，等待用户选择。", len(params.Options)),
+			Timestamp:  time.Now(),
+		})
+	}
+	return msgs
+}
+
+// processAskUserCalls intercepts ask_user tool calls from the assistant's
+// response. Each call declares a question (and optionally 2-6 candidate
+// answers) the user must respond to; the engine stores it for presentation.
+// Every call receives a tool response message (satisfying the DeepSeek API
+// requirement that every tool_call_id has a matching tool response).
+func (e *Engine) processAskUserCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != AskUserToolName {
+			continue
+		}
+		var params struct {
+			Question string   `json:"question"`
+			Options  []string `json:"options"`
+		}
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid ask_user arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if strings.TrimSpace(params.Question) == "" {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "Error: ask_user requires a non-empty question",
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if len(params.Options) > 0 {
+			if len(params.Options) < 2 || len(params.Options) > 6 {
+				msgs = append(msgs, Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    "Error: ask_user options require 2 to 6 items. Provide 2-6 candidate answers or omit options for an open-ended question.",
+					Timestamp:  time.Now(),
+				})
+				continue
+			}
+			valid := true
+			for _, o := range params.Options {
+				if strings.TrimSpace(o) == "" {
+					msgs = append(msgs, Message{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    "Error: ask_user requires non-empty option strings",
+						Timestamp:  time.Now(),
+					})
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				continue
+			}
+		}
+		e.pendingAskUser = &AskUserRequest{
+			Question: params.Question,
+			Options:  append([]string(nil), params.Options...),
+		}
+		msgs = append(msgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    "✓ 已记录问题，等待用户回答。",
 			Timestamp:  time.Now(),
 		})
 	}

@@ -98,6 +98,15 @@ type Engine struct {
 	// handleConfirmCommand reads it. Cleared once consumed.
 	pendingConfirmOptions []string
 
+	// pendingAskUser holds the question the agent asked the user via ask_user.
+	// Non-nil means the engine is awaiting the user's response — with Options
+	// the popup shows 方案A/B/C... for the user to choose, without Options the
+	// question is presented via the awaiting_user Blocked path for free input.
+	// NOT reset at Run start — it must survive until the next Run's
+	// handleConfirmCommand (with options) or the free-input path reads it.
+	// Cleared once consumed.
+	pendingAskUser *AskUserRequest
+
 	// pendingAnalysisNudge is true when the analysis report gate has blocked
 	// edit/write calls, waiting for the agent to output a text-only analysis
 	// report. Persists across Run() calls (set in one Run, checked in the next
