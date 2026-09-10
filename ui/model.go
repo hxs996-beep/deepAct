@@ -2124,7 +2124,7 @@ func renderMessage(msg DisplayMessage, width int) []string {
 		}
 		return styled
 	default:
-		rendered := renderMarkdown(content, width)
+		rendered := renderMarkdownByBlocks(content, width)
 		return wrapLines(strings.Split(rendered, "\n"), width)
 	}
 }
@@ -2180,6 +2180,97 @@ func renderMarkdown(content string, width int) string {
 	// content (especially visible in the blocked/"确认执行代码" state).
 	out = strings.Trim(strings.TrimRight(out, "\n"), "\n")
 	return out
+}
+
+// renderMarkdownByBlocks renders markdown content block-by-block instead of as
+// one document. glamour merges adjacent non-blank text lines into a single
+// paragraph and re-wraps them at spaces, so a long line over the terminal width
+// appends the NEXT line's text to the current line's end — the
+// "其他行内容展示在 // 前面" / "验收） • grep 验收..." corruption seen when
+// analysis reports quote // comment lines or "• " lines (U+2022 is not a
+// markdown list marker).
+//
+// Splitting on top-level blocks keeps inline formatting (###, **bold**, `code`,
+// tables, code fences) while guaranteeing glamour never joins unrelated lines:
+//   - fenced code blocks stay whole (cross-line content must not be reflowed)
+//   - markdown tables stay whole (header + separator + rows share one render)
+//   - every other non-blank line renders as its own block, so adjacent lines
+//     cannot be folded into one paragraph
+func renderMarkdownByBlocks(content string, width int) string {
+	blocks := splitMarkdownBlocks(content)
+	if len(blocks) == 1 {
+		return renderMarkdown(content, width)
+	}
+	rendered := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		rendered = append(rendered, renderMarkdown(b, width))
+	}
+	return strings.Join(rendered, "\n")
+}
+
+// splitMarkdownBlocks splits markdown source into top-level blocks. A block is
+// either a markdown table (consecutive | lines with a separator row) or a
+// single ordinary line. Blank lines act as separators and are dropped.
+// 逐行独立成块使 glamour 无法把相邻普通行合并为段落；表格整体成块保证
+// glamour 渲染出框线 │ 与对齐。
+func splitMarkdownBlocks(content string) []string {
+	lines := strings.Split(content, "\n")
+	var blocks []string
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Fenced code block: keep the whole ``` ... ``` block as one unit so
+		// glamour renders the code verbatim (markdown inside is not interpreted).
+		if strings.HasPrefix(trimmed, "```") {
+			j := i + 1
+			for j < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[j]), "```") {
+				j++
+			}
+			if j < len(lines) {
+				j++ // include closing fence
+			}
+			blocks = append(blocks, strings.Join(lines[i:j], "\n"))
+			i = j - 1
+			continue
+		}
+		// Table: header/row line followed by a separator row (| --- |). Keep the
+		// whole consecutive table as one block so glamour renders header + rows.
+		if strings.HasPrefix(trimmed, "|") && i+1 < len(lines) && isMarkdownTableSep(strings.TrimSpace(lines[i+1])) {
+			j := i
+			for j < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[j]), "|") {
+				j++
+			}
+			blocks = append(blocks, strings.Join(lines[i:j], "\n"))
+			i = j - 1
+			continue
+		}
+		blocks = append(blocks, line)
+	}
+	return blocks
+}
+
+// isMarkdownTableSep reports whether a markdown table separator row such as
+// "| --- | --- |" (header underline) matches. The core may contain only
+// '-', ':', '|' and spaces and must include at least one '-'.
+func isMarkdownTableSep(s string) bool {
+	if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") {
+		return false
+	}
+	core := s[1 : len(s)-1]
+	hasDash := false
+	for _, r := range core {
+		switch r {
+		case '-':
+			hasDash = true
+		case ':', '|', ' ':
+		default:
+			return false
+		}
+	}
+	return hasDash
 }
 
 func toolIcon(name string) string {
