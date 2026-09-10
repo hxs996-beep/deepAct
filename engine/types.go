@@ -99,6 +99,15 @@ type EngineResponse struct {
 	FinishReason string   `json:"finish_reason,omitempty"`
 }
 
+// AskUserRequest captures an ask_user tool call: the question the model needs
+// the user to answer, plus optional candidate answers. Stored on the Engine
+// while awaiting the user's response; consumed by handleConfirmCommand (with
+// options) or cleared on free input (without options).
+type AskUserRequest struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
+}
+
 type ModelRequest struct {
 	Model           string
 	Messages        []ModelMessage

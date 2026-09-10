@@ -20,6 +20,7 @@ const (
 	TodoWriteToolName      = "todo_write"
 	SubmitResultToolName   = "submit_result"
 	PresentOptionsToolName = "present_options"
+	AskUserToolName        = "ask_user"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -312,6 +313,48 @@ func presentOptionsToolSpec(zh bool) ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        PresentOptionsToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// askUserToolSpec returns the tool definition for asking the user a question.
+// The model calls this at any point (analysis report, mid-execution) when it
+// needs the user to provide information or make a decision that cannot be
+// determined from the codebase — covering config gaps, external facts, user
+// preferences, tradeoff choices, etc. Provide 2-6 candidate answers to present
+// them as selectable options; omit options for an open-ended question.
+func askUserToolSpec(zh bool) ModelTool {
+	desc := "Call this tool when you need the user to provide information or make a decision that you cannot determine yourself (missing configuration, external facts, user preferences, tradeoff choices). If you have 2-6 mutually exclusive candidate answers, provide them as options; otherwise omit options for an open-ended question. Do NOT call it for information you can verify yourself by searching the code or using tools."
+	questionDesc := "The question to present to the user."
+	optionsDesc := "Optional candidate answers (2-6 non-empty strings). When provided, the engine presents them as selectable options (方案A/B/C); when omitted, the user answers freely."
+	if zh {
+		desc = "当你需要用户提供无法自行确定的信息或做决定时（配置缺失、外部事实、用户偏好、权衡选择等），调用本工具。若有 2~6 个互斥的候选答案，作为 options 提供；否则省略 options 呈现开放式问题。能通过搜索代码或工具自行验证的信息不要调用。"
+		questionDesc = "呈现给用户的问题。"
+		optionsDesc = "可选候选答案（2~6 个非空字符串）。提供时引擎以可选项（方案A/B/C）呈现；省略时用户自由输入。"
+	}
+	params := fmt.Sprintf(`{
+				"type": "object",
+				"properties": {
+					"question": {
+						"type": "string",
+						"description": %q
+					},
+					"options": {
+						"type": "array",
+						"items": {"type": "string", "minLength": 1},
+						"minItems": 2,
+						"maxItems": 6,
+						"description": %q
+					}
+				},
+				"required": ["question"]
+			}`, questionDesc, optionsDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        AskUserToolName,
 			Description: desc,
 			Parameters:  json.RawMessage(params),
 		},
