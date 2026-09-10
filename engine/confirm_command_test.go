@@ -158,7 +158,7 @@ func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeTurn error: %v", err)
 	}
-	if result.Blocked {
-		t.Error("expected edit to execute without analysis-gate blocking")
+	if result.LastOp == "" {
+		t.Error("expected edit to execute without analysis-gate blocking (LastOp empty means no operation ran)")
 	}
 }
