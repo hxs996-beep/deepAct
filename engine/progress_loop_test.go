@@ -98,7 +98,7 @@ func TestExecuteTurn_MadeProgress_EditSuccess(t *testing.T) {
 		}}},
 		context: &stubContextBuilder{},
 		tools:   &recordingToolExecutor{},
-		state:   &TaskState{TurnNumber: 0, AnalysisReportConfirmed: true},
+		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "改"}},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
