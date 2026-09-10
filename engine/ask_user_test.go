@@ -237,6 +237,19 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	}
 }
 
+// askUserToolSpec 描述需包含软引导（建议改代码前用 ask_user 让用户确认方案），
+// 按会话语言单一渲染。这是能力层引导，替代已移除的引擎级 analysis gate。
+func TestAskUserToolSpec_SoftGuidance(t *testing.T) {
+	zhSpec := askUserToolSpec(true)
+	if !strings.Contains(zhSpec.Function.Description, "建议先用本工具向用户确认") {
+		t.Errorf("zh desc should contain soft guidance, got %q", zhSpec.Function.Description)
+	}
+	enSpec := askUserToolSpec(false)
+	if !strings.Contains(enSpec.Function.Description, "consider confirming with the user first") {
+		t.Errorf("en desc should contain soft guidance, got %q", enSpec.Function.Description)
+	}
+}
+
 // 自由输入路径：用户未发 /confirm N（无 options 的 ask_user 直接输入），
 // Run 主逻辑中的清除块应清空待决问题，避免残留到下一轮再次弹出。
 func TestAskUser_ClearedOnFreeInputRun(t *testing.T) {
