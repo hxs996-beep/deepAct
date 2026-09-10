@@ -479,11 +479,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// bare "/confirm N" is never treated as user feedback.
 	e.handleConfirmCommand(userMsg)
 
-	// Analysis report nudge: if the gate blocked in the previous Run() and the
-	// agent produced a text-only analysis report, handle the user's response
-	// (confirmation or feedback) before any other processing.
-	e.handleAnalysisNudgeConfirmation(userMsg)
-
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
 	// 回输入框，或无 options 的 ask_user 直接输入），本组待决问题作废，
 	// 避免残留到下一轮再次弹出。
@@ -1609,53 +1604,6 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	// 本组问题已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
 	e.pendingAskUser = nil
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
-	return true
-}
-
-// handleAnalysisNudgeConfirmation processes the user's response to an analysis
-// report nudge. When the analysis report gate blocks edit/write calls, the
-// agent outputs a text-only report (ending the Run()), and the user responds.
-// If the user confirms, AnalysisReportConfirmed is set so the gate skips on
-// the next edit attempt. If the user gives feedback, the nudge is cleared so
-// the agent can re-analyze. Returns true if a nudge was pending and handled.
-func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
-	if !e.pendingAnalysisNudge {
-		return false
-	}
-	if isDangerousConfirmation(userMsg) {
-		e.state.AnalysisReportConfirmed = true
-		e.pendingAnalysisNudge = false
-		// Replace the user's bare confirmation with a contextual message so
-		// the agent knows the analysis was approved and can proceed to edit.
-		if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-			msg := "✓ 分析报告已确认，可以开始修改代码。"
-			if !e.isChinese {
-				msg = "✓ Analysis report confirmed. You may now proceed with code changes."
-			}
-			e.history[len(e.history)-1].Content = msg
-		}
-		loopLog.Printf("analysis nudge confirmed by user")
-	} else {
-		// User is providing feedback on the analysis, not confirming.
-		// Contextualize so the agent understands this is feedback and should
-		// re-analyze rather than proceed to edit.
-		if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-			if e.isChinese {
-				e.history[len(e.history)-1].Content = fmt.Sprintf(
-					"用户对分析报告给出了反馈：%s\n\n请根据反馈重新分析，然后再次输出完整的分析报告。",
-					userMsg,
-				)
-			} else {
-				e.history[len(e.history)-1].Content = fmt.Sprintf(
-					"The user provided feedback on the analysis report: %s\n\nRe-analyze based on the feedback, then output a complete analysis report again.",
-					userMsg,
-				)
-			}
-		}
-		e.pendingAnalysisNudge = false
-		e.state.AnalysisReportConfirmed = false
-		loopLog.Printf("analysis nudge feedback from user (not confirmation)")
-	}
 	return true
 }
 
