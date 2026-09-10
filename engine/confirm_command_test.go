@@ -62,9 +62,12 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 			Goal:                    "修改 .gitignore 并提交 memory/",
 			AnalysisReportConfirmed: false,
 		},
-		history:              []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese:            true,
-		pendingConfirmOptions: []string{"用 Redis 缓存", "改用 MySQL"},
+		history:   []Message{{Role: "user", Content: "/confirm 1"}},
+		isChinese: true,
+		pendingAskUser: &AskUserRequest{
+			Question: "缓存方案选哪个？",
+			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
+		},
 	}
 	e.pendingAnalysisNudge = true
 

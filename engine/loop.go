@@ -1598,22 +1598,22 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
 		switch {
-		case len(e.pendingConfirmOptions) > 0 && n >= 1 && n <= len(e.pendingConfirmOptions):
-			label := confirmOptionLabel(n-1, e.pendingConfirmOptions[n-1])
+		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 && n >= 1 && n <= len(e.pendingAskUser.Options):
+			label := confirmOptionLabel(n-1, e.pendingAskUser.Options[n-1])
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了：%s，请按该方案执行修改。", label)
-		case len(e.pendingConfirmOptions) > 0:
+		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0:
 			// 有声明方案但编号越界（n < 1 或 n > len(options)）：不静默降级为
 			// "按报告执行"，明确告知 agent 用户选择无效，由其决定下一步。
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了无效的方案编号 %d，请重新选择。", n)
-			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(e.pendingConfirmOptions))
+			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(e.pendingAskUser.Options))
 		default:
 			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（按报告执行），可以开始修改代码。"
 		}
 	}
-	// 本组方案已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
-	e.pendingConfirmOptions = nil
+	// 本组问题已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
+	e.pendingAskUser = nil
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
 	return true
 }

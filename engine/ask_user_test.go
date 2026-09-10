@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -186,5 +187,86 @@ func TestAskUserOptions_PendingNoOptions_Nil(t *testing.T) {
 	got := e.askUserOptions()
 	if got != nil {
 		t.Errorf("expected nil options without options, got %v", got)
+	}
+}
+
+// 无待决问题（纯分析门控）时，/confirm 1 确认报告（"按报告执行"）。
+func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
+	e := &Engine{
+		state:     &TaskState{AnalysisReportConfirmed: false},
+		history:   []Message{{Role: "user", Content: "/confirm 1"}},
+		isChinese: true,
+	}
+	e.pendingAnalysisNudge = true
+
+	if !e.handleConfirmCommand("/confirm 1") {
+		t.Fatal("handleConfirmCommand should handle /confirm 1")
+	}
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after confirm")
+	}
+	if e.pendingAnalysisNudge {
+		t.Error("pendingAnalysisNudge should be false after confirm")
+	}
+	last := e.history[len(e.history)-1].Content
+	if !strings.Contains(last, "按报告执行") {
+		t.Errorf("history should mention 按报告执行, got %q", last)
+	}
+}
+
+// 有待决问题且带 options 时，/confirm N 选择方案N并注入方案描述。
+func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
+	e := &Engine{
+		state:     &TaskState{AnalysisReportConfirmed: false},
+		history:   []Message{{Role: "user", Content: "/confirm 2"}},
+		isChinese: true,
+		pendingAskUser: &AskUserRequest{
+			Question: "缓存方案选哪个？",
+			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
+		},
+	}
+
+	if !e.handleConfirmCommand("/confirm 2") {
+		t.Fatal("handleConfirmCommand should handle /confirm 2")
+	}
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after selecting a plan")
+	}
+	last := e.history[len(e.history)-1].Content
+	if !strings.Contains(last, "方案B: 改用 MySQL") {
+		t.Errorf("history should mention the selected plan 方案B: 改用 MySQL, got %q", last)
+	}
+	if e.pendingAskUser != nil {
+		t.Errorf("pendingAskUser should be cleared after selection, got %+v", e.pendingAskUser)
+	}
+}
+
+// 有待决问题但编号越界（n > len(options)）时，不静默降级为"按报告执行"。
+func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
+	e := &Engine{
+		state:     &TaskState{AnalysisReportConfirmed: false},
+		history:   []Message{{Role: "user", Content: "/confirm 5"}},
+		isChinese: true,
+		pendingAskUser: &AskUserRequest{
+			Question: "缓存方案选哪个？",
+			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
+		},
+	}
+
+	if !e.handleConfirmCommand("/confirm 5") {
+		t.Fatal("handleConfirmCommand should handle /confirm 5")
+	}
+	if !e.state.AnalysisReportConfirmed {
+		t.Error("AnalysisReportConfirmed should be true after out-of-range confirm")
+	}
+	last := e.history[len(e.history)-1].Content
+	if !strings.Contains(last, "无效") {
+		t.Errorf("history should mention invalid option for out-of-range N, got %q", last)
+	}
+	if strings.Contains(last, "按报告执行") {
+		t.Errorf("out-of-range N must NOT degrade to 按报告执行, got %q", last)
+	}
+	if e.pendingAskUser != nil {
+		t.Errorf("pendingAskUser should be cleared after out-of-range confirm, got %+v", e.pendingAskUser)
 	}
 }
