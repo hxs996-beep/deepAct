@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -268,5 +269,31 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	}
 	if e.pendingAskUser != nil {
 		t.Errorf("pendingAskUser should be cleared after out-of-range confirm, got %+v", e.pendingAskUser)
+	}
+}
+
+// 自由输入路径：用户未发 /confirm N（无 options 的 ask_user 直接输入），
+// Run 主逻辑中的清除块应清空待决问题，避免残留到下一轮再次弹出。
+func TestAskUser_ClearedOnFreeInputRun(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "任务已完成。", FinishReason: "stop"},
+		}},
+		context: &stubContextBuilder{},
+		tools:   stubToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "连接字符串是 mysql://root@localhost/db"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		pendingAskUser: &AskUserRequest{
+			Question: "数据库连接字符串是什么？",
+		},
+	}
+	e.pendingAnalysisNudge = true
+
+	if _, err := e.Run(context.Background(), "连接字符串是 mysql://root@localhost/db"); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if e.pendingAskUser != nil {
+		t.Errorf("pendingAskUser should be cleared after a free-input Run, got %+v", e.pendingAskUser)
 	}
 }

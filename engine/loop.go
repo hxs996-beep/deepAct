@@ -91,13 +91,6 @@ type Engine struct {
 	// user approval before execution.
 	pendingEditPlan *PendingEditPlan
 
-	// pendingConfirmOptions holds the options the agent declared via
-	// present_options in its analysis report. Non-empty means the popup shows
-	// 方案A/B/C... for the user to choose instead of the fixed "按报告执行".
-	// NOT reset at Run start — it must survive until the next Run's
-	// handleConfirmCommand reads it. Cleared once consumed.
-	pendingConfirmOptions []string
-
 	// pendingAskUser holds the question the agent asked the user via ask_user.
 	// Non-nil means the engine is awaiting the user's response — with Options
 	// the popup shows 方案A/B/C... for the user to choose, without Options the
@@ -492,9 +485,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.handleAnalysisNudgeConfirmation(userMsg)
 
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
-	// 回输入框），本组待决方案作废，避免残留到下一轮门控拦截时再次弹出。
-	if len(e.pendingConfirmOptions) > 0 {
-		e.pendingConfirmOptions = nil
+	// 回输入框，或无 options 的 ask_user 直接输入），本组待决问题作废，
+	// 避免残留到下一轮再次弹出。
+	if e.pendingAskUser != nil {
+		e.pendingAskUser = nil
 	}
 
 	if e.pendingEditPlan != nil {
@@ -1023,7 +1017,7 @@ func (e *Engine) askUserOptions() []string {
 }
 
 // confirmOptionLabel renders the 方案X: <desc> label for a declared option at
-// 0-based index i. Shared by confirmOptions (popup display) and
+// 0-based index i. Shared by askUserOptions (popup display) and
 // handleConfirmCommand (history injection) so both agree on the label.
 func confirmOptionLabel(i int, opt string) string {
 	return fmt.Sprintf("方案%c: %s", 'A'+i, opt)
@@ -1579,8 +1573,8 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 //
 // Any /confirm N flips AnalysisReportConfirmed so the agent's next edit/write
 // in this same Run passes the analysis gate.
-// When the agent declared options via present_options (pendingConfirmOptions
-// non-empty), /confirm N selects 方案N and the choice is injected into history
+// When the agent declared options via ask_user (pendingAskUser with a non-empty
+// Options list), /confirm N selects 方案N and the choice is injected into history
 // so the agent implements the selected plan; an out-of-range N injects an
 // "invalid option number" feedback instead of silently degrading to report
 // confirmation. When no options were declared, /confirm 1 confirms the report
