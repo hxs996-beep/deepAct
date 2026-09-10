@@ -259,17 +259,6 @@ type TaskState struct {
 	// leaked stale all-session state and grew the volatile tail.
 	ReadHistory []ReadRecord `json:"read_history"`
 
-	// AnalysisReportConfirmed is set when the user confirms the analysis report
-	// presented by the agent. When true, the analysis report gate is skipped,
-	// allowing edits to proceed directly.
-	//
-	// Scoped to a single Run: it is reset to false at the start of every Run
-	// and only re-set within that Run by handleAnalysisNudgeConfirmation. This
-	// prevents a confirmation from a prior task from leaking into an unrelated
-	// new question (which made the agent skip presenting a fresh report and
-	// falsely claim "analysis report already confirmed").
-	AnalysisReportConfirmed bool `json:"analysis_report_confirmed,omitempty"`
-
 	// PlanConfirmed is set when the user confirms a plan presented by the
 	// agent. When true, the plan gate is skipped, allowing edits to proceed.
 	// Scoped to a single Run: reset to false at the start of every Run.

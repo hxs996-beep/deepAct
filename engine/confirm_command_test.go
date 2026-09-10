@@ -109,8 +109,8 @@ func TestConfirmOptions_AskUserWithOptions_Mounted(t *testing.T) {
 	}
 }
 
-// 无 ask_user、无 gate 时正常结束不携带确认选项。
-func TestConfirmOptions_NotReturnedWithoutGate(t *testing.T) {
+// 无 ask_user、无待决方案时正常结束不携带确认选项。
+func TestConfirmOptions_NotReturnedWithoutAskUser(t *testing.T) {
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{
 			{Delta: "任务已完成。", FinishReason: "stop"},
