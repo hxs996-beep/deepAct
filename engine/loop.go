@@ -101,19 +101,6 @@ type Engine struct {
 	// Cleared once consumed.
 	pendingAskUser *AskUserRequest
 
-	// pendingAnalysisNudge is true when the analysis report gate has blocked
-	// edit/write calls, waiting for the agent to output a text-only analysis
-	// report. Persists across Run() calls (set in one Run, checked in the next
-	// when the user confirms). Cleared on user confirmation, feedback, or
-	// session reset.
-	pendingAnalysisNudge bool
-
-	// analysisNudgeCount tracks how many times the analysis report gate has
-	// blocked within the current Run(). After 2 blocks, the gate stops
-	// intercepting and lets the edit plan guard take over (degraded mode).
-	// Reset to 0 at the start of each Run().
-	analysisNudgeCount int
-
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
 
@@ -121,9 +108,9 @@ type Engine struct {
 	collabHall *CollabHall
 
 	// teamVerdictPending is set when the user's roundtable verdict is processed.
-	// On the next Run(), it causes PlanConfirmed + AnalysisReportConfirmed to be
-	// set, skipping the analysis-report gate and edit-plan guard - the user
-	// already approved the plan through the debate process.
+	// On the next Run(), it causes PlanConfirmed to be set, skipping the
+	// edit-plan guard - the user already approved the plan through the debate
+	// process.
 	teamVerdictPending bool
 
 	// collabVerdictPending is set when the user confirms the /collab summary,
@@ -324,17 +311,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
-	e.analysisNudgeCount = 0
-	// AnalysisReportConfirmed is scoped to a single Run: it is set true by
-	// handleConfirmCommand or handleAnalysisNudgeConfirmation when the user
-	// confirms a report / selects a plan, and only needs to skip the analysis
-	// gate within that same Run so the
-	// edit-plan guard can take over. After this Run, either pendingEditPlan or
-	// PlanConfirmed independently skips the gate, so the flag must NOT persist -
-	// otherwise a stale confirmation leaks from a prior task and the agent
-	// falsely claims "analysis report already confirmed" on an unrelated new
-	// question (and skips presenting a fresh report).
-	e.state.AnalysisReportConfirmed = false
 	e.runErrorCount = 0
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
@@ -479,15 +455,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.updateGoalFromFirstMessage(userMsg)
 
 	// /confirm N — deterministic confirmation channel. Must run before
-	// handleAnalysisNudgeConfirmation so the state set here is what the agent
-	// sees in this same Run, and before the negative-feedback rewrite so a
-	// bare "/confirm N" is never treated as user feedback.
+	// the free-input clearing so the state set here is what the agent
+	// sees in this same Run, and before the negative-feedback rewrite so
+	// a bare "/confirm N" is never treated as user feedback.
 	e.handleConfirmCommand(userMsg)
-
-	// Analysis report nudge: if the gate blocked in the previous Run() and the
-	// agent produced a text-only analysis report, handle the user's response
-	// (confirmation or feedback) before any other processing.
-	e.handleAnalysisNudgeConfirmation(userMsg)
 
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
 	// 回输入框，或无 options 的 ask_user 直接输入），本组待决问题作废，
@@ -761,22 +732,20 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 
 	// Team verdict: the user already approved a plan through the debate process.
-	// Override the confirmation gates (analysis-report gate + edit-plan guard).
+	// Override the edit-plan guard.
 	// Must come AFTER the roundtable block because handleVerdict (in the
 	// AwaitingVerdict case above) sets the flag during this same Run().
 	if e.teamVerdictPending {
 		e.state.PlanConfirmed = true
-		e.state.AnalysisReportConfirmed = true
 		e.teamVerdictPending = false
-		loopLog.Printf("team verdict: PlanConfirmed=true, skipping confirmation gates")
+		loopLog.Printf("team verdict: PlanConfirmed=true, skipping edit-plan guard")
 	}
 
 	// Collab verdict: the user already approved a plan through the pipeline.
 	if e.collabVerdictPending {
 		e.state.PlanConfirmed = true
-		e.state.AnalysisReportConfirmed = true
 		e.collabVerdictPending = false
-		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping confirmation gates")
+		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping edit-plan guard")
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -1007,33 +976,17 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			Stage:   StageAct,
 		}, nil
 	}
-	// Analysis gate confirmation: if the gate intercepted edits in this Run
-	// (agent produced a report but the user hasn't confirmed), present the
-	// confirmation options so the UI can show the popup. The report is already
-	// visible as Summary. analysisNudgeCount is > 0 only when the gate blocked
-	// this Run; it resets to 0 at the next Run's start (loop.go:298), so a
-	// confirmed /confirm N won't re-prompt.
-	if e.analysisNudgeCount > 0 {
-		return &EngineResponse{
-			Summary: summary,
-			Options: e.askUserOptions(),
-			Stage:   StageVerifyCompact,
-		}, nil
-	}
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
 }
 
 // askUserOptions returns the presentation options after a Run.
-// No pending ask_user → the analysis-gate fixed two items (按报告执行 /
-// 输入你的意见). Pending ask_user with options → 方案A/B/C... plus the
-// free-input entry. Pending ask_user without options → nil (the question is
-// presented via the awaiting_user Blocked path, user answers freely).
+// Pending ask_user with options → 方案A/B/C... plus the free-input entry.
+// Pending ask_user without options → nil (the question is presented via the
+// awaiting_user Blocked path, user answers freely). No pending ask_user →
+// nil (no options popup; the model decides whether to ask via ask_user).
 func (e *Engine) askUserOptions() []string {
 	if e.pendingAskUser == nil {
-		return []string{
-			"按报告执行",
-			"输入你的意见",
-		}
+		return nil
 	}
 	if len(e.pendingAskUser.Options) == 0 {
 		return nil
@@ -1601,25 +1554,18 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 // handleConfirmCommand processes a /confirm N message deterministically,
 // bypassing isDangerousConfirmation.
 //
-// Any /confirm N flips AnalysisReportConfirmed so the agent's next edit/write
-// in this same Run passes the analysis gate.
 // When the agent declared options via ask_user (pendingAskUser with a non-empty
 // Options list), /confirm N selects 方案N and the choice is injected into history
 // so the agent implements the selected plan; an out-of-range N injects an
-// "invalid option number" feedback instead of silently degrading to report
-// confirmation. When no options were declared, /confirm 1 confirms the report
-// ("按报告执行"). The last popup item ("输入你的意见") never reaches here — the
-// UI returns to the input box.
+// "invalid option number" feedback. With no pending ask_user, /confirm N is a
+// silent no-op (consumed but produces no history rewrite). The last popup item
+// ("输入你的意见") never reaches here — the UI returns to the input box.
 // Returns true if userMsg was a valid /confirm command.
 func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	n, ok := parseConfirmCommand(userMsg)
 	if !ok {
 		return false
 	}
-	// 置确认态（任何 /confirm N 都确认执行）。
-	e.state.AnalysisReportConfirmed = true
-	e.pendingAnalysisNudge = false
-
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
 		switch {
 		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 && n >= 1 && n <= len(e.pendingAskUser.Options):
@@ -1627,65 +1573,16 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了：%s，请按该方案执行修改。", label)
 		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0:
-			// 有声明方案但编号越界（n < 1 或 n > len(options)）：不静默降级为
-			// "按报告执行"，明确告知 agent 用户选择无效，由其决定下一步。
+			// 有声明方案但编号越界（n < 1 或 n > len(options)）：明确告知
+			// agent 用户选择无效，由其决定下一步。
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了无效的方案编号 %d，请重新选择。", n)
 			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(e.pendingAskUser.Options))
-		default:
-			e.history[len(e.history)-1].Content = "✓ 分析报告已确认（按报告执行），可以开始修改代码。"
 		}
 	}
 	// 本组问题已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
 	e.pendingAskUser = nil
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
-	return true
-}
-
-// handleAnalysisNudgeConfirmation processes the user's response to an analysis
-// report nudge. When the analysis report gate blocks edit/write calls, the
-// agent outputs a text-only report (ending the Run()), and the user responds.
-// If the user confirms, AnalysisReportConfirmed is set so the gate skips on
-// the next edit attempt. If the user gives feedback, the nudge is cleared so
-// the agent can re-analyze. Returns true if a nudge was pending and handled.
-func (e *Engine) handleAnalysisNudgeConfirmation(userMsg string) bool {
-	if !e.pendingAnalysisNudge {
-		return false
-	}
-	if isDangerousConfirmation(userMsg) {
-		e.state.AnalysisReportConfirmed = true
-		e.pendingAnalysisNudge = false
-		// Replace the user's bare confirmation with a contextual message so
-		// the agent knows the analysis was approved and can proceed to edit.
-		if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-			msg := "✓ 分析报告已确认，可以开始修改代码。"
-			if !e.isChinese {
-				msg = "✓ Analysis report confirmed. You may now proceed with code changes."
-			}
-			e.history[len(e.history)-1].Content = msg
-		}
-		loopLog.Printf("analysis nudge confirmed by user")
-	} else {
-		// User is providing feedback on the analysis, not confirming.
-		// Contextualize so the agent understands this is feedback and should
-		// re-analyze rather than proceed to edit.
-		if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-			if e.isChinese {
-				e.history[len(e.history)-1].Content = fmt.Sprintf(
-					"用户对分析报告给出了反馈：%s\n\n请根据反馈重新分析，然后再次输出完整的分析报告。",
-					userMsg,
-				)
-			} else {
-				e.history[len(e.history)-1].Content = fmt.Sprintf(
-					"The user provided feedback on the analysis report: %s\n\nRe-analyze based on the feedback, then output a complete analysis report again.",
-					userMsg,
-				)
-			}
-		}
-		e.pendingAnalysisNudge = false
-		e.state.AnalysisReportConfirmed = false
-		loopLog.Printf("analysis nudge feedback from user (not confirmation)")
-	}
 	return true
 }
 
@@ -1776,9 +1673,6 @@ func (e *Engine) clearSessionState() {
 	e.state.ConfirmedScope = false
 
 	e.pendingEditPlan = nil
-	e.pendingAnalysisNudge = false
-	e.analysisNudgeCount = 0
-	e.state.AnalysisReportConfirmed = false
 
 	e.steerMu.Lock()
 	e.steerQueue = nil
