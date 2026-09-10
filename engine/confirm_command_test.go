@@ -130,3 +130,35 @@ func TestConfirmOptions_NotReturnedWithoutAskUser(t *testing.T) {
 		t.Errorf("expected no options without gate interception, got %v", resp.Options)
 	}
 }
+
+// 回归测试：移除 analysis gate 后，搜索过代码（runToolCallCount > 0）再直接
+// 提交 edit 不再被拦截——模型自主决定是否用 ask_user 确认。
+func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "修改代码",
+			ToolCalls: []ModelToolCall{
+				{ID: "call_edit", Type: "function", Function: ModelFunctionCall{
+					Name:      "edit",
+					Arguments: `{"path":"engine/types.go","old_string":"old","new_string":"new"}`,
+				}},
+			},
+			FinishReason: "tool_calls",
+		}}},
+		context:          &stubContextBuilder{},
+		tools:            &recordingToolExecutor{},
+		state:            &TaskState{TurnNumber: 0},
+		history:          []Message{{Role: "user", Content: "改"}},
+		config:           EngineConfig{ModelName: "test-model"},
+		guards:           &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		runToolCallCount: 2, // 已做过搜索
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.Blocked {
+		t.Error("expected edit to execute without analysis-gate blocking")
+	}
+}
