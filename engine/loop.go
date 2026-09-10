@@ -973,6 +973,16 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
 		e.runUsageAccum.CacheHitTokens, e.runUsageAccum.CacheMissTokens)
+	// ask_user with options: the agent asked a question and declared candidate
+	// answers — present them as selectable options (方案A/B/C + 输入你的意见).
+	// 无 options 已由 awaiting_user Blocked 分支（loop.go:823）处理，不走此处。
+	if e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 {
+		return &EngineResponse{
+			Summary: summary,
+			Options: e.askUserOptions(),
+			Stage:   StageAct,
+		}, nil
+	}
 	// Analysis gate confirmation: if the gate intercepted edits in this Run
 	// (agent produced a report but the user hasn't confirmed), present the
 	// confirmation options so the UI can show the popup. The report is already
@@ -982,26 +992,30 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.analysisNudgeCount > 0 {
 		return &EngineResponse{
 			Summary: summary,
-			Options: e.confirmOptions(),
+			Options: e.askUserOptions(),
 			Stage:   StageVerifyCompact,
 		}, nil
 	}
 	return &EngineResponse{Summary: summary, Stage: StageVerifyCompact}, nil
 }
 
-// confirmOptions returns the confirmation options for the analysis-gate popup.
-// No declared options → fixed two items (按报告执行 / 输入你的意见). Declared
-// options → 方案A/B/C... plus the free-input entry. The last item is always
-// the free-input entry — selecting it returns to the input box.
-func (e *Engine) confirmOptions() []string {
-	if len(e.pendingConfirmOptions) == 0 {
+// askUserOptions returns the presentation options after a Run.
+// No pending ask_user → the analysis-gate fixed two items (按报告执行 /
+// 输入你的意见). Pending ask_user with options → 方案A/B/C... plus the
+// free-input entry. Pending ask_user without options → nil (the question is
+// presented via the awaiting_user Blocked path, user answers freely).
+func (e *Engine) askUserOptions() []string {
+	if e.pendingAskUser == nil {
 		return []string{
 			"按报告执行",
 			"输入你的意见",
 		}
 	}
-	opts := make([]string, 0, len(e.pendingConfirmOptions)+1)
-	for i, o := range e.pendingConfirmOptions {
+	if len(e.pendingAskUser.Options) == 0 {
+		return nil
+	}
+	opts := make([]string, 0, len(e.pendingAskUser.Options)+1)
+	for i, o := range e.pendingAskUser.Options {
 		opts = append(opts, confirmOptionLabel(i, o))
 	}
 	opts = append(opts, "输入你的意见")

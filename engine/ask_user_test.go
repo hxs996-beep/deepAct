@@ -149,3 +149,42 @@ func TestToolSpecsWithHandoff_IncludesAskUser(t *testing.T) {
 		t.Error("toolSpecsWithHandoff should include ask_user")
 	}
 }
+
+func TestAskUserOptions_NoPending_FixedTwo(t *testing.T) {
+	e := &Engine{}
+	got := e.askUserOptions()
+	want := []string{"按报告执行", "输入你的意见"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("option %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAskUserOptions_PendingWithOptions_ABCPrefixed(t *testing.T) {
+	e := &Engine{pendingAskUser: &AskUserRequest{
+		Question: "缓存方案选哪个？",
+		Options:  []string{"用 Redis 缓存", "改用 MySQL"},
+	}}
+	got := e.askUserOptions()
+	want := []string{"方案A: 用 Redis 缓存", "方案B: 改用 MySQL", "输入你的意见"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("option %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAskUserOptions_PendingNoOptions_Nil(t *testing.T) {
+	e := &Engine{pendingAskUser: &AskUserRequest{Question: "数据库连接字符串是什么？"}}
+	got := e.askUserOptions()
+	if got != nil {
+		t.Errorf("expected nil options without options, got %v", got)
+	}
+}

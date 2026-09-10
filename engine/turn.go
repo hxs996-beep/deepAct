@@ -645,12 +645,21 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	result := TurnResult{Done: false, FinishReason: finish}
-	// B: 模型声明了互斥方案（present_options 有效调用）→ 本 turn 的报告文本
-	// 即最终结论，立即结束 Run 并将报告全文作为 CompletionSummary。避免 Run
-	// 循环继续调用模型（污染 Summary、浪费一次调用），UI 收到干净的报告 + Options。
-	if len(e.pendingConfirmOptions) > 0 {
+	// ask_user: 模型需要用户输入。有 options → 本 turn 的报告文本即最终结论，
+	// 立即结束 Run 并将报告全文作为 CompletionSummary。UI 收到干净的报告 +
+	// Options（弹窗选择）。无 options → 同时置 Blocked + awaiting_user，经
+	// loop.go 的 Blocked 分支（优先于 Done）呈现问题，用户自由输入。
+	if e.pendingAskUser != nil {
 		result.Done = true
 		result.CompletionSummary = content
+		// No options → present the question via the awaiting_user Blocked path
+		// (loop.go processes Blocked before Done). The engine must never decide
+		// on the user's behalf; use the structured Question, not narration text.
+		if len(e.pendingAskUser.Options) == 0 {
+			result.Blocked = true
+			result.BlockedBy = "awaiting_user"
+			result.Questions = []string{e.pendingAskUser.Question}
+		}
 	}
 	// Record the first operation for loop detection.
 	// For destructive tools (edit/write), include content hash so different edits
