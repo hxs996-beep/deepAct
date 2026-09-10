@@ -28,40 +28,30 @@ func TestParseConfirmCommand(t *testing.T) {
 	}
 }
 
-// /confirm 1 确定性确认：置 AnalysisReportConfirmed。
-func TestHandleConfirmCommand_ConfirmExecutes(t *testing.T) {
+// 无待决问题（pendingAskUser == nil）时，/confirm N 静默消费，不改写 history。
+// "按报告执行"固定确认语义已随 analysis gate 移除。
+func TestHandleConfirmCommand_NoPending_Noop(t *testing.T) {
 	e := &Engine{
-		state: &TaskState{
-			Goal:                    "修改 .gitignore 并提交 memory/",
-			AnalysisReportConfirmed: false,
-		},
-		history:   []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese: true,
+		state:   &TaskState{},
+		history: []Message{{Role: "user", Content: "/confirm 1"}},
 	}
-	e.pendingAnalysisNudge = true
 
 	if !e.handleConfirmCommand("/confirm 1") {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
 	}
-	if !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should be true after /confirm 1")
-	}
-	if e.pendingAnalysisNudge {
-		t.Error("pendingAnalysisNudge should be false after /confirm 1")
-	}
 	last := e.history[len(e.history)-1].Content
-	if !strings.Contains(last, "已确认") {
-		t.Errorf("history user message should be rewritten as confirmation, got %q", last)
+	if last != "/confirm 1" {
+		t.Errorf("history should be unchanged with no pending ask_user, got %q", last)
+	}
+	if e.pendingAskUser != nil {
+		t.Errorf("pendingAskUser should stay nil, got %+v", e.pendingAskUser)
 	}
 }
 
-// 多方案模式下 /confirm 1 → 选择方案A，确认执行并注入方案描述。
+// /confirm 1 选择 ask_user 声明的方案A，确认执行并注入方案描述。
 func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	e := &Engine{
-		state: &TaskState{
-			Goal:                    "修改 .gitignore 并提交 memory/",
-			AnalysisReportConfirmed: false,
-		},
+		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
 		isChinese: true,
 		pendingAskUser: &AskUserRequest{
@@ -69,82 +59,57 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
 		},
 	}
-	e.pendingAnalysisNudge = true
 
 	if !e.handleConfirmCommand("/confirm 1") {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
-	}
-	if !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should be true after selecting 方案A")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "方案A: 用 Redis 缓存") {
 		t.Errorf("history should mention 方案A: 用 Redis 缓存, got %q", last)
 	}
+	if e.pendingAskUser != nil {
+		t.Errorf("pendingAskUser should be cleared after selecting 方案A, got %+v", e.pendingAskUser)
+	}
 }
 
-// 本 Run 内门控拦截过且 agent 已输出报告时，EngineResponse 携带 4 项确认选项。
-// 正确触发序列（Run 入口会重置 runToolCallCount 与 analysisNudgeCount，不能用
-// 预置值）：turn1 grep 累加 runToolCallCount → turn2 edit 触发门控拦截
-// （nudgeCount=1）→ turn3 文本报告 Done → Run 结束挂载选项。
-// 注意：必须设置 guards/readLoop，否则 turn.go:514 的 e.guards.loop 解引用 nil。
-func TestConfirmOptions_ReturnedWhenGateIntercepted(t *testing.T) {
-	grepChunks := []ModelChunk{
-		{
-			Delta: "搜索代码",
-			ToolCalls: []ModelToolCall{
-				{ID: "call_read", Type: "function", Function: ModelFunctionCall{
-					Name:      "grep",
-					Arguments: `{"pattern":"foo","path":"."}`,
-				}},
-			},
-			FinishReason: "tool_calls",
-			Usage:        &ModelUsage{},
+// 模型调用 ask_user（有 options）后 Run 结束挂载选项——无 gate 参与。
+func TestConfirmOptions_AskUserWithOptions_Mounted(t *testing.T) {
+	askChunks := []ModelChunk{{
+		Delta: "缓存方案需要你决定。",
+		ToolCalls: []ModelToolCall{
+			{ID: "call_ask", Type: "function", Function: ModelFunctionCall{
+				Name:      AskUserToolName,
+				Arguments: `{"question":"缓存方案选哪个？","options":["用 Redis 缓存","改用 MySQL"]}`,
+			}},
 		},
-	}
-	editChunks := []ModelChunk{
-		{
-			Delta: "修改代码",
-			ToolCalls: []ModelToolCall{
-				{ID: "call_edit", Type: "function", Function: ModelFunctionCall{
-					Name:      "edit",
-					Arguments: `{"path":"engine/types.go","old_string":"old","new_string":"new"}`,
-				}},
-			},
-			FinishReason: "tool_calls",
-			Usage:        &ModelUsage{},
-		},
-	}
-	reportChunks := []ModelChunk{
-		{Delta: "分析完成，计划修改以下文件……", FinishReason: "stop", Usage: &ModelUsage{}},
-	}
-	model := &multiTurnModel{turns: [][]ModelChunk{grepChunks, editChunks, reportChunks}}
+		FinishReason: "tool_calls",
+		Usage:        &ModelUsage{},
+	}}
+	model := &multiTurnModel{turns: [][]ModelChunk{askChunks}}
 	e := &Engine{
-		model:    model,
-		tools:    stubToolExecutor{},
-		context:  steerContextBuilder{},
-		state:    &TaskState{TaskID: "test", ConfirmedScope: true},
-		config:   EngineConfig{ModelName: "test-model"},
+		model:     model,
+		tools:     stubToolExecutor{},
+		context:   steerContextBuilder{},
+		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
+		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
-		// 必须完整初始化 guards：loop 供 turn.go:514、scope 供 turn.go:558
-		// （turn1 的 grep 在分析门控之前就经过 scope.CheckTool）。
-		guards:   &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
-		readLoop: NewReadLoopState(),
+		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		readLoop:  NewReadLoopState(),
 	}
 
 	resp, err := e.Run(context.Background(), "修改代码")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if len(resp.Options) != 2 {
-		t.Fatalf("expected 2 options, got %d: %v", len(resp.Options), resp.Options)
+	if len(resp.Options) != 3 {
+		t.Fatalf("expected 3 options, got %d: %v", len(resp.Options), resp.Options)
 	}
 	if !strings.Contains(resp.Options[len(resp.Options)-1], "意见") {
 		t.Errorf("last option should be the free-input item, got %q", resp.Options[len(resp.Options)-1])
 	}
 }
 
-// 门控未拦截（analysisNudgeCount=0）时，正常结束不携带确认选项。
+// 无 ask_user、无 gate 时正常结束不携带确认选项。
 func TestConfirmOptions_NotReturnedWithoutGate(t *testing.T) {
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{

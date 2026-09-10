@@ -152,17 +152,12 @@ func TestToolSpecsWithHandoff_IncludesAskUser(t *testing.T) {
 	}
 }
 
-func TestAskUserOptions_NoPending_FixedTwo(t *testing.T) {
+// 无待决 ask_user 时返回 nil（固定"按报告执行 / 输入你的意见"选项已随 gate 移除）。
+func TestAskUserOptions_NoPending_Nil(t *testing.T) {
 	e := &Engine{}
 	got := e.askUserOptions()
-	want := []string{"按报告执行", "输入你的意见"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("option %d = %q, want %q", i, got[i], want[i])
-		}
+	if got != nil {
+		t.Errorf("expected nil options without pending ask_user, got %v", got)
 	}
 }
 
@@ -191,34 +186,10 @@ func TestAskUserOptions_PendingNoOptions_Nil(t *testing.T) {
 	}
 }
 
-// 无待决问题（纯分析门控）时，/confirm 1 确认报告（"按报告执行"）。
-func TestHandleConfirmCommand_NoOptions_ConfirmExecutes(t *testing.T) {
-	e := &Engine{
-		state:     &TaskState{AnalysisReportConfirmed: false},
-		history:   []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese: true,
-	}
-	e.pendingAnalysisNudge = true
-
-	if !e.handleConfirmCommand("/confirm 1") {
-		t.Fatal("handleConfirmCommand should handle /confirm 1")
-	}
-	if !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should be true after confirm")
-	}
-	if e.pendingAnalysisNudge {
-		t.Error("pendingAnalysisNudge should be false after confirm")
-	}
-	last := e.history[len(e.history)-1].Content
-	if !strings.Contains(last, "按报告执行") {
-		t.Errorf("history should mention 按报告执行, got %q", last)
-	}
-}
-
 // 有待决问题且带 options 时，/confirm N 选择方案N并注入方案描述。
 func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	e := &Engine{
-		state:     &TaskState{AnalysisReportConfirmed: false},
+		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 2"}},
 		isChinese: true,
 		pendingAskUser: &AskUserRequest{
@@ -229,9 +200,6 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 
 	if !e.handleConfirmCommand("/confirm 2") {
 		t.Fatal("handleConfirmCommand should handle /confirm 2")
-	}
-	if !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should be true after selecting a plan")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "方案B: 改用 MySQL") {
@@ -245,7 +213,7 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 // 有待决问题但编号越界（n > len(options)）时，不静默降级为"按报告执行"。
 func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	e := &Engine{
-		state:     &TaskState{AnalysisReportConfirmed: false},
+		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 5"}},
 		isChinese: true,
 		pendingAskUser: &AskUserRequest{
@@ -256,9 +224,6 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 
 	if !e.handleConfirmCommand("/confirm 5") {
 		t.Fatal("handleConfirmCommand should handle /confirm 5")
-	}
-	if !e.state.AnalysisReportConfirmed {
-		t.Error("AnalysisReportConfirmed should be true after out-of-range confirm")
 	}
 	last := e.history[len(e.history)-1].Content
 	if !strings.Contains(last, "无效") {
@@ -288,7 +253,6 @@ func TestAskUser_ClearedOnFreeInputRun(t *testing.T) {
 			Question: "数据库连接字符串是什么？",
 		},
 	}
-	e.pendingAnalysisNudge = true
 
 	if _, err := e.Run(context.Background(), "连接字符串是 mysql://root@localhost/db"); err != nil {
 		t.Fatalf("Run error: %v", err)
