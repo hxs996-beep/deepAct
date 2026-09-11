@@ -41,28 +41,24 @@ func TestProcessLoadSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 		name    string
 		callID  string
 		input   string
-		wantErr bool
 		wantSub string
 	}{
 		{
 			name:    "bad JSON",
 			callID:  "call_bad_json",
 			input:   `{invalid json}`,
-			wantErr: true,
 			wantSub: "invalid load_skill arguments",
 		},
 		{
 			name:    "empty skill_name",
 			callID:  "call_empty_name",
 			input:   `{"skill_name":""}`,
-			wantErr: true,
 			wantSub: "non-empty skill_name",
 		},
 		{
 			name:    "unknown skill",
 			callID:  "call_unknown",
 			input:   `{"skill_name":"nonexistent"}`,
-			wantErr: true,
 			wantSub: `skill "nonexistent" not found`,
 		},
 	}

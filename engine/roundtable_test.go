@@ -152,10 +152,10 @@ func newTestEngine(t *testing.T) *Engine {
 	})
 
 	e := &Engine{
-		model:    &stubCompleteModel{}, // 蓝图/合成走单次 Complete；其他测试按需覆盖
-		agents:   reg,
-		state:    &TaskState{TaskID: "test-debate"},
-		config:   EngineConfig{},
+		model:  &stubCompleteModel{}, // 蓝图/合成走单次 Complete；其他测试按需覆盖
+		agents: reg,
+		state:  &TaskState{TaskID: "test-debate"},
+		config: EngineConfig{},
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	return e
