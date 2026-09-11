@@ -735,15 +735,6 @@ func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolR
 		UserLanguage:   userLang,
 	}
 
-	// Inject matched skill content into sub-agent context
-	if e.matchedSkillsContent != "" {
-		if handoff.Context != "" {
-			handoff.Context = e.matchedSkillsContent + "\n\n" + handoff.Context
-		} else {
-			handoff.Context = e.matchedSkillsContent
-		}
-	}
-
 	// Inject main agent's working context (known files, findings, modifications)
 	// as a starting point for the sub-agent. The sub-agent should re-examine these
 	// from its own perspective to find blind spots the main agent missed.

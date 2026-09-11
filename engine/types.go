@@ -246,9 +246,6 @@ type TaskState struct {
 	ConsecutiveFailures  int              `json:"consecutive_failures"`
 	EditScopeFiles       int              `json:"edit_scope_files"`
 	PendingDangerousCmd  string           `json:"pending_dangerous_cmd,omitempty"`  // normalized command awaiting user confirmation
-	PendingActivateSkill string           `json:"pending_activate_skill,omitempty"` // skill name awaiting user confirmation via activate_skill tool
-	ActiveSkillName      string           `json:"active_skill_name,omitempty"`      // name of the currently activated skill
-	ActiveSkillContent   string           `json:"active_skill_content,omitempty"`   // full content of the activated skill
 	Roundtable           *RoundtableState `json:"roundtable,omitempty"`
 	Collab               *CollabState     `json:"collab,omitempty"`
 

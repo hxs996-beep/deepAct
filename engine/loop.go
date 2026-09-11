@@ -75,21 +75,6 @@ type Engine struct {
 	// prefix cache across turns — history only grows with actual conversation.
 	pendingPinnedMessages []string
 
-	// matchedSkillsContent holds the content of matched skills for the current Run() call.
-	// It is injected into sub-agent context when a handoff occurs, so skill methodology
-	// instructions are carried through to sub-agents.
-	matchedSkillsContent string
-
-	// activatedSkills tracks skill names that have been explicitly activated
-	// via /skill command within the current session, to prevent duplicate
-	// injection from keyword-based auto-matching.
-	activatedSkills map[string]bool
-
-	// lastActivatedSkill records the most recently activated skill name.
-	// The activate_skill tool checks NextSkills of this skill to determine
-	// if auto-activation (no user confirmation) is allowed.
-	lastActivatedSkill string
-
 	// pendingEditPlan holds the agent's proposed edits for user confirmation.
 	// When non-nil, the agent has proposed file modifications and is awaiting
 	// user approval before execution.
@@ -199,7 +184,6 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		readLoop:        NewReadLoopState(),
 		errorLoop:       NewErrorLoopState(0),
 		progressLoop:    NewProgressLoopState(6),
-		activatedSkills: make(map[string]bool),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	e.collabHall = NewCollabHall(e)
@@ -310,7 +294,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.progressLoop.Reset()
 	}
 	e.readProgressKeys = make(map[string]bool)
-	e.matchedSkillsContent = ""
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
@@ -416,13 +399,16 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				}
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
-			e.activateSkill(s, "explicit /"+s.Name+" command")
+			// Load semantics: inject the full content once for this turn,
+			// not persistently. Consumed at the next turn start (turn.go:80-86).
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages,
+				fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content))
 
 			taskText := extractTaskTextAfterSkillCmd(userMsg, sc.name)
 			if taskText == "" {
-				msg := fmt.Sprintf("✓ Skill `%s` activated: %s", s.Name, s.Description)
+				msg := fmt.Sprintf("✓ Skill `%s` loaded. Full methodology injected for this turn.", s.Name)
 				if zh {
-					msg = fmt.Sprintf("✓ 已激活 skill `%s`: %s", s.Name, s.Description)
+					msg = fmt.Sprintf("✓ 已加载 skill `%s`：方法论已注入当前回合。", s.Name)
 				}
 				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
 			}
@@ -619,29 +605,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			reissueHint = fmt.Sprintf("The user confirmed the dangerous command. Please re-issue the previously blocked command: `%s`", confirmedCmd)
 		}
 		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
-	}
-
-	// Auto-deactivate skill when user intent shifts from development to operational use.
-	// This prevents skill methodology (e.g., TDD) from constraining verification
-	// or ad-hoc testing after development is complete.
-	if e.state.ActiveSkillName != "" && !strings.HasPrefix(strings.TrimSpace(userMsg), "/") {
-		if e.detectIntentShift(userMsg) {
-			skillName := e.state.ActiveSkillName
-			e.deactivateSkill()
-			msg := fmt.Sprintf("✓ 自动解除 skill `%s`：检测到意图从开发转向使用/验证。", skillName)
-			if !zh {
-				msg = fmt.Sprintf("✓ Auto-deactivated skill `%s`: intent shift from development to usage/verification.", skillName)
-			}
-			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
-			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{
-					Type:   "skill_deactivated",
-					Name:   skillName,
-					Detail: "auto-deactivated due to intent shift",
-				})
-			}
-			loopLog.Printf("auto-deactivated skill %q: user intent shift detected", skillName)
-		}
 	}
 
 	// 用户负面反馈：暂停当前路径，反思并重新规划执行路线。
@@ -1377,64 +1340,6 @@ func (e *Engine) accumulateUsage(usage *ModelUsage) {
 	e.usageMu.Unlock()
 }
 
-// deactivateSkill clears the active skill state, releasing the agent from
-// the skill's methodology constraints. If the current skill has NextSkills,
-// the first next skill in the chain is auto-activated, ensuring the skill
-// chain (e.g., brainstorming → writing-plans → TDD) is followed without
-// requiring the model to manually call activate_skill.
-func (e *Engine) deactivateSkill() {
-	currentName := e.state.ActiveSkillName
-	if currentName == "" {
-		return
-	}
-
-	// Look up current skill's NextSkills for chain auto-activation
-	var nextSkill *skill.Skill
-	if e.skills != nil {
-		if current := e.skills.Get(currentName); current != nil && len(current.NextSkills) > 0 {
-			nextName := current.NextSkills[0]
-			if nextName != "" && nextName != currentName {
-				nextSkill = e.skills.Get(nextName)
-			}
-		}
-	}
-
-	e.state.ActiveSkillName = ""
-	e.state.ActiveSkillContent = ""
-	e.matchedSkillsContent = ""
-	e.context.SetActiveSkill("", "")
-	// Keep lastActivatedSkill for chain tracking purposes
-	// Keep activatedSkills map for deduplication purposes
-
-	// Auto-activate next skill in chain
-	if nextSkill != nil {
-		e.activatedSkills[nextSkill.Name] = true
-		e.lastActivatedSkill = nextSkill.Name
-		e.state.ActiveSkillName = nextSkill.Name
-		e.state.ActiveSkillContent = nextSkill.Content
-		e.context.SetActiveSkill(nextSkill.Name, nextSkill.Content)
-		e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", nextSkill.Name, nextSkill.Content)
-
-		chainInfo := fmt.Sprintf(" (chain: %s → %s)", currentName, nextSkill.Name)
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{
-				Type:   "skill_activated",
-				Name:   nextSkill.Name,
-				Detail: nextSkill.Description + chainInfo,
-			})
-		}
-
-		zh := e.isChinese
-		msg := fmt.Sprintf("✓ Skill `%s` auto-activated%s. Full methodology now in stable zone.", nextSkill.Name, chainInfo)
-		if zh {
-			msg = fmt.Sprintf("✓ 已自动激活 skill `%s`%s。方法论已注入稳定区。", nextSkill.Name, chainInfo)
-		}
-		e.pendingPinnedMessages = append(e.pendingPinnedMessages, msg)
-
-		loopLog.Printf("skill chain: %s → %s auto-activated", currentName, nextSkill.Name)
-	}
-}
-
 func msgIsChinese(msg string) bool {
 	for _, r := range msg {
 		if unicode.Is(unicode.Han, r) {
@@ -1442,14 +1347,6 @@ func msgIsChinese(msg string) bool {
 		}
 	}
 	return false
-}
-
-func joinSkillNames(skills []*skill.Skill) string {
-	names := make([]string, len(skills))
-	for i, s := range skills {
-		names[i] = s.Name
-	}
-	return strings.Join(names, ", ")
 }
 
 // skillCommand represents a parsed /skill or /skills command.
@@ -1668,10 +1565,6 @@ func (e *Engine) clearSessionState() {
 	e.steerQueue = nil
 	e.steerMu.Unlock()
 
-	e.deactivateSkill()
-	e.activatedSkills = make(map[string]bool)
-	e.lastActivatedSkill = ""
-
 	// /clear also wipes the cross-session persistent memory for this project,
 	// so a cleared state does not resurface on the next process start.
 	if e.memory != nil {
@@ -1824,26 +1717,3 @@ func describeScope(scope string, zh bool) string {
 	return "lines " + scope
 }
 
-// activateSkill activates a skill and injects its methodology into the stable zone.
-// reason is a human-readable description of why the skill was activated (for logging/progress).
-func (e *Engine) activateSkill(s *skill.Skill, reason string) {
-	e.activatedSkills[s.Name] = true
-	e.lastActivatedSkill = s.Name
-	e.state.ActiveSkillName = s.Name
-	e.state.ActiveSkillContent = s.Content
-	e.context.SetActiveSkill(s.Name, s.Content)
-
-	skillMsg := fmt.Sprintf(
-		"✓ Skill `%s` auto-activated (%s). Full methodology now in stable zone.",
-		s.Name, reason,
-	)
-	e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-	e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
-	if e.config.OnProgress != nil {
-		e.config.OnProgress(ProgressEvent{
-			Type:   "skill_activated",
-			Name:   s.Name,
-			Detail: s.Description + " (" + reason + ")",
-		})
-	}
-}
