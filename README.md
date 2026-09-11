@@ -45,7 +45,7 @@
 
 *Measured on release 1.0.6 (macOS arm64); figures vary slightly by platform.*
 
-One 16 MB Go file that ships a full agent: four guards, team collaboration, parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
+One 16 MB Go file that ships a full agent: team collaboration, parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
 
 ## Quick Start
 
@@ -180,15 +180,6 @@ max_results = 5
 
 ## Core Capabilities
 
-### The Four Guards
-
-Every destructive action (file edits, shell commands) passes four gates:
-
-1. **Ambiguity Check** — vague requests get questioned back
-2. **Design Review** — anti-pattern plans get rejected
-3. **Scope Guard** — out-of-scope actions get blocked
-4. **Loop Detection** — spinning in circles gets stopped
-
 ### Parallel Subagents
 
 Complex tasks are split across dedicated subagents (searcher / planner / critic / tester) that run independently, with results merged back into the main loop — fast without getting messy.
@@ -210,7 +201,7 @@ Every step is written to an immutable JSONL log: rewind to any step, fork a new 
 
 ```text
 cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
-engine/   agent loop·guards·roundtable·subagents   policy/   ambiguity·design·scope guards
+engine/   agent loop·roundtable·subagents   policy/   ambiguity·design·scope checks
 context/  prompt build·tree snapshot·compaction   llm/      DeepSeek client (stream·retry·rate)
 tools/    built-in tools + MCP      router/    model routing
 session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
