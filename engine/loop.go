@@ -604,16 +604,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 	}
 
-	// 用户负面反馈：暂停当前路径，反思并重新规划执行路线。
-	// 改写 history 最后一条 user 消息（照 pendingEditPlan 反馈路径模式），
-	// 让主 agent 本轮自行反思，不引入新状态。纯关键词检测，零 LLM 调用。
-	applyNegativeFeedbackRewrite(e.history, userMsg, zh)
-
 	// Debate Arena phase — execute the current debate round, then return
 	// the round result to the user. The engine continues to the next round
 	// on the next Run() call until AwaitingVerdict.
-	// Placed after the negative-feedback rewrite (and before the team-verdict
-	// gate below): handleVerdict runs when the user delivers a verdict in this
+	// Placed before the team-verdict gate below: handleVerdict runs when the
+	// user delivers a verdict in this
 	// Run(), and the teamVerdictPending flag it sets is consumed in the SAME Run().
 	if e.state.Roundtable != nil {
 		phase := e.state.Roundtable.Phase
