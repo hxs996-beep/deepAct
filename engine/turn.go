@@ -614,8 +614,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// advances the task — from a "N turns narrate but never act" loop, and
 	// complements ReadLoopState which separately catches repeated same-scope
 	// reads (3rd nudge, 4th block).
-	if e.readProgressKeys == nil {
-		e.readProgressKeys = make(map[string]bool)
+	if e.progressKeys == nil {
+		e.progressKeys = make(map[string]bool)
 	}
 	for _, c := range regularCalls {
 		switch c.Name {
@@ -626,8 +626,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		case "read":
 			if path := extractPathFromArgs(c.Input, e.config.WorkDir); path != "" {
 				key := "read:" + path + "::" + extractReadScope(c.Input)
-				if !e.readProgressKeys[key] {
-					e.readProgressKeys[key] = true
+				if !e.progressKeys[key] {
+					e.progressKeys[key] = true
 					result.MadeProgress = true
 				}
 			}
@@ -637,10 +637,17 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					continue
 				}
 				key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
-				if !e.readProgressKeys[key] {
-					e.readProgressKeys[key] = true
+				if !e.progressKeys[key] {
+					e.progressKeys[key] = true
 					result.MadeProgress = true
 				}
+			}
+		case "grep", "glob":
+			// 新信息获取（新 pattern/路径的搜索）＝推进理解＝进展。
+			key := searchKey(c, e.config.WorkDir)
+			if key != "" && !e.progressKeys[key] {
+				e.progressKeys[key] = true
+				result.MadeProgress = true
 			}
 		}
 		// 不 break：所有 read key 必须无条件记录，即使本轮已因 edit 等
@@ -1286,6 +1293,23 @@ func extractReadScope(input json.RawMessage) string {
 		return fmt.Sprintf("L%d-", start)
 	}
 	return fmt.Sprintf("L%d-%d", start, int(limit))
+}
+
+// searchKey builds a per-search progress key: "grep:<pattern>:<path>",
+// "glob:<pattern>:<path>". pattern is the primary dimension; path is
+// appended so searching different files is distinct. Empty key when neither
+// pattern nor path is present.
+func searchKey(c ToolCallRequest, workDir string) string {
+	var m map[string]interface{}
+	if len(c.Input) == 0 || json.Unmarshal(c.Input, &m) != nil {
+		return ""
+	}
+	pattern, _ := m["pattern"].(string)
+	path := extractPathFromArgs(c.Input, workDir)
+	if pattern == "" && path == "" {
+		return ""
+	}
+	return c.Name + ":" + pattern + ":" + path
 }
 
 // contentSignature returns a short hash of the tool call's input arguments,

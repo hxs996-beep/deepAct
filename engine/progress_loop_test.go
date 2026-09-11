@@ -114,7 +114,7 @@ func TestExecuteTurn_MadeProgress_EditSuccess(t *testing.T) {
 
 func TestExecuteTurn_MadeProgress_NovelRead(t *testing.T) {
 	// 方案 A：首次读到新 (path, scope) 视为进展——真实排查持续读新内容
-	// 不应被 progress guard 误伤。readProgressKeys 留 nil 验证懒初始化。
+	// 不应被 progress guard 误伤。progressKeys 留 nil 验证懒初始化。
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{{
 			Delta: "读文件",
@@ -158,7 +158,7 @@ func TestExecuteTurn_MadeProgress_RepeatedRead(t *testing.T) {
 		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
 		// 该 (path, scope) 本轮已读过：key 形式与 read 的 LastOp 一致
 		// "read:path::scope"。
-		readProgressKeys: map[string]bool{"read:a.go::": true},
+		progressKeys: map[string]bool{"read:a.go::": true},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -227,7 +227,7 @@ func TestExecuteTurn_MadeProgress_ReadKeyRecordedWithEdit(t *testing.T) {
 	if !r1.MadeProgress {
 		t.Error("expected MadeProgress=true for turn with edit + novel read")
 	}
-	if !e.readProgressKeys["read:b.go::"] {
+	if !e.progressKeys["read:b.go::"] {
 		t.Error("expected read key read:b.go:: to be recorded even when edit already set progress")
 	}
 	// 第二轮：重复读 b.go（无其他操作）→ 不应算进展（key 已在第一轮记录）。
@@ -244,6 +244,58 @@ func TestExecuteTurn_MadeProgress_ReadKeyRecordedWithEdit(t *testing.T) {
 	}
 	if r2.MadeProgress {
 		t.Error("expected MadeProgress=false when re-reading a file already recorded in a prior turn")
+	}
+}
+
+func TestExecuteTurn_MadeProgress_NovelGrep(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "搜索",
+			ToolCalls: []ModelToolCall{{ID: "c1", Type: "function", Function: ModelFunctionCall{
+				Name: "grep", Arguments: `{"pattern":"LoopTracker"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "搜"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.MadeProgress {
+		t.Error("expected MadeProgress=true for a novel grep pattern")
+	}
+}
+
+func TestExecuteTurn_MadeProgress_RepeatedGrep(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "重复搜索",
+			ToolCalls: []ModelToolCall{{ID: "c1", Type: "function", Function: ModelFunctionCall{
+				Name: "grep", Arguments: `{"pattern":"LoopTracker"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "搜"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		// 该 pattern 本轮已搜过：key 形式 "grep:<pattern>:"
+		progressKeys: map[string]bool{"grep:LoopTracker:": true},
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.MadeProgress {
+		t.Error("expected MadeProgress=false for a repeated grep of the same pattern")
 	}
 }
 
@@ -325,14 +377,16 @@ func TestRun_ProgressLoop_NovelReadsAllowed(t *testing.T) {
 }
 
 func TestRun_ProgressLoop_NoNovelReadBlocked(t *testing.T) {
-	// 每轮 todo + grep（无新读、无改动）仍是无进展，第 6 轮应 block。
+	// 每轮 todo + 重复同一 pattern 的 grep（无新读、无新信息、无改动）仍是无进展：
+	// 首轮 novel grep 算进展后，相同搜索不再产生新信息，第 7 轮（连续 6 轮无进展）应 block。
 	model := &multiTurnModel{turns: [][]ModelChunk{
 		noProgressTurnChunks("t1", "foo"),
-		noProgressTurnChunks("t2", "bar"),
-		noProgressTurnChunks("t3", "baz"),
-		noProgressTurnChunks("t4", "qux"),
-		noProgressTurnChunks("t5", "quux"),
-		noProgressTurnChunks("t6", "corge"),
+		noProgressTurnChunks("t2", "foo"),
+		noProgressTurnChunks("t3", "foo"),
+		noProgressTurnChunks("t4", "foo"),
+		noProgressTurnChunks("t5", "foo"),
+		noProgressTurnChunks("t6", "foo"),
+		noProgressTurnChunks("t7", "foo"),
 	}}
 	e := &Engine{
 		model:   model,

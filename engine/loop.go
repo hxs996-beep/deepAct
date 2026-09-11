@@ -60,11 +60,12 @@ type Engine struct {
 	readLoop     *LoopTracker
 	errorLoop    *LoopTracker
 	progressLoop *LoopTracker
-	// readProgressKeys tracks read keys ("read:path::scope") already seen
-	// this Run. A novel read (new key) counts as progress for
-	// ProgressLoopState, so legitimate investigation — reading new content —
-	// is not mistaken for a no-progress loop. Reset each Run.
-	readProgressKeys map[string]bool
+	// progressKeys tracks "new information" keys already seen this Run
+	// ("read:path::scope", "grep:<pattern>:<path>", "glob:<pattern>:<path>").
+	// A novel key counts as progress for ProgressLoopState, so legitimate
+	// investigation — reading or searching new content — is not mistaken for
+	// a no-progress loop. Reset each Run.
+	progressKeys map[string]bool
 	evalStore        EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill loads) that should
@@ -290,7 +291,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.progressLoop != nil {
 		e.progressLoop.Reset()
 	}
-	e.readProgressKeys = make(map[string]bool)
+	e.progressKeys = make(map[string]bool)
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
