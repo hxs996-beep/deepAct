@@ -6,113 +6,102 @@ import (
 	"testing"
 )
 
-// --- LoopGuard ---
+// --- LoopTracker (unified counting core) ---
 
-func TestNewLoopGuard(t *testing.T) {
-	g := NewLoopGuard("", 0)
-	if g == nil {
-		t.Fatal("expected non-nil LoopGuard")
-	}
-	if g.maxRepeats != 4 {
-		t.Errorf("default maxRepeats = %d, want 4", g.maxRepeats)
-	}
-}
-
-func TestNewLoopGuard_CustomMax(t *testing.T) {
-	g := NewLoopGuard("", 3)
-	if g.maxRepeats != 3 {
-		t.Errorf("maxRepeats = %d, want 3", g.maxRepeats)
+func TestLoopTracker_DefaultBlockAt(t *testing.T) {
+	tr := NewLoopTracker(0, 0, false)
+	tr.Check("k", false)
+	tr.Check("k", false)
+	tr.Check("k", false)
+	if a := tr.Check("k", false); a.Type != GuardBlock {
+		t.Fatalf("4th repeat: want block, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Check_AllowsFirstCall(t *testing.T) {
-	g := NewLoopGuard("", 3)
-	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
-	action := g.Check(call)
-	if action.Type != GuardAllow {
-		t.Errorf("expected allow, got %s: %s", action.Type, action.Message)
+func TestLoopTracker_AllowUntilBlockAt(t *testing.T) {
+	tr := NewLoopTracker(0, 3, false)
+	if a := tr.Check("k", false); a.Type != GuardAllow {
+		t.Fatal("1st should allow")
+	}
+	if a := tr.Check("k", false); a.Type != GuardAllow {
+		t.Fatal("2nd should allow")
+	}
+	if a := tr.Check("k", false); a.Type != GuardBlock {
+		t.Fatalf("3rd should block, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Check_BlocksAfterMaxRepeats(t *testing.T) {
-	g := NewLoopGuard("", 2)
-	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
-
-	// First call — allow
-	if a := g.Check(call); a.Type != GuardAllow {
-		t.Fatal("first call should be allowed")
+func TestLoopTracker_NudgeThenBlock(t *testing.T) {
+	tr := NewLoopTracker(3, 4, false)
+	tr.Check("k", false)
+	tr.Check("k", false)
+	if a := tr.Check("k", false); a.Type != GuardDiagnose {
+		t.Fatalf("3rd: want diagnose(nudge), got %s", a.Type)
 	}
-
-	// Second call (now at maxRepeats) — block
-	action := g.Check(call)
-	if action.Type != GuardBlock {
-		t.Errorf("expected block after max repeats, got %s", action.Type)
-	}
-	if action.Message == "" {
-		t.Error("block message should not be empty")
+	if a := tr.Check("k", false); a.Type != GuardBlock {
+		t.Fatalf("4th: want block, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Check_DifferentContentHash(t *testing.T) {
-	g := NewLoopGuard("", 2)
-	call1 := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
-	call2 := makeToolCall("edit", `{"path":"foo.go","old_string":"c","new_string":"d"}`)
-
-	g.Check(call1)
-	action := g.Check(call2)
-	if action.Type != GuardAllow {
-		t.Errorf("different edit on same file should be allowed, got %s", action.Type)
+func TestLoopTracker_DifferentKeysIndependent(t *testing.T) {
+	tr := NewLoopTracker(0, 2, false)
+	tr.Check("a", false)
+	if a := tr.Check("b", false); a.Type != GuardAllow {
+		t.Fatalf("different key should be independent, got %s", a.Type)
+	}
+	if a := tr.Check("a", false); a.Type != GuardBlock {
+		t.Fatalf("same key 2nd: want block, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Check_NonDestructiveTool(t *testing.T) {
-	g := NewLoopGuard("", 2)
-	call := makeToolCall("grep", `{"pattern":"foo"}`)
-	// Even with many repeats, non-destructive tools aren't tracked
-	for i := 0; i < 10; i++ {
-		if a := g.Check(call); a.Type != GuardAllow {
-			t.Fatalf("iteration %d: grep should not be tracked, got %s", i, a.Type)
-		}
+func TestLoopTracker_ResetOnSuccess(t *testing.T) {
+	tr := NewLoopTracker(0, 3, true)
+	tr.Check("k", false) // error
+	tr.Check("k", false) // error
+	if a := tr.Check("k", true); a.Type != GuardAllow { // success resets
+		t.Fatalf("success should clear streak, got %s", a.Type)
+	}
+	tr.Check("k", false)
+	tr.Check("k", false)
+	tr.Check("k", false) // block
+	if a := tr.Check("k", false); a.Type != GuardBlock {
+		t.Fatalf("after reset + 3 errors: want block, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Check_ReadWithScope(t *testing.T) {
-	g := NewLoopGuard("", 2)
-	call1 := makeToolCall("read", `{"path":"foo.go","symbol":"TestFoo"}`)
-	call2 := makeToolCall("read", `{"path":"foo.go","symbol":"TestBar"}`)
-
-	g.Check(call1)
-	action := g.Check(call2)
-	if action.Type != GuardAllow {
-		t.Errorf("different read scopes should be allowed, got %s", action.Type)
+func TestLoopTracker_GlobalCounter(t *testing.T) {
+	// progress: key="" single global counter, success resets it.
+	tr := NewLoopTracker(4, 6, true)
+	for i := 0; i < 3; i++ {
+		tr.Check("", false)
+	}
+	if a := tr.Check("", false); a.Type != GuardDiagnose {
+		t.Fatalf("4th: want nudge, got %s", a.Type)
+	}
+	if a := tr.Check("", true); a.Type != GuardAllow {
+		t.Fatalf("progress signal should reset, got %s", a.Type)
+	}
+	tr.Check("", false)
+	if a := tr.Check("", false); a.Type != GuardAllow {
+		t.Fatalf("post-reset counting should restart, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Reset(t *testing.T) {
-	g := NewLoopGuard("", 2)
-	call := makeToolCall("edit", `{"path":"foo.go","old_string":"a","new_string":"b"}`)
-
-	g.Check(call)
-	g.Check(call) // would block
-	g.Reset()
-	// After reset, should allow again
-	if a := g.Check(call); a.Type != GuardAllow {
-		t.Errorf("after reset should allow, got %s", a.Type)
+func TestLoopTracker_Reset(t *testing.T) {
+	tr := NewLoopTracker(0, 2, false)
+	tr.Check("k", false)
+	tr.Reset()
+	if a := tr.Check("k", false); a.Type != GuardAllow {
+		t.Fatalf("after reset should allow, got %s", a.Type)
 	}
 }
 
-func TestLoopGuard_Reset_Nil(t *testing.T) {
-	var g *LoopGuard
-	g.Reset() // should not panic
-}
-
-func TestLoopGuard_Check_Nil(t *testing.T) {
-	var g *LoopGuard
-	call := makeToolCall("edit", `{"path":"foo.go"}`)
-	action := g.Check(call)
-	if action.Type != GuardAllow {
-		t.Errorf("nil guard should allow, got %s", action.Type)
+func TestLoopTracker_NilSafe(t *testing.T) {
+	var tr *LoopTracker
+	if a := tr.Check("k", false); a.Type != GuardAllow {
+		t.Fatalf("nil Check: want allow, got %s", a.Type)
 	}
+	tr.Reset() // must not panic
 }
 
 func TestExtractPathField(t *testing.T) {

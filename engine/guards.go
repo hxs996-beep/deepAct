@@ -1,11 +1,8 @@
 package engine
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -22,218 +19,74 @@ const (
 	GuardAskUser  = "ask_user"
 )
 
-// LoopGuard detects when the agent repeats the same operation on the same
-// content without making progress. It tracks (toolName, path, contentHash)
-// tuples and blocks when the same tuple appears too many times in a session.
-// Content hash distinguishes different edits on the same file (e.g., different
-// old_string→new_string pairs for the edit tool, or different file content for
-// write), avoiding false positives when modifying multiple locations.
-type LoopGuard struct {
-	mu         sync.Mutex
-	entries    map[string]*loopEntry // key: "toolName:path:contentHash"
-	maxRepeats int
-	workDir    string // base for normalizing relative paths in keys
+// LoopTracker is the unified counting core for all loop guards. Four
+// configured instances replace LoopGuard / ReadLoopState / ErrorLoopState /
+// ProgressLoopState: they differ only in key granularity, thresholds, and
+// whether a success resets the streak. A new loop variant = a new instance +
+// key construction, never a new struct.
+type LoopTracker struct {
+	mu             sync.Mutex
+	counts         map[string]int
+	nudgeAt        int // 0 = no nudge tier
+	blockAt        int
+	resetOnSuccess bool // error/progress semantics: a success clears the key
 }
 
-type loopEntry struct {
-	count int
+// NewLoopTracker creates a LoopTracker. blockAt<=0 defaults to 4; a nudgeAt
+// >= blockAt is treated as no nudge tier.
+func NewLoopTracker(nudgeAt, blockAt int, resetOnSuccess bool) *LoopTracker {
+	if blockAt <= 0 {
+		blockAt = 4
+	}
+	if nudgeAt >= blockAt {
+		nudgeAt = 0
+	}
+	return &LoopTracker{
+		counts:         make(map[string]int),
+		nudgeAt:        nudgeAt,
+		blockAt:        blockAt,
+		resetOnSuccess: resetOnSuccess,
+	}
 }
 
-func NewLoopGuard(workDir string, maxRepeats int) *LoopGuard {
-	if maxRepeats <= 0 {
-		maxRepeats = 4
+// Check records a key occurrence and returns GuardAllow, GuardDiagnose
+// (nudge, when count == nudgeAt), or GuardBlock (when count >= blockAt).
+// For progress/error instances, success=true clears the streak for key
+// (progress uses key="" as a global single counter).
+func (t *LoopTracker) Check(key string, success bool) GuardAction {
+	if t == nil {
+		return GuardAction{Type: GuardAllow}
 	}
-	return &LoopGuard{
-		entries:    make(map[string]*loopEntry),
-		maxRepeats: maxRepeats,
-		workDir:    workDir,
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if success && t.resetOnSuccess {
+		delete(t.counts, key)
+		return GuardAction{Type: GuardAllow}
 	}
-}
-
-// normalizePath canonicalizes a file path so the same physical file yields one
-// loop-detection key regardless of how the model addressed it (relative path,
-// "./" prefix, absolute path, or via the file_path alias). Relative paths are
-// resolved against workDir; without a workDir they are only Cleaned. This
-// prevents the model from splitting its repeat count across path forms and
-// never tripping the guard — the root cause of repeated reads.
-func normalizePath(p, workDir string) string {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return ""
-	}
-	if filepath.IsAbs(p) || workDir == "" {
-		return filepath.Clean(p)
-	}
-	return filepath.Clean(filepath.Join(workDir, p))
-}
-
-// extractToolKey extracts a unique key from a tool call for loop detection.
-// Returns "toolName:path:contentHash" for destructive tools, or "" for
-// exploratory tools. Content hash ensures that different edits on the same
-// file (different old_string→new_string) are treated as distinct operations,
-// preventing false loop detection when modifying multiple locations.
-func extractToolKey(call ToolCallRequest, workDir string) string {
-	path := extractPathField(call.Input, workDir)
-	if path == "" {
-		return ""
-	}
-
-	var contentHash string
-	switch call.Name {
-	case "edit":
-		contentHash = extractEditContentHash(call.Input)
-	case "write":
-		contentHash = extractWriteContentHash(call.Input)
-	case "read":
-		// Human-readable scope ("", "symbol:Run", "L10-50") — aligned with
-		// LastOp and ReadRecord so all three use one consistent key form.
-		return "read:" + path + "::" + extractReadScope(call.Input)
+	t.counts[key]++
+	switch {
+	case t.nudgeAt > 0 && t.counts[key] == t.nudgeAt:
+		return GuardAction{Type: GuardDiagnose, Message: "loop-nudge"}
+	case t.counts[key] >= t.blockAt:
+		return GuardAction{Type: GuardBlock, Message: "loop-block"}
 	default:
-		// grep/glob/bash etc. — not tracked for loops
-		return ""
+		return GuardAction{Type: GuardAllow}
 	}
-
-	if contentHash == "" {
-		return ""
-	}
-
-	return call.Name + ":" + path + ":" + contentHash
 }
 
-// extractEditContentHash computes sha256("old_string→new_string") from edit input.
-func extractEditContentHash(input json.RawMessage) string {
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	oldStr, _ := m["old_string"].(string)
-	newStr, _ := m["new_string"].(string)
-	h := sha256.Sum256([]byte(oldStr + "\x00" + newStr))
-	return hex.EncodeToString(h[:])
-}
-
-// extractWriteContentHash computes sha256(content) from write input.
-func extractWriteContentHash(input json.RawMessage) string {
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	content, _ := m["content"].(string)
-	if content == "" {
-		return ""
-	}
-	h := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(h[:])
-}
-
-// readMultiTargetView is engine's view of a read_multi target (mirrors the
-// tools/builtin readMultiTarget struct, kept unexported and local to avoid a
-// tools→engine import).
-type readMultiTargetView struct {
-	Path   string `json:"path"`
-	Symbol string `json:"symbol"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
-}
-
-// parseReadMultiTargets parses the targets array from a read_multi tool call's
-// input. Returns nil on error.
-func parseReadMultiTargets(input json.RawMessage) []readMultiTargetView {
-	var m struct {
-		Targets []readMultiTargetView `json:"targets"`
-	}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return nil
-	}
-	return m.Targets
-}
-
-// readMultiTargetScope derives the same scope string extractReadScope would
-// produce for a read_multi target (symbol first, then offset/limit range).
-// Used so read_multi sub-targets share the read key space with plain reads —
-// reading the same (path, scope) via either tool is recognized as a repeat.
-func readMultiTargetScope(t readMultiTargetView) string {
-	if t.Symbol != "" {
-		return "symbol:" + t.Symbol
-	}
-	if t.Offset == 0 && t.Limit == 0 {
-		return ""
-	}
-	start := t.Offset
-	if start == 0 {
-		start = 1
-	}
-	if t.Limit == 0 {
-		return fmt.Sprintf("L%d-", start)
-	}
-	return fmt.Sprintf("L%d-%d", start, t.Limit)
-}
-
-// Check inspects a tool call for loop behavior. Returns GuardBlock if the
-// same (tool, path, contentHash) tuple has been repeated too many times.
-// Reset clears all loop tracking state (e.g., on new user message).
-func (g *LoopGuard) Reset() {
-	if g == nil {
+// Reset clears all tracking state (e.g., on new user message / new Run).
+func (t *LoopTracker) Reset() {
+	if t == nil {
 		return
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.entries = make(map[string]*loopEntry)
-}
-
-func extractPathField(input json.RawMessage, workDir string) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	if p, ok := m["path"].(string); ok {
-		return normalizePath(p, workDir)
-	}
-	if p, ok := m["file_path"].(string); ok {
-		return normalizePath(p, workDir)
-	}
-	return ""
-}
-
-func (g *LoopGuard) Check(call ToolCallRequest) GuardAction {
-	if g == nil {
-		return GuardAction{Type: GuardAllow}
-	}
-
-	k := extractToolKey(call, g.workDir)
-	if k == "" {
-		return GuardAction{Type: GuardAllow}
-	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	entry, exists := g.entries[k]
-	if !exists {
-		entry = &loopEntry{}
-		g.entries[k] = entry
-	}
-
-	entry.count++
-	if entry.count >= g.maxRepeats {
-		return GuardAction{
-			Type: GuardBlock,
-			Message: fmt.Sprintf(
-				"Loop detected: %s %q repeated %d times. The agent appears to be repeating the same operation without making progress.",
-				call.Name, k, entry.count,
-			),
-		}
-	}
-
-	return GuardAction{Type: GuardAllow}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.counts = make(map[string]int)
 }
 
 type GuardSystem struct {
 	scope *ScopeGuard
-	loop  *LoopGuard
+	loop  *LoopTracker
 }
 
 // SetLanguage propagates the session-locked language flag to the scope guard
@@ -409,165 +262,4 @@ func isDestructiveTool(name string) bool {
 	default:
 		return false
 	}
-}
-
-// ReadLoopState tracks per-(path,scope) read counts and applies a two-tier
-// policy: 3rd read of the same key → nudge (GuardDiagnose); 4th → block.
-// Different (path, scope) keys are independent. Reset on new user message.
-//
-// Rationale: reading a file can help the LLM self-correct, so the first
-// repeated reads are allowed and the 3rd injects a nudge giving the agent a
-// chance to recover; only if it keeps re-reading the same scope do we block.
-type ReadLoopState struct {
-	mu     sync.Mutex
-	counts map[string]int
-}
-
-func NewReadLoopState() *ReadLoopState {
-	return &ReadLoopState{counts: make(map[string]int)}
-}
-
-// Check returns GuardAllow (1st-2nd), GuardDiagnose (3rd, nudge), or
-// GuardBlock (4th+). key is the scope-aware read key "read:path::scope".
-func (s *ReadLoopState) Check(key string) GuardAction {
-	if s == nil || key == "" {
-		return GuardAction{Type: GuardAllow}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.counts[key]++
-	switch s.counts[key] {
-	case 1, 2:
-		return GuardAction{Type: GuardAllow}
-	case 3:
-		return GuardAction{Type: GuardDiagnose, Message: "read-loop-nudge"}
-	default: // 4+
-		return GuardAction{Type: GuardBlock, Message: "read-loop-block"}
-	}
-}
-
-func (s *ReadLoopState) Reset() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.counts = make(map[string]int)
-}
-
-// ErrorLoopState tracks consecutive failures of the same coarse operation
-// (keyed "tool:path", WITHOUT content hash) and blocks when a tool keeps
-// erroring on the same file without progress.
-//
-// Rationale: LoopGuard and consecutiveSameOp both incorporate a content
-// signature, so a model that re-issues a failing call with slightly varied
-// arguments (common when confused by an error) defeats them and loops
-// indefinitely. This guard keys only on (tool, path) so varied-but-failing
-// attempts on the same target still accumulate. A success on the same key
-// resets the streak. Read ops are excluded — they have ReadLoopState.
-type ErrorLoopState struct {
-	mu        sync.Mutex
-	counts    map[string]int // key: coarse "tool:path"
-	maxErrors int
-}
-
-func NewErrorLoopState(maxErrors int) *ErrorLoopState {
-	if maxErrors <= 0 {
-		maxErrors = 3
-	}
-	return &ErrorLoopState{counts: make(map[string]int), maxErrors: maxErrors}
-}
-
-// Check records an error or success for opKey. On error, increments the
-// streak and returns GuardBlock once it reaches maxErrors. On success,
-// clears the streak for opKey. opKey is the coarse "tool:path" form.
-func (s *ErrorLoopState) Check(opKey string, isError bool) GuardAction {
-	if s == nil || opKey == "" {
-		return GuardAction{Type: GuardAllow}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !isError {
-		delete(s.counts, opKey)
-		return GuardAction{Type: GuardAllow}
-	}
-	s.counts[opKey]++
-	if s.counts[opKey] >= s.maxErrors {
-		return GuardAction{
-			Type: GuardBlock,
-			Message: fmt.Sprintf(
-				"Repeated tool errors on %s (%d times). The agent appears stuck on a failing operation; provide new direction.",
-				opKey, s.counts[opKey],
-			),
-		}
-	}
-	return GuardAction{Type: GuardAllow}
-}
-
-func (s *ErrorLoopState) Reset() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.counts = make(map[string]int)
-}
-
-// ProgressLoopState tracks consecutive turns without a progress signal and
-// applies a two-tier policy: 4th no-progress turn → nudge (GuardDiagnose);
-// 6th → block. A progress signal (successful edit/write/revert/bash call or
-// a handoff) resets the streak. Different from the operation-repeat guards
-// (ReadLoopState/consecutiveSameOp/ErrorLoopState), which only fire when the
-// SAME operation repeats: ProgressLoopState fires when the agent spends many
-// turns on read-only/planning work (narration + read + todo_write) without
-// ever modifying code or reaching a conclusion — the loop form that bypassed
-// all prior guards.
-type ProgressLoopState struct {
-	mu      sync.Mutex
-	count   int
-	nudgeAt int // 4th no-progress turn → nudge
-	blockAt int // 6th no-progress turn → block
-}
-
-func NewProgressLoopState(blockAt int) *ProgressLoopState {
-	if blockAt <= 0 {
-		blockAt = 6
-	}
-	return &ProgressLoopState{
-		count:   0,
-		nudgeAt: blockAt - 2,
-		blockAt: blockAt,
-	}
-}
-
-// Check returns GuardAllow, GuardDiagnose (nudge), or GuardBlock based on the
-// accumulated no-progress streak. progress=true resets the streak.
-func (s *ProgressLoopState) Check(progress bool) GuardAction {
-	if s == nil {
-		return GuardAction{Type: GuardAllow}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if progress {
-		s.count = 0
-		return GuardAction{Type: GuardAllow}
-	}
-	s.count++
-	switch {
-	case s.count >= s.blockAt:
-		return GuardAction{Type: GuardBlock, Message: "progress-loop-block"}
-	case s.count == s.nudgeAt:
-		return GuardAction{Type: GuardDiagnose, Message: "progress-loop-nudge"}
-	default:
-		return GuardAction{Type: GuardAllow}
-	}
-}
-
-func (s *ProgressLoopState) Reset() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.count = 0
 }
