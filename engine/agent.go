@@ -15,7 +15,7 @@ const (
 	AgentTeamLead AgentID = "team-lead"
 
 	HandoffToolName        = "handoff_to_agent"
-	ActivateSkillToolName  = "activate_skill"
+	LoadSkillToolName      = "load_skill"
 	TaskCompleteToolName   = "task_complete"
 	TodoWriteToolName      = "todo_write"
 	SubmitResultToolName   = "submit_result"
@@ -97,8 +97,8 @@ type Agent interface {
 	Run(ctx context.Context, input Handoff) (*HandoffResult, error)
 }
 
-// ActivateSkillParams is the JSON schema for the activate_skill tool call.
-type ActivateSkillParams struct {
+// LoadSkillParams is the JSON schema for the load_skill tool call.
+type LoadSkillParams struct {
 	SkillName string `json:"skill_name"`
 	Reasoning string `json:"reasoning,omitempty"`
 }
@@ -158,23 +158,24 @@ func taskCompleteToolSpec(zh bool) ModelTool {
 
 const maxSubAgentDepth = 2
 
-// activateSkillToolSpec returns the tool definition exposed to LLMs for suggesting skill activation.
-func activateSkillToolSpec() ModelTool {
+// loadSkillToolSpec returns the tool definition exposed to LLMs for loading
+// a skill's full instructions on demand (deepseek-harness tool-skill model).
+func loadSkillToolSpec() ModelTool {
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
-			Name:        ActivateSkillToolName,
-			Description: "Activate a skill to guide the agent's methodology for the current task. Call this proactively BEFORE searching code or analyzing, whenever the user's request matches a skill in the Available Skills list. The skill's instructions will override general rules and become the governing framework.",
+			Name:        LoadSkillToolName,
+			Description: "Load the full instructions for an available skill. Call this with the exact skill name from the Available Skills list before acting on a task that names or clearly matches that skill. The catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"skill_name": {
 						"type": "string",
-						"description": "Name of the skill to activate, e.g. 'writing-plans'"
+						"description": "Name of the skill to load, e.g. 'writing-plans'"
 					},
 					"reasoning": {
 						"type": "string",
-						"description": "Explain to the user why this skill should be activated next"
+						"description": "Explain to the user why this skill should be loaded next"
 					}
 				},
 				"required": ["skill_name"]

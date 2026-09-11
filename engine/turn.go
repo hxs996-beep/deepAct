@@ -451,19 +451,19 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Check for activate_skill tool call — intercept and auto-activate if in skill chain.
+	// Check for load_skill tool call — intercept and return the skill's full content.
 	// Collect tool messages in a separate slice and add them AFTER the assistant
 	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
 	// followed by tool messages responding to each tool_call_id.
-	pendingActivateMsgs := e.processActivateSkillCalls(calls)
+	pendingLoadMsgs := e.processLoadSkillCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
 
 	e.history = append(e.history, assistant)
 
-	// Add activate_skill tool messages AFTER the assistant message, so the
+	// Add load_skill tool messages AFTER the assistant message, so the
 	// DeepSeek API sees the correct order: assistant(tool_calls) → tool.
-	for _, msg := range pendingActivateMsgs {
+	for _, msg := range pendingLoadMsgs {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingTodoMsgs {
@@ -474,16 +474,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	// Separate handoff calls from regular tool calls.
-	// activate_skill is already handled by the intercept block above
+	// load_skill is already handled by the intercept block above
 	// (turn.go:363-416) — it must NOT enter regularCalls, or Execute will
-	// produce a duplicate tool message ("tool not found: activate_skill")
+	// produce a duplicate tool message ("tool not found: load_skill")
 	// with the same tool_call_id, violating the API contract.
 	var handoffCalls []ToolCallRequest
 	var regularCalls []ToolCallRequest
 	for _, call := range calls {
 		if call.Name == HandoffToolName {
 			handoffCalls = append(handoffCalls, call)
-		} else if call.Name == ActivateSkillToolName {
+		} else if call.Name == LoadSkillToolName {
 			continue
 		} else if call.Name == TodoWriteToolName {
 			continue
@@ -678,11 +678,11 @@ func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
 	return get(u)
 }
 
-// toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and activate_skill tools appended.
+// toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and load_skill tools appended.
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
 	specs = append(specs, handoffToolSpec(e.isChinese))
-	specs = append(specs, activateSkillToolSpec())
+	specs = append(specs, loadSkillToolSpec())
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, askUserToolSpec(e.isChinese))
@@ -962,13 +962,13 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 			return fmt.Sprintf("update todos: %d 项", len(todos))
 		}
 		return "update todos"
-	case "skill_install", "activate_skill":
-		// skill_install uses "name"; activate_skill uses "skill_name".
+	case "skill_install", "load_skill":
+		// skill_install uses "name"; load_skill uses "skill_name".
 		if n, ok := m["name"].(string); ok && n != "" {
 			return "install skill: " + n
 		}
 		if n, ok := m["skill_name"].(string); ok && n != "" {
-			return "activate skill: " + n
+			return "load skill: " + n
 		}
 	case "handoff_to_agent":
 		agent, _ := m["agent"].(string)
@@ -1364,47 +1364,47 @@ func addToWorkingSet(state *TaskState, path string, notes string) {
 	state.WorkingSet.Files = append(state.WorkingSet.Files, FileRef{Path: path, Notes: notes})
 }
 
-// processActivateSkillCalls intercepts activate_skill tool calls from the
-// assistant's response. For each call, it either activates the skill (success)
-// or produces an error tool message (bad JSON, empty name, unknown skill).
-// Every activate_skill call receives a tool response — this is critical because
-// the DeepSeek API requires that every tool_call_id in an assistant message has
-// a matching tool response. Without it, the next model call would be rejected
-// and the session would be permanently stuck.
+// processLoadSkillCalls intercepts load_skill tool calls from the
+// assistant's response. For each call, it either returns the skill's full
+// content as the tool result (success) or produces an error tool message
+// (bad JSON, empty name, unknown skill). Every load_skill call receives a
+// tool response — this is critical because the DeepSeek API requires that
+// every tool_call_id in an assistant message has a matching tool response.
+// Without it, the next model call would be rejected and the session would
+// be permanently stuck.
 //
 // The returned slice of Messages must be appended to history AFTER the
 // assistant message to satisfy the API ordering:
 // assistant(tool_calls) → tool(responses).
-func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
-	var pendingActivateMsgs []Message
+func (e *Engine) processLoadSkillCalls(calls []ToolCallRequest) []Message {
+	var pendingLoadMsgs []Message
 	for _, call := range calls {
-		if call.Name != ActivateSkillToolName {
+		if call.Name != LoadSkillToolName {
 			continue
 		}
-		var params ActivateSkillParams
+		var params LoadSkillParams
 		if err := json.Unmarshal(call.Input, &params); err != nil {
-			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+			pendingLoadMsgs = append(pendingLoadMsgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
-				Content:    fmt.Sprintf("Error: invalid activate_skill arguments: %v", err),
+				Content:    fmt.Sprintf("Error: invalid load_skill arguments: %v", err),
 				Timestamp:  time.Now(),
 			})
 			continue
 		}
 		if params.SkillName == "" {
-			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+			pendingLoadMsgs = append(pendingLoadMsgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
-				Content:    "Error: activate_skill requires a non-empty skill_name",
+				Content:    "Error: load_skill requires a non-empty skill_name",
 				Timestamp:  time.Now(),
 			})
 			continue
 		}
 
-		// Directly activate the skill — no user confirmation needed
 		s := e.skills.Get(params.SkillName)
 		if s == nil {
-			pendingActivateMsgs = append(pendingActivateMsgs, Message{
+			pendingLoadMsgs = append(pendingLoadMsgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
 				Content:    fmt.Sprintf("Error: skill %q not found", params.SkillName),
@@ -1412,40 +1412,17 @@ func (e *Engine) processActivateSkillCalls(calls []ToolCallRequest) []Message {
 			})
 			continue
 		}
-		prevSkill := e.lastActivatedSkill
-		e.activatedSkills[s.Name] = true
-		e.lastActivatedSkill = s.Name
-		e.state.ActiveSkillName = s.Name
-		e.state.ActiveSkillContent = s.Content
 
-		// Inject skill methodology into stable zone (persistent across turns)
-		e.context.SetActiveSkill(s.Name, s.Content)
-
-		chainInfo := ""
-		if prevSkill != "" {
-			chainInfo = fmt.Sprintf(" (chain: %s → %s)", prevSkill, s.Name)
-		}
-		skillMsg := fmt.Sprintf(
-			"✓ Skill `%s` activated%s. Full methodology now in stable zone.",
-			s.Name, chainInfo,
-		)
-		e.pendingPinnedMessages = append(e.pendingPinnedMessages, skillMsg)
-		e.matchedSkillsContent = fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content)
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{
-				Type:   "skill_activated",
-				Name:   s.Name,
-				Detail: s.Description + chainInfo,
-			})
-		}
-		pendingActivateMsgs = append(pendingActivateMsgs, Message{
+		// Load semantics: return the full skill content as this turn's
+		// tool result. No engine state, no persistent stable-zone injection.
+		pendingLoadMsgs = append(pendingLoadMsgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    fmt.Sprintf("✓ Activated skill `%s`%s", s.Name, chainInfo),
+			Content:    fmt.Sprintf("[SKILL — %s]\n\n%s", s.Name, s.Content),
 			Timestamp:  time.Now(),
 		})
 	}
-	return pendingActivateMsgs
+	return pendingLoadMsgs
 }
 
 // processTodoWriteCalls intercepts todo_write tool calls from the assistant's
