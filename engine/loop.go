@@ -167,23 +167,23 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		loop:  NewLoopGuard(cfg.WorkDir, 6), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
-		model:           deps.Model,
-		tools:           deps.Tools,
-		policy:          deps.Policy,
-		context:         deps.Context,
-		compressor:      deps.Compressor,
-		session:         deps.Session,
-		memory:          deps.Memory,
-		agents:          deps.Agents,
-		skills:          deps.Skills,
-		router:          deps.Router,
-		config:          cfg,
-		state:           &TaskState{TaskID: cfg.SessionID},
-		history:         make([]Message, 0),
-		guards:          guard,
-		readLoop:        NewReadLoopState(),
-		errorLoop:       NewErrorLoopState(0),
-		progressLoop:    NewProgressLoopState(6),
+		model:        deps.Model,
+		tools:        deps.Tools,
+		policy:       deps.Policy,
+		context:      deps.Context,
+		compressor:   deps.Compressor,
+		session:      deps.Session,
+		memory:       deps.Memory,
+		agents:       deps.Agents,
+		skills:       deps.Skills,
+		router:       deps.Router,
+		config:       cfg,
+		state:        &TaskState{TaskID: cfg.SessionID},
+		history:      make([]Message, 0),
+		guards:       guard,
+		readLoop:     NewReadLoopState(),
+		errorLoop:    NewErrorLoopState(0),
+		progressLoop: NewProgressLoopState(6),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	e.collabHall = NewCollabHall(e)
@@ -375,9 +375,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				b.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
 			}
 			if zh {
-				b.WriteString("\n使用 `/<名称>` 激活指定技能。")
+				b.WriteString("\n使用 `/<名称>` 加载指定技能。")
 			} else {
-				b.WriteString("\nUse `/<name>` to activate a specific skill.")
+				b.WriteString("\nUse `/<name>` to load a specific skill.")
 			}
 			return &EngineResponse{Summary: b.String(), Stage: StageAct}, nil
 
@@ -1272,8 +1272,10 @@ func (e *Engine) recordRunEval(_ bool) {
 
 // detectIntentShift checks if the user's message signals an intent shift from
 // "development/implementation" to "operational use/verification" of existing work.
-// When detected, the active skill should be auto-deactivated so its methodology
-// no longer constrains the agent's behavior.
+// The auto-deactivation mechanism it was written for was removed as part of the
+// skill load-semantics refactor (skills are now loaded on demand via /<name> rather
+// than activated and auto-deactivated), so this method currently has no callers.
+// It is kept as a heuristic reference for detecting such intent shifts.
 //
 // Heuristics:
 //   - "用这个/拿这个/试试这个 X" pattern: user wants to USE/TRY existing code
@@ -1716,4 +1718,3 @@ func describeScope(scope string, zh bool) string {
 	}
 	return "lines " + scope
 }
-

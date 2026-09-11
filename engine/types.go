@@ -229,25 +229,25 @@ type MessageToolCall struct {
 }
 
 type TaskState struct {
-	TaskID               string           `json:"task_id"`
-	Goal                 string           `json:"goal"`
-	ConfirmedScope       bool             `json:"confirmed_scope"`
-	Constraints          []string         `json:"constraints"`
-	Assumptions          []string         `json:"assumptions"`
-	Decisions            []Decision       `json:"decisions"`
-	MemoryMarkers        []string         `json:"memory_markers"` // extracted from <!-- REMEMBER: ... --> in model output
-	Plan                 []PlanStep       `json:"plan"`
-	WorkingSet           WorkingSet       `json:"working_set"`
-	OpenQuestions        []string         `json:"open_questions"`
-	ModifiedFiles        []string         `json:"modified_files"`
-	FileCollapse         []FileCollapse   `json:"file_collapse"`
-	CallChain            []CallChainEntry `json:"call_chain"`
-	TurnNumber           int              `json:"turn_number"`
-	ConsecutiveFailures  int              `json:"consecutive_failures"`
-	EditScopeFiles       int              `json:"edit_scope_files"`
-	PendingDangerousCmd  string           `json:"pending_dangerous_cmd,omitempty"`  // normalized command awaiting user confirmation
-	Roundtable           *RoundtableState `json:"roundtable,omitempty"`
-	Collab               *CollabState     `json:"collab,omitempty"`
+	TaskID              string           `json:"task_id"`
+	Goal                string           `json:"goal"`
+	ConfirmedScope      bool             `json:"confirmed_scope"`
+	Constraints         []string         `json:"constraints"`
+	Assumptions         []string         `json:"assumptions"`
+	Decisions           []Decision       `json:"decisions"`
+	MemoryMarkers       []string         `json:"memory_markers"` // extracted from <!-- REMEMBER: ... --> in model output
+	Plan                []PlanStep       `json:"plan"`
+	WorkingSet          WorkingSet       `json:"working_set"`
+	OpenQuestions       []string         `json:"open_questions"`
+	ModifiedFiles       []string         `json:"modified_files"`
+	FileCollapse        []FileCollapse   `json:"file_collapse"`
+	CallChain           []CallChainEntry `json:"call_chain"`
+	TurnNumber          int              `json:"turn_number"`
+	ConsecutiveFailures int              `json:"consecutive_failures"`
+	EditScopeFiles      int              `json:"edit_scope_files"`
+	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
+	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
+	Collab              *CollabState     `json:"collab,omitempty"`
 
 	// ReadHistory records each file read this session (path + scope) for the
 	// loop guard to count repeated reads of the same (path, scope) and block
