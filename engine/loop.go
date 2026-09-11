@@ -29,18 +29,17 @@ const (
 )
 
 type EngineDeps struct {
-	Model        ModelClient
-	Tools        ToolExecutor
-	Policy       PolicyChecker
-	Context      ContextBuilder
-	Compressor   Compressor
-	Session      SessionStore
-	Memory       MemoryStore
-	Agents       *AgentRegistry
-	Skills       *skill.Registry
-	SkillMatcher skill.SkillMatcher
-	Router       ModelRouter
-	MCPManagers  []io.Closer // MCP server connections to close on shutdown
+	Model       ModelClient
+	Tools       ToolExecutor
+	Policy      PolicyChecker
+	Context     ContextBuilder
+	Compressor  Compressor
+	Session     SessionStore
+	Memory      MemoryStore
+	Agents      *AgentRegistry
+	Skills      *skill.Registry
+	Router      ModelRouter
+	MCPManagers []io.Closer // MCP server connections to close on shutdown
 }
 
 type Engine struct {
@@ -53,7 +52,6 @@ type Engine struct {
 	memory       MemoryStore
 	agents       *AgentRegistry
 	skills       *skill.Registry
-	skillMatcher skill.SkillMatcher
 	router       ModelRouter
 	config       EngineConfig
 	state        *TaskState
@@ -193,7 +191,6 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		memory:          deps.Memory,
 		agents:          deps.Agents,
 		skills:          deps.Skills,
-		skillMatcher:    deps.SkillMatcher,
 		router:          deps.Router,
 		config:          cfg,
 		state:           &TaskState{TaskID: cfg.SessionID},
@@ -432,19 +429,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if len(e.history) > 0 {
 				e.history[len(e.history)-1].Content = taskText
 			}
-		}
-	}
-
-	// Skill matching: semantic auto-activation via the SkillMatcher interface.
-	// The matcher (wired in cmd/run.go) sends the user message + all skill
-	// descriptions to the flash model and returns the one best-matching skill,
-	// or nil. When no matcher is wired, skill matching is disabled.
-	if e.state.ActiveSkillName == "" && e.skillMatcher != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		matched := e.skillMatcher.Match(ctx, userMsg, e.skills.All())
-		cancel()
-		if matched != nil {
-			e.activateSkill(matched, "semantic match")
 		}
 	}
 

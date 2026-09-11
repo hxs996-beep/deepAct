@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -142,7 +141,6 @@ func buildSkillSuggestions(reg *skill.Registry) {
 // buildSkillsBlock renders a static skills list for the stable zone.
 // Each skill is shown as "name: description". The model uses semantic
 // understanding (not keyword matching) to decide when to call activate_skill.
-// Engine-level auto-activation is handled separately by SemanticMatcher.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
@@ -318,45 +316,17 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		routing.FlashModelName = config.FlashModelName
 	}
 
-	// Build skill matcher: semantic-only via the primary model.
-	// Skill matching is a first-class feature that must work whenever the
-	// primary model is configured — it must NOT depend on a separate flash
-	// model setting (which may be unset, misconfigured, or too slow).
-	// The user message + all skill descriptions are sent to the model,
-	// which returns the ONE most relevant skill (or null). Keyword substring
-	// matching was removed — it produced rampant false positives (e.g. "PR"
-	// lowercased to "pr" matched "prefix"). MatchFunc wraps client.Complete so
-	// the skill package stays free of any engine import.
-	matchFn := func(ctx context.Context, systemMsg, userMsg string) (string, error) {
-		req := engine.ModelRequest{
-			Model: config.ModelName,
-			Messages: []engine.ModelMessage{
-				{Role: "system", Content: systemMsg},
-				{Role: "user", Content: userMsg},
-			},
-			Temperature: 0,
-			JsonMode:    true,
-		}
-		resp, err := client.Complete(ctx, req)
-		if err != nil {
-			return "", fmt.Errorf("skill semantic match: %w", err)
-		}
-		return resp.Message.Content, nil
-	}
-	skillMatcher := skill.NewSemanticMatcher(matchFn, config.ModelName)
-
 	deps := engine.EngineDeps{
-		Model:        client,
-		Tools:        toolExecutor,
-		Policy:       checker,
-		Context:      contextAssembler,
-		Compressor:   compressor,
-		Session:      store,
-		Memory:       memStore,
-		Agents:       agentReg,
-		Skills:       skillReg,
-		SkillMatcher: skillMatcher,
-		Router:       routing,
+		Model:      client,
+		Tools:      toolExecutor,
+		Policy:     checker,
+		Context:    contextAssembler,
+		Compressor: compressor,
+		Session:    store,
+		Memory:     memStore,
+		Agents:     agentReg,
+		Skills:     skillReg,
+		Router:     routing,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown
 	mcpClosers := make([]io.Closer, len(mcpManagers))
