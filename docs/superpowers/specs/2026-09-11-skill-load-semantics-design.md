@@ -49,7 +49,7 @@
 | 项 | 位置 | 动作 |
 |---|---|---|
 | 语义匹配调用块 | `engine/loop.go:438-449` | 删除 |
-| `SkillMatcher` 接口 | `engine/interfaces.go:13` | 删除 |
+| `SkillMatcher` 接口 | `skill/matcher.go:12`（`engine/interfaces.go` 无此接口） | 删除 |
 | 引擎字段 `skillMatcher` | `engine/loop.go:41,56,196` | 删除 |
 | matchFn 构建 + deps 注入 | `cmd/run.go:330-346,358` | 删除 |
 | 文件 | `skill/matcher.go`、`skill/matcher_llm.go`、`skill/matcher_test.go` | 删除 |
