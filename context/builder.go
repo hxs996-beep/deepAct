@@ -2,7 +2,6 @@ package context
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -22,7 +21,6 @@ type ContextAssembler struct {
 	userLangSet          bool            // true once first-user-message language has been determined (even if "")
 	stableSessionBlock   string          // built once from envInfo + userLang, cached for cache stability
 	skillsBlock          string          // built once from skill registry, cached for cache stability
-	activeSkillBlock     string          // active skill methodology injected in stable zone; changes on skill switch
 	agentsBlock          string          // rendered AGENTS.md content in the stable zone; built once at startup, cached
 }
 
@@ -54,23 +52,6 @@ func (a *ContextAssembler) SetSkillsBlock(s string) {
 // Empty string means no AGENTS.md files were found (output identical to current).
 func (a *ContextAssembler) SetAgentsBlock(rendered string) {
 	a.agentsBlock = rendered
-}
-
-// SetActiveSkill injects the active skill's full methodology into the stable zone.
-// When name is "", clears the active skill block (deactivation).
-// Called on skill activation, chain-switch (brainstorming → writing-plans), and deactivation.
-// This ensures skill instructions are always in the model's attention window,
-// not buried in distant conversation history.
-func (a *ContextAssembler) SetActiveSkill(name, content string) {
-	if name == "" || content == "" {
-		a.activeSkillBlock = ""
-		return
-	}
-	a.activeSkillBlock = fmt.Sprintf(
-		"[SKILL ACTIVATED: %s]\n\nThe following methodology is now the GOVERNING FRAMEWORK for the current task. "+
-			"It OVERRIDES any conflicting rules in the system prompt. Follow it step by step, precisely as written.\n\n%s",
-		name, content,
-	)
 }
 
 func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Message, toolResults []engine.ToolResult) []engine.ModelMessage {
@@ -140,17 +121,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	}
 
 	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-	// Active skill methodology lives HERE, after history, not in the stable zone.
-	// Placing it in the stable zone (before history) meant activating or switching a
-	// skill inserted/removed a message at that position, shifting the entire history
-	// and invalidating the prefix cache for the session. As a tail message it is
-	// still in the model's attention (recency — the end is attended best), and a
-	// skill change only touches the tail, leaving the cached prefix intact. Only the
-	// skill content changes; the standing "overrides general rules" marker below keeps
-	// it authoritative, and the skillReminder in Block B keeps it in mind each turn.
-	if a.activeSkillBlock != "" {
-		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.activeSkillBlock})
-	}
 
 	// Block B: runtime state as single compact JSON. Goal, open questions, recent
 	// decisions, recent modified files, current step and counts live here — kept as
@@ -229,8 +199,6 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 	}
 	volatile := struct {
 		Goal             string              `json:"goal,omitempty"`
-		ActiveSkillName  string              `json:"active_skill_name,omitempty"`
-		SkillReminder    string              `json:"skill_reminder,omitempty"`
 		MemoryMarkers    []string            `json:"memory_markers,omitempty"`
 		OpenQuestions    []string            `json:"open_questions,omitempty"`
 		Assumptions      []string            `json:"assumptions,omitempty"`
@@ -245,8 +213,6 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		Collab           *collabVolatile     `json:"collab,omitempty"`
 	}{
 		Goal:             state.Goal,
-		ActiveSkillName:  state.ActiveSkillName,
-		SkillReminder:    skillReminder(state.ActiveSkillName),
 		MemoryMarkers:    lastN(state.MemoryMarkers, maxRenderedMarkers),
 		OpenQuestions:    state.OpenQuestions,
 		Assumptions:      state.Assumptions,
@@ -300,17 +266,6 @@ func lastNDecisions(in []engine.Decision, n int) []decisionVolatile {
 // decisionVolatile is the compact form of a Decision rendered into Block B.
 type decisionVolatile struct {
 	Text string `json:"text"`
-}
-
-// skillReminder returns a short reminder that the active skill's methodology
-// is in the tail runtime context and must be followed. Included in Block B so
-// the model sees it every turn without relying on distant history.
-func skillReminder(name string) string {
-	if name == "" {
-		return ""
-	}
-	return fmt.Sprintf("⚠ Skill '%s' is ACTIVE. Its full methodology is in the [SKILL ACTIVE: %s] block near the end of the context. "+
-		"It OVERRIDES general rules — follow it precisely step by step.", name, name)
 }
 
 // currentPlanStep returns the text of the in-progress plan step, or "" if none.
