@@ -64,7 +64,12 @@ type Engine struct {
 	readLoop     *ReadLoopState
 	errorLoop    *ErrorLoopState
 	progressLoop *ProgressLoopState
-	evalStore    EvalStore
+	// readProgressKeys tracks read keys ("read:path::scope") already seen
+	// this Run. A novel read (new key) counts as progress for
+	// ProgressLoopState, so legitimate investigation — reading new content —
+	// is not mistaken for a no-progress loop. Reset each Run.
+	readProgressKeys map[string]bool
+	evalStore        EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill activations) that should
 	// be appended at the END of the assembled messages array for the current
@@ -307,6 +312,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if e.progressLoop != nil {
 		e.progressLoop.Reset()
 	}
+	e.readProgressKeys = make(map[string]bool)
 	e.matchedSkillsContent = ""
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}

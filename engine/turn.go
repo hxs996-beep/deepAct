@@ -37,11 +37,13 @@ type TurnResult struct {
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
-	// MadeProgress is true when this turn produced a progress signal (a
-	// successful edit/write/revert/bash call, or a handoff). Read-only,
-	// todo_write, ask_user and planning calls are NOT progress. The
-	// ProgressLoopState guard uses it to detect "N turns without progress"
-	// loops (narration + read/todo) that bypass operation-repeat guards.
+	// MadeProgress is true when this turn produced a progress signal: a
+	// successful edit/write/revert/bash call, a handoff, or a NOVEL read (a
+	// (path, scope) not yet read this Run). Repeated reads, read-only
+	// search/planning (grep/glob/lsp/todo_write), ask_user and narration are
+	// NOT progress. ProgressLoopState uses it to detect "N turns without
+	// progress" loops (narration + repeated read/todo) while leaving
+	// legitimate investigation — reading new content — alone.
 	MadeProgress bool
 }
 
@@ -605,20 +607,45 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		break
 	}
 	// Progress signal for ProgressLoopState: a successful destructive call
-	// (edit/write/revert/bash) or a handoff counts as progress; read-only
-	// exploration and planning (read/grep/glob/lsp/todo_write) do not. This
-	// detects "N turns narrate but never act" loops regardless of which
-	// read-only tools the model uses as cover.
+	// (edit/write/revert/bash), a handoff, or a NOVEL read (a (path, scope)
+	// not yet read this Run) counts as progress. Repeated reads of the same
+	// scope and read-only search/planning (grep/glob/lsp/todo_write) do not.
+	// This distinguishes legitimate investigation — reading new content
+	// advances the task — from a "N turns narrate but never act" loop, and
+	// complements ReadLoopState which separately catches repeated same-scope
+	// reads (3rd nudge, 4th block).
+	if e.readProgressKeys == nil {
+		e.readProgressKeys = make(map[string]bool)
+	}
 	for _, c := range regularCalls {
 		switch c.Name {
 		case "edit", "write", "revert", "bash":
 			if statusByID[c.ID] == "ok" {
 				result.MadeProgress = true
 			}
+		case "read":
+			if path := extractPathFromArgs(c.Input, e.config.WorkDir); path != "" {
+				key := "read:" + path + "::" + extractReadScope(c.Input)
+				if !e.readProgressKeys[key] {
+					e.readProgressKeys[key] = true
+					result.MadeProgress = true
+				}
+			}
+		case "read_multi":
+			for _, tgt := range parseReadMultiTargets(c.Input) {
+				if tgt.Path == "" {
+					continue
+				}
+				key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
+				if !e.readProgressKeys[key] {
+					e.readProgressKeys[key] = true
+					result.MadeProgress = true
+				}
+			}
 		}
-		if result.MadeProgress {
-			break
-		}
+		// 不 break：所有 read key 必须无条件记录，即使本轮已因 edit 等
+		// 置位 MadeProgress——否则后续轮次重复读同一 (path, scope) 会被
+		// 误判为"新读"而错误重置 progress 计数。
 	}
 	if !result.MadeProgress && len(handoffCalls) > 0 {
 		result.MadeProgress = true

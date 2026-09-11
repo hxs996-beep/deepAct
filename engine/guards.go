@@ -148,6 +148,27 @@ func parseReadMultiTargets(input json.RawMessage) []readMultiTargetView {
 	return m.Targets
 }
 
+// readMultiTargetScope derives the same scope string extractReadScope would
+// produce for a read_multi target (symbol first, then offset/limit range).
+// Used so read_multi sub-targets share the read key space with plain reads —
+// reading the same (path, scope) via either tool is recognized as a repeat.
+func readMultiTargetScope(t readMultiTargetView) string {
+	if t.Symbol != "" {
+		return "symbol:" + t.Symbol
+	}
+	if t.Offset == 0 && t.Limit == 0 {
+		return ""
+	}
+	start := t.Offset
+	if start == 0 {
+		start = 1
+	}
+	if t.Limit == 0 {
+		return fmt.Sprintf("L%d-", start)
+	}
+	return fmt.Sprintf("L%d-%d", start, t.Limit)
+}
+
 // Check inspects a tool call for loop behavior. Returns GuardBlock if the
 // same (tool, path, contentHash) tuple has been repeated too many times.
 // Reset clears all loop tracking state (e.g., on new user message).
