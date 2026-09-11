@@ -93,8 +93,8 @@ func TestConfirmOptions_AskUserWithOptions_Mounted(t *testing.T) {
 		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
-		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
-		readLoop:  NewReadLoopState(),
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		readLoop:  NewLoopTracker(3, 4, false),
 	}
 
 	resp, err := e.Run(context.Background(), "修改代码")
@@ -150,7 +150,7 @@ func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
 		state:            &TaskState{TurnNumber: 0},
 		history:          []Message{{Role: "user", Content: "改"}},
 		config:           EngineConfig{ModelName: "test-model"},
-		guards:           &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		guards:           &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
 		runToolCallCount: 2, // 已做过搜索
 	}
 

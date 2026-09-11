@@ -21,16 +21,17 @@ func TestRun_ResetsLoopGuardOnNewRun(t *testing.T) {
 		state:    &TaskState{TurnNumber: 0, Goal: ""},
 		history:  []Message{},
 		config:   EngineConfig{ModelName: "test-model"},
-		guards:   &GuardSystem{loop: NewLoopGuard("", 6)},
-		readLoop: NewReadLoopState(),
+		guards:   &GuardSystem{loop: NewLoopTracker(0, 6, false)},
+		readLoop: NewLoopTracker(3, 4, false),
 	}
 	call := ToolCallRequest{Name: "read", Input: json.RawMessage(`{"file_path":"loop.go"}`)}
-	// Preload: 6 reads reach the block threshold (maxRepeats=6).
+	key := extractToolKey(call, "")
+	// Preload: 6 reads reach the block threshold (blockAt=6).
 	for i := 0; i < 6; i++ {
-		e.guards.loop.Check(call)
+		e.guards.loop.Check(key, false)
 	}
 	// 7th check blocks before Run.
-	if a := e.guards.loop.Check(call); a.Type != GuardBlock {
+	if a := e.guards.loop.Check(key, false); a.Type != GuardBlock {
 		t.Fatalf("preload: expected block after 6 reads (count=7), got %v", a.Type)
 	}
 	// Run must reset LoopGuard.
@@ -38,7 +39,7 @@ func TestRun_ResetsLoopGuardOnNewRun(t *testing.T) {
 		t.Fatalf("Run error: %v", err)
 	}
 	// After Run, first check should Allow (count reset).
-	action := e.guards.loop.Check(call)
+	action := e.guards.loop.Check(key, false)
 	if action.Type != GuardAllow {
 		t.Errorf("after Run, LoopGuard should be reset (Allow), got %v (msg=%s)", action.Type, action.Message)
 	}
@@ -54,22 +55,22 @@ func TestRun_ResetsReadLoopStateOnNewRun(t *testing.T) {
 		state:    &TaskState{TurnNumber: 0, Goal: ""},
 		history:  []Message{},
 		config:   EngineConfig{ModelName: "test-model"},
-		guards:   &GuardSystem{loop: NewLoopGuard("", 6)},
-		readLoop: NewReadLoopState(),
+		guards:   &GuardSystem{loop: NewLoopTracker(0, 6, false)},
+		readLoop: NewLoopTracker(3, 4, false),
 	}
 	// Preload ReadLoopState to the block tier (4th same key blocks).
 	key := "read:loop.go::"
 	for i := 0; i < 3; i++ {
-		e.readLoop.Check(key)
+		e.readLoop.Check(key, false)
 	}
-	if a := e.readLoop.Check(key); a.Type != GuardBlock {
+	if a := e.readLoop.Check(key, false); a.Type != GuardBlock {
 		t.Fatalf("preload: expected block on 4th read, got %v", a.Type)
 	}
 	if _, err := e.Run(context.Background(), "新任务"); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
 	// After Run, first check should Allow (count reset).
-	if a := e.readLoop.Check(key); a.Type != GuardAllow {
+	if a := e.readLoop.Check(key, false); a.Type != GuardAllow {
 		t.Errorf("after Run, ReadLoopState should be reset (Allow), got %v", a.Type)
 	}
 }

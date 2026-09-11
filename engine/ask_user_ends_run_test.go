@@ -39,8 +39,8 @@ func TestAskUser_EndsRunWithOptions(t *testing.T) {
 		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
-		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
-		readLoop:  NewReadLoopState(),
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		readLoop:  NewLoopTracker(3, 4, false),
 	}
 
 	resp, err := e.Run(context.Background(), "优化方案显示")
@@ -93,8 +93,8 @@ func TestAskUser_NoOptions_EndsRunBlockedAwaitingUser(t *testing.T) {
 		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
-		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
-		readLoop:  NewReadLoopState(),
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		readLoop:  NewLoopTracker(3, 4, false),
 	}
 
 	resp, err := e.Run(context.Background(), "配置数据库连接")

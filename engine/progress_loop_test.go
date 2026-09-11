@@ -9,63 +9,63 @@ import (
 // --- ProgressLoopState unit tests ---
 
 func TestProgressLoopState_NudgeThenBlock(t *testing.T) {
-	s := NewProgressLoopState(6)
+	s := NewLoopTracker(4, 6, true)
 	// 1st-3rd no-progress: allow (normal exploration/analysis is tolerated)
 	for i := 1; i <= 3; i++ {
-		if a := s.Check(false); a.Type != GuardAllow {
+		if a := s.Check("", false); a.Type != GuardAllow {
 			t.Fatalf("no-progress %d: want allow, got %s (%s)", i, a.Type, a.Message)
 		}
 	}
 	// 4th: nudge
-	if a := s.Check(false); a.Type != GuardDiagnose {
+	if a := s.Check("", false); a.Type != GuardDiagnose {
 		t.Fatalf("4th no-progress: want diagnose(nudge), got %s (%s)", a.Type, a.Message)
 	}
 	// 5th: allow (response window after the nudge)
-	if a := s.Check(false); a.Type != GuardAllow {
+	if a := s.Check("", false); a.Type != GuardAllow {
 		t.Fatalf("5th no-progress: want allow, got %s (%s)", a.Type, a.Message)
 	}
 	// 6th: block
-	a := s.Check(false)
+	a := s.Check("", false)
 	if a.Type != GuardBlock {
 		t.Fatalf("6th no-progress: want block, got %s (%s)", a.Type, a.Message)
 	}
 }
 
 func TestProgressLoopState_ProgressResets(t *testing.T) {
-	s := NewProgressLoopState(6)
-	s.Check(false)
-	s.Check(false)
-	s.Check(false)
+	s := NewLoopTracker(4, 6, true)
+	s.Check("", false)
+	s.Check("", false)
+	s.Check("", false)
 	// A progress signal resets the streak.
-	if a := s.Check(true); a.Type != GuardAllow {
+	if a := s.Check("", true); a.Type != GuardAllow {
 		t.Fatalf("progress: want allow, got %s", a.Type)
 	}
 	// Three more no-progress turns stay under the threshold.
 	for i := 0; i < 3; i++ {
-		if a := s.Check(false); a.Type != GuardAllow {
+		if a := s.Check("", false); a.Type != GuardAllow {
 			t.Fatalf("post-reset no-progress %d: want allow, got %s", i, a.Type)
 		}
 	}
 }
 
 func TestProgressLoopState_NilSafe(t *testing.T) {
-	var s *ProgressLoopState
-	if a := s.Check(false); a.Type != GuardAllow {
+	var s *LoopTracker
+	if a := s.Check("", false); a.Type != GuardAllow {
 		t.Errorf("nil Check: want allow, got %s", a.Type)
 	}
-	if a := s.Check(true); a.Type != GuardAllow {
+	if a := s.Check("", true); a.Type != GuardAllow {
 		t.Errorf("nil Check(progress): want allow, got %s", a.Type)
 	}
 	s.Reset() // must not panic
 }
 
 func TestProgressLoopState_Reset(t *testing.T) {
-	s := NewProgressLoopState(6)
+	s := NewLoopTracker(4, 6, true)
 	for i := 0; i < 4; i++ {
-		s.Check(false)
+		s.Check("", false)
 	}
 	s.Reset()
-	if a := s.Check(false); a.Type != GuardAllow {
+	if a := s.Check("", false); a.Type != GuardAllow {
 		t.Fatalf("after reset 1st: want allow, got %s", a.Type)
 	}
 }
@@ -101,7 +101,7 @@ func TestExecuteTurn_MadeProgress_EditSuccess(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "改"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -128,7 +128,7 @@ func TestExecuteTurn_MadeProgress_NovelRead(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -155,7 +155,7 @@ func TestExecuteTurn_MadeProgress_RepeatedRead(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
 		// 该 (path, scope) 本轮已读过：key 形式与 read 的 LastOp 一致
 		// "read:path::scope"。
 		readProgressKeys: map[string]bool{"read:a.go::": true},
@@ -184,7 +184,7 @@ func TestExecuteTurn_MadeProgress_NovelReadMulti(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -217,7 +217,7 @@ func TestExecuteTurn_MadeProgress_ReadKeyRecordedWithEdit(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "改"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
 	}
 	// 第一轮：edit + 新 read b.go → 有进展，且 b.go 的 key 应被记录。
 	r1, err := e.executeTurn(context.Background())
@@ -308,11 +308,11 @@ func TestRun_ProgressLoop_NovelReadsAllowed(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopGuard("", 6),
+			loop:  NewLoopTracker(0, 6, false),
 			scope: NewScopeGuard(false),
 		},
-		readLoop:     NewReadLoopState(),
-		progressLoop: NewProgressLoopState(6),
+		readLoop:     NewLoopTracker(3, 4, false),
+		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}
 	resp, err := e.Run(context.Background(), "排查问题")
@@ -342,11 +342,11 @@ func TestRun_ProgressLoop_NoNovelReadBlocked(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopGuard("", 6),
+			loop:  NewLoopTracker(0, 6, false),
 			scope: NewScopeGuard(false),
 		},
-		readLoop:     NewReadLoopState(),
-		progressLoop: NewProgressLoopState(6),
+		readLoop:     NewLoopTracker(3, 4, false),
+		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}
 	resp, err := e.Run(context.Background(), "实现功能")
@@ -390,11 +390,11 @@ func TestRun_ProgressLoop_EditResetsStreak(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopGuard("", 6),
+			loop:  NewLoopTracker(0, 6, false),
 			scope: NewScopeGuard(true),
 		},
-		readLoop:     NewReadLoopState(),
-		progressLoop: NewProgressLoopState(6),
+		readLoop:     NewLoopTracker(3, 4, false),
+		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}
 	resp, err := e.Run(context.Background(), "实现功能")

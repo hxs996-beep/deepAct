@@ -391,35 +391,42 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				// for unknown tools); check each sub-target as a synthetic read so
 				// repeated fan-out reads of the same (path, scope) are still caught.
 				for _, tgt := range parseReadMultiTargets(call.Input) {
-					synthInput, _ := json.Marshal(map[string]interface{}{
-						"path": tgt.Path, "symbol": tgt.Symbol,
-						"offset": tgt.Offset, "limit": tgt.Limit,
-					})
-					synth := ToolCallRequest{ID: call.ID, Name: "read", Input: synthInput}
-					a := e.guards.loop.Check(synth)
+					key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
+					a := e.guards.loop.Check(key, false)
 					if a.Type != GuardAllow {
-						loopAction = GuardAction{
-							Type:    a.Type,
-							Message: fmt.Sprintf("read_multi target %s: %s", tgt.Path, a.Message),
-						}
+						loopAction = GuardAction{Type: a.Type, Message: fmt.Sprintf("read_multi target %s: %s", tgt.Path, a.Message)}
 						break
 					}
 				}
 			} else {
-				loopAction = e.guards.loop.Check(call)
+				key := extractToolKey(call, e.config.WorkDir)
+				if key == "" {
+					loopAction = GuardAction{Type: GuardAllow}
+				} else {
+					loopAction = e.guards.loop.Check(key, false)
+				}
 			}
 			if loopAction.Type != GuardAllow {
+				// LoopTracker's Message is a placeholder ("loop-block"); build a
+				// user-visible bilingual message. The original LoopGuard's count
+				// is no longer available, so use a concise generic loop message.
+				msg := loopAction.Message
+				if zh := e.isChinese; zh {
+					msg = "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
+				} else {
+					msg = "Detected repeated operation loop. The agent may be stuck. Please provide new direction."
+				}
 				e.history = append(e.history, assistant)
 				for _, c := range calls {
 					e.history = append(e.history, Message{
 						Role:       "tool",
 						ToolCallID: c.ID,
-						Content:    "Blocked: " + loopAction.Message,
+						Content:    "Blocked: " + msg,
 						Timestamp:  time.Now(),
 					})
 				}
-				turnLog.Printf("LoopGuard block: %s", loopAction.Message)
-				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{loopAction.Message}}, nil
+				turnLog.Printf("LoopGuard block: %s", msg)
+				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{msg}}, nil
 			}
 		}
 

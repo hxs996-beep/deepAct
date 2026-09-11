@@ -6,18 +6,18 @@ import (
 )
 
 func TestReadLoopState_NudgeThenBlock(t *testing.T) {
-	s := NewReadLoopState()
+	s := NewLoopTracker(3, 4, false)
 	key := "read:a.go::symbol:Run"
 
 	// 1st, 2nd: allow
-	if a := s.Check(key); a.Type != GuardAllow {
+	if a := s.Check(key, false); a.Type != GuardAllow {
 		t.Fatalf("1st: want allow, got %s (%s)", a.Type, a.Message)
 	}
-	if a := s.Check(key); a.Type != GuardAllow {
+	if a := s.Check(key, false); a.Type != GuardAllow {
 		t.Fatalf("2nd: want allow, got %s (%s)", a.Type, a.Message)
 	}
 	// 3rd: nudge
-	a := s.Check(key)
+	a := s.Check(key, false)
 	if a.Type != GuardDiagnose {
 		t.Fatalf("3rd: want diagnose(nudge), got %s (%s)", a.Type, a.Message)
 	}
@@ -25,51 +25,51 @@ func TestReadLoopState_NudgeThenBlock(t *testing.T) {
 		t.Fatal("3rd: nudge message empty")
 	}
 	// 4th: block
-	a = s.Check(key)
+	a = s.Check(key, false)
 	if a.Type != GuardBlock {
 		t.Fatalf("4th: want block, got %s (%s)", a.Type, a.Message)
 	}
 }
 
 func TestReadLoopState_DifferentScopeIndependent(t *testing.T) {
-	s := NewReadLoopState()
+	s := NewLoopTracker(3, 4, false)
 	k1 := "read:a.go::symbol:Run"
 	k2 := "read:a.go::L10-50"
 	// k2 read 3 times → nudge, but must not inflate k1's count.
-	if a := s.Check(k2); a.Type != GuardAllow {
+	if a := s.Check(k2, false); a.Type != GuardAllow {
 		t.Fatalf("k2 1st: want allow, got %s", a.Type)
 	}
-	if a := s.Check(k2); a.Type != GuardAllow {
+	if a := s.Check(k2, false); a.Type != GuardAllow {
 		t.Fatalf("k2 2nd: want allow, got %s", a.Type)
 	}
-	if a := s.Check(k2); a.Type != GuardDiagnose {
+	if a := s.Check(k2, false); a.Type != GuardDiagnose {
 		t.Fatalf("k2 3rd: want diagnose, got %s", a.Type)
 	}
 	// k1 is independent: its 1st and 2nd must still be allow despite k2's counts.
-	if a := s.Check(k1); a.Type != GuardAllow {
+	if a := s.Check(k1, false); a.Type != GuardAllow {
 		t.Fatalf("k1 1st: want allow (independent of k2), got %s", a.Type)
 	}
-	if a := s.Check(k1); a.Type != GuardAllow {
+	if a := s.Check(k1, false); a.Type != GuardAllow {
 		t.Fatalf("k1 2nd: want allow, got %s", a.Type)
 	}
 }
 
 func TestReadLoopState_Reset(t *testing.T) {
-	s := NewReadLoopState()
+	s := NewLoopTracker(3, 4, false)
 	key := "read:a.go::symbol:Run"
-	s.Check(key)
-	s.Check(key)
-	s.Check(key) // nudge
+	s.Check(key, false)
+	s.Check(key, false)
+	s.Check(key, false) // nudge
 	s.Reset()
 	// After reset, 1st is allow again
-	if a := s.Check(key); a.Type != GuardAllow {
+	if a := s.Check(key, false); a.Type != GuardAllow {
 		t.Fatalf("after reset 1st: want allow, got %s", a.Type)
 	}
 }
 
 func TestReadLoopState_NilSafe(t *testing.T) {
-	var s *ReadLoopState
-	if a := s.Check("read:a.go::"); a.Type != GuardAllow {
+	var s *LoopTracker
+	if a := s.Check("read:a.go::", false); a.Type != GuardAllow {
 		t.Errorf("nil Check: want allow, got %s", a.Type)
 	}
 	s.Reset() // must not panic

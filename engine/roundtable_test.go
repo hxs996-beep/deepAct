@@ -290,9 +290,9 @@ func TestRun_VerdictExecutesInSameRun(t *testing.T) {
 		state:     &TaskState{TaskID: "test-verdict-run"},
 		history:   []Message{},
 		config:    EngineConfig{ModelName: "test-model", MaxTurns: 10},
-		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
-		readLoop:  NewReadLoopState(),
-		errorLoop: NewErrorLoopState(0),
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
+		readLoop:  NewLoopTracker(3, 4, false),
+		errorLoop: NewLoopTracker(0, 3, true),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	e.state.Roundtable = &RoundtableState{

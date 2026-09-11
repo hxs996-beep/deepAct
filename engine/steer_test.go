@@ -181,9 +181,9 @@ func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
 		history:   []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
 		config:    EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
-		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopGuard("", 6)},
-		readLoop:  NewReadLoopState(),
-		errorLoop: NewErrorLoopState(0),
+		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopTracker(0, 6, false)},
+		readLoop:  NewLoopTracker(3, 4, false),
+		errorLoop: NewLoopTracker(0, 3, true),
 	}
 
 	// Steer before Run - simulates UI calling Steer during a prior Blocked run.

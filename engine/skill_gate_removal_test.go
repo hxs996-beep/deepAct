@@ -42,7 +42,7 @@ func TestExecuteTurn_SkillHardGateRemoved_EditProceeds(t *testing.T) {
 		context:   &stubContextBuilder{},
 		tools:     stubToolExecutor{},
 		skills:    skillReg,
-		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
 		state:     &TaskState{TurnNumber: 5},
 		history:   []Message{{Role: "user", Content: "修改代码"}},
 		config:    EngineConfig{ModelName: "test-model"},

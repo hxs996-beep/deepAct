@@ -71,14 +71,13 @@ func TestParseReadMultiTargets(t *testing.T) {
 func TestLoopGuard_ReadMultiPerTargetBlocks(t *testing.T) {
 	// read_multi of the same (path, scope) repeatedly must be blocked by the
 	// loop guard, just like repeated single reads — read_multi must not bypass.
-	g := NewLoopGuard("", 3)
+	g := NewLoopTracker(0, 3, false)
 	tgt := readMultiTargetView{Path: "a.go", Symbol: "Run"}
-	synthInput, _ := json.Marshal(map[string]interface{}{"path": tgt.Path, "symbol": tgt.Symbol, "offset": tgt.Offset, "limit": tgt.Limit})
-	synth := ToolCallRequest{ID: "c", Name: "read", Input: synthInput}
+	key := "read:" + normalizePath(tgt.Path, "") + "::" + readMultiTargetScope(tgt)
 
 	var lastAction GuardAction
 	for i := 0; i < 3; i++ {
-		lastAction = g.Check(synth)
+		lastAction = g.Check(key, false)
 	}
 	if lastAction.Type != GuardBlock {
 		t.Fatalf("after 3 repeated read_multi targets, action = %v, want GuardBlock", lastAction.Type)

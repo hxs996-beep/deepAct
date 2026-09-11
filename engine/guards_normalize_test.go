@@ -39,7 +39,7 @@ func TestExtractToolKey_NormalizesPathVariations(t *testing.T) {
 // and trip the guard at maxRepeats — the behavior that was broken before.
 func TestLoopGuard_NormalizedPathsAccumulate(t *testing.T) {
 	workDir := "/Users/x/deepact"
-	g := NewLoopGuard(workDir, 4)
+	g := NewLoopTracker(0, 4, false)
 	calls := []ToolCallRequest{
 		{Name: "read", Input: json.RawMessage(`{"path":"ui/model.go"}`)},
 		{Name: "read", Input: json.RawMessage(`{"path":"./ui/model.go"}`)},
@@ -47,7 +47,7 @@ func TestLoopGuard_NormalizedPathsAccumulate(t *testing.T) {
 		{Name: "read", Input: json.RawMessage(`{"path":"/Users/x/deepact/ui/model.go"}`)}, // 4th → block
 	}
 	for i, c := range calls {
-		a := g.Check(c)
+		a := g.Check(extractToolKey(c, workDir), false)
 		if i < 3 && a.Type != GuardAllow {
 			t.Fatalf("call %d: want allow, got %s (%s)", i, a.Type, a.Message)
 		}

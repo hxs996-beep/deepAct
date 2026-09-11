@@ -57,9 +57,9 @@ type Engine struct {
 	steerMu      sync.Mutex
 	steerQueue   []string
 	guards       *GuardSystem
-	readLoop     *ReadLoopState
-	errorLoop    *ErrorLoopState
-	progressLoop *ProgressLoopState
+	readLoop     *LoopTracker
+	errorLoop    *LoopTracker
+	progressLoop *LoopTracker
 	// readProgressKeys tracks read keys ("read:path::scope") already seen
 	// this Run. A novel read (new key) counts as progress for
 	// ProgressLoopState, so legitimate investigation — reading new content —
@@ -162,7 +162,7 @@ type PendingEditAction struct {
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopGuard(cfg.WorkDir, 6), // block after 6 repeats of same (tool, path)
+		loop:  NewLoopTracker(0, 6, false), // block after 6 repeats of same (tool, path)
 	}
 	e := &Engine{
 		model:        deps.Model,
@@ -178,9 +178,9 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		state:        &TaskState{TaskID: cfg.SessionID},
 		history:      make([]Message, 0),
 		guards:       guard,
-		readLoop:     NewReadLoopState(),
-		errorLoop:    NewErrorLoopState(0),
-		progressLoop: NewProgressLoopState(6),
+		readLoop:     NewLoopTracker(3, 4, false), // 3rd nudge / 4th block
+		errorLoop:    NewLoopTracker(0, 3, true),  // 3 errors → block, success resets
+		progressLoop: NewLoopTracker(4, 6, true),  // 4th nudge / 6th block, progress resets
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	e.collabHall = NewCollabHall(e)
@@ -785,7 +785,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		// block), which covers tools LoopGuard doesn't track (grep/bash/etc.).
 		if turnResult.LastOp != "" {
 			if strings.HasPrefix(turnResult.LastOp, "read:") {
-				action := e.readLoop.Check(turnResult.LastOp)
+				action := e.readLoop.Check(turnResult.LastOp, false)
 				switch action.Type {
 				case GuardDiagnose:
 					nudge := buildReadLoopNudge(turnResult.LastOp, zh)
@@ -811,7 +811,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				// varied args on the same target still accumulate and trip,
 				// unlike the content-hash-based LoopGuard/consecutiveSameOp.
 				if e.errorLoop != nil {
-					action := e.errorLoop.Check(coarseOp(turnResult.LastOp), turnResult.LastOpError)
+					action := e.errorLoop.Check(coarseOp(turnResult.LastOp), !turnResult.LastOpError)
 					if action.Type == GuardBlock {
 						msg := "检测到重复的工具错误，Agent 在同一操作上反复失败。请提供新的方向或修正参数。"
 						if !zh {
@@ -843,7 +843,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		// operation-repeat guards: every turn is a *different* operation, so
 		// ReadLoopState / consecutiveSameOp / ErrorLoopState never fire.
 		if e.progressLoop != nil {
-			action := e.progressLoop.Check(turnResult.MadeProgress)
+			action := e.progressLoop.Check("", turnResult.MadeProgress)
 			switch action.Type {
 			case GuardDiagnose:
 				nudge := buildProgressNudge(zh)
