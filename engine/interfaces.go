@@ -12,12 +12,6 @@ type ToolExecutor interface {
 	Specs() []ModelTool
 }
 
-type PolicyChecker interface {
-	CheckAmbiguity(userMsg string, state *TaskState) AmbiguityResult
-	CheckDesign(plan string, context string) DesignReview
-	CheckScope(action string, state *TaskState) ScopeResult
-}
-
 type ContextBuilder interface {
 	Build(state *TaskState, history []Message, toolResults []ToolResult) []ModelMessage
 	EstimateTokens(messages []ModelMessage) int

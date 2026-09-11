@@ -333,31 +333,6 @@ type Dimension struct {
 	Improvement string  `json:"improvement"`
 }
 
-type AmbiguityResult struct {
-	Score     float64  `json:"score"`
-	Missing   []string `json:"missing"`
-	Questions []string `json:"questions"`
-}
-
-type DesignReview struct {
-	Verdict string        `json:"verdict"`
-	Issues  []DesignIssue `json:"issues"`
-}
-
-type DesignIssue struct {
-	Pattern     string `json:"pattern"`
-	Severity    string `json:"severity"`
-	What        string `json:"what"`
-	Why         string `json:"why"`
-	Alternative string `json:"alternative"`
-}
-
-type ScopeResult struct {
-	Allowed bool     `json:"allowed"`
-	Reasons []string `json:"reasons,omitempty"`
-}
-
-// DebateRoundPhase labels the phase of a single debate round.
 type DebateRoundPhase string
 
 const (

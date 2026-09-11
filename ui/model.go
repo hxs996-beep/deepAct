@@ -3118,7 +3118,7 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 		b.WriteString(fmt.Sprintf("- %s — %s\n", t.Command, t.Description))
 	}
 	b.WriteString("- (MCP) — tools registered by configured MCP servers\n")
-	b.WriteString("- (skills) — tools exposed by the active skill\n\n")
+	b.WriteString("- (skills) — loadable via `/<name>` or the `load_skill` tool\n\n")
 
 	b.WriteString("Type a natural language request to start, or use `/debate <需求>` for multi-role debate.\n")
 	b.WriteString("Use `/collab <需求>` for multi-role collaboration pipeline.\n")

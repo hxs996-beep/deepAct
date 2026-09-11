@@ -9,12 +9,11 @@ import (
 // SkillFile represents the parsed content of a SKILL.md file.
 // All fields are populated by ParseMarkdownSkill from YAML frontmatter.
 type SkillFile struct {
-	Name                  string
-	Description           string
-	Keywords              []string
-	Content               string
-	NextSkills            []string
-	AutoActivateThreshold *int
+	Name        string
+	Description string
+	Keywords    []string
+	Content     string
+	NextSkills  []string
 
 	// Claude Code-compatible fields
 	AllowedTools           []string
@@ -84,7 +83,6 @@ func SkillFromSkillFile(sf SkillFile) *Skill {
 		Keywords:               sf.Keywords,
 		Content:                sf.Content,
 		NextSkills:             sf.NextSkills,
-		AutoActivateThreshold:  sf.AutoActivateThreshold,
 		AllowedTools:           sf.AllowedTools,
 		ArgumentHint:           sf.ArgumentHint,
 		Arguments:              sf.Arguments,

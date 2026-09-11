@@ -10,13 +10,8 @@ type Skill struct {
 	Name        string   // Unique identifier, e.g. "debugging"
 	Description string   // Short description for matching
 	Content     string   // Full skill instructions injected into prompt
-	Keywords    []string // Retained as metadata (matching is LLM-semantic)
+	Keywords    []string // Retained as metadata
 	NextSkills  []string // Skill names suggested after this skill completes
-
-	// AutoActivateThreshold is retained as metadata.
-	// Unused since keyword-based auto-activation was removed in favor of
-	// semantic matching.
-	AutoActivateThreshold *int
 
 	// Claude Code-compatible frontmatter fields. Parsed from YAML
 	// frontmatter in SKILL.md files.
@@ -24,7 +19,7 @@ type Skill struct {
 	AllowedTools           []string // allowed-tools: tool permission patterns
 	ArgumentHint           string   // argument-hint: hint showing argument placeholders
 	Arguments              []string // arguments: argument names for $name substitution
-	WhenToUse              string   // when_to_use: when to auto-invoke, including trigger phrases
+	WhenToUse              string   // when_to_use: trigger phrases for when to use this skill
 	Model                  string   // model: per-skill model override
 	Effort                 string   // effort: reasoning effort level
 	Agent                  string   // agent: agent type for execution
@@ -32,7 +27,7 @@ type Skill struct {
 	Hooks                  string   // hooks: JSON-encoded hook configuration
 	Paths                  []string // paths: conditional activation file patterns
 	UserInvocable          bool     // user-invocable: can be invoked via / (default true)
-	DisableModelInvocation bool     // disable-model-invocation: skip auto-activation
+	DisableModelInvocation bool     // disable-model-invocation: exclude from model-invocable catalog
 	Version                string   // version: skill version string
 	Shell                  string   // shell: shell execution settings (JSON-encoded)
 	BaseDir                string   // base directory of the skill (for ${SKILL_DIR})

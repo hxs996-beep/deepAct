@@ -31,7 +31,6 @@ const (
 type EngineDeps struct {
 	Model       ModelClient
 	Tools       ToolExecutor
-	Policy      PolicyChecker
 	Context     ContextBuilder
 	Compressor  Compressor
 	Session     SessionStore
@@ -45,7 +44,6 @@ type EngineDeps struct {
 type Engine struct {
 	model        ModelClient
 	tools        ToolExecutor
-	policy       PolicyChecker
 	context      ContextBuilder
 	compressor   Compressor
 	session      SessionStore
@@ -69,7 +67,7 @@ type Engine struct {
 	readProgressKeys map[string]bool
 	evalStore        EvalStore
 
-	// pendingPinnedMessages holds messages (e.g., skill activations) that should
+	// pendingPinnedMessages holds messages (e.g., skill loads) that should
 	// be appended at the END of the assembled messages array for the current
 	// Run() call, rather than mixed into e.history. This preserves the stable
 	// prefix cache across turns — history only grows with actual conversation.
@@ -169,7 +167,6 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	e := &Engine{
 		model:        deps.Model,
 		tools:        deps.Tools,
-		policy:       deps.Policy,
 		context:      deps.Context,
 		compressor:   deps.Compressor,
 		session:      deps.Session,
@@ -353,7 +350,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Skill command handling — /skills (list) and /skill <name> (activate)
+	// Skill command handling — /skills (list) and /skill <name> (load)
 	if sc := parseSkillCommand(userMsg); sc != nil {
 		switch sc.action {
 		case "list":
@@ -381,7 +378,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}
 			return &EngineResponse{Summary: b.String(), Stage: StageAct}, nil
 
-		case "activate":
+		case "load":
 			s := e.skills.Get(sc.name)
 			if s == nil {
 				// Try case-insensitive match
@@ -1270,63 +1267,6 @@ func (e *Engine) recordRunEval(_ bool) {
 	}
 }
 
-// detectIntentShift checks if the user's message signals an intent shift from
-// "development/implementation" to "operational use/verification" of existing work.
-// The auto-deactivation mechanism it was written for was removed as part of the
-// skill load-semantics refactor (skills are now loaded on demand via /<name> rather
-// than activated and auto-deactivated), so this method currently has no callers.
-// It is kept as a heuristic reference for detecting such intent shifts.
-//
-// Heuristics:
-//   - "用这个/拿这个/试试这个 X" pattern: user wants to USE/TRY existing code
-//   - Operational intent (看看/试试/跑一下/检查/验证) without development intent (写/实现/开发/添加)
-func (e *Engine) detectIntentShift(userMsg string) bool {
-	msg := strings.ToLower(userMsg)
-
-	// Strong shift signals: user wants to apply something to existing work
-	strongShiftPhrases := []string{
-		"用这个",  // "use this..."
-		"拿这个",  // "take this..."
-		"试试这个", // "try this..."
-		"用这个token",
-		"用这个key",
-		"用这个密钥",
-	}
-	for _, p := range strongShiftPhrases {
-		if strings.Contains(msg, p) {
-			return true
-		}
-	}
-
-	// General heuristic: operational intent without development intent
-	// Development keywords indicate the user is still building/implementing
-	devWords := []string{"写", "实现", "开发", "添加", "增加", "创建", "修改", "重构", "设计", "建一个"}
-	// Operational keywords indicate the user wants to use/verify existing work
-	opWords := []string{
-		"看看", "看一下", "看一看", "检查", "检查一下", "验证", "验证一下",
-		"试试", "试一下", "测试一下",
-		"跑一下", "跑起来", "启动", "运行", "运行一下",
-		"看看结果", "看看效果",
-	}
-
-	hasDev := false
-	for _, w := range devWords {
-		if strings.Contains(msg, w) {
-			hasDev = true
-			break
-		}
-	}
-	hasOp := false
-	for _, w := range opWords {
-		if strings.Contains(msg, w) {
-			hasOp = true
-			break
-		}
-	}
-
-	return hasOp && !hasDev
-}
-
 // accumulateUsage adds a sub-agent's token usage to the main engine's
 // per-Run accumulator. Thread-safe: uses usageMu for concurrent goroutine access.
 func (e *Engine) accumulateUsage(usage *ModelUsage) {
@@ -1353,8 +1293,8 @@ func msgIsChinese(msg string) bool {
 
 // skillCommand represents a parsed /skill or /skills command.
 type skillCommand struct {
-	action string // "list" or "activate"
-	name   string // skill name for "activate"
+	action string // "list" or "load"
+	name   string // skill name for "load"
 }
 
 // parseSkillCommand checks if userMsg is a /skill, /skills, or /<skillname> command.
@@ -1385,10 +1325,10 @@ func parseSkillCommand(userMsg string) *skillCommand {
 		if len(parts) < 2 {
 			return &skillCommand{action: "list"}
 		}
-		return &skillCommand{action: "activate", name: strings.ToLower(parts[1])}
+		return &skillCommand{action: "load", name: strings.ToLower(parts[1])}
 	default:
 		if isValidSkillName(cmd) {
-			return &skillCommand{action: "activate", name: cmd}
+			return &skillCommand{action: "load", name: cmd}
 		}
 		return nil
 	}

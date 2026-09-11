@@ -18,7 +18,6 @@ import (
 	"github.com/deepact/deepact/engine"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/memory"
-	"github.com/deepact/deepact/policy"
 	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
 	"github.com/deepact/deepact/skill"
@@ -247,10 +246,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	agentReg := engine.NewDefaultRegistry(runner)
 	runner.SetRegistry(agentReg)
 
-	checker := policy.NewChecker(0.45)
-	checker.SetModelClient(client)
-	checker.SetModelName(config.ModelName)
-
 	store, err := session.NewStore(defaultSessionDir())
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
@@ -317,7 +312,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
-		Policy:     checker,
 		Context:    contextAssembler,
 		Compressor: compressor,
 		Session:    store,
