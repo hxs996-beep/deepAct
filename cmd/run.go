@@ -139,17 +139,15 @@ func buildSkillSuggestions(reg *skill.Registry) {
 }
 
 // buildSkillsBlock renders a static skills list for the stable zone.
-// Each skill is shown as "name: description". The model uses semantic
-// understanding (not keyword matching) to decide when to call activate_skill.
+// Each skill is shown as "name: description". The model loads a skill's full
+// instructions via the load_skill tool when the task matches.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("BLOCKING REQUIREMENT: when the user's request semantically matches a skill below, call the `activate_skill` tool to activate it BEFORE generating any other response about the task. Do not merely mention a skill by name — invoke it. If no skill matches, respond normally.\n")
-	b.WriteString("Type `/<skillname>` (e.g., `/brainstorming`) to activate a specific skill explicitly. ")
-	b.WriteString("Use `activate_skill` to switch skills when the current one reaches its terminal state.\n\n")
+	b.WriteString("以下为可用技能摘要，仅供选择。当用户明确命名某技能，或任务明显匹配某技能描述时，先调用 `load_skill` 工具加载其全文，再遵循其中指令。摘要不含完整指令，加载前不得推断或遵循。用户也可用 `/<name>` 直接加载。若当前技能到达终态需切换，调用 `load_skill` 加载下一个技能。\n\n")
 	for _, s := range all {
 		if s.DisableModelInvocation {
 			continue
@@ -168,7 +166,7 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		}
 		b.WriteString("\n")
 
-		// Next skills in chain — LLM uses this to know what to activate next
+		// Next skills in chain — LLM uses this to know what to load next
 		if len(s.NextSkills) > 0 && !(len(s.NextSkills) == 1 && s.NextSkills[0] == "") {
 			b.WriteString("  → Next: ")
 			b.WriteString(strings.Join(s.NextSkills, ", "))
