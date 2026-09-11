@@ -18,10 +18,10 @@ func TestSummarizeArgs(t *testing.T) {
 		wantNonEmpty bool
 	}{
 		{
-			name:         "activate_skill shows skill name",
-			toolName:     "activate_skill",
+			name:         "load_skill shows skill name",
+			toolName:     "load_skill",
 			input:        map[string]interface{}{"skill_name": "brainstorming", "reasoning": "explore design"},
-			wantContains: "activate skill: brainstorming",
+			wantContains: "load skill: brainstorming",
 		},
 		{
 			name:         "skill_install shows skill name",
@@ -169,7 +169,7 @@ func TestSummarizeArgs(t *testing.T) {
 // must produce a non-empty Detail so the UI never shows a bare "[*]  ✓" node.
 func TestSummarizeArgsNeverEmpty(t *testing.T) {
 	tools := []string{
-		"activate_skill", "skill_install", "handoff_to_agent",
+		"load_skill", "skill_install", "handoff_to_agent",
 		"bash", "read", "read_multi", "grep", "glob", "edit", "write", "lsp",
 		"mcp_unknown_tool", "custom_tool", "",
 	}

@@ -105,9 +105,8 @@ func TestSteer_EmitsProgressEvent(t *testing.T) {
 
 func TestClearSessionState_ClearsSteerQueue(t *testing.T) {
 	e := &Engine{
-		state:           &TaskState{},
-		history:         make([]Message, 0),
-		activatedSkills: make(map[string]bool),
+		state:   &TaskState{},
+		history: make([]Message, 0),
 	}
 
 	e.Steer("queued message")
@@ -165,8 +164,6 @@ func (steerContextBuilder) EstimateTokens(msgs []ModelMessage) int {
 	return total
 }
 
-func (steerContextBuilder) SetActiveSkill(_, _ string) {}
-
 func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 	// Turn 1: model returns text-only (Done=true) -> steer queue has msg -> drain -> continue
 	// Turn 2: model returns text-only (Done=true) -> steer queue empty -> break
@@ -178,16 +175,15 @@ func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 	}
 	model := &multiTurnModel{turns: [][]ModelChunk{turn1Chunks, turn2Chunks}}
 	e := &Engine{
-		model:           model,
-		tools:           stubToolExecutor{},
-		context:         steerContextBuilder{},
-		state:           &TaskState{TaskID: "test", ConfirmedScope: true},
-		history:         []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
-		config:          EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
-		guards:          &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopGuard("", 6)},
-		readLoop:        NewReadLoopState(),
-		errorLoop:       NewErrorLoopState(0),
-		activatedSkills: make(map[string]bool),
+		model:     model,
+		tools:     stubToolExecutor{},
+		context:   steerContextBuilder{},
+		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
+		history:   []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
+		config:    EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopGuard("", 6)},
+		readLoop:  NewReadLoopState(),
+		errorLoop: NewErrorLoopState(0),
 	}
 
 	// Steer before Run - simulates UI calling Steer during a prior Blocked run.

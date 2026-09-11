@@ -9,7 +9,7 @@ func TestNodeDetailLabelFallback(t *testing.T) {
 		want string
 	}{
 		{"uses detail when present", ToolNode{Name: "bash", Detail: "go build"}, "go build"},
-		{"falls back to name when detail empty", ToolNode{Name: "activate_skill", Detail: ""}, "activate_skill"},
+		{"falls back to name when detail empty", ToolNode{Name: "load_skill", Detail: ""}, "load_skill"},
 		{"falls back to name when detail whitespace", ToolNode{Name: "handoff_to_agent", Detail: "   "}, "handoff_to_agent"},
 		{"em-dash when both empty", ToolNode{Name: "", Detail: ""}, "—"},
 	}
@@ -26,13 +26,13 @@ func TestNodeDetailLabelFallback(t *testing.T) {
 // rendered exec block must contain the tool name so a node is never just "[*]  ✓".
 func TestRenderExecBlockNeverBareIcon(t *testing.T) {
 	lines := renderExecBlock([]ToolNode{
-		{Name: "activate_skill", Detail: "", Icon: "[*]", Done: true},
+		{Name: "load_skill", Detail: "", Icon: "[*]", Done: true},
 	}, 80)
 	joined := ""
 	for _, l := range lines {
 		joined += l + "\n"
 	}
-	if !contains(joined, "activate_skill") {
+	if !contains(joined, "load_skill") {
 		t.Fatalf("exec block should contain tool name for empty-Detail node, got:\n%s", joined)
 	}
 }

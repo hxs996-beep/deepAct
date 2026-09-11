@@ -43,7 +43,7 @@ func TestExecuteTurn_SkillHardGateRemoved_EditProceeds(t *testing.T) {
 		tools:     stubToolExecutor{},
 		skills:    skillReg,
 		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(false)},
-		state:     &TaskState{TurnNumber: 5, ActiveSkillName: "systematic-debugging"},
+		state:     &TaskState{TurnNumber: 5},
 		history:   []Message{{Role: "user", Content: "修改代码"}},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,

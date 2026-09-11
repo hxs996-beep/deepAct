@@ -1,9 +1,9 @@
 // Package skill provides a methodology skill system for guiding agent behavior.
 //
 // Skills are composable methodology templates (like "brainstorming", "debugging")
-// that can be activated by the user via /<skillname> commands or by the model
-// when relevant. Available skills are listed in the stable system prompt block
-// so the model can decide which methodology to apply.
+// that can be loaded by the user via /<skillname> commands or by the model via
+// the load_skill tool. Available skills are listed in the stable system prompt
+// block so the model can decide which methodology to apply.
 package skill
 
 type Skill struct {

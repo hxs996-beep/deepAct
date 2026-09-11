@@ -158,14 +158,6 @@ func TestFormatTaskStateVolatile(t *testing.T) {
 			want: `"turn_number":5`,
 		},
 		{
-			name: "with active skill",
-			state: &engine.TaskState{
-				ActiveSkillName: "test-driven-development",
-				TurnNumber:      1,
-			},
-			want: `"active_skill_name":"test-driven-development"`,
-		},
-		{
 			name: "with consecutive failures",
 			state: &engine.TaskState{
 				ConsecutiveFailures: 3,
@@ -359,56 +351,6 @@ func TestBuild_AgentsBlockInStableZone(t *testing.T) {
 	if !found {
 		t.Errorf("Build() should include AGENTS.md content in stable zone")
 	}
-}
-
-func TestBuild_ActiveSkillInTail(t *testing.T) {
-	assembler := NewContextAssembler(".", nil)
-	assembler.userLang = "中文"
-	assembler.userLangSet = true
-	assembler.stableSessionBlock = "stable"
-	assembler.skillsBlock = "[skills]"
-
-	assembler.SetActiveSkill("writing-plans", "1. 先写计划\n2. 再执行")
-
-	state := &engine.TaskState{Goal: "g"}
-	history := []engine.Message{
-		{Role: "user", Content: "开始"},
-		{Role: "assistant", Content: "好的"},
-	}
-	msgs := assembler.Build(state, history, nil)
-
-	lastHistoryIdx := -1
-	skillIdx := -1
-	for i, msg := range msgs {
-		if msg.Content == "开始" || msg.Content == "好的" {
-			lastHistoryIdx = i
-		}
-		if strings.Contains(msg.Content, "[SKILL ACTIVATED: writing-plans]") {
-			skillIdx = i
-		}
-	}
-	if skillIdx == -1 {
-		t.Fatalf("active skill message not found in Build output")
-	}
-	if lastHistoryIdx == -1 {
-		t.Fatalf("history messages not found in Build output")
-	}
-	// The skill methodology must sit AFTER history (tail snapshot, recency), not
-	// in the stable zone before it — so a skill change only touches the tail and
-	// never shifts the cached history prefix.
-	if skillIdx <= lastHistoryIdx {
-		t.Errorf("active skill message should come AFTER history; skillIdx=%d lastHistoryIdx=%d", skillIdx, lastHistoryIdx)
-	}
-	// It must appear before Block B (the very last "current state" message).
-	for j := skillIdx + 1; j < len(msgs); j++ {
-		if strings.Contains(msgs[j].Content, "Block B") {
-			if !strings.Contains(msgs[skillIdx].Content, "1. 先写计划") {
-				t.Errorf("skill methodology text should be preserved in tail block")
-			}
-			return
-		}
-	}
-	t.Errorf("Block B not found after the active skill message")
 }
 
 func TestBuildBlockB_SupersedesPhrase(t *testing.T) {

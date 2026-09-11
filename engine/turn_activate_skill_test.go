@@ -8,26 +8,22 @@ import (
 	"github.com/deepact/deepact/skill"
 )
 
-// stubContextBuilder is a minimal ContextBuilder for testing activate_skill
-// interception. Only SetActiveSkill is exercised; other methods are no-ops.
-type stubContextBuilder struct {
-	activeSkill string
-}
+// stubContextBuilder is a minimal ContextBuilder for testing load_skill
+// interception. Other methods are no-ops.
+type stubContextBuilder struct{}
 
 func (s *stubContextBuilder) Build(_ *TaskState, _ []Message, _ []ToolResult) []ModelMessage {
 	return nil
 }
 func (s *stubContextBuilder) EstimateTokens(_ []ModelMessage) int { return 0 }
-func (s *stubContextBuilder) SetActiveSkill(name, _ string) { s.activeSkill = name }
 
-// TestProcessActivateSkillCalls_NoOrphanedToolCalls verifies that every
-// activate_skill call receives a tool response message — even when the
+// TestProcessLoadSkillCalls_NoOrphanedToolCalls verifies that every
+// load_skill call receives a tool response message — even when the
 // call is invalid (bad JSON, empty name, unknown skill). Without a response,
 // the DeepSeek API rejects the next request because the assistant message
 // contains a tool_call_id with no matching tool message, permanently
 // stalling the session.
-func TestProcessActivateSkillCalls_NoOrphanedToolCalls(t *testing.T) {
-	// Set up a minimal engine with one known skill.
+func TestProcessLoadSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 	skillReg := skill.NewRegistry()
 	skillReg.Register(&skill.Skill{
 		Name:        "brainstorming",
@@ -36,10 +32,9 @@ func TestProcessActivateSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 	})
 
 	e := &Engine{
-		skills:          skillReg,
-		state:           &TaskState{},
-		activatedSkills: make(map[string]bool),
-		config:          EngineConfig{},
+		skills: skillReg,
+		state:  &TaskState{},
+		config: EngineConfig{},
 	}
 
 	tests := []struct {
@@ -54,7 +49,7 @@ func TestProcessActivateSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 			callID:  "call_bad_json",
 			input:   `{invalid json}`,
 			wantErr: true,
-			wantSub: "invalid activate_skill arguments",
+			wantSub: "invalid load_skill arguments",
 		},
 		{
 			name:    "empty skill_name",
@@ -75,9 +70,9 @@ func TestProcessActivateSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := []ToolCallRequest{
-				{ID: tt.callID, Name: ActivateSkillToolName, Input: json.RawMessage(tt.input)},
+				{ID: tt.callID, Name: LoadSkillToolName, Input: json.RawMessage(tt.input)},
 			}
-			msgs := e.processActivateSkillCalls(calls)
+			msgs := e.processLoadSkillCalls(calls)
 			if len(msgs) != 1 {
 				t.Fatalf("expected 1 tool response, got %d — tool_call %q is orphaned", len(msgs), tt.callID)
 			}
@@ -94,9 +89,10 @@ func TestProcessActivateSkillCalls_NoOrphanedToolCalls(t *testing.T) {
 	}
 }
 
-// TestProcessActivateSkillCalls_ValidActivation verifies that a valid
-// activate_skill call produces a success tool response AND activates the skill.
-func TestProcessActivateSkillCalls_ValidActivation(t *testing.T) {
+// TestProcessLoadSkillCalls_ValidReturnsFullContent verifies that a valid
+// load_skill call returns the skill's full content as the tool result and
+// writes NO engine state (load semantics, not activate semantics).
+func TestProcessLoadSkillCalls_ValidReturnsFullContent(t *testing.T) {
 	skillReg := skill.NewRegistry()
 	skillReg.Register(&skill.Skill{
 		Name:        "brainstorming",
@@ -105,17 +101,15 @@ func TestProcessActivateSkillCalls_ValidActivation(t *testing.T) {
 	})
 
 	e := &Engine{
-		skills:          skillReg,
-		state:           &TaskState{},
-		activatedSkills: make(map[string]bool),
-		config:          EngineConfig{},
-		context:         &stubContextBuilder{},
+		skills: skillReg,
+		state:  &TaskState{},
+		config: EngineConfig{},
 	}
 
 	calls := []ToolCallRequest{
-		{ID: "call_ok", Name: ActivateSkillToolName, Input: json.RawMessage(`{"skill_name":"brainstorming"}`)},
+		{ID: "call_ok", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"brainstorming"}`)},
 	}
-	msgs := e.processActivateSkillCalls(calls)
+	msgs := e.processLoadSkillCalls(calls)
 
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool response, got %d", len(msgs))
@@ -123,21 +117,18 @@ func TestProcessActivateSkillCalls_ValidActivation(t *testing.T) {
 	if msgs[0].ToolCallID != "call_ok" {
 		t.Errorf("ToolCallID = %q, want call_ok", msgs[0].ToolCallID)
 	}
-	if !strings.Contains(msgs[0].Content, "Activated skill") {
-		t.Errorf("Content = %q, want success message", msgs[0].Content)
+	if !strings.Contains(msgs[0].Content, "[SKILL — brainstorming]") {
+		t.Errorf("Content = %q, want [SKILL — brainstorming] marker", msgs[0].Content)
 	}
-	if e.state.ActiveSkillName != "brainstorming" {
-		t.Errorf("ActiveSkillName = %q, want brainstorming", e.state.ActiveSkillName)
-	}
-	if !e.activatedSkills["brainstorming"] {
-		t.Error("activatedSkills should contain brainstorming")
+	if !strings.Contains(msgs[0].Content, "step 1...") {
+		t.Errorf("Content = %q, want full skill content", msgs[0].Content)
 	}
 }
 
-// TestProcessActivateSkillCalls_Mixed verifies that when activate_skill calls
-// are mixed with regular tool calls, only activate_skill calls get responses
-// from processActivateSkillCalls (regular calls are handled elsewhere).
-func TestProcessActivateSkillCalls_Mixed(t *testing.T) {
+// TestProcessLoadSkillCalls_Mixed verifies that when load_skill calls
+// are mixed with regular tool calls, only load_skill calls get responses
+// from processLoadSkillCalls (regular calls are handled elsewhere).
+func TestProcessLoadSkillCalls_Mixed(t *testing.T) {
 	skillReg := skill.NewRegistry()
 	skillReg.Register(&skill.Skill{
 		Name:        "brainstorming",
@@ -146,25 +137,22 @@ func TestProcessActivateSkillCalls_Mixed(t *testing.T) {
 	})
 
 	e := &Engine{
-		skills:          skillReg,
-		state:           &TaskState{},
-		activatedSkills: make(map[string]bool),
-		config:          EngineConfig{},
-		context:         &stubContextBuilder{},
+		skills: skillReg,
+		state:  &TaskState{},
+		config: EngineConfig{},
 	}
 
 	calls := []ToolCallRequest{
 		{ID: "call_read", Name: "read", Input: json.RawMessage(`{"path":"foo.go"}`)},
-		{ID: "call_bad", Name: ActivateSkillToolName, Input: json.RawMessage(`{"skill_name":"nope"}`)},
-		{ID: "call_ok", Name: ActivateSkillToolName, Input: json.RawMessage(`{"skill_name":"brainstorming"}`)},
+		{ID: "call_bad", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"nope"}`)},
+		{ID: "call_ok", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"brainstorming"}`)},
 		{ID: "call_grep", Name: "grep", Input: json.RawMessage(`{"pattern":"foo"}`)},
 	}
 
-	msgs := e.processActivateSkillCalls(calls)
+	msgs := e.processLoadSkillCalls(calls)
 
-	// Only 2 activate_skill calls → 2 responses. Regular calls are skipped.
 	if len(msgs) != 2 {
-		t.Fatalf("expected 2 tool responses (for activate_skill only), got %d", len(msgs))
+		t.Fatalf("expected 2 tool responses (for load_skill only), got %d", len(msgs))
 	}
 
 	ids := map[string]bool{}
@@ -178,10 +166,10 @@ func TestProcessActivateSkillCalls_Mixed(t *testing.T) {
 		t.Error("missing tool response for call_ok (valid skill)")
 	}
 	if ids["call_read"] {
-		t.Error("regular call 'read' should not get a response from processActivateSkillCalls")
+		t.Error("regular call 'read' should not get a response from processLoadSkillCalls")
 	}
 	if ids["call_grep"] {
-		t.Error("regular call 'grep' should not get a response from processActivateSkillCalls")
+		t.Error("regular call 'grep' should not get a response from processLoadSkillCalls")
 	}
 }
 

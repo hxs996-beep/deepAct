@@ -152,11 +152,10 @@ func newTestEngine(t *testing.T) *Engine {
 	})
 
 	e := &Engine{
-		model:           &stubCompleteModel{}, // 蓝图/合成走单次 Complete；其他测试按需覆盖
-		agents:          reg,
-		state:           &TaskState{TaskID: "test-debate"},
-		config:          EngineConfig{},
-		activatedSkills: make(map[string]bool),
+		model:    &stubCompleteModel{}, // 蓝图/合成走单次 Complete；其他测试按需覆盖
+		agents:   reg,
+		state:    &TaskState{TaskID: "test-debate"},
+		config:   EngineConfig{},
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	return e
@@ -285,16 +284,15 @@ func TestDebateArena_VerdictDebateAgain(t *testing.T) {
 // loop and executes the plan in the same Run().
 func TestRun_VerdictExecutesInSameRun(t *testing.T) {
 	e := &Engine{
-		model:           &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了选定方案。", FinishReason: "stop"}}},
-		context:         &stubContextBuilder{},
-		tools:           stubToolExecutor{},
-		state:           &TaskState{TaskID: "test-verdict-run"},
-		history:         []Message{},
-		config:          EngineConfig{ModelName: "test-model", MaxTurns: 10},
-		guards:          &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
-		readLoop:        NewReadLoopState(),
-		errorLoop:       NewErrorLoopState(0),
-		activatedSkills: make(map[string]bool),
+		model:     &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了选定方案。", FinishReason: "stop"}}},
+		context:   &stubContextBuilder{},
+		tools:     stubToolExecutor{},
+		state:     &TaskState{TaskID: "test-verdict-run"},
+		history:   []Message{},
+		config:    EngineConfig{ModelName: "test-model", MaxTurns: 10},
+		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		readLoop:  NewReadLoopState(),
+		errorLoop: NewErrorLoopState(0),
 	}
 	e.roundtableHall = NewRoundtableHall(e)
 	e.state.Roundtable = &RoundtableState{

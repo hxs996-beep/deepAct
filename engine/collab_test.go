@@ -75,10 +75,9 @@ func newCollabTestEngine(t *testing.T) *Engine {
 		},
 	})
 	e := &Engine{
-		agents:          reg,
-		state:           &TaskState{TaskID: "test-collab"},
-		config:          EngineConfig{},
-		activatedSkills: make(map[string]bool),
+		agents: reg,
+		state:  &TaskState{TaskID: "test-collab"},
+		config: EngineConfig{},
 	}
 	e.collabHall = NewCollabHall(e)
 	return e
@@ -118,10 +117,9 @@ func newCaptureCollabTestEngine(t *testing.T) (*Engine, *capturePromptRunner) {
 	reg := NewAgentRegistry()
 	reg.Register(captor)
 	e := &Engine{
-		agents:          reg,
-		state:           &TaskState{TaskID: "test-collab-capture"},
-		config:          EngineConfig{},
-		activatedSkills: make(map[string]bool),
+		agents: reg,
+		state:  &TaskState{TaskID: "test-collab-capture"},
+		config: EngineConfig{},
 	}
 	e.collabHall = NewCollabHall(e)
 	return e, captor
@@ -398,16 +396,15 @@ func TestCollab_AdvanceConfirmWithAdjustment_NotRestart(t *testing.T) {
 
 func TestRun_CollabExecutesAndConfirms(t *testing.T) {
 	e := &Engine{
-		model:           &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了协作方案。", FinishReason: "stop"}}},
-		context:         &stubContextBuilder{},
-		tools:           stubToolExecutor{},
-		state:           &TaskState{TaskID: "test-collab-run"},
-		history:         []Message{},
-		config:          EngineConfig{ModelName: "test-model", MaxTurns: 10},
-		guards:          &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
-		readLoop:        NewReadLoopState(),
-		errorLoop:       NewErrorLoopState(0),
-		activatedSkills: make(map[string]bool),
+		model:     &stubStreamModel{chunks: []ModelChunk{{Delta: "执行了协作方案。", FinishReason: "stop"}}},
+		context:   &stubContextBuilder{},
+		tools:     stubToolExecutor{},
+		state:     &TaskState{TaskID: "test-collab-run"},
+		history:   []Message{},
+		config:    EngineConfig{ModelName: "test-model", MaxTurns: 10},
+		guards:    &GuardSystem{loop: NewLoopGuard("", 6), scope: NewScopeGuard(true)},
+		readLoop:  NewReadLoopState(),
+		errorLoop: NewErrorLoopState(0),
 	}
 	reg := NewAgentRegistry()
 	reg.Register(&mockPromptRunner{
