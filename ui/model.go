@@ -113,7 +113,7 @@ var helpTools = []Suggestion{
 	{Command: "lsp", Description: "Code intelligence (definition/references/hover/symbols/callers)"},
 	{Command: "skill_install", Description: "Install a skill from the community registry"},
 	{Command: "handoff_to_agent", Description: "Delegate a sub-task to a sub agent"},
-	{Command: "activate_skill", Description: "Activate a skill to govern the current task"},
+	{Command: "load_skill", Description: "Load a skill's full instructions to govern the current task"},
 	{Command: "task_complete", Description: "Submit your final conclusion to the user"},
 	{Command: "todo_write", Description: "Report your step-by-step todo list"},
 }
@@ -639,11 +639,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cost := estimateCost(msg.TokensIn, msg.TokensOut, msg.CacheHit, msg.ModelName, &m.pricing)
 			m.status.Cost = cost
 			m.status.SessionCost += cost
-		case "skill_activated":
-			m.messages = append(m.messages, DisplayMessage{
-				Role:    "system",
-				Content: fmt.Sprintf("Skill activated: **%s** — %s", msg.Name, msg.Detail),
-			})
 		case "todo_update":
 			// Full snapshot replacement from engine todo_write interception
 			m.todoItems = msg.Todos
@@ -2477,7 +2472,7 @@ func renderSearchBlock(nodes []ToolNode, width int) []string {
 }
 
 // nodeDetailLabel returns the text shown after a tool node's icon. When the
-// engine didn't supply a Detail (e.g. for activate_skill / handoff_to_agent /
+// engine didn't supply a Detail (e.g. for load_skill / handoff_to_agent /
 // MCP tools whose arg shape isn't recognized), it falls back to the tool name
 // so the node never renders as a bare icon with no context.
 func nodeDetailLabel(node ToolNode) string {
