@@ -100,7 +100,7 @@ type LoopTracker struct {
     nudgeAt        int // 0 = 无 nudge
     blockAt        int
     resetOnSuccess bool // error 语义：同键成功即清零
-    progressKey    string // 非空 = 全局无进展计数（专用键）
+    // 全局计数（progress）用 key="" 约定，无独立字段。
 }
 func (t *LoopTracker) Check(key string, success bool) GuardAction // allow → diagnose(nudge) → block
 func (t *LoopTracker) Reset()
@@ -110,7 +110,7 @@ Engine 持有四个配置实例（loop / read / error / progress），共享同�
 
 | 实例 | key | nudgeAt | blockAt | resetOnSuccess |
 |---|---|---|---|---|
-| loop | `tool:path:contentHash` | 0 | 4 | false |
+| loop | `tool:path:contentHash` | 0 | 6 | false |
 | read | `read:path::scope` | 3 | 4 | false |
 | error | `tool:path`（粗） | 0 | 3 | true |
 | progress | 忽略 key（全局计数，调用 `Check("", progress)`） | 4 | 6 | 外部调用方在 progress 信号时传 success=true |
