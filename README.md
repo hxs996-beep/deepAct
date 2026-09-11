@@ -122,7 +122,7 @@ A pipeline of four Chinese-named roles works in sequence: **侦察 (Recon)** sca
 
 ### Project Rules & Skills
 
-Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent **auto-activates** the most relevant skill by semantically matching your message against each skill's `name`/`description` (silently falls back on mismatch). You can also switch manually with the `activate_skill` tool.
+Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent loads a skill's full instructions via the `load_skill` tool when your message names or clearly matches that skill. You can also load a skill directly with `/<name>`.
 
 Skill directories are loaded by priority (later ones win on name conflicts):
 
