@@ -31,19 +31,21 @@ type TurnResult struct {
 	FinishReason string
 	LastOp       string // "toolName:path" for loop detection, empty if irrelevant
 	// LastOpError is true when the operation recorded in LastOp returned an
-	// error status this turn. Used by ErrorLoopState to detect repeated
-	// failing operations that defeat the content-hash-based loop guards.
+	// error status this turn. Used by the errorLoop tracker to detect
+	// repeated failing operations that defeat the content-hash-based loop
+	// guards.
 	LastOpError bool
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
 	// MadeProgress is true when this turn produced a progress signal: a
-	// successful edit/write/revert/bash call, a handoff, or a NOVEL read (a
-	// (path, scope) not yet read this Run). Repeated reads, read-only
-	// search/planning (grep/glob/lsp/todo_write), ask_user and narration are
-	// NOT progress. ProgressLoopState uses it to detect "N turns without
-	// progress" loops (narration + repeated read/todo) while leaving
-	// legitimate investigation — reading new content — alone.
+	// successful edit/write/revert/bash call, a handoff, a novel read (a
+	// (path, scope) not yet read this Run), or a novel search (grep/glob
+	// with a new pattern/path key). Repeated reads and repeated searches,
+	// lsp, todo_write, ask_user and narration are NOT progress.
+	// ProgressLoopState uses it to detect "N turns without progress" loops
+	// (narration + repeated read/todo) while leaving legitimate
+	// investigation — reading or searching new content — alone.
 	MadeProgress bool
 }
 
@@ -408,8 +410,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			}
 			if loopAction.Type != GuardAllow {
 				// LoopTracker's Message is a placeholder ("loop-block"); build a
-				// user-visible bilingual message. The original LoopGuard's count
+				// user-visible bilingual message. The original loop guard's count
 				// is no longer available, so use a concise generic loop message.
+				// NOTE: this bilingual block message duplicates the consecutiveSameOp
+				// message in loop.go — keep them in sync if either changes.
 				msg := loopAction.Message
 				if zh := e.isChinese; zh {
 					msg = "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
@@ -425,7 +429,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 						Timestamp:  time.Now(),
 					})
 				}
-				turnLog.Printf("LoopGuard block: %s", msg)
+				turnLog.Printf("loop block: %s", msg)
 				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{msg}}, nil
 			}
 		}
@@ -506,7 +510,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Execute regular tool calls.
 	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
 	// statusByID records each call's outcome status so the loop-detection block
-	// below can tell whether the first op errored (feeds ErrorLoopState).
+	// below can tell whether the first op errored (feeds the errorLoop tracker).
 	statusByID := make(map[string]string, len(regularCalls))
 	if len(regularCalls) > 0 {
 		toolsStart := time.Now()
@@ -590,7 +594,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// For read operations, include a human-readable scope (symbol/offset/limit) so
 	// reading different sections of the same file produces distinct LastOps and is
 	// not counted as a loop. Repeated reads of the SAME scope are still caught.
-	// Key form is aligned with LoopGuard's read key ("read:path::scope").
+	// Key form is aligned with the loop guard's read key ("read:path::scope").
 	for _, c := range regularCalls {
 		path := extractPathFromArgs(c.Input, e.config.WorkDir)
 		if path == "" {
@@ -601,19 +605,21 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else {
 			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
 		}
-		// Record whether this op errored so ErrorLoopState can catch repeated
-		// failures on the same (tool, path) that defeat content-hash guards.
+		// Record whether this op errored so the errorLoop tracker can catch
+		// repeated failures on the same (tool, path) that defeat content-hash
+		// guards.
 		result.LastOpError = statusByID[c.ID] == "error"
 		break
 	}
-	// Progress signal for ProgressLoopState: a successful destructive call
-	// (edit/write/revert/bash), a handoff, or a NOVEL read (a (path, scope)
-	// not yet read this Run) counts as progress. Repeated reads of the same
-	// scope and read-only search/planning (grep/glob/lsp/todo_write) do not.
-	// This distinguishes legitimate investigation — reading new content
-	// advances the task — from a "N turns narrate but never act" loop, and
-	// complements ReadLoopState which separately catches repeated same-scope
-	// reads (3rd nudge, 4th block).
+	// Progress signal for the progressLoop tracker: a successful destructive
+	// call (edit/write/revert/bash), a handoff, a NOVEL read (a (path, scope)
+	// not yet read this Run), or a NOVEL search (grep/glob with a new
+	// pattern/path key) counts as progress. Repeated reads of the same scope
+	// and repeated searches do not. This distinguishes legitimate
+	// investigation — reading or searching new content advances the task —
+	// from a "N turns narrate but never act" loop, and complements the
+	// readLoop tracker which separately catches repeated same-scope reads
+	// (3rd nudge, 4th block).
 	if e.progressKeys == nil {
 		e.progressKeys = make(map[string]bool)
 	}

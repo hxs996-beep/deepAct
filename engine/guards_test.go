@@ -43,6 +43,18 @@ func TestLoopTracker_NudgeThenBlock(t *testing.T) {
 	}
 }
 
+func TestLoopTracker_NoNudgeWhenNudgeAtZero(t *testing.T) {
+	tr := NewLoopTracker(0, 4, false)
+	tr.Check("k", false)
+	tr.Check("k", false)
+	if a := tr.Check("k", false); a.Type != GuardAllow {
+		t.Fatalf("3rd: want allow (no nudge tier), got %s", a.Type)
+	}
+	if a := tr.Check("k", false); a.Type != GuardBlock {
+		t.Fatalf("4th: want block, got %s", a.Type)
+	}
+}
+
 func TestLoopTracker_DifferentKeysIndependent(t *testing.T) {
 	tr := NewLoopTracker(0, 2, false)
 	tr.Check("a", false)
@@ -56,8 +68,8 @@ func TestLoopTracker_DifferentKeysIndependent(t *testing.T) {
 
 func TestLoopTracker_ResetOnSuccess(t *testing.T) {
 	tr := NewLoopTracker(0, 3, true)
-	tr.Check("k", false) // error
-	tr.Check("k", false) // error
+	tr.Check("k", false)                                // error
+	tr.Check("k", false)                                // error
 	if a := tr.Check("k", true); a.Type != GuardAllow { // success resets
 		t.Fatalf("success should clear streak, got %s", a.Type)
 	}
@@ -421,8 +433,8 @@ func TestGuardActionConstants(t *testing.T) {
 
 func makeToolCall(name string, inputJSON string) ToolCallRequest {
 	return ToolCallRequest{
-		ID:   "call-1",
-		Name: name,
+		ID:    "call-1",
+		Name:  name,
 		Input: json.RawMessage(inputJSON),
 	}
 }

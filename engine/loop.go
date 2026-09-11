@@ -62,11 +62,11 @@ type Engine struct {
 	progressLoop *LoopTracker
 	// progressKeys tracks "new information" keys already seen this Run
 	// ("read:path::scope", "grep:<pattern>:<path>", "glob:<pattern>:<path>").
-	// A novel key counts as progress for ProgressLoopState, so legitimate
-	// investigation — reading or searching new content — is not mistaken for
-	// a no-progress loop. Reset each Run.
+	// A novel key counts as progress for the progress LoopTracker
+	// (progressLoop), so legitimate investigation — reading or searching new
+	// content — is not mistaken for a no-progress loop. Reset each Run.
 	progressKeys map[string]bool
-	evalStore        EvalStore
+	evalStore    EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill loads) that should
 	// be appended at the END of the assembled messages array for the current
@@ -273,15 +273,15 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Drain steer queue: inject messages retained from a previous Blocked run.
 	e.drainSteerQueue()
 
-	// Reset read-loop tracking (LoopGuard + ReadLoopState) on each Run. Read
+	// Reset loop tracking (loop guard + read loop) on each Run. Read
 	// counts must NOT accumulate across Runs: a user retrying or revisiting a
 	// task legitimately re-reads the same core files, and cross-Run accumulation
 	// falsely blocked normal reads as "loops" (maxRepeats reached across
-	// retries). Within a Run, ReadLoopState still catches true read loops
-	// (4th same-read blocks). Edit/write loop counts also reset per Run -
+	// retries). Within a Run, the readLoop tracker still catches true read
+	// loops (4th same-read blocks). Edit/write loop counts also reset per Run -
 	// same-Run repetition is still caught, and the edit-plan guard +
-	// contentHash differentiation cover cross-Run edit cases. ErrorLoopState
-	// persists (error streaks across Runs are meaningful).
+	// contentHash differentiation cover cross-Run edit cases. The errorLoop
+	// tracker persists (error streaks across Runs are meaningful).
 	if e.guards != nil && e.guards.loop != nil {
 		e.guards.loop.Reset()
 	}
@@ -430,8 +430,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 	// /confirm N — deterministic confirmation channel. Must run before
 	// the free-input clearing so the state set here is what the agent
-	// sees in this same Run, and before the negative-feedback rewrite so
-	// a bare "/confirm N" is never treated as user feedback.
+	// sees in this same Run, and so a bare "/confirm N" is never treated
+	// as user feedback.
 	e.handleConfirmCommand(userMsg)
 
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
@@ -780,10 +780,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			break
 		}
 
-		// Loop detection: read ops go through ReadLoopState (two-tier:
+		// Loop detection: read ops go through readLoop (two-tier:
 		// 3rd same (path,scope) → nudge, 4th → block). Non-read ops keep the
 		// original consecutiveSameOp guard (5 consecutive same first-calls →
-		// block), which covers tools LoopGuard doesn't track (grep/bash/etc.).
+		// block), which covers tools the loop guard doesn't track (grep/bash/etc.).
 		if turnResult.LastOp != "" {
 			if strings.HasPrefix(turnResult.LastOp, "read:") {
 				action := e.readLoop.Check(turnResult.LastOp, false)
@@ -810,8 +810,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				// Error-streak guard: keys on coarse (tool, path) — without the
 				// content signature — so repeated FAILING calls with slightly
 				// varied args on the same target still accumulate and trip,
-				// unlike the content-hash-based LoopGuard/consecutiveSameOp.
+				// unlike the content-hash-based loop guard/consecutiveSameOp.
 				if e.errorLoop != nil {
+					// LoopTracker.Check 取 success 语义；errorLoop 的
+					// resetOnSuccess=true，故 LastOpError 需取反（成功=清除连错计数）。
 					action := e.errorLoop.Check(coarseOp(turnResult.LastOp), !turnResult.LastOpError)
 					if action.Type == GuardBlock {
 						msg := "检测到重复的工具错误，Agent 在同一操作上反复失败。请提供新的方向或修正参数。"
@@ -842,7 +844,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		// (successful edit/write/revert/bash or handoff) → nudge then block.
 		// Catches the "narration + read + todo_write" loop that bypasses all
 		// operation-repeat guards: every turn is a *different* operation, so
-		// ReadLoopState / consecutiveSameOp / ErrorLoopState never fire.
+		// readLoop / consecutiveSameOp / errorLoop never fire.
 		if e.progressLoop != nil {
 			action := e.progressLoop.Check("", turnResult.MadeProgress)
 			switch action.Type {
@@ -1621,9 +1623,9 @@ func splitReadKey(key string) (path, scope string) {
 
 // coarseOp reduces a LastOp key to its "tool:path" form by dropping the
 // content-signature suffix ("#sig") used for edit/write and the scope suffix
-// ("::scope") used for read. ErrorLoopState keys on this coarse form so that
-// repeated failing attempts with varied arguments on the same (tool, path)
-// still accumulate into one streak.
+// ("::scope") used for read. The errorLoop tracker keys on this coarse form
+// so that repeated failing attempts with varied arguments on the same
+// (tool, path) still accumulate into one streak.
 func coarseOp(op string) string {
 	if before, _, ok := strings.Cut(op, "#"); ok {
 		op = before

@@ -299,6 +299,31 @@ func TestExecuteTurn_MadeProgress_RepeatedGrep(t *testing.T) {
 	}
 }
 
+func TestExecuteTurn_MadeProgress_NovelGlob(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "批量查找",
+			ToolCalls: []ModelToolCall{{ID: "c1", Type: "function", Function: ModelFunctionCall{
+				Name: "glob", Arguments: `{"pattern":"*.go"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "找"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.MadeProgress {
+		t.Error("expected MadeProgress=true for a novel glob pattern")
+	}
+}
+
 // --- Run integration: novel reads are progress; no-progress loops are caught ---
 
 // novelReadTurnChunks builds one turn that updates todos and reads a NEW
