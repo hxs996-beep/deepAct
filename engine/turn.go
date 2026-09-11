@@ -220,13 +220,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// these back; they must never reach the user or be written into history.
 	content = stripInternalPromptEcho(content)
 
-	// Layer 3: When tool calls exist, strip intermediate thinking text from content.
-	// The model sometimes outputs intent text ("Let me...", "让我...") alongside
-	// DSML tool calls. This text is noise — tool results provide execution context.
-	if hasValidToolCalls(toolCalls) && isIntermediateText(content) {
-		content = ""
-	}
-
 	// Layer 4 (max-token truncation): when the output cap cut the stream
 	// (finish_reason == "length"), the response may end with a partially
 	// streamed tool call whose arguments never closed. Never execute it —

@@ -369,13 +369,6 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			msg.ToolCalls = nil
 		}
 
-		// Strip intermediate thinking text from content when tool calls exist.
-		// The model sometimes outputs intent text alongside structured tool calls;
-		// this text is noise and should not pollute the sub-agent's history.
-		if len(msg.ToolCalls) > 0 && isIntermediateText(msg.Content) {
-			msg.Content = ""
-		}
-
 		history = append(history, msg)
 
 		// No tool calls → agent may be done
