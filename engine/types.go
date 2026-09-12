@@ -92,7 +92,7 @@ type EngineConfig struct {
 type EngineResponse struct {
 	Summary      string   `json:"summary"`
 	Questions    []string `json:"questions,omitempty"`
-	Options      []string `json:"options,omitempty"` // e.g. ["方案A: 用Redis", "方案B: 用MySQL"]
+	Options      []string `json:"options,omitempty"` // e.g. ["用Redis", "用MySQL"]
 	NextStep     string   `json:"next_step,omitempty"`
 	Stage        Stage    `json:"stage"`
 	Blocked      bool     `json:"blocked"`

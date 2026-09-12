@@ -32,7 +32,7 @@ func TestReproOptionsDup_NarrationSuperSet(t *testing.T) {
 	m.finishStreaming(EngineResponseMsg{
 		Response: &engine.EngineResponse{
 			Summary: report,
-			Options: []string{"方案A: 改为前缀匹配", "方案B: 改引擎 Summary 源", "输入你的意见"},
+			Options: []string{"改为前缀匹配", "改引擎 Summary 源", "输入你的意见"},
 		},
 	})
 

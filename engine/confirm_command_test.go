@@ -48,7 +48,7 @@ func TestHandleConfirmCommand_NoPending_Noop(t *testing.T) {
 	}
 }
 
-// /confirm 1 选择 ask_user 声明的方案A，确认执行并注入方案描述。
+// /confirm 1 选择 ask_user 声明的第一个选项，确认执行并注入选项描述。
 func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{},
@@ -64,11 +64,11 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 		t.Fatal("handleConfirmCommand should handle /confirm 1")
 	}
 	last := e.history[len(e.history)-1].Content
-	if !strings.Contains(last, "方案A: 用 Redis 缓存") {
-		t.Errorf("history should mention 方案A: 用 Redis 缓存, got %q", last)
+	if !strings.Contains(last, "用 Redis 缓存") {
+		t.Errorf("history should mention 用 Redis 缓存, got %q", last)
 	}
 	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should be cleared after selecting 方案A, got %+v", e.pendingAskUser)
+		t.Errorf("pendingAskUser should be cleared after selecting the option, got %+v", e.pendingAskUser)
 	}
 }
 

@@ -86,8 +86,8 @@ type Engine struct {
 
 	// pendingAskUser holds the question the agent asked the user via ask_user.
 	// Non-nil means the engine is awaiting the user's response — with Options
-	// the popup shows 方案A/B/C... for the user to choose, without Options the
-	// question is presented via the awaiting_user Blocked path for free input.
+	// the popup shows the raw options for the user to choose, without Options
+	// the question is presented via the awaiting_user Blocked path for free input.
 	// NOT reset at Run start — it must survive until the next Run's
 	// handleConfirmCommand (with options) or the free-input path reads it.
 	// Cleared once consumed.
@@ -957,7 +957,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.runUsageAccum.PromptTokens, e.runUsageAccum.CompletionTokens,
 		e.runUsageAccum.CacheHitTokens, e.runUsageAccum.CacheMissTokens)
 	// ask_user with options: the agent asked a question and declared candidate
-	// answers — present them as selectable options (方案A/B/C + 输入你的意见).
+	// answers — present them as selectable options (raw options + 输入你的意见).
 	// 无 options 已由 awaiting_user Blocked 分支（loop.go:823）处理，不走此处。
 	if e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 {
 		return &EngineResponse{
@@ -970,7 +970,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 }
 
 // askUserOptions returns the presentation options after a Run.
-// Pending ask_user with options → 方案A/B/C... plus the free-input entry.
+// Pending ask_user with options → raw options plus the free-input entry.
 // Pending ask_user without options → nil (the question is presented via the
 // awaiting_user Blocked path, user answers freely). No pending ask_user →
 // nil (no options popup; the model decides whether to ask via ask_user).
@@ -982,18 +982,9 @@ func (e *Engine) askUserOptions() []string {
 		return nil
 	}
 	opts := make([]string, 0, len(e.pendingAskUser.Options)+1)
-	for i, o := range e.pendingAskUser.Options {
-		opts = append(opts, confirmOptionLabel(i, o))
-	}
+	opts = append(opts, e.pendingAskUser.Options...)
 	opts = append(opts, "输入你的意见")
 	return opts
-}
-
-// confirmOptionLabel renders the 方案X: <desc> label for a declared option at
-// 0-based index i. Shared by askUserOptions (popup display) and
-// handleConfirmCommand (history injection) so both agree on the label.
-func confirmOptionLabel(i int, opt string) string {
-	return fmt.Sprintf("方案%c: %s", 'A'+i, opt)
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the
@@ -1424,12 +1415,12 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 // bypassing isDangerousConfirmation.
 //
 // When the agent declared options via ask_user (pendingAskUser with a non-empty
-// Options list), /confirm N selects 方案N and the choice is injected into history
-// so the agent implements the selected plan; an out-of-range N injects an
-// "invalid option number" feedback. With no pending ask_user, /confirm N is a
-// silent no-op (consumed but produces no history rewrite). The last popup item
-// ("输入你的意见") never reaches here — the UI returns to the input box.
-// Returns true if userMsg was a valid /confirm command.
+// Options list), /confirm N selects the Nth option and the choice is injected
+// into history so the agent implements the selected plan; an out-of-range N
+// injects an "invalid option number" feedback. With no pending ask_user,
+// /confirm N is a silent no-op (consumed but produces no history rewrite). The
+// last popup item ("输入你的意见") never reaches here — the UI returns to the
+// input box. Returns true if userMsg was a valid /confirm command.
 func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	n, ok := parseConfirmCommand(userMsg)
 	if !ok {
@@ -1438,7 +1429,7 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
 		switch {
 		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 && n >= 1 && n <= len(e.pendingAskUser.Options):
-			label := confirmOptionLabel(n-1, e.pendingAskUser.Options[n-1])
+			label := e.pendingAskUser.Options[n-1]
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了：%s，请按该方案执行修改。", label)
 		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0:

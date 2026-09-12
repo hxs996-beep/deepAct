@@ -167,7 +167,7 @@ func TestAskUserOptions_PendingWithOptions_ABCPrefixed(t *testing.T) {
 		Options:  []string{"用 Redis 缓存", "改用 MySQL"},
 	}}
 	got := e.askUserOptions()
-	want := []string{"方案A: 用 Redis 缓存", "方案B: 改用 MySQL", "输入你的意见"}
+	want := []string{"用 Redis 缓存", "改用 MySQL", "输入你的意见"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -202,8 +202,8 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 		t.Fatal("handleConfirmCommand should handle /confirm 2")
 	}
 	last := e.history[len(e.history)-1].Content
-	if !strings.Contains(last, "方案B: 改用 MySQL") {
-		t.Errorf("history should mention the selected plan 方案B: 改用 MySQL, got %q", last)
+	if !strings.Contains(last, "改用 MySQL") {
+		t.Errorf("history should mention the selected plan 改用 MySQL, got %q", last)
 	}
 	if e.pendingAskUser != nil {
 		t.Errorf("pendingAskUser should be cleared after selection, got %+v", e.pendingAskUser)
