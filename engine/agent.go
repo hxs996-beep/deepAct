@@ -160,8 +160,6 @@ func taskCompleteToolSpec(zh bool) ModelTool {
 	}
 }
 
-const maxSubAgentDepth = 2
-
 // loadSkillToolSpec returns the tool definition exposed to LLMs for loading
 // a skill's full instructions on demand (deepseek-harness tool-skill model).
 func loadSkillToolSpec() ModelTool {

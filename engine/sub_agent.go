@@ -31,6 +31,7 @@ type SubAgentRunner struct {
 	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
 	langPackZh       string // Chinese language pack (Go/Python rules in zh)
 	langPackEn       string // English language pack (Go/Python rules in en)
+	maxDepth         int    // absolute delegation-depth cap; 0 = default 2
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -99,6 +100,22 @@ func (r *SubAgentRunner) SetSubAgentBaseURL(url string) {
 	r.subAgentBaseURL = url
 }
 
+// SetMaxDepth caps how deep sub-agent nesting may go. 0 resets to the default (2).
+func (r *SubAgentRunner) SetMaxDepth(d int) {
+	if d <= 0 {
+		d = 2
+	}
+	r.maxDepth = d
+}
+
+// MaxDepth returns the current nesting cap.
+func (r *SubAgentRunner) MaxDepth() int {
+	if r.maxDepth <= 0 {
+		return 2
+	}
+	return r.maxDepth
+}
+
 // SetLangPacks sets both language variants of the language-specific rules.
 // Called once at startup from cmd/run.go after language detection.
 func (r *SubAgentRunner) SetLangPacks(zh, en string) {
@@ -154,9 +171,9 @@ func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content
 }
 
 func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
-	if input.Depth > maxSubAgentDepth {
+	if input.Depth > r.MaxDepth() {
 		return &HandoffResult{
-			Summary:      fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", maxSubAgentDepth),
+			Summary:      fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", r.MaxDepth()),
 			Blocked:      true,
 			BlockedBy:    "max_depth",
 			FinishReason: HandoffReasonMaxDepth,
@@ -529,36 +546,51 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			if r.onProgress != nil {
 				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, r.workDir)})
 			}
-			if call.Name == HandoffToolName && input.Depth < maxSubAgentDepth {
-				// Execute sub-sub-agent
-				result := r.executeSubHandoff(ctx, call, input.Depth+1, input.UserLanguage)
-				if r.onProgress != nil {
-					r.onProgress(ProgressEvent{Type: "tool_done", Name: "handoff", Detail: briefDigest(result.Digest)})
-				}
-				if result.Status != "cancelled" {
+			// ask_user: the sub-agent needs user input. Validate, record a tool
+			// response, then end the run with awaiting_user so the questions
+			// bubble to the parent engine.
+			if call.Name == AskUserToolName {
+				q, ok := parseAskUserInput(call.Input)
+				if !ok {
 					history = append(history, ModelMessage{
-						Role:       "tool",
-						ToolCallID: call.ID,
-						Content:    result.Digest,
+						Role: "tool", ToolCallID: call.ID,
+						Content: "Error: ask_user requires a non-empty question (options 2-6 when provided).",
 					})
+					continue
 				}
-			} else if call.Name == HandoffToolName {
 				history = append(history, ModelMessage{
-					Role:       "tool",
-					ToolCallID: call.ID,
-					Content:    "Max nesting depth reached. Cannot delegate further.",
+					Role: "tool", ToolCallID: call.ID,
+					Content: "✓ 已记录问题，等待用户回答。",
 				})
-			} else {
-				env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID}
-				results := r.tools.Execute(env, []ToolCallRequest{call})
-				if len(results) > 0 {
-					if r.onProgress != nil {
-						r.onProgress(ProgressEvent{Type: "tool_done", Name: results[0].ToolName, Detail: briefDigest(results[0].Digest), FullDetail: results[0].Digest})
-					}
+				return &HandoffResult{
+					Summary:      q.Question,
+					Questions:    []string{q.Question},
+					FinishReason: HandoffReasonAwaitingUser,
+					Usage:        &totalUsage,
+				}, nil
+			}
+			env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID, Ctx: ctx, Depth: input.Depth + 1, UserLang: input.UserLanguage}
+			results := r.tools.Execute(env, []ToolCallRequest{call})
+			if len(results) > 0 {
+				res := results[0]
+				if r.onProgress != nil {
+					r.onProgress(ProgressEvent{Type: "tool_done", Name: res.ToolName, Detail: briefDigest(res.Digest), FullDetail: res.Digest})
+				}
+				// Nested bubble: a child's handoff result carried questions →
+				// stop and bubble them up.
+				if len(res.Questions) > 0 {
+					return &HandoffResult{
+						Summary:      res.Digest,
+						Questions:    res.Questions,
+						FinishReason: HandoffReasonAwaitingUser,
+						Usage:        &totalUsage,
+					}, nil
+				}
+				// cancelled results are not written to history: the run is
+				// unwinding (ctx cancelled) and no further LLM call will follow.
+				if res.Status != "cancelled" {
 					history = append(history, ModelMessage{
-						Role:       "tool",
-						ToolCallID: results[0].ToolCallID,
-						Content:    results[0].Digest,
+						Role: "tool", ToolCallID: res.ToolCallID, Content: res.Digest,
 					})
 				}
 			}
@@ -697,16 +729,26 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 	return sb.String()
 }
 
-// filterTools returns a tool spec list filtered to only the allowed tools.
-// If allowList is empty, all tools are allowed.
-// userLang controls the language of the handoff tool description ("中文" = Chinese).
+// filterTools returns a tool spec list filtered to the allowed tools. The
+// handoff_to_agent and ask_user tools are ALWAYS included — delegation and
+// user-questions are core sub-agent capabilities that an allowList must not
+// strip (the old code always prepended handoff; /debate and /collab pass a
+// read-only allowList but their members still need to delegate and ask).
+// The constructed specs are used for both so the registry copy (if present)
+// is not duplicated.
 func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
 	all := r.tools.Specs()
-	// Always include the handoff tool
 	result := []ModelTool{handoffToolSpec(zhFromLang(userLang))}
+	result = append(result, askUserToolSpec(zhFromLang(userLang)))
 
 	if len(allowList) == 0 {
-		return append(result, all...)
+		for _, spec := range all {
+			if spec.Function.Name == HandoffToolName || spec.Function.Name == AskUserToolName {
+				continue // already added above
+			}
+			result = append(result, spec)
+		}
+		return result
 	}
 
 	allowSet := make(map[string]bool, len(allowList))
@@ -714,67 +756,14 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []Mode
 		allowSet[name] = true
 	}
 	for _, spec := range all {
+		if spec.Function.Name == HandoffToolName || spec.Function.Name == AskUserToolName {
+			continue // already added above
+		}
 		if allowSet[spec.Function.Name] {
 			result = append(result, spec)
 		}
 	}
 	return result
-}
-
-// executeSubHandoff handles a handoff_to_agent call from within a sub-agent.
-func (r *SubAgentRunner) executeSubHandoff(ctx context.Context, call ToolCallRequest, depth int, userLang string) ToolResult {
-	var params HandoffToAgentParams
-	if err := json.Unmarshal(call.Input, &params); err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("invalid handoff params: %v", err),
-		}
-	}
-
-	agent, err := r.registry.Get(AgentID(params.Agent))
-	if err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("agent not found: %s - %v", params.Agent, err),
-		}
-	}
-
-	handoff := Handoff{
-		Agent:          AgentID(params.Agent),
-		Goal:           params.Goal,
-		Context:        params.Context,
-		Tools:          params.Tools,
-		Constraints:    params.Constraints,
-		ExpectedOutput: params.ExpectedOutput,
-		Depth:          depth,
-		UserLanguage:   userLang,
-	}
-
-	result, err := agent.Run(ctx, handoff)
-	if err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("agent error: %v", err),
-		}
-	}
-
-	status := "ok"
-	if result.BlockedBy == "cancelled" {
-		status = "cancelled"
-	}
-	digest := formatHandoffResult(result, zhFromLang(userLang))
-	return ToolResult{
-		ToolCallID: call.ID,
-		ToolName:   HandoffToolName,
-		Status:     status,
-		Digest:     digest,
-	}
 }
 
 // buildResult extracts conclusions from the agent's final text response.
@@ -918,4 +907,26 @@ func getNudgeMessage(goal string) string {
 		return "请直接使用工具执行下一步，完成目标后给出最终结论。不要只描述计划。"
 	}
 	return "Use tools to take the next action. Complete the goal and give your final conclusions. Do not just describe a plan."
+}
+
+// parseAskUserInput validates an ask_user call input and returns the question.
+// Options are accepted for validation but bubbled as nil (YAGNI: the parent
+// presents via the awaiting_user free-input path).
+func parseAskUserInput(input json.RawMessage) (struct{ Question string }, bool) {
+	var p struct {
+		Question string   `json:"question"`
+		Options  []string `json:"options"`
+	}
+	if err := json.Unmarshal(input, &p); err != nil || strings.TrimSpace(p.Question) == "" {
+		return struct{ Question string }{}, false
+	}
+	if len(p.Options) > 0 && (len(p.Options) < 2 || len(p.Options) > 6) {
+		return struct{ Question string }{}, false
+	}
+	for _, o := range p.Options {
+		if strings.TrimSpace(o) == "" {
+			return struct{ Question string }{}, false
+		}
+	}
+	return struct{ Question string }{Question: p.Question}, true
 }

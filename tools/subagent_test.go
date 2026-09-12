@@ -71,7 +71,7 @@ func TestSubAgentTool_Run_DepthDispatch(t *testing.T) {
 func TestSubAgentTool_Run_QuestionsPassthrough(t *testing.T) {
 	tool := NewSubAgentTool(
 		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
-			return engine.ToolResult{Status: "ok", Digest: "d", Questions: []string{"Q?"}}, nil
+			return engine.ToolResult{Status: "ok", Digest: "d", FinishReason: engine.HandoffReasonAwaitingUser, Questions: []string{"Q?"}}, nil
 		},
 		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
@@ -86,6 +86,9 @@ func TestSubAgentTool_Run_QuestionsPassthrough(t *testing.T) {
 	}
 	if len(env.Questions) != 1 || env.Questions[0] != "Q?" {
 		t.Errorf("Questions = %v, want [Q?]", env.Questions)
+	}
+	if env.FinishReason != engine.HandoffReasonAwaitingUser {
+		t.Errorf("FinishReason = %q, want %q", env.FinishReason, engine.HandoffReasonAwaitingUser)
 	}
 }
 

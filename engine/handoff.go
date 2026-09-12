@@ -128,11 +128,7 @@ func (r *SubAgentRunner) RunSubAgent(ctx context.Context, params HandoffToAgentP
 	call := ToolCallRequest{Name: HandoffToolName, Input: mustJSON(params)}
 	res := runHandoff(ctx, call, handoffOptions{
 		resolve: func(id AgentID) (Agent, error) { return r.registry.Get(id) },
-		accumulate: func(u *ModelUsage) {
-			if r.onProgress != nil {
-				// nested usage is folded into the parent's own usage already
-			}
-		},
+		accumulate: nil,
 		zh:       zhFromLang(userLang),
 		depth:    depth,
 		userLang: userLang,
