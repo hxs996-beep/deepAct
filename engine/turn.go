@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -498,9 +497,34 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Execute handoff calls (sub-agents) — parallel when multiple, sequential when single.
+	// Execute handoff calls through the registered SubAgentTool.
 	if len(handoffCalls) > 0 {
-		results := e.executeHandoffsParallel(ctx, handoffCalls)
+		userLang := ""
+		if e.isChinese {
+			userLang = "中文"
+		}
+		// agent_start events for UI.
+		for _, call := range handoffCalls {
+			var params HandoffToAgentParams
+			if err := json.Unmarshal(call.Input, &params); err == nil && e.config.OnProgress != nil {
+				name := params.Agent
+				if name == "" {
+					name = "sub"
+				}
+				e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+			}
+		}
+		execCtx := ToolExecContext{
+			WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
+			Ctx: ctx, Depth: 0, UserLang: userLang,
+		}
+		results := e.tools.Execute(execCtx, handoffCalls)
+		// agent_done events for UI.
+		for _, r := range results {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: r.ToolName, Detail: briefDigest(r.Digest)})
+			}
+		}
 		msgs := e.processHandoffResults(handoffCalls, results)
 		for _, msg := range msgs {
 			e.history = append(e.history, msg)
@@ -702,196 +726,6 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, askUserToolSpec(e.isChinese))
 	return specs
-}
-
-// executeHandoff processes a handoff_to_agent tool call from the main agent loop.
-func (e *Engine) executeHandoff(ctx context.Context, call ToolCallRequest) ToolResult {
-	if e.agents == nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     "no agent registry configured",
-		}
-	}
-
-	var params HandoffToAgentParams
-	if err := json.Unmarshal(call.Input, &params); err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("invalid handoff params: %v", err),
-		}
-	}
-
-	agent, err := e.agents.Get(AgentID(params.Agent))
-	if err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("agent not found: %s - %v", params.Agent, err),
-		}
-	}
-
-	userLang := ""
-	if e.isChinese {
-		userLang = "中文"
-	}
-	handoff := Handoff{
-		Agent:          AgentID(params.Agent),
-		Goal:           params.Goal,
-		Context:        params.Context,
-		Tools:          params.Tools,
-		Constraints:    params.Constraints,
-		ExpectedOutput: params.ExpectedOutput,
-		Depth:          0, // main engine starts at depth 0
-		UserLanguage:   userLang,
-	}
-
-	// Inject main agent's working context (known files, findings, modifications)
-	// as a starting point for the sub-agent. The sub-agent should re-examine these
-	// from its own perspective to find blind spots the main agent missed.
-	if e.state != nil {
-		var agentCtx strings.Builder
-
-		if len(e.state.WorkingSet.Files) > 0 {
-			agentCtx.WriteString("\n## Main Agent Context (Review Starting Point)\n")
-			agentCtx.WriteString("The main agent examined these files. Re-examine them from your own perspective:\n")
-			for _, f := range e.state.WorkingSet.Files {
-				agentCtx.WriteString(fmt.Sprintf("- %s (%s)\n", f.Path, f.Notes))
-			}
-		}
-
-		if len(e.state.MemoryMarkers) > 0 {
-			agentCtx.WriteString("\nKey findings from the main agent (review for blind spots):\n")
-			for _, m := range e.state.MemoryMarkers {
-				agentCtx.WriteString(fmt.Sprintf("  • %s\n", m))
-			}
-		}
-
-		if len(e.state.ModifiedFiles) > 0 {
-			agentCtx.WriteString("\nFiles modified so far:\n")
-			for _, f := range e.state.ModifiedFiles {
-				agentCtx.WriteString(fmt.Sprintf("- %s\n", f))
-			}
-		}
-
-		extra := agentCtx.String()
-		if extra != "" {
-			if handoff.Context != "" {
-				handoff.Context = handoff.Context + extra
-			} else {
-				handoff.Context = extra
-			}
-		}
-	}
-
-	result, err := agent.Run(ctx, handoff)
-	if err != nil {
-		return ToolResult{
-			ToolCallID: call.ID,
-			ToolName:   HandoffToolName,
-			Status:     "error",
-			Digest:     fmt.Sprintf("agent error: %v", err),
-		}
-	}
-
-	if result.Usage != nil {
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "usage", Usage: result.Usage})
-		}
-		e.accumulateUsage(result.Usage)
-	}
-
-	status := "ok"
-	if result.BlockedBy == "cancelled" {
-		status = "cancelled"
-	}
-	digest := formatHandoffResult(result, e.isChinese)
-	return ToolResult{
-		ToolCallID:   call.ID,
-		ToolName:     HandoffToolName,
-		Status:       status,
-		Digest:       digest,
-		FinishReason: result.FinishReason,
-	}
-}
-
-// executeHandoffsParallel runs multiple handoff_to_agent calls concurrently.
-// Each sub-agent runs in its own goroutine; results are collected and returned
-// in the original call order. Progress events (agent_start/agent_done) are
-// emitted with the actual agent name and goal, enabling the UI to display
-// multiple sub-agents working simultaneously.
-func (e *Engine) executeHandoffsParallel(ctx context.Context, calls []ToolCallRequest) []ToolResult {
-	if len(calls) == 0 {
-		return nil
-	}
-
-	type indexedResult struct {
-		index  int
-		result ToolResult
-	}
-
-	resultsCh := make(chan indexedResult, len(calls))
-	var wg sync.WaitGroup
-
-	for i, call := range calls {
-		wg.Add(1)
-		go func(idx int, c ToolCallRequest) {
-			defer wg.Done()
-
-			// Parse params for progress display
-			var params HandoffToAgentParams
-			if err := json.Unmarshal(c.Input, &params); err == nil {
-				agentName := params.Agent
-				if agentName == "" {
-					agentName = "sub"
-				}
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{
-						Type:   "agent_start",
-						Name:   agentName,
-						Detail: params.Goal,
-					})
-				}
-			}
-
-			r := e.executeHandoff(ctx, c)
-
-			// Parse again for agent_done event (use same name)
-			var params2 HandoffToAgentParams
-			if err := json.Unmarshal(c.Input, &params2); err == nil {
-				agentName := params2.Agent
-				if agentName == "" {
-					agentName = "sub"
-				}
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{
-						Type:   "agent_done",
-						Name:   agentName,
-						Detail: briefDigest(r.Digest),
-					})
-				}
-			}
-
-			resultsCh <- indexedResult{index: idx, result: r}
-		}(i, call)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultsCh)
-	}()
-
-	// Collect results in original order
-	ordered := make([]ToolResult, len(calls))
-	for ir := range resultsCh {
-		ordered[ir.index] = ir.result
-	}
-
-	return ordered
 }
 
 func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {

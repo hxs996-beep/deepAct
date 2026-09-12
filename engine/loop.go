@@ -532,9 +532,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			}
 		}
 
-		// Execute handoff calls — parallel when multiple, sequential when single.
+		// Execute handoff calls through the registered SubAgentTool.
 		if len(handoffCalls) > 0 {
-			results := e.executeHandoffsParallel(ctx, handoffCalls)
+			execCtx := ToolExecContext{
+				WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
+				Ctx: ctx, Depth: 0,
+			}
+			results := e.tools.Execute(execCtx, handoffCalls)
 			for i := range handoffCalls {
 				result := results[i]
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
