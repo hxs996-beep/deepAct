@@ -39,6 +39,11 @@ type EngineDeps struct {
 	Skills      *skill.Registry
 	Router      ModelRouter
 	MCPManagers []io.Closer // MCP server connections to close on shutdown
+
+	// AfterEngine, when set, is called at the end of NewEngine with the new
+	// Engine instance. Used by cmd/run.go to register tools that need a live
+	// Engine reference (e.g. the SubAgentTool backends).
+	AfterEngine func(*Engine)
 }
 
 type Engine struct {
@@ -201,6 +206,10 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	}
 	if store, err := NewJSONLEvalStore(evalPath); err == nil {
 		e.evalStore = store
+	}
+
+	if deps.AfterEngine != nil {
+		deps.AfterEngine(e)
 	}
 
 	return e

@@ -691,10 +691,12 @@ func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
 	return get(u)
 }
 
-// toolSpecsWithHandoff returns the tool specs list with the handoff_to_agent and load_skill tools appended.
+// toolSpecsWithHandoff returns the tool specs list with the load_skill and
+// task tools appended. handoff_to_agent is provided by the registered
+// SubAgentTool (via e.tools.Specs()); it is not appended here to avoid a
+// duplicated spec.
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
-	specs = append(specs, handoffToolSpec(e.isChinese))
 	specs = append(specs, loadSkillToolSpec())
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())

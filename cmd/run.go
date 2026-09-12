@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -326,6 +327,29 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		mcpClosers[i] = mcpManagers[i]
 	}
 	deps.MCPManagers = mcpClosers
+
+	// Register the SubAgentTool after the Engine is constructed so the
+	// backends can capture the live Engine (main) and SubAgentRunner (nested)
+	// references. handoff_to_agent is then served by e.tools.Specs().
+	deps.AfterEngine = func(e *engine.Engine) {
+		registry.Register(tools.NewSubAgentTool(
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
+				return e.RunSubAgent(ctx, p, depth, lang)
+			},
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
+				return runner.RunSubAgent(ctx, p, depth, lang)
+			},
+			func() []string {
+				specs := agentReg.AgentSpecs()
+				ids := make([]string, 0, len(specs))
+				for _, s := range specs {
+					ids = append(ids, string(s.ID))
+				}
+				return ids
+			},
+			runner.MaxDepth(),
+		))
+	}
 	return config, deps, nil
 }
 
