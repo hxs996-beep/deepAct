@@ -92,6 +92,9 @@ type Engine struct {
 	// handleConfirmCommand (with options) or the free-input path reads it.
 	// Cleared once consumed.
 	pendingAskUser *AskUserRequest
+	// askUserMu guards pendingAskUser: parallel sub-agent handoffs can
+	// bubble up questions concurrently, so the write must be serialized.
+	askUserMu sync.Mutex
 
 	// roundtableHall orchestrates multi-stance roundtable discussions.
 	roundtableHall *RoundtableHall
@@ -534,11 +537,37 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 		// Execute handoff calls through the registered SubAgentTool.
 		if len(handoffCalls) > 0 {
+			// agent_start events for UI (mirrors turn.go handoff execution).
+			for _, call := range handoffCalls {
+				var params HandoffToAgentParams
+				if err := json.Unmarshal(call.Input, &params); err == nil && e.config.OnProgress != nil {
+					name := params.Agent
+					if name == "" {
+						name = "sub"
+					}
+					e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+				}
+			}
 			execCtx := ToolExecContext{
 				WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
 				Ctx: ctx, Depth: 0,
 			}
 			results := e.tools.Execute(execCtx, handoffCalls)
+			// agent_done events for UI. Execute preserves order, so results[i]
+			// corresponds to handoffCalls[i]; parse the real agent name from
+			// the call input.
+			for i, r := range results {
+				if e.config.OnProgress != nil {
+					name := "sub"
+					if i < len(handoffCalls) {
+						var params HandoffToAgentParams
+						if err := json.Unmarshal(handoffCalls[i].Input, &params); err == nil && params.Agent != "" {
+							name = params.Agent
+						}
+					}
+					e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: briefDigest(r.Digest)})
+				}
+			}
 			for i := range handoffCalls {
 				result := results[i]
 				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})

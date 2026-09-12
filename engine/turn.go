@@ -519,10 +519,19 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			Ctx: ctx, Depth: 0, UserLang: userLang,
 		}
 		results := e.tools.Execute(execCtx, handoffCalls)
-		// agent_done events for UI.
-		for _, r := range results {
+		// agent_done events for UI. Execute preserves order, so results[i]
+		// corresponds to handoffCalls[i]; parse the real agent name from the
+		// call input (r.ToolName is always "handoff_to_agent").
+		for i, r := range results {
 			if e.config.OnProgress != nil {
-				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: r.ToolName, Detail: briefDigest(r.Digest)})
+				name := "sub"
+				if i < len(handoffCalls) {
+					var params HandoffToAgentParams
+					if err := json.Unmarshal(handoffCalls[i].Input, &params); err == nil && params.Agent != "" {
+						name = params.Agent
+					}
+				}
+				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: briefDigest(r.Digest)})
 			}
 		}
 		msgs := e.processHandoffResults(handoffCalls, results)

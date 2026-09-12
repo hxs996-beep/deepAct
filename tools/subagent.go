@@ -24,7 +24,7 @@ type SubAgentTool struct {
 }
 
 // NewSubAgentTool constructs the tool. agents returns the current registered
-// agent IDs for the dynamic enum; maxDepth caps nesting (0 forbids delegation).
+// agent IDs for the dynamic enum; maxDepth caps nesting (0 disables the depth check).
 func NewSubAgentTool(main, nested SubAgentBackend, agents func() []string, maxDepth int) *SubAgentTool {
 	return &SubAgentTool{main: main, nested: nested, agents: agents, maxDepth: maxDepth}
 }

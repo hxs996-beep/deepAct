@@ -20,6 +20,9 @@ type handoffOptions struct {
 	accumulate func(*ModelUsage)
 	// zh localizes the result digest.
 	zh bool
+	// onUsage reports sub-agent usage to the parent (e.g. as a "usage"
+	// ProgressEvent for the UI). Called alongside accumulate when both set.
+	onUsage func(*ModelUsage)
 	// depth is the depth of the new sub-agent run (0 = first level).
 	depth int
 	// userLang is the session language ("中文" or "").
@@ -72,8 +75,13 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		}
 	}
 
-	if result.Usage != nil && opts.accumulate != nil {
-		opts.accumulate(result.Usage)
+	if result.Usage != nil {
+		if opts.accumulate != nil {
+			opts.accumulate(result.Usage)
+		}
+		if opts.onUsage != nil {
+			opts.onUsage(result.Usage)
+		}
 	}
 
 	status := "ok"
@@ -108,14 +116,21 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 			}
 		},
 		accumulate: e.accumulateUsage,
-		zh:         e.isChinese,
-		depth:      depth,
-		userLang:   userLang,
+		onUsage: func(u *ModelUsage) {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "usage", Usage: u})
+			}
+		},
+		zh:       e.isChinese,
+		depth:    depth,
+		userLang: userLang,
 	})
 	// Bubble up sub-agent questions into the pending ask_user seam so the
 	// existing awaiting_user / Options UI path presents them.
 	if len(res.Questions) > 0 {
+		e.askUserMu.Lock()
 		e.pendingAskUser = &AskUserRequest{Question: res.Questions[0]}
+		e.askUserMu.Unlock()
 	}
 	return res, nil
 }
@@ -127,11 +142,11 @@ func (r *SubAgentRunner) RunSubAgent(ctx context.Context, params HandoffToAgentP
 	}
 	call := ToolCallRequest{Name: HandoffToolName, Input: mustJSON(params)}
 	res := runHandoff(ctx, call, handoffOptions{
-		resolve: func(id AgentID) (Agent, error) { return r.registry.Get(id) },
+		resolve:    func(id AgentID) (Agent, error) { return r.registry.Get(id) },
 		accumulate: nil,
-		zh:       zhFromLang(userLang),
-		depth:    depth,
-		userLang: userLang,
+		zh:         zhFromLang(userLang),
+		depth:      depth,
+		userLang:   userLang,
 	})
 	return res, nil
 }
