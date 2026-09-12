@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
@@ -180,6 +181,14 @@ type ToolExecContext struct {
 	WorkDir    string
 	SessionID  string
 	TurnNumber int
+	// Ctx propagates the run's cancellation signal into tools (sub-agent
+	// delegation needs it to cancel child runs when the parent cancels).
+	Ctx context.Context
+	// Depth is the depth of the NEW sub-agent this handoff produces:
+	// 0 = main agent delegating the first level; d+1 = a sub-agent at depth d.
+	Depth int
+	// UserLang is the session language ("中文" or "") for localized tool output.
+	UserLang string
 }
 
 type ToolCallRequest struct {
@@ -198,6 +207,9 @@ type ToolResult struct {
 	// FinishReason carries a handoff's HandoffResult.FinishReason so the
 	// parent loop can react to why a sub-agent ended without text parsing.
 	FinishReason string `json:"finish_reason,omitempty"`
+	// Questions carries ask_user questions bubbled up from a sub-agent so the
+	// parent engine can present them via the awaiting_user path.
+	Questions []string `json:"questions,omitempty"`
 }
 
 // EventTypeMessage records conversation messages (user/assistant in full,

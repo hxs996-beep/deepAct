@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -18,15 +19,21 @@ type ToolContext struct {
 	SessionID   string
 	TurnNumber  int
 	ArtifactDir string // base directory for artifact store (e.g., ~/.deepact/artifacts)
+	// Ctx/Depth/UserLang mirror engine.ToolExecContext — see engine/types.go.
+	Ctx      context.Context
+	Depth    int
+	UserLang string
 }
 
 type ToolResultEnvelope struct {
-	ToolCallID  string `json:"tool_call_id"`
-	ToolName    string `json:"tool_name"`
-	Status      string `json:"status"`
-	Digest      string `json:"digest"`
-	ArtifactRef string `json:"artifact_ref,omitempty"`
-	ExitCode    *int   `json:"exit_code,omitempty"`
+	ToolCallID   string   `json:"tool_call_id"`
+	ToolName     string   `json:"tool_name"`
+	Status       string   `json:"status"`
+	Digest       string   `json:"digest"`
+	ArtifactRef  string   `json:"artifact_ref,omitempty"`
+	ExitCode     *int     `json:"exit_code,omitempty"`
+	FinishReason string   `json:"finish_reason,omitempty"`
+	Questions    []string `json:"questions,omitempty"`
 }
 
 const (

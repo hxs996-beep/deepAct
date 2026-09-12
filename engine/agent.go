@@ -35,6 +35,7 @@ const (
 	HandoffReasonStalledNarration = "stalled_narration" // text-only narration without acting
 	HandoffReasonNoResult         = "no_result"         // structured run ended without submitting a result
 	HandoffReasonMaxDepth         = "max_depth"         // nesting depth exceeded
+	HandoffReasonAwaitingUser     = "awaiting_user"     // sub-agent asked the user; parent must present the question
 )
 
 // Handoff carries delegation parameters from parent to sub-agent.
@@ -75,6 +76,9 @@ type HandoffResult struct {
 	// the parent handle the outcome deterministically.
 	FinishReason string      `json:"finish_reason,omitempty"`
 	Usage        *ModelUsage `json:"usage,omitempty"`
+	// Questions holds ask_user questions a sub-agent asked before ending.
+	// Bubbles up through the tool result to the parent engine.
+	Questions []string `json:"questions,omitempty"`
 }
 
 // AgentSpec describes an agent's identity and capabilities.

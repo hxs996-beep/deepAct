@@ -35,7 +35,10 @@ func (e *EngineExecutor) Execute(ctx engine.ToolExecContext, calls []engine.Tool
 	if e == nil || e.exec == nil {
 		return nil
 	}
-	toolCtx := ToolContext{WorkDir: ctx.WorkDir, SessionID: ctx.SessionID, TurnNumber: ctx.TurnNumber, ArtifactDir: e.ArtifactDir}
+	toolCtx := ToolContext{
+		WorkDir: ctx.WorkDir, SessionID: ctx.SessionID, TurnNumber: ctx.TurnNumber,
+		ArtifactDir: e.ArtifactDir, Ctx: ctx.Ctx, Depth: ctx.Depth, UserLang: ctx.UserLang,
+	}
 	toolCalls := make([]ToolCall, 0, len(calls))
 	for _, call := range calls {
 		toolCalls = append(toolCalls, ToolCall{ID: call.ID, Name: call.Name, Input: call.Input})
@@ -44,12 +47,14 @@ func (e *EngineExecutor) Execute(ctx engine.ToolExecContext, calls []engine.Tool
 	engineResults := make([]engine.ToolResult, 0, len(results))
 	for _, result := range results {
 		engineResults = append(engineResults, engine.ToolResult{
-			ToolCallID:  result.ToolCallID,
-			ToolName:    result.ToolName,
-			Status:      result.Status,
-			Digest:      result.Digest,
-			ArtifactRef: result.ArtifactRef,
-			ExitCode:    result.ExitCode,
+			ToolCallID:   result.ToolCallID,
+			ToolName:     result.ToolName,
+			Status:       result.Status,
+			Digest:       result.Digest,
+			ArtifactRef:  result.ArtifactRef,
+			ExitCode:     result.ExitCode,
+			FinishReason: result.FinishReason,
+			Questions:    result.Questions,
 		})
 	}
 	return engineResults
