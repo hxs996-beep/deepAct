@@ -131,3 +131,18 @@ func TestWriteSourceFiles_EmptyPath(t *testing.T) {
 		t.Error("expected error for empty path")
 	}
 }
+
+func TestWriteSourceFiles_RejectsLeafSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "evil.go"), filepath.Join(dir, "evil.go")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	files := []RATDSourceFile{{Path: "evil.go", Content: "x"}}
+	if err := writeSourceFiles(files, dir); err == nil {
+		t.Fatal("expected error writing through leaf symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "evil.go")); !os.IsNotExist(err) {
+		t.Error("content leaked outside workdir through leaf symlink")
+	}
+}

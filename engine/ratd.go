@@ -238,6 +238,13 @@ func writeSourceFiles(files []RATDSourceFile, workDir string) error {
 			return fmt.Errorf("unsafe source path %q escapes workdir via symlink", f.Path)
 		}
 		out := filepath.Join(dirReal, filepath.Base(p))
+		if fi, err := os.Lstat(out); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("refusing to write through symlink %q", f.Path)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %w", f.Path, err)
+		}
 		if err := os.WriteFile(out, []byte(f.Content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", f.Path, err)
 		}
