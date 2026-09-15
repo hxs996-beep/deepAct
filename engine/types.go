@@ -504,15 +504,18 @@ type RATDSandboxResult struct {
 
 // RATDState tracks the current /ratd session within TaskState.
 type RATDState struct {
-	Goal         string             `json:"goal"`
-	Phase        RATDPhase          `json:"phase"`
-	Language     string             `json:"language,omitempty"`
-	SourceFiles  []RATDSourceFile   `json:"source_files,omitempty"`
-	DesignNotes  string             `json:"design_notes,omitempty"`
-	Tests        []RATDTest         `json:"tests,omitempty"`
-	CurrentRound int                `json:"current_round"`
-	LastSandbox  *RATDSandboxResult `json:"last_sandbox,omitempty"`
-	FinalVerify  bool               `json:"final_verify,omitempty"` // no_issues 触发的最终验证轮
+	Goal        string           `json:"goal"`
+	Phase       RATDPhase        `json:"phase"`
+	Language    string           `json:"language,omitempty"`
+	SourceFiles []RATDSourceFile `json:"source_files,omitempty"`
+	DesignNotes string           `json:"design_notes,omitempty"`
+	Tests       []RATDTest       `json:"tests,omitempty"`
+	// WrittenTestFiles tracks test file paths already written to disk, so a
+	// REJECTed test can be removed and stale files do not accumulate.
+	WrittenTestFiles []string           `json:"written_test_files,omitempty"`
+	CurrentRound     int                `json:"current_round"`
+	LastSandbox      *RATDSandboxResult `json:"last_sandbox,omitempty"`
+	FinalVerify      bool               `json:"final_verify,omitempty"` // no_issues 触发的最终验证轮
 	// ActionableFeedback carries the Arbitrator's fix instructions, injected
 	// into the Proposer refactor round.
 	ActionableFeedback string `json:"actionable_feedback,omitempty"` // Arbitrator 的修复指令，注入 Proposer 重构轮

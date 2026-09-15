@@ -207,6 +207,9 @@ func (m *ratdMockAgent) Spec() AgentSpec {
 }
 func (m *ratdMockAgent) SetOnProgress(fn ProgressFunc) {}
 
+// Run implements Agent. It is an unused fallback: runRole always uses
+// RunWithPrompt when the agent supports it, which ratdMockAgent does, so this
+// path is never taken in harness tests.
 func (m *ratdMockAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
 	return &HandoffResult{Summary: m.pick(input), Conclusions: []string{m.pick(input)}}, nil
 }
@@ -346,11 +349,22 @@ func TestRATDArena_RejectInvalidTest(t *testing.T) {
 		},
 		arbitratorDecision: `{"decision":"REJECT_TEST","rejected_reason":"invalid","actionable_feedback":""}`,
 	}
-	// 第一次沙箱失败（触发仲裁 REJECT 丢弃无效测试），随后 RedTeam 认输
-	// → FinalVerify 沙箱成功 → 收敛。验证无效测试被丢弃后仍能正常交付。
+	// Mock 轮次梳理：
+	//   1. Propose   → 生成源码，写盘
+	//   2. RedTeam   → 消费 payloads[0]（无效测试）→ Tests=[t1]
+	//   3. Sandbox#1 → sync 写入 q_test.go → 运行失败（calls=1）
+	//   4. Arbitrate → REJECT_TEST → Tests=[]（丢弃）
+	//   5. RedTeam   → 消费 payloads[1]（no_issues）→ FinalVerify
+	//   6. Sandbox#2 → sync 删除已不在套件中的 q_test.go → 运行成功（calls=2）
+	//   7. Done      → 交付
 	calls := 0
+	testFileOnDiskAtSandbox := map[int]bool{}
 	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
 		calls++
+		// syncTestFilesToDisk 已在进入沙箱前执行：此刻磁盘状态应反映
+		// 当前 Tests 套件——#1 有测试（存在）、#2 测试被 REJECT（不存在）。
+		_, statErr := os.Stat(filepath.Join(wd, "src", "q_test.go"))
+		testFileOnDiskAtSandbox[calls] = statErr == nil
 		if calls == 1 {
 			return &RATDSandboxResult{ExitCode: 1, Output: "FAIL"}
 		}
@@ -370,6 +384,15 @@ func TestRATDArena_RejectInvalidTest(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 sandbox runs (fail→reject + final verify pass), got %d", calls)
+	}
+	if !testFileOnDiskAtSandbox[1] {
+		t.Error("RedTeam test file must be on disk when the sandbox runs against it")
+	}
+	if testFileOnDiskAtSandbox[2] {
+		t.Error("REJECTed test file must be removed from disk before the next sandbox run")
+	}
+	if _, err := os.Stat(filepath.Join(e.config.WorkDir, "src", "q_test.go")); !os.IsNotExist(err) {
+		t.Errorf("REJECTed test file must not remain on disk, stat err=%v", err)
 	}
 }
 

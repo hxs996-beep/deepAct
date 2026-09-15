@@ -211,47 +211,132 @@ func parseArbitration(content string) (decision string, feedback string, err err
 	return a.Decision, a.Feedback, nil
 }
 
+// resolveSafePath validates that relPath stays inside workDir (rejecting empty
+// paths, absolute paths, ../ escapes, and symlink traversal out of the
+// workdir) and returns the resolved absolute path. When createDirs is true,
+// parent directories are created first. Leaf symlinks are refused so writes
+// and removals never follow a link out of the workdir.
+func resolveSafePath(workDir, relPath string, createDirs bool) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("absolute path %q escapes workdir", relPath)
+	}
+	p := filepath.Join(workDir, filepath.FromSlash(relPath))
+	rel, err := filepath.Rel(workDir, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe path %q escapes workdir", relPath)
+	}
+	dir := filepath.Dir(p)
+	if createDirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+	workDirReal, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %s: %w", workDir, err)
+	}
+	dirReal, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve dir %s: %w", dir, err)
+	}
+	relReal, err := filepath.Rel(workDirReal, dirReal)
+	if err != nil || relReal == ".." || strings.HasPrefix(relReal, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe path %q escapes workdir via symlink", relPath)
+	}
+	out := filepath.Join(dirReal, filepath.Base(p))
+	if fi, err := os.Lstat(out); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refusing to write through symlink %q", relPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat %s: %w", relPath, err)
+	}
+	return out, nil
+}
+
+// safeWriteFile writes content to relPath under workDir after validating that
+// the path stays within workDir. It creates parent directories as needed.
+func safeWriteFile(workDir, relPath, content string) error {
+	out, err := resolveSafePath(workDir, relPath, true)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(out, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", relPath, err)
+	}
+	return nil
+}
+
+// safeRemoveFile removes relPath under workDir after validating that the path
+// stays within workDir. Missing files are not an error.
+func safeRemoveFile(workDir, relPath string) error {
+	out, err := resolveSafePath(workDir, relPath, false)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", relPath, err)
+	}
+	return nil
+}
+
 // writeSourceFiles writes all Proposer files under workDir. Paths are
 // validated to stay within workDir (rejects absolute paths, ../ escapes, empty
 // paths, and symlink traversal out of the workdir).
 func writeSourceFiles(files []RATDSourceFile, workDir string) error {
-	workDirReal, err := filepath.EvalSymlinks(workDir)
-	if err != nil {
-		return fmt.Errorf("resolve workdir %s: %w", workDir, err)
-	}
 	for _, f := range files {
-		if f.Path == "" {
-			return fmt.Errorf("source file has empty path")
-		}
-		p := filepath.Join(workDir, filepath.FromSlash(f.Path))
-		rel, err := filepath.Rel(workDir, p)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(f.Path) {
-			return fmt.Errorf("unsafe source path %q escapes workdir", f.Path)
-		}
-		dir := filepath.Dir(p)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
-		dirReal, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			return fmt.Errorf("resolve dir %s: %w", dir, err)
-		}
-		relReal, err := filepath.Rel(workDirReal, dirReal)
-		if err != nil || relReal == ".." || strings.HasPrefix(relReal, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("unsafe source path %q escapes workdir via symlink", f.Path)
-		}
-		out := filepath.Join(dirReal, filepath.Base(p))
-		if fi, err := os.Lstat(out); err == nil {
-			if fi.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("refusing to write through symlink %q", f.Path)
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat %s: %w", f.Path, err)
-		}
-		if err := os.WriteFile(out, []byte(f.Content), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", f.Path, err)
+		if err := safeWriteFile(workDir, f.Path, f.Content); err != nil {
+			return fmt.Errorf("write source %s: %w", f.Path, err)
 		}
 	}
+	return nil
+}
+
+// writeTestFiles writes all RedTeam test files under workDir. Each path is
+// validated with the same safety checks as writeSourceFiles.
+func writeTestFiles(tests []RATDTest, workDir string) error {
+	for _, t := range tests {
+		if err := safeWriteFile(workDir, t.TargetFile, t.TestCode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeTestFile removes a single RedTeam test file from workDir. Paths
+// outside workDir are refused; missing files are not an error.
+func removeTestFile(test RATDTest, workDir string) error {
+	return safeRemoveFile(workDir, test.TargetFile)
+}
+
+// syncTestFilesToDisk makes on-disk test files match state.RATD.Tests:
+// removes previously-written files no longer in the suite, then writes every
+// current test, and records the written paths in state.WrittenTestFiles.
+// Idempotent: with an unchanged suite it rewrites the same files and leaves
+// no stale ones behind.
+func syncTestFilesToDisk(state *RATDState, workDir string) error {
+	current := make(map[string]bool, len(state.Tests))
+	for _, t := range state.Tests {
+		current[t.TargetFile] = true
+	}
+	for _, p := range state.WrittenTestFiles {
+		if !current[p] {
+			if err := safeRemoveFile(workDir, p); err != nil {
+				return err
+			}
+		}
+	}
+	if err := writeTestFiles(state.Tests, workDir); err != nil {
+		return err
+	}
+	written := make([]string, 0, len(state.Tests))
+	for _, t := range state.Tests {
+		written = append(written, t.TargetFile)
+	}
+	state.WrittenTestFiles = written
 	return nil
 }
 
@@ -303,14 +388,11 @@ func execSandboxRunner(ctx context.Context, command, workDir string, timeout tim
 		}
 	}
 	out := buf.String()
-	if len(out) > 4000 {
+	runes := []rune(out)
+	if len(runes) > 4000 {
 		// Truncate on a rune boundary so multibyte UTF-8 output is never
 		// split mid-character.
-		runes := []rune(out)
-		if len(runes) > 4000 {
-			runes = runes[:4000]
-		}
-		out = string(runes) + "\n... (truncated)"
+		out = string(runes[:4000]) + "\n... (truncated)"
 	}
 	res.Output = out
 	return res
@@ -449,6 +531,9 @@ func (h *RATDHall) handleRATDArena(ctx context.Context) (*EngineResponse, error)
 			state.RATD.Phase = RATDSandbox
 
 		case RATDSandbox:
+			if err := syncTestFilesToDisk(state.RATD, workDir); err != nil {
+				return nil, fmt.Errorf("sync test files: %w", err)
+			}
 			res := h.runSandbox(ctx, workDir, state.RATD.Language)
 			state.RATD.LastSandbox = res
 			state.RATD.CurrentRound++
