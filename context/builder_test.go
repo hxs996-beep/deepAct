@@ -177,28 +177,6 @@ func TestFormatTaskStateVolatile(t *testing.T) {
 	}
 }
 
-func TestFlattenRoundtable(t *testing.T) {
-	tests := []struct {
-		name string
-		rt   *engine.RoundtableState
-		want string // must contain this string, or empty if expect nil
-	}{
-		{
-			name: "nil roundtable",
-			rt:   nil,
-			want: "",
-		},
-	}
-	for _, tt := range tests {
-		result := flattenRoundtable(tt.rt)
-		if tt.want == "" {
-			if result != nil {
-				t.Errorf("%s: expected nil, got %+v", tt.name, result)
-			}
-		}
-	}
-}
-
 // TestFormatTaskStateVolatile_Collab asserts that a live /collab pipeline is
 // rendered into the volatile context (Block B) so the main agent can see the
 // collab-produced plan across all execution turns, mirroring roundtable.

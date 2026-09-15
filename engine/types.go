@@ -84,9 +84,6 @@ type EngineConfig struct {
 	Pricing                PricingConfig
 	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
 	PromptVersion          string // SHA256 hash of the system prompt for tracking
-	// TeamMembers is the ordered list of member IDs to use in /team debate mode.
-	// Empty = use DefaultDebateMembers.
-	TeamMembers []string
 }
 
 type EngineResponse struct {
@@ -258,7 +255,6 @@ type TaskState struct {
 	ConsecutiveFailures int              `json:"consecutive_failures"`
 	EditScopeFiles      int              `json:"edit_scope_files"`
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
-	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
 	Collab              *CollabState     `json:"collab,omitempty"`
 	RATD                *RATDState       `json:"ratd,omitempty"`
 
@@ -344,74 +340,6 @@ type Dimension struct {
 	Evidence    string  `json:"evidence"`
 	Issue       string  `json:"issue"`
 	Improvement string  `json:"improvement"`
-}
-
-type DebateRoundPhase string
-
-const (
-	DebateProposal  DebateRoundPhase = "proposal"
-	DebateChallenge DebateRoundPhase = "challenge"
-	DebateRebuttal  DebateRoundPhase = "rebuttal"
-	DebateFinal     DebateRoundPhase = "final"
-)
-
-// DebateRound captures one round of the debate arena.
-type DebateRound struct {
-	Phase   DebateRoundPhase `json:"phase"`
-	Outputs []DebateOutput   `json:"outputs"`
-}
-
-// DebateOutput is one member's contribution in a debate round.
-type DebateOutput struct {
-	MemberID string   `json:"member_id"`
-	Content  string   `json:"content"`
-	Targets  []string `json:"targets"` // member IDs this output targets (challenge/rebuttal)
-}
-
-// RoundtablePhase describes which stage of the roundtable we are in.
-type RoundtablePhase int
-
-const (
-	RoundtableIdle            RoundtablePhase = iota
-	RoundtableProposal                        // 提案轮
-	RoundtableChallenge                       // 质询轮
-	RoundtableRebuttal                        // 反驳轮
-	RoundtableFinal                           // 终陈轮
-	RoundtableAwaitingVerdict                 // 等待用户裁决
-	RoundtableDone                            // 完成
-)
-
-func (p RoundtablePhase) String() string {
-	switch p {
-	case RoundtableProposal:
-		return "proposal"
-	case RoundtableChallenge:
-		return "challenge"
-	case RoundtableRebuttal:
-		return "rebuttal"
-	case RoundtableFinal:
-		return "final"
-	case RoundtableAwaitingVerdict:
-		return "awaiting_verdict"
-	case RoundtableDone:
-		return "done"
-	default:
-		return "idle"
-	}
-}
-
-// RoundtableState tracks the current roundtable session within TaskState.
-type RoundtableState struct {
-	Goal         string             `json:"goal"`
-	Phase        RoundtablePhase    `json:"phase"`
-	Members      []RoundtableMember `json:"members"`
-	DebateRounds []DebateRound      `json:"debate_rounds"` // 替代 Proposals + Reviews
-	// SharedContext 是预搜索子 agent 产出的代码调研报告，作为所有辩论成员的共享基线。
-	SharedContext string `json:"shared_context,omitempty"`
-	// WinnerID 是终陈后判定的平均分最高成员 ID。
-	WinnerID string `json:"winner_id,omitempty"`
-	// Blueprint 是胜者方案的详细实施蓝图（LLM 生成）。
-	Blueprint string `json:"blueprint,omitempty"`
 }
 
 // CollabStageName labels a single stage of the /collab pipeline.

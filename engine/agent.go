@@ -12,14 +12,13 @@ type AgentID string
 
 const (
 	AgentSub AgentID = "sub"
-	AgentTeamLead AgentID = "team-lead"
 
-	HandoffToolName        = "handoff_to_agent"
-	LoadSkillToolName      = "load_skill"
-	TaskCompleteToolName   = "task_complete"
-	TodoWriteToolName      = "todo_write"
-	SubmitResultToolName   = "submit_result"
-	AskUserToolName        = "ask_user"
+	HandoffToolName      = "handoff_to_agent"
+	LoadSkillToolName    = "load_skill"
+	TaskCompleteToolName = "task_complete"
+	TodoWriteToolName    = "todo_write"
+	SubmitResultToolName = "submit_result"
+	AskUserToolName      = "ask_user"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -52,7 +51,7 @@ type Handoff struct {
 	Depth          int    `json:"depth"`
 	NoNudge        bool   `json:"no_nudge,omitempty"`
 	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
-	MaxIterations  int    `json:"max_iterations,omitempty"`
+	MaxIterations int `json:"max_iterations,omitempty"`
 	// StructuredResult turns this run into a structured run: the loop injects
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
@@ -64,12 +63,12 @@ type Handoff struct {
 
 // HandoffResult is returned by a sub-agent after execution.
 type HandoffResult struct {
-	Conclusions []string    `json:"conclusions"`
-	Summary     string      `json:"summary"`
-	Artifacts   []string    `json:"artifacts,omitempty"`
-	Blocked     bool        `json:"blocked"`
-	BlockedBy   string      `json:"blocked_by,omitempty"`
-	TimedOut    bool        `json:"timed_out,omitempty"` // true when max iterations reached
+	Conclusions []string `json:"conclusions"`
+	Summary     string   `json:"summary"`
+	Artifacts   []string `json:"artifacts,omitempty"`
+	Blocked     bool     `json:"blocked"`
+	BlockedBy   string   `json:"blocked_by,omitempty"`
+	TimedOut    bool     `json:"timed_out,omitempty"` // true when max iterations reached
 	// FinishReason is the structured reason the run ended with
 	// (HandoffReason* constants). "completed" means the agent delivered a
 	// genuine result; every other value signals partial/no output and lets

@@ -96,17 +96,11 @@ type Engine struct {
 	// bubble up questions concurrently, so the write must be serialized.
 	askUserMu sync.Mutex
 
-	// roundtableHall orchestrates multi-stance roundtable discussions.
-	roundtableHall *RoundtableHall
+	// ratdHall orchestrates the /ratd harness (proposer/redteam/arbitrator).
+	ratdHall *RATDHall
 
 	// collabHall orchestrates the /collab pipeline (recon → design → dev → review).
 	collabHall *CollabHall
-
-	// teamVerdictPending is set when the user's roundtable verdict is processed.
-	// On the next Run(), it causes PlanConfirmed to be set, skipping the
-	// edit-plan guard - the user already approved the plan through the debate
-	// process.
-	teamVerdictPending bool
 
 	// collabVerdictPending is set when the user confirms the /collab summary,
 	// skipping confirmation gates so the plan lands directly.
@@ -191,7 +185,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		errorLoop:    NewLoopTracker(0, 3, true),  // 3 errors → block, success resets
 		progressLoop: NewLoopTracker(4, 6, true),  // 4th nudge / 6th block, progress resets
 	}
-	e.roundtableHall = NewRoundtableHall(e)
+	e.ratdHall = NewRATDHall(e)
 	e.collabHall = NewCollabHall(e)
 
 	// Persistent memory (memory_markers, decisions, open_questions,
@@ -311,40 +305,18 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
 
-	// Team command handling — /debate <goal>
-	// Activates the debate arena: 4-round structured debate → user verdict.
-	if tc := parseTeamCommand(userMsg); tc != nil {
-		e.state.Roundtable = &RoundtableState{
-			Goal:  tc.Goal,
-			Phase: RoundtableProposal,
+	// RATD command handling — /ratd <goal>
+	// Activates the reverse-test-driven harness: propose → red-team → sandbox.
+	if rc := parseRATDCommand(userMsg); rc != nil {
+		e.state.RATD = &RATDState{
+			Goal:  rc.Goal,
+			Phase: RATDPropose,
 		}
-		// Resolve members: command-line > config > defaults
-		// Priority: 1) --members flag  2) config.toml [team].members  3) DefaultDebateMembers
-		var resolved []RoundtableMember
-		if len(tc.MemberIDs) > 0 {
-			resolved = resolveMembers(tc.MemberIDs, DefaultDebateMembers)
-		}
-		if len(resolved) == 0 && len(e.config.TeamMembers) > 0 {
-			resolved = resolveMembers(e.config.TeamMembers, DefaultDebateMembers)
-		}
-		if len(resolved) > 0 {
-			e.state.Roundtable.Members = resolved
-		}
-		// Load --add member from TOML file
-		if tc.AddMemberPath != "" {
-			added, err := loadMemberFromFile(tc.AddMemberPath)
-			if err != nil {
-				loopLog.Printf("failed to load --add member from %s: %v", tc.AddMemberPath, err)
-			} else if added != nil {
-				e.state.Roundtable.Members = append(e.state.Roundtable.Members, *added)
-			}
-		}
-		// Replace raw "/debate <goal>" so the main agent loop sees a proper prompt
+		// Replace raw "/ratd <goal>" so the main agent loop sees a proper prompt.
 		if len(e.history) > 0 {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"辩论模式已启动：%s\n\n请等待团队成员完成辩论。",
-				tc.Goal)
-			userMsg = fmt.Sprintf("辩论模式已启动：%s\n\n请等待团队成员完成辩论。", tc.Goal)
+				"反向测试驱动协作已启动：%s\n\n请等待 Harness 完成。", rc.Goal)
+			userMsg = fmt.Sprintf("反向测试驱动协作已启动：%s\n\n请等待 Harness 完成。", rc.Goal)
 		}
 	}
 
@@ -647,41 +619,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 	}
 
-	// Debate Arena phase — execute the current debate round, then return
-	// the round result to the user. The engine continues to the next round
-	// on the next Run() call until AwaitingVerdict.
-	// Placed before the team-verdict gate below: handleVerdict runs when the
-	// user delivers a verdict in this
-	// Run(), and the teamVerdictPending flag it sets is consumed in the SAME Run().
-	if e.state.Roundtable != nil {
-		phase := e.state.Roundtable.Phase
-		switch phase {
-		case RoundtableProposal, RoundtableChallenge, RoundtableRebuttal, RoundtableFinal:
-			response, err := e.roundtableHall.handleDebateArena(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("debate arena: %w", err)
-			}
-			if response != nil {
-				return response, nil
-			}
-		case RoundtableAwaitingVerdict:
-			response, err := e.roundtableHall.Advance(ctx, userMsg)
-			if err != nil {
-				return nil, fmt.Errorf("verdict: %w", err)
-			}
-			// "再辩一轮" restarts the debate: return its response and let the
-			// next Run() execute the rounds. A picked verdict (Phase becomes
-			// RoundtableDone) skips the "✓ 裁决已记录" ack and falls through
-			// to the main agent loop, which consumes the pinned verdict +
-			// teamVerdictPending flag set by handleVerdict and executes the
-			// chosen proposal in this same Run().
-			if e.state.Roundtable.Phase != RoundtableDone {
-				return response, nil
-			}
-		case RoundtableDone:
-			// Debate complete — clear roundtable state so normal flow resumes.
-			// The verdict was already injected as a pinned message.
-			e.state.Roundtable = nil
+	// RATD harness phase — execute the harness state machine to completion.
+	if e.state.RATD != nil {
+		response, err := e.ratdHall.handleRATDArena(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("ratd harness: %w", err)
+		}
+		if response != nil {
+			return response, nil
 		}
 	}
 
@@ -717,16 +662,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			// 末尾的清理逻辑处理（见下方 loop.go 末尾），两者互补不重复。
 			e.state.Collab = nil
 		}
-	}
-
-	// Team verdict: the user already approved a plan through the debate process.
-	// Override the edit-plan guard.
-	// Must come AFTER the roundtable block because handleVerdict (in the
-	// AwaitingVerdict case above) sets the flag during this same Run().
-	if e.teamVerdictPending {
-		e.state.PlanConfirmed = true
-		e.teamVerdictPending = false
-		loopLog.Printf("team verdict: PlanConfirmed=true, skipping edit-plan guard")
 	}
 
 	// Collab verdict: the user already approved a plan through the pipeline.
@@ -917,12 +852,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Run() call continues from the correct position. +1 because 'turns' was
 	// not incremented after a Done break — it still points to the completed turn.
 	e.state.TurnNumber = turns + 1
-
-	// Clean up completed roundtable state. It was available in Block B for this
-	// Run() call's context; subsequent turns don't need stale roundtable data.
-	if e.state.Roundtable != nil && e.state.Roundtable.Phase == RoundtableDone {
-		e.state.Roundtable = nil
-	}
 
 	// Clean up a completed collab pipeline the same way: the pinned plan was
 	// already consumed by this Run()'s agent loop.

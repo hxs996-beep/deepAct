@@ -20,7 +20,7 @@ func TestParseCollabCommand_Valid(t *testing.T) {
 
 func TestParseCollabCommand_NotCollab(t *testing.T) {
 	cases := []string{
-		"/debate 实现一个功能",
+		"/ratd 实现一个功能",
 		"/team 实现一个功能",
 		"/skills",
 		"普通用户消息",

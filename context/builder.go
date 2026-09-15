@@ -198,19 +198,18 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		return ""
 	}
 	volatile := struct {
-		Goal             string              `json:"goal,omitempty"`
-		MemoryMarkers    []string            `json:"memory_markers,omitempty"`
-		OpenQuestions    []string            `json:"open_questions,omitempty"`
-		Assumptions      []string            `json:"assumptions,omitempty"`
-		RecentDecisions  []decisionVolatile  `json:"recent_decisions,omitempty"`
-		ModifiedCount    int                 `json:"modified_count"`
-		RecentModified   []string            `json:"recent_modified,omitempty"`
-		CurrentStep      string              `json:"current_step,omitempty"`
-		TurnNumber       int                 `json:"turn_number"`
-		ConsecutiveFails int                 `json:"consecutive_failures"`
-		EditScopeFiles   int                 `json:"edit_scope_files"`
-		Roundtable       *roundtableVolatile `json:"roundtable,omitempty"`
-		Collab           *collabVolatile     `json:"collab,omitempty"`
+		Goal             string             `json:"goal,omitempty"`
+		MemoryMarkers    []string           `json:"memory_markers,omitempty"`
+		OpenQuestions    []string           `json:"open_questions,omitempty"`
+		Assumptions      []string           `json:"assumptions,omitempty"`
+		RecentDecisions  []decisionVolatile `json:"recent_decisions,omitempty"`
+		ModifiedCount    int                `json:"modified_count"`
+		RecentModified   []string           `json:"recent_modified,omitempty"`
+		CurrentStep      string             `json:"current_step,omitempty"`
+		TurnNumber       int                `json:"turn_number"`
+		ConsecutiveFails int                `json:"consecutive_failures"`
+		EditScopeFiles   int                `json:"edit_scope_files"`
+		Collab           *collabVolatile    `json:"collab,omitempty"`
 	}{
 		Goal:             state.Goal,
 		MemoryMarkers:    lastN(state.MemoryMarkers, maxRenderedMarkers),
@@ -223,7 +222,6 @@ func formatTaskStateVolatile(state *engine.TaskState) string {
 		TurnNumber:       state.TurnNumber,
 		ConsecutiveFails: state.ConsecutiveFailures,
 		EditScopeFiles:   state.EditScopeFiles,
-		Roundtable:       flattenRoundtable(state.Roundtable),
 		Collab:           flattenCollab(state.Collab),
 	}
 	data, err := json.Marshal(volatile)
@@ -278,34 +276,6 @@ func currentPlanStep(plan []engine.PlanStep) string {
 	return ""
 }
 
-// roundtableVolatile is a compact representation of roundtable results
-// injected into Block B for the main agent to make informed decisions.
-type roundtableVolatile struct {
-	Phase        string   `json:"phase"`
-	Goal         string   `json:"goal,omitempty"`
-	DebateRounds int      `json:"debate_rounds,omitempty"`
-	MemberIDs    []string `json:"member_ids,omitempty"`
-}
-
-// flattenRoundtable converts engine.RoundtableState to the compact volatile form.
-func flattenRoundtable(rt *engine.RoundtableState) *roundtableVolatile {
-	if rt == nil {
-		return nil
-	}
-	v := &roundtableVolatile{
-		Phase:        rt.Phase.String(),
-		Goal:         truncString(rt.Goal, 120),
-		DebateRounds: len(rt.DebateRounds),
-	}
-	if len(rt.Members) > 0 {
-		v.MemberIDs = make([]string, len(rt.Members))
-		for i, m := range rt.Members {
-			v.MemberIDs[i] = m.ID
-		}
-	}
-	return v
-}
-
 // collabVolatile is a compact representation of the /collab pipeline state
 // injected into Block B so the main agent can tell that the active plan is
 // a collab-pipeline output across all execution turns, not just the first.
@@ -328,7 +298,7 @@ func flattenCollab(c *engine.CollabState) *collabVolatile {
 }
 
 // collabPhaseName maps an engine.CollabPhase to a readable string for the
-// volatile context. CollabPhase has no String() method (unlike RoundtablePhase).
+// volatile context. CollabPhase has no String() method.
 func collabPhaseName(p engine.CollabPhase) string {
 	switch p {
 	case engine.CollabReconPhase:

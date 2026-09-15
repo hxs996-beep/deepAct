@@ -223,9 +223,6 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	cfg.AutoConfirmScope = !f.Guards.ScopeGuard
 	// ConferenceEnabled was removed (dead code - Conference state is managed
 	// via TaskState.Conference field in the engine, not via EngineConfig).
-	if len(f.Team.Members) > 0 {
-		cfg.TeamMembers = f.Team.Members
-	}
 }
 
 type uiConfig struct {
