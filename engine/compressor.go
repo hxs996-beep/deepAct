@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,13 @@ type CompressionOrchestrator struct {
 	modelName      string
 	flashModelName string
 	userLang       string // session-locked user language, used to pick prompt language
+
+	// degradedUntil suppresses compression until this time after an archive
+	// summary fails (e.g. flash model timeout). Without the cooldown, an
+	// over-threshold context retries the failing compression every turn,
+	// burning a wasted flash round-trip (and a cold cache) each time.
+	mu           sync.Mutex
+	degradedUntil time.Time
 }
 
 func NewCompressionOrchestrator(model ModelClient, estimator TokenEstimator, modelName string) *CompressionOrchestrator {
@@ -50,10 +58,17 @@ const (
 	// Single threshold: no incremental layers (no 65% stale eviction or 85%
 	// code collapse), just one pass at 80%.
 	compactRatio = 0.80
+
+	// compressionCooldown is how long compression stays suppressed after an
+	// archive-summary failure, preventing per-turn retry loops.
+	compressionCooldown = 5 * time.Minute
 )
 
 func (c *CompressionOrchestrator) ShouldCompress(currentTokens, maxTokens int) (CompressionLayer, bool) {
 	if maxTokens <= 0 {
+		return LayerToolGovernance, false
+	}
+	if c.isDegraded() {
 		return LayerToolGovernance, false
 	}
 	ratio := float64(currentTokens) / float64(maxTokens)
@@ -63,16 +78,36 @@ func (c *CompressionOrchestrator) ShouldCompress(currentTokens, maxTokens int) (
 	return LayerToolGovernance, false
 }
 
-func (c *CompressionOrchestrator) Compress(layer CompressionLayer, state *TaskState, history []Message) ([]Message, error) {
+// isDegraded reports whether a recent archive-summary failure is still within
+// its cooldown window. While degraded, compression is skipped entirely.
+func (c *CompressionOrchestrator) isDegraded() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Before(c.degradedUntil)
+}
+
+func (c *CompressionOrchestrator) markDegraded() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.degradedUntil = time.Now().Add(compressionCooldown)
+}
+
+func (c *CompressionOrchestrator) clearDegraded() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.degradedUntil = time.Time{}
+}
+
+func (c *CompressionOrchestrator) Compress(ctx context.Context, layer CompressionLayer, state *TaskState, history []Message) ([]Message, error) {
 	switch layer {
 	case LayerFullCompact:
-		return c.compressArchive(state, history)
+		return c.compressArchive(ctx, state, history)
 	default:
 		return history, nil
 	}
 }
 
-func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Message) ([]Message, error) {
+func (c *CompressionOrchestrator) compressArchive(ctx context.Context, state *TaskState, history []Message) ([]Message, error) {
 	if c.model == nil || len(history) <= tailBudget/1000 {
 		return history, nil
 	}
@@ -85,7 +120,7 @@ func (c *CompressionOrchestrator) compressArchive(state *TaskState, history []Me
 	oldHistory := history[:freshStart]
 	freshHistory := history[freshStart:]
 
-	summary, err := c.generateArchiveSummary(state, oldHistory)
+	summary, err := c.generateArchiveSummary(ctx, state, oldHistory)
 	if err != nil {
 		return history, nil
 	}
@@ -131,10 +166,12 @@ func containsDecisionText(decisions []Decision, text string) bool {
 	return false
 }
 
-func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, history []Message) (string, error) {
+func (c *CompressionOrchestrator) generateArchiveSummary(ctx context.Context, state *TaskState, history []Message) (string, error) {
 	prompt := buildArchivePrompt(state, history, zhFromLang(c.userLang))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Inherit the caller's context so a user cancel can abort compression
+	// mid-flight; 30s bounds a single attempt.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	req := ModelRequest{
@@ -149,8 +186,12 @@ func (c *CompressionOrchestrator) generateArchiveSummary(state *TaskState, histo
 
 	resp, err := c.model.Complete(ctx, req)
 	if err != nil {
+		// Enter the cooldown so over-threshold contexts stop retrying this
+		// failing compression every turn. Cleared on the next success.
+		c.markDegraded()
 		return "", fmt.Errorf("archive summary: %w", err)
 	}
+	c.clearDegraded()
 	return resp.Message.Content, nil
 }
 
@@ -345,20 +386,20 @@ func (c *CompressionOrchestrator) EstimateTokens(messages []ModelMessage) int {
 }
 
 // CompressModelMessages applies compression to ModelMessage history for sub-agents.
-func (c *CompressionOrchestrator) CompressModelMessages(layer CompressionLayer, goal string, history []ModelMessage) ([]ModelMessage, error) {
+func (c *CompressionOrchestrator) CompressModelMessages(ctx context.Context, layer CompressionLayer, goal string, history []ModelMessage) ([]ModelMessage, error) {
 	switch layer {
 	case LayerFullCompact:
-		return c.compressModelArchive(goal, history)
+		return c.compressModelArchive(ctx, goal, history)
 	default:
 		return history, nil
 	}
 }
 
-func (c *CompressionOrchestrator) compressModelArchive(goal string, history []ModelMessage) ([]ModelMessage, error) {
+func (c *CompressionOrchestrator) compressModelArchive(ctx context.Context, goal string, history []ModelMessage) ([]ModelMessage, error) {
 	if c.model == nil || len(history) <= tailBudget/1000 {
 		return history, nil
 	}
-	summary, err := c.generateModelArchiveSummary(goal, history)
+	summary, err := c.generateModelArchiveSummary(ctx, goal, history)
 	if err != nil {
 		return history, nil
 	}
@@ -380,9 +421,9 @@ func (c *CompressionOrchestrator) compressModelArchive(goal string, history []Mo
 	return result, nil
 }
 
-func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, history []ModelMessage) (string, error) {
+func (c *CompressionOrchestrator) generateModelArchiveSummary(ctx context.Context, goal string, history []ModelMessage) (string, error) {
 	prompt := buildModelArchivePrompt(goal, history, zhFromLang(c.userLang))
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	req := ModelRequest{
@@ -396,8 +437,10 @@ func (c *CompressionOrchestrator) generateModelArchiveSummary(goal string, histo
 	}
 	resp, err := c.model.Complete(ctx, req)
 	if err != nil {
+		c.markDegraded()
 		return "", fmt.Errorf("archive summary: %w", err)
 	}
+	c.clearDegraded()
 	return resp.Message.Content, nil
 }
 

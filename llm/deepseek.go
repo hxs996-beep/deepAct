@@ -38,8 +38,10 @@ const (
 	// This is the TTFT-before-any-bytes phase; a server that accepts the TCP
 	// connection but never responds with headers hangs here indefinitely
 	// without it. Streaming bodies are NOT bounded by this (the idleTimeout
-	// watchdog handles mid-stream stalls).
-	DefaultResponseHeaderTimeout = 120 * time.Second
+	// watchdog handles mid-stream stalls). Generous because a long prompt on a
+	// cold prefix-cache miss can push TTFT past two minutes; tripping it forces
+	// a wasteful full-request retry.
+	DefaultResponseHeaderTimeout = 180 * time.Second
 	// DefaultDialTimeout caps the TCP connection establishment phase. Without
 	// it, a server that is reachable but never completes the handshake (or a
 	// black-holed route) hangs the very first byte indefinitely. Generous
@@ -159,11 +161,18 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 				// stale (server closed without notice) so a reused half-open
 				// connection doesn't silently hang the next request.
 				IdleConnTimeout: 90 * time.Second,
+				// Streaming responses hold a connection until SSE ends, so a
+				// single host needs more than Go's default 2 idle connections
+				// when parallel agents/debate members are in flight. Sized at
+				// 2× the limiter's max slots: 20 idle + live streams cannot
+				// exceed 10, so the pool never thrashes with TCP/TLS redials.
+				MaxIdleConns:       100,
+				MaxIdleConnsPerHost: 20,
 			},
 		}
 	}
 	if limiter == nil {
-		limiter = NewAdaptiveLimiter(5, 10, 1, 10, 5)
+		limiter = NewAdaptiveLimiter(8, 10, 1, 20, 8)
 	}
 	if retry.MaxRetries == 0 {
 		retry = DefaultRetryPolicy()

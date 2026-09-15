@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -56,7 +57,7 @@ func TestShouldCompress(t *testing.T) {
 func TestCompress_NoOpOnToolGovernance(t *testing.T) {
 	c := NewCompressionOrchestrator(nil, nil, "pro")
 	history := []Message{{Role: "user", Content: "hello"}}
-	result, err := c.Compress(LayerToolGovernance, nil, history)
+	result, err := c.Compress(context.Background(), LayerToolGovernance, nil, history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestCompress_NoOpOnToolGovernance(t *testing.T) {
 func TestCompress_NoModel(t *testing.T) {
 	c := NewCompressionOrchestrator(nil, nil, "pro")
 	history := []Message{{Role: "user", Content: "hello"}}
-	result, err := c.Compress(LayerFullCompact, nil, history)
+	result, err := c.Compress(context.Background(), LayerFullCompact, nil, history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -373,7 +374,7 @@ func TestEstimateTokens_NilEstimator(t *testing.T) {
 func TestCompressModelMessages_NoOpOnToolGovernance(t *testing.T) {
 	c := NewCompressionOrchestrator(nil, nil, "pro")
 	history := []ModelMessage{{Role: "user", Content: "hello"}}
-	result, err := c.CompressModelMessages(LayerToolGovernance, "goal", history)
+	result, err := c.CompressModelMessages(context.Background(), LayerToolGovernance, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +386,7 @@ func TestCompressModelMessages_NoOpOnToolGovernance(t *testing.T) {
 func TestCompressModelMessages_NoModel(t *testing.T) {
 	c := NewCompressionOrchestrator(nil, nil, "pro")
 	history := []ModelMessage{{Role: "user", Content: "hello"}}
-	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -425,7 +426,7 @@ func TestCompressModelMessages_TrimsOldHistory(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		history = append(history, ModelMessage{Role: "user", Content: fmt.Sprintf("message-%d", i)})
 	}
-	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -443,7 +444,7 @@ func TestCompressModelMessages_ShortHistoryNoOp(t *testing.T) {
 	mock := &stubCompleteModel{resp: `{"goal":"g"}`}
 	c := NewCompressionOrchestrator(mock, nil, "pro")
 	history := []ModelMessage{{Role: "user", Content: "hi"}}
-	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -460,12 +461,37 @@ func TestCompressModelMessages_ModelErrorKeepsHistory(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		history = append(history, ModelMessage{Role: "user", Content: "x"})
 	}
-	result, err := c.CompressModelMessages(LayerFullCompact, "goal", history)
+	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(result) != len(history) {
 		t.Errorf("model failure must keep history unchanged: got %d, want %d", len(result), len(history))
+	}
+}
+
+// TestCompressionCooldown 回归验证：摘要生成失败后进入冷却窗口，期间
+// ShouldCompress 返回 false（不再每轮重试失败的压缩），且冷却窗口内成功后清除。
+func TestCompressionCooldown(t *testing.T) {
+	c := NewCompressionOrchestrator(nil, nil, "pro")
+	if c.isDegraded() {
+		t.Fatal("fresh orchestrator must not be degraded")
+	}
+	// 失败 → 进入冷却
+	c.markDegraded()
+	if !c.isDegraded() {
+		t.Fatal("markDegraded must set the degraded flag")
+	}
+	if _, ok := c.ShouldCompress(999999, 1000000); ok {
+		t.Fatal("ShouldCompress must be suppressed while degraded")
+	}
+	// 成功 → 清除冷却，恢复正常压缩
+	c.clearDegraded()
+	if c.isDegraded() {
+		t.Fatal("clearDegraded must reset the degraded flag")
+	}
+	if layer, ok := c.ShouldCompress(999999, 1000000); !ok || layer != LayerFullCompact {
+		t.Fatalf("after clearing, ShouldCompress must allow compression, got layer=%v ok=%v", layer, ok)
 	}
 }
 

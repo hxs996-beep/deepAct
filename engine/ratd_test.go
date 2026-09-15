@@ -31,6 +31,53 @@ func TestParseCodePayload_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestParseCodePayload_CodeFence(t *testing.T) {
+	payload := "```json\n{\"language\":\"go\",\"source_files\":[{\"path\":\"src/q.go\",\"content\":\"package q\"}],\"design_notes\":\"fenced\"}\n```"
+	lang, files, notes, err := parseCodePayload(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lang != "go" || len(files) != 1 || files[0].Path != "src/q.go" || notes != "fenced" {
+		t.Errorf("got lang=%q files=%v notes=%q", lang, files, notes)
+	}
+}
+
+func TestParseCodePayload_ProseAroundJSON(t *testing.T) {
+	// 模型在 JSON 前后夹带中文叙述 —— 用户报告的 'å'（UTF-8 中文首字节）场景。
+	payload := "好的，这是方案：\n{\"language\":\"go\",\"source_files\":[{\"path\":\"main.go\",\"content\":\"package main\"}],\"design_notes\":\"prose\"}\n以上是我的答案。"
+	lang, files, notes, err := parseCodePayload(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lang != "go" || len(files) != 1 || files[0].Path != "main.go" || notes != "prose" {
+		t.Errorf("got lang=%q files=%v notes=%q", lang, files, notes)
+	}
+}
+
+func TestParseCodePayload_FormatExampleThenAnswer(t *testing.T) {
+	// 模型先贴输出格式示例（source_files 为空），再给出真正的 payload。
+	payload := "输出格式示例：{\"language\":\"go\",\"source_files\":[]}\n答案：\n{\"language\":\"go\",\"source_files\":[{\"path\":\"main.go\",\"content\":\"package main\"}]}"
+	_, files, _, err := parseCodePayload(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 || files[0].Path != "main.go" {
+		t.Errorf("got files=%v", files)
+	}
+}
+
+func TestParseCodePayload_BraceInStringValue(t *testing.T) {
+	// source 字符串值内含不成对的大括号（如模板 {{），brace 扫描不得被干扰。
+	payload := `{"language":"go","source_files":[{"path":"t.go","content":"var s = \"{{ not balanced"}],"design_notes":"brace-in-string"}`
+	_, files, _, err := parseCodePayload(payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 || files[0].Content != `var s = "{{ not balanced` {
+		t.Errorf("got files=%v", files)
+	}
+}
+
 func TestParseTestPayload_NoIssues(t *testing.T) {
 	_, noIssues, err := parseTestPayload(`{"no_issues_found": true}`)
 	if err != nil || !noIssues {

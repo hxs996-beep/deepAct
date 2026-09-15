@@ -142,17 +142,74 @@ type codePayloadJSON struct {
 	DesignNotes string           `json:"design_notes"`
 }
 
-// parseCodePayload parses a Proposer CodePayload. Errors when JSON is invalid
-// or no source files were produced.
+// topLevelJSONObjects splits content into top-level JSON object literals,
+// tolerating prose around them and fenced code blocks (```json / ```). Braces
+// inside string values (including escaped quotes) are ignored, so content like
+// `{"content":"{{"}` extracts as a single object. An object is only emitted
+// when its braces balance, so dangling `}` outside a string is ignored.
+func topLevelJSONObjects(content string) []string {
+	text := strings.TrimSpace(content)
+	// Strip a leading code fence and its closing marker.
+	if strings.HasPrefix(text, "```") {
+		if end := strings.LastIndex(text, "```"); end > 3 {
+			text = strings.TrimSpace(text[3:end])
+			if idx := strings.Index(text, "\n"); idx >= 0 {
+				text = strings.TrimSpace(text[idx:])
+			}
+		}
+	}
+	var objs []string
+	inString, escaped := false, false
+	depth, start := 0, -1
+	for i, r := range text {
+		switch {
+		case inString:
+			if escaped {
+				escaped = false
+			} else if r == '\\' {
+				escaped = true
+			} else if r == '"' {
+				inString = false
+			}
+		case r == '"':
+			inString = true
+		case r == '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case r == '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					objs = append(objs, text[start:i+1])
+					start = -1
+				}
+			}
+		}
+	}
+	return objs
+}
+
+// parseCodePayload parses a Proposer CodePayload. Errors when no JSON object
+// with source files is found (invalid JSON, prose-only output, or empty
+// example objects).
 func parseCodePayload(content string) (language string, files []RATDSourceFile, designNotes string, err error) {
-	var p codePayloadJSON
-	if err = json.Unmarshal([]byte(content), &p); err != nil {
-		return "", nil, "", fmt.Errorf("invalid CodePayload: %w", err)
+	objs := topLevelJSONObjects(content)
+	if len(objs) == 0 {
+		return "", nil, "", fmt.Errorf("invalid CodePayload: no JSON object found")
 	}
-	if len(p.SourceFiles) == 0 {
-		return "", nil, "", fmt.Errorf("CodePayload has no source_files")
+	for _, obj := range objs {
+		var p codePayloadJSON
+		if err = json.Unmarshal([]byte(obj), &p); err != nil {
+			continue // 语法失败的对象跳过，尝试下一个
+		}
+		if len(p.SourceFiles) == 0 {
+			continue // 空示例对象（如输出格式示例）跳过
+		}
+		return p.Language, p.SourceFiles, p.DesignNotes, nil
 	}
-	return p.Language, p.SourceFiles, p.DesignNotes, nil
+	return "", nil, "", fmt.Errorf("invalid CodePayload: no valid payload (objects: %d)", len(objs))
 }
 
 // testPayloadJSON mirrors the RedTeam's output contract. NoIssuesFound is a
@@ -172,27 +229,34 @@ type testPayloadJSON struct {
 // and rejected. Otherwise returns the parsed test. Errors on invalid JSON or
 // ambiguous payloads.
 func parseTestPayload(content string) (test *RATDTest, noIssues bool, err error) {
-	var p testPayloadJSON
-	if err = json.Unmarshal([]byte(content), &p); err != nil {
-		return nil, false, fmt.Errorf("invalid TestPayload: %w", err)
+	objs := topLevelJSONObjects(content)
+	if len(objs) == 0 {
+		return nil, false, fmt.Errorf("invalid TestPayload: no JSON object found")
 	}
-	if p.NoIssuesFound != nil && *p.NoIssuesFound {
-		if strings.TrimSpace(p.TestCode) == "" && strings.TrimSpace(p.TargetFile) == "" {
-			return nil, true, nil
+	for _, obj := range objs {
+		var p testPayloadJSON
+		if err = json.Unmarshal([]byte(obj), &p); err != nil {
+			continue // 语法失败的对象跳过，尝试下一个
 		}
-		return nil, false, fmt.Errorf("TestPayload 同时声明 no_issues_found=true 与测试字段，含混")
+		if p.NoIssuesFound != nil && *p.NoIssuesFound {
+			if strings.TrimSpace(p.TestCode) == "" && strings.TrimSpace(p.TargetFile) == "" {
+				return nil, true, nil
+			}
+			return nil, false, fmt.Errorf("TestPayload 同时声明 no_issues_found=true 与测试字段，含混")
+		}
+		t := &RATDTest{
+			Category:   p.Category,
+			Severity:   p.Severity,
+			TargetFile: p.TargetFile,
+			TestCode:   p.TestCode,
+			Rationale:  p.Rationale,
+		}
+		if strings.TrimSpace(t.TestCode) == "" || strings.TrimSpace(t.TargetFile) == "" {
+			continue // 不完整的测试对象跳过
+		}
+		return t, false, nil
 	}
-	t := &RATDTest{
-		Category:   p.Category,
-		Severity:   p.Severity,
-		TargetFile: p.TargetFile,
-		TestCode:   p.TestCode,
-		Rationale:  p.Rationale,
-	}
-	if strings.TrimSpace(t.TestCode) == "" || strings.TrimSpace(t.TargetFile) == "" {
-		return nil, false, fmt.Errorf("TestPayload missing test_code/target_file")
-	}
-	return t, false, nil
+	return nil, false, fmt.Errorf("invalid TestPayload: no valid payload (objects: %d)", len(objs))
 }
 
 // parseArbitration parses an Arbitrator ArbitrationResult.
@@ -202,13 +266,20 @@ func parseArbitration(content string) (decision string, feedback string, err err
 		Reason   string `json:"rejected_reason"`
 		Feedback string `json:"actionable_feedback"`
 	}
-	if err = json.Unmarshal([]byte(content), &a); err != nil {
-		return "", "", fmt.Errorf("invalid ArbitrationResult: %w", err)
+	objs := topLevelJSONObjects(content)
+	if len(objs) == 0 {
+		return "", "", fmt.Errorf("invalid ArbitrationResult: no JSON object found")
 	}
-	if a.Decision != "ACCEPT_TEST" && a.Decision != "REJECT_TEST" {
-		return "", "", fmt.Errorf("invalid arbitration decision %q", a.Decision)
+	for _, obj := range objs {
+		if err = json.Unmarshal([]byte(obj), &a); err != nil {
+			continue // 语法失败的对象跳过，尝试下一个
+		}
+		if a.Decision != "ACCEPT_TEST" && a.Decision != "REJECT_TEST" {
+			continue // 非法决策的对象跳过
+		}
+		return a.Decision, a.Feedback, nil
 	}
-	return a.Decision, a.Feedback, nil
+	return "", "", fmt.Errorf("invalid ArbitrationResult: no valid decision (objects: %d)", len(objs))
 }
 
 // resolveSafePath validates that relPath stays inside workDir (rejecting empty

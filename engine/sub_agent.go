@@ -274,7 +274,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			if tokens > 0 {
 				layer, should := r.compressor.ShouldCompress(tokens, limit)
 				if should {
-					if compressed, err := r.compressor.CompressModelMessages(layer, input.Goal, history); err == nil {
+					if compressed, err := r.compressor.CompressModelMessages(ctx, layer, input.Goal, history); err == nil {
 						history = compressed
 					}
 				}

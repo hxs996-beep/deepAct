@@ -866,7 +866,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		return nil, err
 	}
 
-	if err := e.verifyAndCompact(); err != nil {
+	if err := e.verifyAndCompact(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1148,7 +1148,7 @@ func (e *Engine) persistHistory() {
 	e.persistedCount = len(e.history)
 }
 
-func (e *Engine) verifyAndCompact() error {
+func (e *Engine) verifyAndCompact(ctx context.Context) error {
 	if e.context == nil || e.compressor == nil {
 		return nil
 	}
@@ -1156,7 +1156,7 @@ func (e *Engine) verifyAndCompact() error {
 	tokens := e.context.EstimateTokens(messages)
 	layer, should := e.compressor.ShouldCompress(tokens, e.config.MaxContextTokens)
 	if should {
-		compacted, err := e.compressor.Compress(layer, e.state, e.history)
+		compacted, err := e.compressor.Compress(ctx, layer, e.state, e.history)
 		if err != nil {
 			// Compression is best-effort — same as executeTurn (turn.go:53-56).
 			// A failure (e.g. flash model timeout) must NOT suppress the run

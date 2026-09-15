@@ -67,7 +67,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		tokens := e.context.EstimateTokens(msgs)
 		layer, should := e.compressor.ShouldCompress(tokens, e.config.MaxContextTokens)
 		if should {
-			compacted, err := e.compressor.Compress(layer, e.state, e.history)
+			compacted, err := e.compressor.Compress(ctx, layer, e.state, e.history)
 			if err == nil {
 				e.history = compacted
 			}

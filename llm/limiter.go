@@ -3,22 +3,38 @@ package llm
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 )
 
+// AdaptiveLimiter bounds concurrent LLM requests. Concurrency is governed by
+// currentSlots — a soft, adaptive target: Record429 halves it after three
+// consecutive rate-limit responses, RecordSuccess grows it back toward maxSlots.
+// The hard ceiling is maxSlots.
+//
+// Unlike the old implementation, the semaphore instance is never replaced:
+// in-flight tracking is an atomic counter gated against currentSlots, so there
+// is no race between Acquire reading a semaphore pointer and Record*/replacing
+// it, and released slots can never be lost to a stale instance.
 type AdaptiveLimiter struct {
-	sem          *semaphore.Weighted
+	// inFlight counts requests that have passed the gate (atomic).
+	inFlight atomic.Int64
+	// currentSlots is the soft concurrency target, mutated under mu,
+	// read atomically by Acquire.
+	currentSlots atomic.Int64
 	rateLimiter  *rate.Limiter
 	maxSlots     int64
 	minSlots     int64
 	mu           sync.Mutex
-	currentSlots int64
 	consecutive  int
 	lastSuccess  time.Time
 	last429      time.Time
+	// wake is a buffered signal (capacity 1) that a slot was released.
+	// The buffer prevents lost wakeups: a release that fires before a waiter
+	// enters its select still delivers its token.
+	wake chan struct{}
 }
 
 func NewAdaptiveLimiter(initialSlots int64, maxSlots int64, minSlots int64, rps rate.Limit, burst int) *AdaptiveLimiter {
@@ -34,35 +50,53 @@ func NewAdaptiveLimiter(initialSlots int64, maxSlots int64, minSlots int64, rps 
 	if minSlots > maxSlots {
 		minSlots = maxSlots
 	}
-	return &AdaptiveLimiter{
-		sem:          semaphore.NewWeighted(initialSlots),
-		rateLimiter:  rate.NewLimiter(rps, burst),
-		maxSlots:     maxSlots,
-		minSlots:     minSlots,
-		currentSlots: initialSlots,
+	l := &AdaptiveLimiter{
+		rateLimiter: rate.NewLimiter(rps, burst),
+		maxSlots:    maxSlots,
+		minSlots:    minSlots,
+		wake:        make(chan struct{}, 1),
 	}
+	l.currentSlots.Store(initialSlots)
+	return l
 }
 
 func (l *AdaptiveLimiter) Acquire(ctx context.Context) error {
 	if err := l.rateLimiter.Wait(ctx); err != nil {
 		return err
 	}
-	return l.sem.Acquire(ctx, 1)
+	for {
+		if l.tryAcquire() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-l.wake:
+		}
+	}
+}
+
+// tryAcquire attempts to claim one slot under the current target. Returns true
+// on success; false when the target is reached or a race was lost (in which
+// case the caller waits for a release).
+func (l *AdaptiveLimiter) tryAcquire() bool {
+	cur := l.currentSlots.Load()
+	if l.inFlight.Load() >= cur {
+		return false
+	}
+	if l.inFlight.Add(1) <= cur {
+		return true
+	}
+	l.inFlight.Add(-1)
+	return false
 }
 
 func (l *AdaptiveLimiter) Release() {
-	l.mu.Lock()
-	sem := l.sem
-	l.mu.Unlock()
-	if sem == nil {
-		return
+	l.inFlight.Add(-1)
+	select {
+	case l.wake <- struct{}{}:
+	default:
 	}
-	defer func() {
-		if recover() != nil {
-			return
-		}
-	}()
-	sem.Release(1)
 }
 
 func (l *AdaptiveLimiter) Record429() {
@@ -73,13 +107,12 @@ func (l *AdaptiveLimiter) Record429() {
 	if l.consecutive < 3 {
 		return
 	}
-	newSlots := l.currentSlots / 2
+	newSlots := l.currentSlots.Load() / 2
 	if newSlots < l.minSlots {
 		newSlots = l.minSlots
 	}
-	if newSlots != l.currentSlots {
-		l.currentSlots = newSlots
-		l.sem = semaphore.NewWeighted(newSlots)
+	if newSlots != l.currentSlots.Load() {
+		l.currentSlots.Store(newSlots)
 	}
 	l.consecutive = 0
 }
@@ -92,16 +125,15 @@ func (l *AdaptiveLimiter) RecordSuccess() {
 		return
 	}
 	l.lastSuccess = now
-	if l.currentSlots >= l.maxSlots {
+	if l.currentSlots.Load() >= l.maxSlots {
 		return
 	}
-	newSlots := l.currentSlots + 1
+	newSlots := l.currentSlots.Load() + 1
 	if newSlots > l.maxSlots {
 		newSlots = l.maxSlots
 	}
-	if newSlots != l.currentSlots {
-		l.currentSlots = newSlots
-		l.sem = semaphore.NewWeighted(newSlots)
+	if newSlots != l.currentSlots.Load() {
+		l.currentSlots.Store(newSlots)
 	}
 	if l.consecutive > 0 {
 		l.consecutive = 0
@@ -109,7 +141,5 @@ func (l *AdaptiveLimiter) RecordSuccess() {
 }
 
 func (l *AdaptiveLimiter) Slots() int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.currentSlots
+	return l.currentSlots.Load()
 }
