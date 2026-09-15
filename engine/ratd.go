@@ -331,3 +331,67 @@ func (h *RATDHall) runSandbox(ctx context.Context, workDir, language string) *RA
 	}
 	return execSandboxRunner(ctx, cmd, workDir, ratdSandboxTimeout)
 }
+
+// runRole executes a harness role via the sub agent with its role prompt.
+// Returns the sub-agent's Summary (the JSON payload) or a failure marker.
+func (h *RATDHall) runRole(ctx context.Context, role, goal string, zh bool, iterations int) string {
+	if h.engine.config.OnProgress != nil {
+		h.engine.config.OnProgress(ProgressEvent{
+			Type:   "ratd_role",
+			Name:   role,
+			Detail: pickPrompt(zh, role, role),
+		})
+	}
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          goal,
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: iterations,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return ""
+	}
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, ratdRolePrompt(role, zh))
+		if err != nil || result == nil {
+			return ""
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary
+	}
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return ""
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary
+}
+
+func (h *RATDHall) runProposer(ctx context.Context, goal string, state *RATDState, zh bool) string {
+	return h.runRole(ctx, "proposer", buildProposerGoal(goal, state, zh), zh, ratdRoleIterations)
+}
+
+func (h *RATDHall) runRedTeam(ctx context.Context, goal string, state *RATDState, zh bool) string {
+	return h.runRole(ctx, "redteam", buildRedTeamGoal(goal, state.SourceFiles, zh), zh, ratdRoleIterations)
+}
+
+func (h *RATDHall) runArbitrator(ctx context.Context, goal string, state *RATDState, zh bool) (string, string) {
+	// The failing test is the last one appended this round.
+	var test RATDTest
+	if len(state.Tests) > 0 {
+		test = state.Tests[len(state.Tests)-1]
+	}
+	payload := h.runRole(ctx, "arbitrator", buildArbitratorGoal(goal, state.SourceFiles, test, state.LastSandbox, zh), zh, 5)
+	decision, feedback, err := parseArbitration(payload)
+	if err != nil {
+		return "ACCEPT_TEST", "" // 仲裁失败默认接受（宁可信其有）
+	}
+	return decision, feedback
+}
