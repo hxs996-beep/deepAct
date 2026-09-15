@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -127,4 +130,81 @@ func buildArbitratorGoal(goal string, files []RATDSourceFile, test RATDTest, san
 		}
 	}
 	return sb.String()
+}
+
+// codePayloadJSON mirrors the Proposer's output contract.
+type codePayloadJSON struct {
+	Language    string           `json:"language"`
+	SourceFiles []RATDSourceFile `json:"source_files"`
+	DesignNotes string           `json:"design_notes"`
+}
+
+// parseCodePayload parses a Proposer CodePayload. Errors when JSON is invalid
+// or no source files were produced.
+func parseCodePayload(content string) (language string, files []RATDSourceFile, designNotes string, err error) {
+	var p codePayloadJSON
+	if err = json.Unmarshal([]byte(content), &p); err != nil {
+		return "", nil, "", fmt.Errorf("invalid CodePayload: %w", err)
+	}
+	if len(p.SourceFiles) == 0 {
+		return "", nil, "", fmt.Errorf("CodePayload has no source_files")
+	}
+	return p.Language, p.SourceFiles, p.DesignNotes, nil
+}
+
+// parseTestPayload parses a RedTeam TestPayload. noIssues=true when the payload
+// is {"no_issues_found": true}; otherwise returns the parsed test. Errors on
+// invalid JSON or ambiguous payloads.
+func parseTestPayload(content string) (test *RATDTest, noIssues bool, err error) {
+	var m map[string]interface{}
+	if err = json.Unmarshal([]byte(content), &m); err != nil {
+		return nil, false, fmt.Errorf("invalid TestPayload: %w", err)
+	}
+	if v, ok := m["no_issues_found"].(bool); ok && v {
+		return nil, true, nil
+	}
+	var t RATDTest
+	raw, _ := json.Marshal(m)
+	if err = json.Unmarshal(raw, &t); err != nil {
+		return nil, false, fmt.Errorf("invalid TestPayload: %w", err)
+	}
+	if strings.TrimSpace(t.TestCode) == "" || strings.TrimSpace(t.TargetFile) == "" {
+		return nil, false, fmt.Errorf("TestPayload missing test_code/target_file")
+	}
+	return &t, false, nil
+}
+
+// parseArbitration parses an Arbitrator ArbitrationResult.
+func parseArbitration(content string) (decision string, feedback string, err error) {
+	var a struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"rejected_reason"`
+		Feedback string `json:"actionable_feedback"`
+	}
+	if err = json.Unmarshal([]byte(content), &a); err != nil {
+		return "", "", fmt.Errorf("invalid ArbitrationResult: %w", err)
+	}
+	if a.Decision != "ACCEPT_TEST" && a.Decision != "REJECT_TEST" {
+		return "", "", fmt.Errorf("invalid arbitration decision %q", a.Decision)
+	}
+	return a.Decision, a.Feedback, nil
+}
+
+// writeSourceFiles writes all Proposer files under workDir. Paths are
+// validated to stay within workDir (rejects absolute paths and ../ escapes).
+func writeSourceFiles(files []RATDSourceFile, workDir string) error {
+	for _, f := range files {
+		p := filepath.Join(workDir, filepath.FromSlash(f.Path))
+		rel, err := filepath.Rel(workDir, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(f.Path) {
+			return fmt.Errorf("unsafe source path %q escapes workdir", f.Path)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(f.Content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", f.Path, err)
+		}
+	}
+	return nil
 }
