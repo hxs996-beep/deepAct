@@ -260,6 +260,7 @@ type TaskState struct {
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
 	Roundtable          *RoundtableState `json:"roundtable,omitempty"`
 	Collab              *CollabState     `json:"collab,omitempty"`
+	RATD                *RATDState       `json:"ratd,omitempty"`
 
 	// ReadHistory records each file read this session (path + scope) for the
 	// loop guard to count repeated reads of the same (path, scope) and block
@@ -447,4 +448,69 @@ type CollabState struct {
 	Goal   string        `json:"goal"`
 	Phase  CollabPhase   `json:"phase"`
 	Stages []CollabStage `json:"stages"` // 各流水线段产出，按执行顺序
+}
+
+// RATDPhase describes which stage of the /ratd harness we are in.
+type RATDPhase int
+
+const (
+	RATDIdle      RATDPhase = iota
+	RATDPropose             // Proposer 生成代码
+	RATDRedTeam             // RedTeam 生成对抗测试
+	RATDSandbox             // 引擎跑沙箱
+	RATDArbitrate           // Arbitrator 判定失败测试
+	RATDDone                // 收敛交付
+)
+
+func (p RATDPhase) String() string {
+	switch p {
+	case RATDPropose:
+		return "propose"
+	case RATDRedTeam:
+		return "red_team"
+	case RATDSandbox:
+		return "sandbox"
+	case RATDArbitrate:
+		return "arbitrate"
+	case RATDDone:
+		return "done"
+	default:
+		return "idle"
+	}
+}
+
+// RATDSourceFile is one file produced by the Proposer, written to the workdir.
+type RATDSourceFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// RATDTest is the RedTeam's adversarial test contribution.
+type RATDTest struct {
+	Category   string `json:"test_category"`
+	Severity   string `json:"severity"`
+	TargetFile string `json:"target_file"`
+	TestCode   string `json:"test_code"`
+	Rationale  string `json:"assertion_rationale"`
+}
+
+// RATDSandboxResult captures one sandbox execution outcome.
+type RATDSandboxResult struct {
+	ExitCode    int    `json:"exit_code"`
+	Output      string `json:"output,omitempty"`
+	TimedOut    bool   `json:"timed_out,omitempty"`
+	Unavailable bool   `json:"unavailable,omitempty"` // 无可用测试命令，无法物理验证
+}
+
+// RATDState tracks the current /ratd session within TaskState.
+type RATDState struct {
+	Goal         string             `json:"goal"`
+	Phase        RATDPhase          `json:"phase"`
+	Language     string             `json:"language,omitempty"`
+	SourceFiles  []RATDSourceFile   `json:"source_files,omitempty"`
+	DesignNotes  string             `json:"design_notes,omitempty"`
+	Tests        []RATDTest         `json:"tests,omitempty"`
+	CurrentRound int                `json:"current_round"`
+	LastSandbox  *RATDSandboxResult `json:"last_sandbox,omitempty"`
+	FinalVerify  bool               `json:"final_verify,omitempty"` // no_issues 触发的最终验证轮
 }
