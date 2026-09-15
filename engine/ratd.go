@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	ratdMaxRounds      = 3
-	ratdSandboxTimeout = 120 * time.Second
-	ratdRoleIterations = 10
+	ratdMaxRounds            = 3
+	ratdSandboxTimeout       = 120 * time.Second
+	ratdRoleIterations       = 10
+	ratdArbitratorIterations = 5
 )
 
 // RATDCommand represents a parsed /ratd command.
@@ -303,7 +304,13 @@ func execSandboxRunner(ctx context.Context, command, workDir string, timeout tim
 	}
 	out := buf.String()
 	if len(out) > 4000 {
-		out = out[:4000] + "\n... (truncated)"
+		// Truncate on a rune boundary so multibyte UTF-8 output is never
+		// split mid-character.
+		runes := []rune(out)
+		if len(runes) > 4000 {
+			runes = runes[:4000]
+		}
+		out = string(runes) + "\n... (truncated)"
 	}
 	res.Output = out
 	return res
@@ -388,10 +395,135 @@ func (h *RATDHall) runArbitrator(ctx context.Context, goal string, state *RATDSt
 	if len(state.Tests) > 0 {
 		test = state.Tests[len(state.Tests)-1]
 	}
-	payload := h.runRole(ctx, "arbitrator", buildArbitratorGoal(goal, state.SourceFiles, test, state.LastSandbox, zh), zh, 5)
+	payload := h.runRole(ctx, "arbitrator", buildArbitratorGoal(goal, state.SourceFiles, test, state.LastSandbox, zh), zh, ratdArbitratorIterations)
 	decision, feedback, err := parseArbitration(payload)
 	if err != nil {
 		return "ACCEPT_TEST", "" // 仲裁失败默认接受（宁可信其有）
 	}
 	return decision, feedback
+}
+
+// handleRATDArena runs the /ratd harness state machine to completion within
+// one Run(). Idempotent: re-entering after a partial failure resumes from the
+// stored Phase. On convergence it renders the delivery and clears RATD state.
+func (h *RATDHall) handleRATDArena(ctx context.Context) (*EngineResponse, error) {
+	state := h.engine.state
+	if state.RATD == nil {
+		return nil, nil
+	}
+	zh := msgIsChinese(state.RATD.Goal)
+	goal := state.RATD.Goal
+	workDir := h.engine.config.WorkDir
+
+	for {
+		switch state.RATD.Phase {
+		case RATDPropose:
+			payload := h.runProposer(ctx, goal, state.RATD, zh)
+			lang, files, notes, err := parseCodePayload(payload)
+			if err != nil {
+				return nil, fmt.Errorf("proposer payload: %w", err)
+			}
+			if err := writeSourceFiles(files, workDir); err != nil {
+				return nil, fmt.Errorf("write sources: %w", err)
+			}
+			state.RATD.Language = lang
+			state.RATD.SourceFiles = files
+			state.RATD.DesignNotes = notes
+			state.RATD.Phase = RATDRedTeam
+
+		case RATDRedTeam:
+			if state.RATD.CurrentRound >= ratdMaxRounds {
+				state.RATD.Phase = RATDDone
+				continue
+			}
+			payload := h.runRedTeam(ctx, goal, state.RATD, zh)
+			test, noIssues, err := parseTestPayload(payload)
+			if err != nil {
+				return nil, fmt.Errorf("redteam payload: %w", err)
+			}
+			if noIssues {
+				state.RATD.FinalVerify = true
+			} else {
+				state.RATD.Tests = append(state.RATD.Tests, *test)
+			}
+			state.RATD.Phase = RATDSandbox
+
+		case RATDSandbox:
+			res := h.runSandbox(ctx, workDir, state.RATD.Language)
+			state.RATD.LastSandbox = res
+			state.RATD.CurrentRound++
+			passed := res != nil && !res.TimedOut && res.ExitCode == 0
+			if passed {
+				if state.RATD.FinalVerify {
+					state.RATD.Phase = RATDDone
+				} else {
+					state.RATD.Phase = RATDRedTeam
+				}
+			} else if state.RATD.FinalVerify {
+				// 红队已认输，失败来自回归套件本身 → 回 Propose 重构，
+				// 不再仲裁（此时没有新测试可仲裁）。
+				state.RATD.FinalVerify = false
+				state.RATD.Phase = RATDPropose
+			} else {
+				state.RATD.Phase = RATDArbitrate
+			}
+
+		case RATDArbitrate:
+			decision, feedback := h.runArbitrator(ctx, goal, state.RATD, zh)
+			if decision == "REJECT_TEST" && len(state.RATD.Tests) > 0 {
+				// Drop the invalid test and let RedTeam try again.
+				state.RATD.Tests = state.RATD.Tests[:len(state.RATD.Tests)-1]
+				state.RATD.Phase = RATDRedTeam
+			} else {
+				// ACCEPT: force a refactor round.
+				state.RATD.Phase = RATDPropose
+			}
+			if feedback != "" {
+				state.RATD.ActionableFeedback = feedback
+			}
+
+		case RATDDone:
+			resp := h.buildRATDDelivery(goal, zh)
+			h.engine.state.RATD = nil
+			return resp, nil
+
+		default:
+			h.engine.state.RATD = nil
+			return nil, nil
+		}
+	}
+}
+
+// buildRATDDelivery renders the final delivery screen: changed files list +
+// final sandbox result. Code and tests are already on disk.
+func (h *RATDHall) buildRATDDelivery(goal string, zh bool) *EngineResponse {
+	state := h.engine.state
+	var sb strings.Builder
+	sb.WriteString(pickPrompt(zh,
+		"## RATD-Harness Complete — Code Delivered\n\n",
+		"## RATD-Harness 完成 — 代码已交付\n\n"))
+	sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", pickPrompt(zh, "Requirement", "需求"), goal))
+	sb.WriteString(pickPrompt(zh, "### Changed Files\n\n", "### 改动文件\n\n"))
+	for _, f := range state.RATD.SourceFiles {
+		sb.WriteString(fmt.Sprintf("- `%s`\n", f.Path))
+	}
+	for _, t := range state.RATD.Tests {
+		sb.WriteString(fmt.Sprintf("- `%s` (test, %s)\n", t.TargetFile, t.Severity))
+	}
+	sb.WriteString("\n" + pickPrompt(zh, "### Final Sandbox Result\n\n", "### 最终沙箱结果\n\n"))
+	if state.RATD.LastSandbox == nil {
+		sb.WriteString(pickPrompt(zh, "No sandbox run recorded.", "无沙箱运行记录。"))
+	} else if state.RATD.LastSandbox.Unavailable {
+		sb.WriteString(pickPrompt(zh, "No usable test command for this language — not physically verified.", "该语言无可用测试命令——未做物理验证。"))
+	} else {
+		sb.WriteString(fmt.Sprintf("exit code: %d\n", state.RATD.LastSandbox.ExitCode))
+		if state.RATD.LastSandbox.TimedOut {
+			sb.WriteString(pickPrompt(zh, "(timed out)\n", "（超时）\n"))
+		}
+		sb.WriteString("```\n" + state.RATD.LastSandbox.Output + "\n```\n")
+	}
+	sb.WriteString("\n" + pickPrompt(zh,
+		"Code is written to the workspace. Review and commit as you see fit.",
+		"代码已写入工作区，请自行查看并提交。"))
+	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
 }

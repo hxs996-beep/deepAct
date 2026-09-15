@@ -33,7 +33,7 @@ type TodoItem struct {
 }
 
 type ProgressEvent struct {
-	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage" | "todo_update"
+	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage" | "todo_update" | "ratd_role" (one per /ratd harness role execution)
 	Name       string
 	Detail     string // brief digest for live display
 	FullDetail string // full content (e.g., diff) for final rendering

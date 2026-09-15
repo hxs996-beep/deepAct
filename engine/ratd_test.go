@@ -180,6 +180,9 @@ func TestExecSandboxRunner_Timeout(t *testing.T) {
 	if !res.TimedOut {
 		t.Error("expected timed out")
 	}
+	if res.ExitCode != -1 {
+		t.Errorf("expected ExitCode -1 on timeout, got %d", res.ExitCode)
+	}
 }
 
 func TestRATDHall_RunSandbox_Unavailable(t *testing.T) {
@@ -187,5 +190,216 @@ func TestRATDHall_RunSandbox_Unavailable(t *testing.T) {
 	res := h.runSandbox(context.Background(), t.TempDir(), "brainfuck")
 	if res == nil || !res.Unavailable {
 		t.Error("unknown language should be Unavailable")
+	}
+}
+
+// ratdMockAgent returns canned payloads per role for harness tests.
+type ratdMockAgent struct {
+	proposerPayload    string
+	redTeamPayloads    []string // consumed one per RED_TEAM entry
+	redTeamFallback    string   // used once payloads are exhausted ("" = no_issues)
+	arbitratorDecision string
+}
+
+func (m *ratdMockAgent) ID() AgentID { return AgentSub }
+func (m *ratdMockAgent) Spec() AgentSpec {
+	return AgentSpec{ID: AgentSub, Description: "ratd mock", StructuredResult: true}
+}
+func (m *ratdMockAgent) SetOnProgress(fn ProgressFunc) {}
+
+func (m *ratdMockAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
+	return &HandoffResult{Summary: m.pick(input), Conclusions: []string{m.pick(input)}}, nil
+}
+func (m *ratdMockAgent) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
+	// extraPrompt carries the role prompt. Dispatch on the JSON contract token
+	// that appears in BOTH language variants of each role prompt (tests use
+	// Chinese goals → zh=true → role prompt is Chinese, so English role names
+	// like "Proposer" must NOT be the discriminator).
+	switch {
+	case strings.Contains(extraPrompt, "CodePayload"):
+		return &HandoffResult{Summary: m.proposerPayload, Conclusions: []string{m.proposerPayload}}, nil
+	case strings.Contains(extraPrompt, "TestPayload"):
+		p := m.redTeamFallback
+		if p == "" {
+			p = "{\"no_issues_found\": true}"
+		}
+		if len(m.redTeamPayloads) > 0 {
+			p = m.redTeamPayloads[0]
+			m.redTeamPayloads = m.redTeamPayloads[1:]
+		}
+		return &HandoffResult{Summary: p, Conclusions: []string{p}}, nil
+	case strings.Contains(extraPrompt, "ArbitrationResult"):
+		return &HandoffResult{Summary: m.arbitratorDecision, Conclusions: []string{m.arbitratorDecision}}, nil
+	}
+	return &HandoffResult{Summary: "unexpected role", Conclusions: []string{"unexpected role"}}, nil
+}
+
+func (m *ratdMockAgent) pick(input Handoff) string {
+	switch {
+	case strings.Contains(input.Goal, "CodePayload"):
+		return m.proposerPayload
+	case strings.Contains(input.Goal, "TestPayload"):
+		return "{\"no_issues_found\": true}"
+	default:
+		return "{\"decision\":\"ACCEPT_TEST\"}"
+	}
+}
+
+func newRATDTestEngine(t *testing.T, agent *ratdMockAgent, runner sandboxRunnerFunc) (*Engine, *RATDHall) {
+	t.Helper()
+	reg := NewAgentRegistry()
+	reg.Register(agent)
+	e := &Engine{
+		agents:  reg,
+		state:   &TaskState{TaskID: "test-ratd"},
+		config:  EngineConfig{WorkDir: t.TempDir()},
+		context: &stubContextBuilder{},
+	}
+	hall := NewRATDHall(e)
+	if runner != nil {
+		hall.sandboxRunner = runner
+	}
+	return e, hall
+}
+
+const validProposer = `{"language":"go","source_files":[{"path":"src/q.go","content":"package q\n"}],"design_notes":"simple"}`
+
+func TestRATDArena_ConvergesOnNoIssues(t *testing.T) {
+	agent := &ratdMockAgent{proposerPayload: validProposer}
+	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
+		return &RATDSandboxResult{ExitCode: 0, Output: "ok"}
+	})
+	e.state.RATD = &RATDState{Goal: "实现队列", Phase: RATDPropose}
+
+	resp, err := hall.handleRATDArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleRATDArena: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected delivery response")
+	}
+	if !strings.Contains(resp.Summary, "代码已交付") || !strings.Contains(resp.Summary, "src/q.go") {
+		t.Errorf("delivery missing content: %q", resp.Summary)
+	}
+	if e.state.RATD != nil {
+		t.Error("RATD state should be cleared after delivery")
+	}
+	if _, err := os.Stat(filepath.Join(e.config.WorkDir, "src", "q.go")); err != nil {
+		t.Errorf("source file not written: %v", err)
+	}
+}
+
+func TestRATDArena_RedTeamTestAppendedAndPassed(t *testing.T) {
+	agent := &ratdMockAgent{
+		proposerPayload: validProposer,
+		redTeamPayloads: []string{`{"test_category":"CORRECTNESS","severity":"P1_HIGH","target_file":"src/q_test.go","test_code":"func TestQ(t *testing.T){}","assertion_rationale":"edge"}`},
+	}
+	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
+		return &RATDSandboxResult{ExitCode: 0, Output: "ok"}
+	})
+	e.state.RATD = &RATDState{Goal: "实现队列", Phase: RATDPropose}
+
+	_, err := hall.handleRATDArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleRATDArena: %v", err)
+	}
+	if e.state.RATD != nil {
+		t.Errorf("state not cleared: %+v", e.state.RATD)
+	}
+}
+
+func TestRATDArena_FailThenArbitrateAcceptRefactor(t *testing.T) {
+	agent := &ratdMockAgent{
+		proposerPayload:    validProposer,
+		redTeamPayloads:    []string{`{"test_category":"CORRECTNESS","severity":"P0_CRITICAL","target_file":"src/q_test.go","test_code":"func TestQ(t *testing.T){}","assertion_rationale":"bug"}`},
+		arbitratorDecision: `{"decision":"ACCEPT_TEST","rejected_reason":"","actionable_feedback":"fix it"}`,
+	}
+	// First sandbox fails, then after refactor passes.
+	calls := 0
+	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
+		calls++
+		if calls == 1 {
+			return &RATDSandboxResult{ExitCode: 1, Output: "FAIL: TestQ"}
+		}
+		return &RATDSandboxResult{ExitCode: 0, Output: "ok"}
+	})
+	e.state.RATD = &RATDState{Goal: "实现队列", Phase: RATDPropose}
+
+	resp, err := hall.handleRATDArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleRATDArena: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected delivery after refactor convergence")
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 sandbox runs (fail + refactor pass), got %d", calls)
+	}
+}
+
+func TestRATDArena_RejectInvalidTest(t *testing.T) {
+	agent := &ratdMockAgent{
+		proposerPayload: validProposer,
+		redTeamPayloads: []string{
+			`{"test_category":"CORRECTNESS","severity":"P1_HIGH","target_file":"src/q_test.go","test_code":"func TestQ(t *testing.T){}","assertion_rationale":"bad"}`,
+			`{"no_issues_found": true}`,
+		},
+		arbitratorDecision: `{"decision":"REJECT_TEST","rejected_reason":"invalid","actionable_feedback":""}`,
+	}
+	// 第一次沙箱失败（触发仲裁 REJECT 丢弃无效测试），随后 RedTeam 认输
+	// → FinalVerify 沙箱成功 → 收敛。验证无效测试被丢弃后仍能正常交付。
+	calls := 0
+	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
+		calls++
+		if calls == 1 {
+			return &RATDSandboxResult{ExitCode: 1, Output: "FAIL"}
+		}
+		return &RATDSandboxResult{ExitCode: 0, Output: "ok"}
+	})
+	e.state.RATD = &RATDState{Goal: "实现队列", Phase: RATDPropose}
+
+	resp, err := hall.handleRATDArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleRATDArena: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected delivery")
+	}
+	if e.state.RATD != nil {
+		t.Error("state should be cleared")
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 sandbox runs (fail→reject + final verify pass), got %d", calls)
+	}
+}
+
+func TestRATDArena_MaxRoundsConverges(t *testing.T) {
+	// RedTeam keeps producing failing tests (fallback), Arbitrator keeps
+	// accepting, sandbox keeps failing → must converge after ratdMaxRounds
+	// sandbox runs via the REACHED_MAX_ROUNDS branch.
+	agent := &ratdMockAgent{
+		proposerPayload:    validProposer,
+		arbitratorDecision: `{"decision":"ACCEPT_TEST","rejected_reason":"","actionable_feedback":""}`,
+		redTeamFallback:    `{"test_category":"CORRECTNESS","severity":"P1_HIGH","target_file":"src/q_test.go","test_code":"func TestQ(t *testing.T){}","assertion_rationale":"x"}`,
+	}
+	sandboxCalls := 0
+	e, hall := newRATDTestEngine(t, agent, func(ctx context.Context, cmd, wd string, to time.Duration) *RATDSandboxResult {
+		sandboxCalls++
+		return &RATDSandboxResult{ExitCode: 1, Output: "FAIL"}
+	})
+	e.state.RATD = &RATDState{Goal: "实现队列", Phase: RATDPropose}
+
+	resp, err := hall.handleRATDArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleRATDArena: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected delivery after max rounds")
+	}
+	if e.state.RATD != nil {
+		t.Error("state should be cleared")
+	}
+	if sandboxCalls != ratdMaxRounds {
+		t.Errorf("expected %d sandbox runs before max-rounds convergence, got %d", ratdMaxRounds, sandboxCalls)
 	}
 }
