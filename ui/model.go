@@ -2110,6 +2110,16 @@ func renderMessage(msg DisplayMessage, width int) []string {
 	case "system":
 		return wrapText(SystemMsgStyle.Render(content), width)
 	case "toolsummary":
+		// Prefer the structured ToolTree snapshot: it stores the raw (unstyled)
+		// hunk content, so diff lines can be re-colored with renderHunkLines
+		// (green adds / red deletes). The plain Content path below loses that
+		// color: renderToolSummary bakes ANSI into Content, but the sanitize
+		// above strips every escape sequence, so all lines fall into DimStyle.
+		if len(msg.ToolTree) > 0 {
+			return renderToolSummaryStyled(msg.ToolTree, width)
+		}
+		// Fallback for messages without a ToolTree snapshot (resumed sessions,
+		// hand-built messages): render the sanitized text as before.
 		lines := strings.Split(content, "\n")
 		styled := make([]string, len(lines))
 		for i, line := range lines {
@@ -2592,6 +2602,46 @@ func renderToolSummary(toolTree []ToolNode) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderToolSummaryStyled renders a toolsummary message from the structured
+// ToolTree snapshot, re-coloring edit/write diff hunks with renderHunkLines
+// (green adds / red deletes). The summary and per-tool label lines stay in
+// DimStyle to keep the tool block visually subordinate to assistant markdown
+// (see 2026-07-01-fix-done-no-conclusion-design.md C2).
+//
+// Unlike renderToolSummary, this returns styled lines rather than a raw string
+// with baked-in ANSI: sanitizeForTerminal strips ANSI from Content before
+// renderMessage, so the plain-text path loses all diff colors. Rendering from
+// the ToolTree snapshot (raw hunk content, no ANSI) and re-applying styles
+// here keeps the archived diff block identical to the live toolTree block.
+func renderToolSummaryStyled(toolTree []ToolNode, width int) []string {
+	var lines []string
+	modified := 0
+	for _, n := range toolTree {
+		if n.Done && (n.Name == "edit" || n.Name == "write") {
+			modified++
+		}
+	}
+	lines = append(lines, DimStyle.Render(fmt.Sprintf("● %d tools executed, %d files modified", len(toolTree), modified)))
+
+	for _, node := range toolTree {
+		icon := node.Icon
+		if icon == "" {
+			icon = toolIcon(node.Name)
+		}
+		lines = append(lines, DimStyle.Render(fmt.Sprintf("  %s %s", icon, node.Detail)))
+		for _, child := range node.Children {
+			if node.Name == "edit" || node.Name == "write" {
+				if child.DetailFull != "" {
+					lines = append(lines, renderHunkLines(child.DetailFull)...)
+				}
+			} else {
+				lines = append(lines, DimStyle.Render("    "+child.Detail))
+			}
+		}
+	}
+	return wrapLines(lines, width)
 }
 
 // isDiffContent checks if a string contains unified diff content.

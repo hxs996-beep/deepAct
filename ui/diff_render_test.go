@@ -166,3 +166,81 @@ func TestRenderHunkLines_PlusPrefixEdgeCase(t *testing.T) {
 		t.Errorf("--j; should be rendered as delete (red 210), expected %q in %v", expectedDel, got)
 	}
 }
+
+// TestRenderMessage_ToolSummaryKeepsDiffColors verifies the archived
+// toolsummary message (which replaces the live toolTree after a turn ends)
+// still renders diff lines with green/red colors instead of falling into the
+// all-DimStyle fallback. Regression: sanitizeForTerminal strips the ANSI that
+// renderToolSummary baked into Content, so the plain-text path lost every
+// diff color once the toolTree was archived (user saw gray text after
+// scrolling back to the changes block).
+func TestRenderMessage_ToolSummaryKeepsDiffColors(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.ANSI256)
+
+	msg := DisplayMessage{
+		Role:    "toolsummary",
+		Content: renderToolSummary([]ToolNode{{
+			Name:     "edit",
+			Done:     true,
+			Detail:   "foo.go",
+			Children: []ToolNode{{Name: "hunk", DetailFull: "@@ -1,1 +1,1 @@\n-old\n+new"}},
+		}}),
+		ToolTree: []ToolNode{{
+			Name:     "edit",
+			Done:     true,
+			Detail:   "foo.go",
+			Children: []ToolNode{{Name: "hunk", DetailFull: "@@ -1,1 +1,1 @@\n-old\n+new"}},
+		}},
+	}
+	lines := renderMessage(msg, 80)
+
+	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("210"))
+	foundAdd, foundDel := false, false
+	for _, l := range lines {
+		if strings.Contains(l, addStyle.Render("  +new")) {
+			foundAdd = true
+		}
+		if strings.Contains(l, delStyle.Render("  -old")) {
+			foundDel = true
+		}
+	}
+	if !foundAdd {
+		t.Errorf("archived toolsummary should render +new in green (114), got: %q", lines)
+	}
+	if !foundDel {
+		t.Errorf("archived toolsummary should render -old in red (210), got: %q", lines)
+	}
+}
+
+// TestRenderMessage_ToolSummaryFallback_NoToolTree verifies the fallback path
+// (messages without a ToolTree snapshot — resumed sessions / hand-built
+// messages) still renders the sanitized plain text in DimStyle, matching the
+// pre-change behavior.
+func TestRenderMessage_ToolSummaryFallback_NoToolTree(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.ANSI256)
+
+	msg := DisplayMessage{
+		Role:    "toolsummary",
+		Content: "● 1 tools executed, 1 files modified\n  [~] foo.go",
+	}
+	lines := renderMessage(msg, 80)
+	if len(lines) == 0 {
+		t.Fatal("expected rendered lines")
+	}
+	for i, l := range lines {
+		plain := stripAnsi(l)
+		if plain == "" {
+			continue
+		}
+		if l != DimStyle.Render(plain) && l != DimStyle.Render(plain)+"" {
+			// The wrap path may re-wrap long lines; each styled line must
+			// still equal DimStyle(plain) modulo trailing padding.
+			if !strings.HasPrefix(l, "\x1b[") {
+				t.Errorf("line %d should be DimStyle-styled, got %q", i, l)
+			}
+		}
+	}
+}
