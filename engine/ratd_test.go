@@ -91,3 +91,43 @@ func TestWriteSourceFiles_RejectsAbsolute(t *testing.T) {
 		t.Error("expected error for absolute path")
 	}
 }
+
+func TestWriteSourceFiles_RejectsSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	files := []RATDSourceFile{{Path: "link/evil.go", Content: "x"}}
+	if err := writeSourceFiles(files, dir); err == nil {
+		t.Fatal("expected error for symlink escape")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "evil.go")); !os.IsNotExist(err) {
+		t.Errorf("evil.go must not be written outside workdir, stat err=%v", err)
+	}
+}
+
+func TestParseTestPayload_AmbiguousNoIssuesAndTest(t *testing.T) {
+	_, _, err := parseTestPayload(`{"no_issues_found": true, "test_code":"x", "target_file":"y"}`)
+	if err == nil {
+		t.Error("expected error for no_issues_found=true with test fields")
+	}
+}
+
+func TestParseTestPayload_NoIssuesFalse(t *testing.T) {
+	test, noIssues, err := parseTestPayload(`{"no_issues_found": false, "test_category":"CORRECTNESS","severity":"P1_HIGH","target_file":"a_test.go","test_code":"func T(){}","assertion_rationale":"r"}`)
+	if err != nil || noIssues {
+		t.Fatalf("unexpected: noIssues=%v err=%v", noIssues, err)
+	}
+	if test == nil || test.TargetFile != "a_test.go" || test.TestCode != "func T(){}" {
+		t.Errorf("test = %+v", test)
+	}
+}
+
+func TestWriteSourceFiles_EmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	files := []RATDSourceFile{{Path: "", Content: "x"}}
+	if err := writeSourceFiles(files, dir); err == nil {
+		t.Error("expected error for empty path")
+	}
+}

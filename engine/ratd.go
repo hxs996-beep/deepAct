@@ -152,26 +152,44 @@ func parseCodePayload(content string) (language string, files []RATDSourceFile, 
 	return p.Language, p.SourceFiles, p.DesignNotes, nil
 }
 
+// testPayloadJSON mirrors the RedTeam's output contract. NoIssuesFound is a
+// pointer so an absent field is distinguishable from an explicit false.
+type testPayloadJSON struct {
+	NoIssuesFound *bool  `json:"no_issues_found"`
+	Category      string `json:"test_category"`
+	Severity      string `json:"severity"`
+	TargetFile    string `json:"target_file"`
+	TestCode      string `json:"test_code"`
+	Rationale     string `json:"assertion_rationale"`
+}
+
 // parseTestPayload parses a RedTeam TestPayload. noIssues=true when the payload
-// is {"no_issues_found": true}; otherwise returns the parsed test. Errors on
-// invalid JSON or ambiguous payloads.
+// is {"no_issues_found": true} with no test fields; a payload that declares
+// no_issues_found=true while also carrying test_code/target_file is ambiguous
+// and rejected. Otherwise returns the parsed test. Errors on invalid JSON or
+// ambiguous payloads.
 func parseTestPayload(content string) (test *RATDTest, noIssues bool, err error) {
-	var m map[string]interface{}
-	if err = json.Unmarshal([]byte(content), &m); err != nil {
+	var p testPayloadJSON
+	if err = json.Unmarshal([]byte(content), &p); err != nil {
 		return nil, false, fmt.Errorf("invalid TestPayload: %w", err)
 	}
-	if v, ok := m["no_issues_found"].(bool); ok && v {
-		return nil, true, nil
+	if p.NoIssuesFound != nil && *p.NoIssuesFound {
+		if strings.TrimSpace(p.TestCode) == "" && strings.TrimSpace(p.TargetFile) == "" {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("TestPayload 同时声明 no_issues_found=true 与测试字段，含混")
 	}
-	var t RATDTest
-	raw, _ := json.Marshal(m)
-	if err = json.Unmarshal(raw, &t); err != nil {
-		return nil, false, fmt.Errorf("invalid TestPayload: %w", err)
+	t := &RATDTest{
+		Category:   p.Category,
+		Severity:   p.Severity,
+		TargetFile: p.TargetFile,
+		TestCode:   p.TestCode,
+		Rationale:  p.Rationale,
 	}
 	if strings.TrimSpace(t.TestCode) == "" || strings.TrimSpace(t.TargetFile) == "" {
 		return nil, false, fmt.Errorf("TestPayload missing test_code/target_file")
 	}
-	return &t, false, nil
+	return t, false, nil
 }
 
 // parseArbitration parses an Arbitrator ArbitrationResult.
@@ -191,18 +209,36 @@ func parseArbitration(content string) (decision string, feedback string, err err
 }
 
 // writeSourceFiles writes all Proposer files under workDir. Paths are
-// validated to stay within workDir (rejects absolute paths and ../ escapes).
+// validated to stay within workDir (rejects absolute paths, ../ escapes, empty
+// paths, and symlink traversal out of the workdir).
 func writeSourceFiles(files []RATDSourceFile, workDir string) error {
+	workDirReal, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return fmt.Errorf("resolve workdir %s: %w", workDir, err)
+	}
 	for _, f := range files {
+		if f.Path == "" {
+			return fmt.Errorf("source file has empty path")
+		}
 		p := filepath.Join(workDir, filepath.FromSlash(f.Path))
 		rel, err := filepath.Rel(workDir, p)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(f.Path) {
 			return fmt.Errorf("unsafe source path %q escapes workdir", f.Path)
 		}
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(p), err)
+		dir := filepath.Dir(p)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
-		if err := os.WriteFile(p, []byte(f.Content), 0o644); err != nil {
+		dirReal, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return fmt.Errorf("resolve dir %s: %w", dir, err)
+		}
+		relReal, err := filepath.Rel(workDirReal, dirReal)
+		if err != nil || relReal == ".." || strings.HasPrefix(relReal, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe source path %q escapes workdir via symlink", f.Path)
+		}
+		out := filepath.Join(dirReal, filepath.Base(p))
+		if err := os.WriteFile(out, []byte(f.Content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", f.Path, err)
 		}
 	}
