@@ -69,7 +69,7 @@ type Suggestion struct {
 	Description string // e.g. "分析需求，探索代码并制定方案"
 }
 
-// MemberStatus tracks a roundtable member's review progress for UI display.
+// MemberStatus tracks a member agent's review progress for UI display.
 type MemberStatus struct {
 	ID      string // member ID e.g. "architect"
 	Name    string // display name e.g. "架构师"
@@ -177,7 +177,8 @@ type Model struct {
 	lastMouseX        int       // last mouse X during drag (screen coords, for auto-scroll)
 	lastMouseY        int       // last mouse Y during drag (screen coords, for auto-scroll)
 
-	// Roundtable member progress tracking
+	// memberStatuses tracks per-agent progress cards (fed by member_start/
+	// member_done events; legacy debate UI — no longer emitted by /ratd).
 	memberStatuses []MemberStatus
 
 	// Generic step-progress tracking (driven by todo_write from any skill)

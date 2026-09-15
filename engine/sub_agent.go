@@ -732,7 +732,7 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // filterTools returns a tool spec list filtered to the allowed tools. The
 // handoff_to_agent and ask_user tools are ALWAYS included — delegation and
 // user-questions are core sub-agent capabilities that an allowList must not
-// strip (the old code always prepended handoff; /debate and /collab pass a
+// strip (the old code always prepended handoff; /ratd and /collab pass a
 // read-only allowList but their members still need to delegate and ask).
 // The constructed specs are used for both so the registry copy (if present)
 // is not duplicated.

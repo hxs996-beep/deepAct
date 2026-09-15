@@ -7,7 +7,7 @@ import (
 
 // TestGenericSubAgent_RunWithPrompt verifies that genericSubAgent forwards
 // RunWithPrompt to its SubAgentRunner (fixing the silent drop of role prompts
-// in production /collab and /debate) and sets StructuredResult from Spec
+// in production /collab and /ratd) and sets StructuredResult from Spec
 // before forwarding — exactly matching what Run does, so the scoped
 // submit_result tool is attached to the run.
 func TestGenericSubAgent_RunWithPrompt(t *testing.T) {
