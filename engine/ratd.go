@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -250,4 +252,82 @@ func writeSourceFiles(files []RATDSourceFile, workDir string) error {
 		}
 	}
 	return nil
+}
+
+// sandboxRunnerFunc executes a sandbox command and returns the outcome.
+// Injectable in tests to control ExitCode without a real toolchain.
+type sandboxRunnerFunc func(ctx context.Context, command, workDir string, timeout time.Duration) *RATDSandboxResult
+
+// sandboxCommand maps a language to its base test command. Empty means the
+// language has no available runner — the sandbox is marked Unavailable.
+func sandboxCommand(language string) string {
+	switch language {
+	case "go":
+		return "go test -timeout 60s ./..."
+	case "python":
+		return "pytest -x -q"
+	case "rust":
+		return "cargo test"
+	case "java":
+		return "mvn test"
+	case "typescript":
+		return "npm test"
+	case "cpp":
+		return "ctest --output-on-failure"
+	default:
+		return ""
+	}
+}
+
+// execSandboxRunner is the default sandbox runner: run via bash -c under the
+// engine's ctx with a hard timeout, capturing ExitCode and truncated output.
+func execSandboxRunner(ctx context.Context, command, workDir string, timeout time.Duration) *RATDSandboxResult {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "bash", "-c", command)
+	cmd.Dir = workDir
+	var buf strings.Builder
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	res := &RATDSandboxResult{}
+	if runCtx.Err() == context.DeadlineExceeded {
+		res.TimedOut = true
+	}
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.ExitCode = ee.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+	}
+	out := buf.String()
+	if len(out) > 4000 {
+		out = out[:4000] + "\n... (truncated)"
+	}
+	res.Output = out
+	return res
+}
+
+// RATDHall orchestrates the /ratd harness.
+type RATDHall struct {
+	engine *Engine
+	// sandboxRunner is injectable for tests; nil uses execSandboxRunner.
+	sandboxRunner sandboxRunnerFunc
+}
+
+func NewRATDHall(e *Engine) *RATDHall {
+	return &RATDHall{engine: e}
+}
+
+// runSandbox executes the language test command in workDir.
+func (h *RATDHall) runSandbox(ctx context.Context, workDir, language string) *RATDSandboxResult {
+	cmd := sandboxCommand(language)
+	if cmd == "" {
+		return &RATDSandboxResult{Unavailable: true}
+	}
+	if h.sandboxRunner != nil {
+		return h.sandboxRunner(ctx, cmd, workDir, ratdSandboxTimeout)
+	}
+	return execSandboxRunner(ctx, cmd, workDir, ratdSandboxTimeout)
 }

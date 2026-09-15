@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseCodePayload_Valid(t *testing.T) {
@@ -144,5 +147,45 @@ func TestWriteSourceFiles_RejectsLeafSymlink(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "evil.go")); !os.IsNotExist(err) {
 		t.Error("content leaked outside workdir through leaf symlink")
+	}
+}
+
+func TestSandboxCommand(t *testing.T) {
+	cases := map[string]string{
+		"go": "go test -timeout 60s ./...", "python": "pytest -x -q", "rust": "cargo test",
+	}
+	for lang, want := range cases {
+		if got := sandboxCommand(lang); got != want {
+			t.Errorf("sandboxCommand(%q) = %q, want %q", lang, got, want)
+		}
+	}
+	if sandboxCommand("unknown") != "" {
+		t.Error("unknown language should return empty command")
+	}
+}
+
+func TestExecSandboxRunner_ExitCode(t *testing.T) {
+	res := execSandboxRunner(context.Background(), "exit 3", t.TempDir(), 10*time.Second)
+	if res.TimedOut || res.ExitCode != 3 {
+		t.Errorf("got exit=%d timedout=%v", res.ExitCode, res.TimedOut)
+	}
+	res = execSandboxRunner(context.Background(), "echo hi", t.TempDir(), 10*time.Second)
+	if res.ExitCode != 0 || !strings.Contains(res.Output, "hi") {
+		t.Errorf("got exit=%d output=%q", res.ExitCode, res.Output)
+	}
+}
+
+func TestExecSandboxRunner_Timeout(t *testing.T) {
+	res := execSandboxRunner(context.Background(), "sleep 5", t.TempDir(), 50*time.Millisecond)
+	if !res.TimedOut {
+		t.Error("expected timed out")
+	}
+}
+
+func TestRATDHall_RunSandbox_Unavailable(t *testing.T) {
+	h := &RATDHall{}
+	res := h.runSandbox(context.Background(), t.TempDir(), "brainfuck")
+	if res == nil || !res.Unavailable {
+		t.Error("unknown language should be Unavailable")
 	}
 }
