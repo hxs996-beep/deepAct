@@ -513,4 +513,7 @@ type RATDState struct {
 	CurrentRound int                `json:"current_round"`
 	LastSandbox  *RATDSandboxResult `json:"last_sandbox,omitempty"`
 	FinalVerify  bool               `json:"final_verify,omitempty"` // no_issues 触发的最终验证轮
+	// ActionableFeedback carries the Arbitrator's fix instructions, injected
+	// into the Proposer refactor round.
+	ActionableFeedback string `json:"actionable_feedback,omitempty"` // Arbitrator 的修复指令，注入 Proposer 重构轮
 }

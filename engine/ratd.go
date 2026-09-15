@@ -65,7 +65,8 @@ func ratdRolePrompt(role string, zh bool) string {
 
 // buildProposerGoal builds the task goal for the Proposer. On first run (no
 // failing context) it is just the requirement; on refactor it includes the
-// failing tests, sandbox output, and arbitrator feedback.
+// failing tests, sandbox output, and, when set, the Arbitrator's actionable
+// feedback for the fix round.
 func buildProposerGoal(goal string, state *RATDState, zh bool) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(pickPrompt(zh,
@@ -80,6 +81,10 @@ func buildProposerGoal(goal string, state *RATDState, zh bool) string {
 	if state != nil && state.LastSandbox != nil && state.LastSandbox.Output != "" {
 		sb.WriteString(pickPrompt(zh, "\n## Sandbox Output\n", "\n## 沙箱输出\n"))
 		sb.WriteString(state.LastSandbox.Output + "\n\n")
+	}
+	if state != nil && strings.TrimSpace(state.ActionableFeedback) != "" {
+		sb.WriteString(pickPrompt(zh, "\n## Arbitrator Feedback\n", "\n## 仲裁者反馈\n"))
+		sb.WriteString(state.ActionableFeedback + "\n\n")
 	}
 	sb.WriteString(pickPrompt(zh, "\nDo NOT modify the RedTeam test files. Fix source files only.", "\n不要修改红队测试文件，只修源代码。"))
 	return sb.String()
@@ -111,7 +116,15 @@ func buildArbitratorGoal(goal string, files []RATDSourceFile, test RATDTest, san
 	sb.WriteString(fmt.Sprintf("## Failing Test\n### %s (%s)\n%s\n\n## Rationale\n%s\n\n",
 		test.TargetFile, test.Severity, test.TestCode, test.Rationale))
 	if sandbox != nil {
-		sb.WriteString("## Sandbox Output\n" + sandbox.Output + "\n\n")
+		sb.WriteString(pickPrompt(zh, "## Sandbox Output\n", "## 沙箱输出\n"))
+		sb.WriteString(fmt.Sprintf("exit code: %d", sandbox.ExitCode))
+		if sandbox.TimedOut {
+			sb.WriteString(pickPrompt(zh, " (timed out)", "（超时）"))
+		}
+		sb.WriteString("\n")
+		if sandbox.Output != "" {
+			sb.WriteString(sandbox.Output + "\n\n")
+		}
 	}
 	return sb.String()
 }
