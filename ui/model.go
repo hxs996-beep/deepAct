@@ -52,14 +52,15 @@ type ToolNode struct {
 }
 
 type StatusInfo struct {
-	Model          string
-	TokensIn       int
-	TokensOut      int
-	CacheHitTokens int
-	Cost           float64
-	SessionCost    float64
-	AgentStatus    string
-	ExtraMessage   string
+	Model           string
+	TokensIn        int
+	TokensOut       int
+	CacheHitTokens  int
+	CacheMissTokens int
+	Cost            float64
+	SessionCost     float64
+	AgentStatus     string
+	ExtraMessage    string
 }
 
 type Suggestion struct {
@@ -141,6 +142,11 @@ type Model struct {
 	progressChan           chan ProgressMsg
 	scrollOffset           int
 	cancelled              bool
+	// runSeq monotonically increases per submitted run; the runner echoes it
+	// back in EngineResponseMsg so the Model can drop stale responses from
+	// runs already superseded (e.g. a cancelled run whose response arrives
+	// after the user started a new run).
+	runSeq                 uint64
 	pricing                engine.PricingConfig
 	needsRepaint           bool // forces full Bubble Tea repaint on next frame
 	runStartMsgIdx         int  // index in m.messages at start of current Run; used to strip snapshotted narration on Summary dedup
@@ -199,6 +205,7 @@ type ProgressMsg struct {
 	TokensIn   int
 	TokensOut  int
 	CacheHit   int
+	CacheMiss  int
 	ModelName  string
 	Todos      []engine.TodoItem
 }
@@ -450,6 +457,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case EngineResponseMsg:
 		m.selection = SelectionState{} // new message: clear selection
 		m.autoScrollDir = 0
+		// Drop stale responses from runs already superseded: a cancelled run
+		// (or any run) whose response arrives after the user started a new
+		// run must never pop up as if it were the current run's result.
+		// Guarded on m.runSeq != 0 so pre-existing tests that construct
+		// EngineResponseMsg without a RunSeq still work.
+		if m.runSeq != 0 && msg.RunSeq != m.runSeq {
+			return m, nil
+		}
 		if m.cancelled {
 			m.cancelled = false
 			return m, nil
@@ -636,6 +651,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status.TokensIn += msg.TokensIn
 			m.status.TokensOut += msg.TokensOut
 			m.status.CacheHitTokens += msg.CacheHit
+			m.status.CacheMissTokens += msg.CacheMiss
 			cost := estimateCost(msg.TokensIn, msg.TokensOut, msg.CacheHit, msg.ModelName, &m.pricing)
 			m.status.Cost = cost
 			m.status.SessionCost += cost
@@ -1117,7 +1133,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ---- Running: only allow scroll keys (Ctrl+C/Esc handled above) ----
+	// ---- Running: allow scroll keys; other keys fall through to the input box ----
+	// The user can type supplementary messages while the agent runs. Enter is
+	// intercepted later (ActionSubmit + stateRunning) and sent to the steer
+	// queue instead of starting a new run.
 	if m.state == stateRunning {
 		switch msg.Type {
 		case tea.KeyPgUp:
@@ -1125,7 +1144,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyPgDown:
 			return m.scrollDown(), m.repaintCmd()
 		}
-		return m, nil
 	}
 
 	// ---- Scroll history keyboard shortcuts (stateReady) ----
@@ -1300,7 +1318,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text := m.inputBuf.Value()
 			m.inputBuf.SetValue("")
 			if strings.TrimSpace(text) != "" {
-				m.engine.Steer(text)
+				if m.engine != nil {
+					m.engine.Steer(text)
+				}
 				m.messages = append(m.messages, DisplayMessage{
 					Role:    "user",
 					Content: text,
@@ -1457,6 +1477,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	}
 	m.inputBuf.SetValue("")
 	m.cancelled = false
+	m.runSeq++
 	m.runStartMsgIdx = len(m.messages)
 	m.messages = append(m.messages, DisplayMessage{Role: "user", Content: content})
 	m.toolTree = nil
@@ -1500,7 +1521,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.afterResidue = false
 	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
 	return m, tea.Batch(
-		m.engine.Run(content),
+		m.engine.Run(content, m.runSeq),
 		tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
 		waitForProgress(m.progressChan),
 	)
@@ -1512,6 +1533,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
 	m.state = stateRunning
 	m.cancelled = false
+	m.runSeq++
 	m.runStartMsgIdx = len(m.messages)
 	m.toolTree = nil
 	m.spinners = []AgentSpinner{{Role: "deepact", Goal: "processing your request...", Active: true}}
@@ -1519,7 +1541,7 @@ func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
 	m.narration = ""
 	m.narrationPending = ""
 	return m, tea.Batch(
-		m.engine.Run(fmt.Sprintf("/confirm %d", n)),
+		m.engine.Run(fmt.Sprintf("/confirm %d", n), m.runSeq),
 		tea.Tick(spinnerRate, func(time.Time) tea.Msg { return TickMsg{} }),
 		waitForProgress(m.progressChan),
 	)
@@ -3176,9 +3198,6 @@ func renderInputLine(m Model) string {
 
 	runes := []rune(m.inputBuf.Value())
 	cursor := "█"
-	if m.state == stateRunning {
-		cursor = ""
-	}
 
 	var left, right string
 	cursorPos := m.inputBuf.Cursor()
@@ -3301,13 +3320,10 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 			dragHint = "✓ Copied"
 		}
 	}
-	newlineHint := "Alt/⇧+↩"
-	switch runtime.GOOS {
-	case "windows":
-		newlineHint = "Ctrl/⇧+↩"
-	case "darwin":
-		newlineHint = "⌥/⇧+↩"
-	}
+	// Status bar token display uses I/O to mark input/output (plain ASCII,
+	// width-deterministic on every terminal — the previous ↑/↓ ambiguous-width
+	// glyphs left a background gap after "^Q").
+	newlineHint := "Shift+↩"
 
 	// Compute cache hit rate as integer percentage
 	var cacheRate int
@@ -3319,7 +3335,7 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 	}
 	cacheStr := fmt.Sprintf("%d%%", cacheRate)
 
-	leftPart := fmt.Sprintf(" %s ↑%.1fK ↓%.1fK", cacheStr, float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
+	leftPart := fmt.Sprintf(" %s  %.1fK  %.1fK", cacheStr, float64(status.TokensIn)/1000.0, float64(status.TokensOut)/1000.0)
 	rightPart := fmt.Sprintf("%s │ %s │ Esc │ ^Q", dragHint, newlineHint)
 
 	// Reserve 1 column for the blue bar on the left
@@ -3335,22 +3351,23 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 		gap = 1
 	}
 	line := leftPart + strings.Repeat(" ", gap) + rightPart
-	// Truncate to guarantee the line fits within contentWidth. Characters like
-	// ↑ ↓ ⌥ ↩ │ have ambiguous East Asian Width on macOS — lipgloss.Width may
-	// underestimate their rendered width, causing terminal line wrapping that
-	// pushes the input area off-screen. truncateToWidth measures with runewidth
-	// (ambiguous runes at their real terminal width).
+	// Truncate to guarantee the line fits within contentWidth. truncateToWidth
+	// measures with runewidth (ambiguous runes at their real terminal width).
 	line = truncateToWidth(line, contentWidth)
 	// Defense-in-depth: ensure rendered width exactly fills contentWidth.
-	// Ambiguous-width characters (↑↓│⌥↩) may cause the terminal to render
-	// narrower than expected, leaving old characters visible.
+	// Remaining decorative runes (│ ⌥ ↩ ✓ ⚠ ▍) render at the same width on
+	// every terminal, so this pad should be a no-op.
 	if w := displayWidth(line); w < contentWidth {
 		line += strings.Repeat(" ", contentWidth-w)
 	}
-	// Render ALL THREE rows as a SINGLE lipgloss block: bg set once, fg
-	// inlined via ANSI codes, single \033[0m at the end. This avoids the
-	// intermediate resets between bar+content per-line and between lines,
-	// both of which cause background loss on Windows terminals.
+	// Render ALL THREE rows as a SINGLE background block: bg set once via a
+	// manual ANSI code (NOT lipgloss), fg inlined via ANSI codes, single
+	// \033[0m at the end. lipgloss.Render is not used: it measures width with
+	// ansi.StringWidth, which counts ambiguous-width runes (— • ·) as 1 column
+	// instead of the 2 the terminal renders (see displayWidth). That makes it
+	// pad the middle row with extra spaces, overflowing the terminal width;
+	// the trailing spaces then wrap and break the background after the
+	// right-aligned text.
 	// Colors respect dark/light mode via StatusBarStyle values (方案A).
 	var bgColor, fgBarColor, fgContentColor string
 	if isDark {
@@ -3362,15 +3379,15 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 		fgBarColor = "25"
 		fgContentColor = "236"
 	}
-	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
 	fgBar := fmt.Sprintf("\033[38;5;%sm", fgBarColor)
 	fgContent := fmt.Sprintf("\033[38;5;%sm", fgContentColor)
+	bgOpen := fmt.Sprintf("\x1b[48;5;%sm", bgColor)
 	rows := strings.Join([]string{
-		fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
-		fgBar + "▍" + fgContent + line,
-		fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
+		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
+		bgOpen + fgBar + "▍" + fgContent + line,
+		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 	}, "\n")
-	return bgStyle.Render(rows)
+	return rows + "\x1b[0m"
 }
 
 func wrapText(text string, width int) []string {

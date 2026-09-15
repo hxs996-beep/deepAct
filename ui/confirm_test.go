@@ -13,7 +13,7 @@ type recordRunner struct {
 	prompts []string
 }
 
-func (r *recordRunner) Run(prompt string) tea.Cmd {
+func (r *recordRunner) Run(prompt string, runSeq uint64) tea.Cmd {
 	r.prompts = append(r.prompts, prompt)
 	return func() tea.Msg { return nil }
 }

@@ -25,7 +25,7 @@ type SessionSummary struct {
 }
 
 type EngineRunner interface {
-	Run(prompt string) tea.Cmd
+	Run(prompt string, runSeq uint64) tea.Cmd
 	Cancel()
 	SetProgressChan(ch chan ProgressMsg)
 	ValidateConnection() error
@@ -72,7 +72,7 @@ func (r *DefaultEngineRunner) SetHistory(messages []engine.Message)   { _ = mess
 func (r *DefaultEngineRunner) ListSessions() []SessionSummary         { return nil }
 func (r *DefaultEngineRunner) LoadHistory(id string) []engine.Message { return nil }
 
-func (r *DefaultEngineRunner) Run(prompt string) tea.Cmd {
+func (r *DefaultEngineRunner) Run(prompt string, runSeq uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.mu.Lock()
@@ -81,7 +81,7 @@ func (r *DefaultEngineRunner) Run(prompt string) tea.Cmd {
 		defer cancel()
 
 		resp, err := r.Eng.Run(ctx, prompt)
-		return EngineResponseMsg{Response: resp, Err: err}
+		return EngineResponseMsg{Response: resp, Err: err, RunSeq: runSeq}
 	}
 }
 
@@ -178,7 +178,7 @@ func (r *ProgressEngineRunner) LoadHistory(id string) []engine.Message {
 	return engine.RebuildHistory(events, engine.DefaultResumeBudget)
 }
 
-func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
+func (r *ProgressEngineRunner) Run(prompt string, runSeq uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.mu.Lock()
@@ -194,6 +194,7 @@ func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
 					msg.TokensIn = event.Usage.PromptTokens
 					msg.TokensOut = event.Usage.CompletionTokens
 					msg.CacheHit = event.Usage.CacheHitTokens
+					msg.CacheMiss = event.Usage.CacheMissTokens
 					msg.ModelName = event.ModelName
 				}
 				select {
@@ -206,6 +207,6 @@ func (r *ProgressEngineRunner) Run(prompt string) tea.Cmd {
 		if err != nil {
 			runnerLog.Printf("Engine.Run err: %v", err)
 		}
-		return EngineResponseMsg{Response: resp, Err: err}
+		return EngineResponseMsg{Response: resp, Err: err, RunSeq: runSeq}
 	}
 }

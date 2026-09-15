@@ -31,6 +31,12 @@ type AgentDoneMsg struct {
 type EngineResponseMsg struct {
 	Response *engine.EngineResponse
 	Err      error
+	// RunSeq is the seq of the Run() call that produced this message,
+	// assigned by the Model when it starts a run and passed through the
+	// EngineRunner. The Model drops messages whose RunSeq doesn't match the
+	// current run, so a cancelled run's response can never pop up
+	// ("任务已取消。") after the user has already started a new run.
+	RunSeq uint64
 }
 
 type StatusUpdateMsg struct {

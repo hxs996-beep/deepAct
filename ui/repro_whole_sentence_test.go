@@ -14,7 +14,7 @@ type mockRunner struct {
 	progressCh chan ProgressMsg
 }
 
-func (r *mockRunner) Run(prompt string) tea.Cmd {
+func (r *mockRunner) Run(prompt string, runSeq uint64) tea.Cmd {
 	return func() tea.Msg {
 		full := "正在完成自检，整理本次审查结论"
 		r.progressCh <- ProgressMsg{Type: "content_delta", Detail: full}
@@ -22,6 +22,7 @@ func (r *mockRunner) Run(prompt string) tea.Cmd {
 		return EngineResponseMsg{
 			Response: &engine.EngineResponse{Summary: full},
 			Err:      nil,
+			RunSeq:   runSeq,
 		}
 	}
 }

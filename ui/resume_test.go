@@ -15,7 +15,7 @@ type mockResumeRunner struct {
 	sessions  []SessionSummary
 }
 
-func (m *mockResumeRunner) Run(prompt string) tea.Cmd            { return nil }
+func (m *mockResumeRunner) Run(prompt string, runSeq uint64) tea.Cmd   { return nil }
 func (m *mockResumeRunner) Cancel()                              {}
 func (m *mockResumeRunner) SetProgressChan(ch chan ProgressMsg)  {}
 func (m *mockResumeRunner) ValidateConnection() error            { return nil }

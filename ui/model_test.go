@@ -217,6 +217,65 @@ func TestStatusBarShowsCacheHitRate(t *testing.T) {
 	}
 }
 
+func TestStatusBarShowsCacheUpDown(t *testing.T) {
+	status := StatusInfo{
+		TokensIn:        10000,
+		TokensOut:       2000,
+		CacheHitTokens:  6000,
+		CacheMissTokens: 4000,
+	}
+	line := renderStatusBar(status, 0, 0, 80, time.Time{}, "")
+	for _, want := range []string{"10.0K", "2.0K"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("renderStatusBar wants %q in output, got: %q", want, line)
+		}
+	}
+	// I/O markers were removed from the status bar
+	for _, notWant := range []string{"I 10.0K", "O 2.0K", "up 6.0K", "down 4.0K"} {
+		if strings.Contains(line, notWant) {
+			t.Errorf("renderStatusBar should not contain %q, got: %q", notWant, line)
+		}
+	}
+}
+
+func TestStatusBarRowsFitWidth(t *testing.T) {
+	// Guard against background-color misalignment after the right-aligned
+	// text (e.g. "^Q"): renderStatusBar used to wrap rows with
+	// lipgloss.Render, whose ansi.StringWidth counts ambiguous-width runes
+	// (↑ ↓ ⇧) as 1 column instead of the 2 the terminal renders. That made
+	// it pad the middle row with extra spaces, overflowing the terminal
+	// width; the trailing spaces then wrapped and broke the background.
+	// Every rendered row must fit within the terminal width.
+	for _, width := range []int{80, 100, 120, 160} {
+		status := StatusInfo{TokensIn: 10000, TokensOut: 2000, CacheHitTokens: 5000}
+		s := renderStatusBar(status, 0, 0, width, time.Time{}, "")
+		for i, l := range strings.Split(stripAnsi(s), "\n") {
+			if w := displayWidth(l); w > width {
+				t.Errorf("width=%d row %d displayWidth=%d exceeds terminal width", width, i, w)
+			}
+		}
+	}
+}
+
+func TestStatusBarRowsSelfContainedBackground(t *testing.T) {
+	// Regression: the status bar used to open the background color once at
+	// the start of the 3-row block and rely on ANSI state carry-over for
+	// rows 2-3. Bubble Tea's line-level frame diff can repaint the bottom
+	// row alone (spinner tick / scroll / diff), and without its own
+	// background code that row rendered on the terminal's default
+	// background — visibly different from the input box above (which sets
+	// its background on every row via InputBlockStyle).
+	for _, width := range []int{80, 120} {
+		status := StatusInfo{TokensIn: 10000, TokensOut: 2000, CacheHitTokens: 5000}
+		s := renderStatusBar(status, 0, 0, width, time.Time{}, "")
+		for i, l := range strings.Split(s, "\n") {
+			if !strings.Contains(l, "\x1b[48;5;") {
+				t.Errorf("width=%d status row %d lacks its own background code: %q", width, i, l)
+			}
+		}
+	}
+}
+
 func TestFooterHeightMatchesViewFooterHeight(t *testing.T) {
 	m := NewModel(nil, engine.PricingConfig{})
 	m.state = stateReady
