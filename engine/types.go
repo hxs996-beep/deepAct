@@ -371,11 +371,30 @@ const (
 	CollabDone                             // 完成
 )
 
+// --- Parallel research phases (new /collab) ---
+// 用 iota+10 偏移避免与旧常量（CollabIdle=0、CollabReconPhase=1 等）数值
+// 冲突——新常量暂与旧常量共存，任务 2 删除旧常量后数值会重新归一。
+const (
+	CollabDecompose  CollabPhase = iota + 10
+	CollabParallel
+	CollabSynthesize
+)
+
 // CollabState tracks the current /collab pipeline within TaskState.
 type CollabState struct {
 	Goal   string        `json:"goal"`
 	Phase  CollabPhase   `json:"phase"`
 	Stages []CollabStage `json:"stages"` // 各流水线段产出，按执行顺序
+}
+
+// CollabTask is one research direction produced by the decomposer.
+type CollabTask struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Direction string `json:"direction"` // 研究方向（自包含，worker 独立开工）
+	Status    string `json:"status"`    // pending/running/done/failed
+	Result    string `json:"result,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // RATDPhase describes which stage of the /ratd harness we are in.

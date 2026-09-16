@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -447,5 +448,72 @@ func TestRun_CollabExecutesAndConfirms(t *testing.T) {
 	}
 	if !decisionFound {
 		t.Error("expected a collab-plan decision to be persisted")
+	}
+}
+
+// --- parseCollabTasks ---
+
+func TestParseCollabTasks_Valid(t *testing.T) {
+	content := `{
+		"tasks": [
+			{"id": "t1", "title": "调研现有缓存实现", "direction": "定位并阅读缓存模块"},
+			{"id": "t2", "title": "调研第三方选型", "direction": "评估可复用方案"}
+		]
+	}`
+	tasks, err := parseCollabTasks(content)
+	if err != nil {
+		t.Fatalf("parseCollabTasks() unexpected error: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(tasks))
+	}
+	if tasks[0].ID != "t1" || tasks[0].Direction == "" {
+		t.Errorf("task[0] = %+v, want id=t1 and non-empty direction", tasks[0])
+	}
+}
+
+func TestParseCollabTasks_ToleratesProse(t *testing.T) {
+	content := "好的，我拆解如下：\n```json\n{\"tasks\": [{\"id\": \"t1\", \"title\": \"A\", \"direction\": \"dir A\"}, {\"id\": \"t2\", \"title\": \"B\", \"direction\": \"dir B\"}]}\n```\n以上是任务列表。"
+	tasks, err := parseCollabTasks(content)
+	if err != nil {
+		t.Fatalf("parseCollabTasks() unexpected error: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(tasks))
+	}
+}
+
+func TestParseCollabTasks_TruncatesOverMax(t *testing.T) {
+	var items []string
+	for i := 1; i <= 8; i++ {
+		items = append(items, fmt.Sprintf(`{"id": "t%d", "title": "T%d", "direction": "d%d"}`, i, i, i))
+	}
+	content := `{"tasks": [` + strings.Join(items, ",") + `]}`
+	tasks, err := parseCollabTasks(content)
+	if err != nil {
+		t.Fatalf("parseCollabTasks() unexpected error: %v", err)
+	}
+	if len(tasks) != collabMaxTasks {
+		t.Fatalf("got %d tasks, want truncated to %d", len(tasks), collabMaxTasks)
+	}
+	if tasks[0].ID != "t1" {
+		t.Errorf("truncation must preserve order, first task = %q", tasks[0].ID)
+	}
+}
+
+func TestParseCollabTasks_TooFewFails(t *testing.T) {
+	content := `{"tasks": [{"id": "t1", "title": "A", "direction": "d"}]}`
+	_, err := parseCollabTasks(content)
+	if err == nil {
+		t.Fatal("expected error for single task (< min)")
+	}
+}
+
+func TestParseCollabTasks_EmptyFails(t *testing.T) {
+	if _, err := parseCollabTasks(`{"tasks": []}`); err == nil {
+		t.Fatal("expected error for empty tasks")
+	}
+	if _, err := parseCollabTasks(`no json here`); err == nil {
+		t.Fatal("expected error for non-JSON content")
 	}
 }

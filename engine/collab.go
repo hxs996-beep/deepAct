@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -46,6 +47,85 @@ type CollabHall struct {
 
 func NewCollabHall(e *Engine) *CollabHall {
 	return &CollabHall{engine: e}
+}
+
+const (
+	collabMaxConcurrency           = 4
+	collabMaxTasks                 = 6
+	collabMinTasks                 = 2
+	collabDecomposerMaxIterations  = 5
+	collabWorkerMaxIterations      = 99
+	collabSynthesizerMaxIterations = 5
+)
+
+// collabTaskPayload mirrors the Decomposer's output contract.
+type collabTaskPayload struct {
+	Tasks []struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Direction string `json:"direction"`
+	} `json:"tasks"`
+}
+
+// parseCollabTasks parses the Decomposer's JSON task list. Tolerates prose
+// wrapping (via topLevelJSONObjects), skips invalid entries, truncates to
+// collabMaxTasks, and errors when fewer than collabMinTasks valid tasks remain.
+func parseCollabTasks(content string) ([]CollabTask, error) {
+	objs := topLevelJSONObjects(content)
+	if len(objs) == 0 {
+		return nil, fmt.Errorf("invalid Decomposer output: no JSON object found")
+	}
+	for _, obj := range objs {
+		var p collabTaskPayload
+		if err := json.Unmarshal([]byte(obj), &p); err != nil {
+			continue
+		}
+		if len(p.Tasks) == 0 {
+			continue
+		}
+		var tasks []CollabTask
+		for _, t := range p.Tasks {
+			if strings.TrimSpace(t.ID) == "" || strings.TrimSpace(t.Direction) == "" {
+				continue
+			}
+			tasks = append(tasks, CollabTask{
+				ID:        t.ID,
+				Title:     t.Title,
+				Direction: t.Direction,
+				Status:    "pending",
+			})
+			if len(tasks) >= collabMaxTasks {
+				break
+			}
+		}
+		if len(tasks) < collabMinTasks {
+			continue
+		}
+		return tasks, nil
+	}
+	return nil, fmt.Errorf("invalid Decomposer output: no valid task list (objects: %d)", len(objs))
+}
+
+// collabResearchRolePrompt returns the compact role system prompt for a
+// parallel-research harness role. Named distinctly from the legacy
+// collabRolePrompt(CollabStageName) which still exists until task 2 removes
+// the serial pipeline.
+func collabResearchRolePrompt(role string, zh bool) string {
+	switch role {
+	case "decomposer":
+		return pickPrompt(zh,
+			"You are a Decomposer — a senior architect. Split the research goal into 2-6 non-overlapping research directions. Each direction must be self-contained so an independent researcher can start without shared context. Do NOT write code solutions — define research directions only. Output ONLY the tasks JSON: {\"tasks\":[{\"id\":\"t1\",\"title\":\"...\",\"direction\":\"...\"}]}.",
+			"你是「拆解员」——资深架构师。把研究目标拆成 2~6 个互不重叠的研究方向。每个方向必须自包含，让独立研究员无需共享上下文即可开工。不要写代码方案——只定研究方向。只输出 tasks JSON：{\"tasks\":[{\"id\":\"t1\",\"title\":\"...\",\"direction\":\"...\"}]}。")
+	case "worker":
+		return pickPrompt(zh,
+			"You are an independent researcher (Worker). Your job is to investigate ONE research direction thoroughly using read-only tools, and produce a concise research summary with concrete evidence (file:line references). Do NOT edit files.",
+			"你是「研究员」——独立研究者。你的任务是只用只读工具彻底调研一个研究方向，产出简洁的研究小结，附具体证据（file:line 引用）。不要改任何文件。")
+	case "synthesizer":
+		return pickPrompt(zh,
+			"You are a Synthesizer — a research team lead. Merge the worker reports below into one structured research report: an overview, per-direction findings, and a cross-cutting analysis with recommendations. Mark failed tasks as incomplete explicitly.",
+			"你是「汇总员」——研究团队负责人。把下面的各 worker 报告合并成一份结构化研究报告：总体结论、各方向发现、跨方向综合分析建议。失败任务明确标注未完成。")
+	}
+	return ""
 }
 
 // collabStageMaxIterations 已移除：流水线阶段子代理不设轮数上限（MaxIterations
