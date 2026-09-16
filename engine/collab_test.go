@@ -381,3 +381,41 @@ func TestParseCollabTasks_EmptyFails(t *testing.T) {
 		t.Fatal("expected error for non-JSON content")
 	}
 }
+
+// --- Run() integration ---
+
+func TestRun_CollabParallelResearch(t *testing.T) {
+	e := &Engine{
+		model:     &stubStreamModel{chunks: []ModelChunk{{Delta: "研究完成。", FinishReason: "stop"}}},
+		context:   &stubContextBuilder{},
+		tools:     stubToolExecutor{},
+		state:     &TaskState{TaskID: "test-collab-run"},
+		history:   []Message{},
+		config:    EngineConfig{ModelName: "test-model", MaxTurns: 10},
+		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
+		readLoop:  NewLoopTracker(3, 4, false),
+		errorLoop: NewLoopTracker(0, 3, true),
+	}
+	reg := NewAgentRegistry()
+	reg.Register(&decomposerMockRunner{
+		mockPromptRunner: mockPromptRunner{
+			mockSimpleAgent: mockSimpleAgent{id: AgentSub, response: "## 产出\n采用微服务架构。"},
+		},
+	})
+	e.agents = reg
+	e.collabHall = NewCollabHall(e)
+
+	resp, err := e.Run(context.Background(), "/collab 研究缓存方案")
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if e.state.Collab != nil {
+		t.Errorf("collab state should be cleared after run, got phase %v", e.state.Collab.Phase)
+	}
+	if !strings.Contains(resp.Summary, "并行研究完成") {
+		t.Errorf("run should surface the research report, got %q", resp.Summary)
+	}
+}
