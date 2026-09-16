@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -162,6 +163,7 @@ type collabCall struct {
 type captureCollabRunner struct {
 	mockPromptRunner
 	decomposed  bool
+	mu          sync.Mutex
 	workerCalls []collabCall
 }
 
@@ -171,7 +173,9 @@ func (c *captureCollabRunner) RunWithPrompt(_ context.Context, input Handoff, ex
 		return &HandoffResult{Summary: `{"tasks":[{"id":"t1","title":"调研缓存","direction":"读 cache.go"},{"id":"t2","title":"调研选型","direction":"评估第三方库"}]}`}, nil
 	}
 	if strings.Contains(extraPrompt, "研究员") {
+		c.mu.Lock()
 		c.workerCalls = append(c.workerCalls, collabCall{tools: input.Tools, maxIterations: input.MaxIterations})
+		c.mu.Unlock()
 	}
 	return &HandoffResult{Summary: c.response, Conclusions: []string{c.response}}, nil
 }
@@ -195,6 +199,120 @@ func newCaptureCollabTestEngine(t *testing.T) (*Engine, *captureCollabRunner) {
 	}
 	e.collabHall = NewCollabHall(e)
 	return e, captor
+}
+
+// scenarioCollabRunner implements RunWithPrompt for worker-failure-tolerance
+// and synthesize-fallback scenarios: emits tasks JSON on the first decomposer
+// call, fails the worker whose goal mentions failDirection with an error, and
+// optionally returns an empty Summary for the synthesizer (captured in synthInput).
+type scenarioCollabRunner struct {
+	mockPromptRunner
+	decomposed     bool
+	failDirection  string
+	failSynthesize bool
+	synthInput     string
+}
+
+func (s *scenarioCollabRunner) RunWithPrompt(_ context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
+	if strings.Contains(extraPrompt, "拆解员") && !s.decomposed {
+		s.decomposed = true
+		return &HandoffResult{Summary: `{"tasks":[{"id":"t1","title":"调研缓存","direction":"读 cache.go"},{"id":"t2","title":"调研选型","direction":"评估第三方库"}]}`}, nil
+	}
+	if strings.Contains(extraPrompt, "研究员") {
+		if s.failDirection != "" && strings.Contains(input.Goal, s.failDirection) {
+			return nil, fmt.Errorf("worker boom")
+		}
+		return &HandoffResult{Summary: s.response, Conclusions: []string{s.response}}, nil
+	}
+	if strings.Contains(extraPrompt, "汇总员") {
+		s.synthInput = input.Goal
+		if s.failSynthesize {
+			return &HandoffResult{Summary: "", Conclusions: nil}, nil
+		}
+		return &HandoffResult{Summary: s.response, Conclusions: []string{s.response}}, nil
+	}
+	return &HandoffResult{Summary: s.response, Conclusions: []string{s.response}}, nil
+}
+
+func newScenarioCollabTestEngine(t *testing.T, runner *scenarioCollabRunner) *Engine {
+	t.Helper()
+	reg := NewAgentRegistry()
+	reg.Register(runner)
+	e := &Engine{
+		agents: reg,
+		state:  &TaskState{TaskID: "test-collab-scenario"},
+		config: EngineConfig{},
+	}
+	e.collabHall = NewCollabHall(e)
+	return e
+}
+
+func TestHandleCollabArena_WorkerFailureTolerated(t *testing.T) {
+	// 规格要求：单 worker 失败不中断其他 worker，汇总输入标注失败任务。
+	runner := &scenarioCollabRunner{
+		mockPromptRunner: mockPromptRunner{
+			mockSimpleAgent: mockSimpleAgent{
+				id:       AgentSub,
+				response: "## 产出\n采用微服务架构。",
+			},
+		},
+		failDirection: "评估第三方库", // t2 失败，t1 正常
+	}
+	e := newScenarioCollabTestEngine(t, runner)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabDecompose,
+	}
+	resp, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() should tolerate worker failure, got error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if !strings.Contains(resp.Summary, "并行研究完成") {
+		t.Errorf("report should mention completion, got:\n%s", resp.Summary)
+	}
+	if !strings.Contains(runner.synthInput, "failed") {
+		t.Errorf("synthesizer input should mark the failed task, got:\n%s", runner.synthInput)
+	}
+	if !strings.Contains(runner.synthInput, "worker boom") {
+		t.Errorf("synthesizer input should carry the worker error, got:\n%s", runner.synthInput)
+	}
+}
+
+func TestHandleCollabArena_SynthesizeFallback(t *testing.T) {
+	// 规格要求：汇总失败时 fallback 展示各任务结果。
+	runner := &scenarioCollabRunner{
+		mockPromptRunner: mockPromptRunner{
+			mockSimpleAgent: mockSimpleAgent{
+				id:       AgentSub,
+				response: "## 产出\n采用微服务架构。",
+			},
+		},
+		failSynthesize: true,
+	}
+	e := newScenarioCollabTestEngine(t, runner)
+	e.state.Collab = &CollabState{
+		Goal:  "实现一个缓存层",
+		Phase: CollabDecompose,
+	}
+	resp, err := e.collabHall.handleCollabArena(context.Background())
+	if err != nil {
+		t.Fatalf("handleCollabArena() unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if !strings.Contains(resp.Summary, "并行研究完成") {
+		t.Errorf("report should mention completion, got:\n%s", resp.Summary)
+	}
+	if !strings.Contains(resp.Summary, "各任务结果") {
+		t.Errorf("report should fall back to task results, got:\n%s", resp.Summary)
+	}
+	if !strings.Contains(resp.Summary, "调研缓存") {
+		t.Errorf("report should list task results, got:\n%s", resp.Summary)
+	}
 }
 
 // --- parseCollabTasks ---
