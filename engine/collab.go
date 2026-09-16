@@ -85,13 +85,15 @@ func parseCollabTasks(content string) ([]CollabTask, error) {
 		}
 		var tasks []CollabTask
 		for _, t := range p.Tasks {
-			if strings.TrimSpace(t.ID) == "" || strings.TrimSpace(t.Direction) == "" {
+			id := strings.TrimSpace(t.ID)
+			dir := strings.TrimSpace(t.Direction)
+			if id == "" || dir == "" {
 				continue
 			}
 			tasks = append(tasks, CollabTask{
-				ID:        t.ID,
+				ID:        id,
 				Title:     t.Title,
-				Direction: t.Direction,
+				Direction: dir,
 				Status:    "pending",
 			})
 			if len(tasks) >= collabMaxTasks {

@@ -375,7 +375,7 @@ const (
 // 用 iota+10 偏移避免与旧常量（CollabIdle=0、CollabReconPhase=1 等）数值
 // 冲突——新常量暂与旧常量共存，任务 2 删除旧常量后数值会重新归一。
 const (
-	CollabDecompose  CollabPhase = iota + 10
+	CollabDecompose CollabPhase = iota + 10
 	CollabParallel
 	CollabSynthesize
 )
