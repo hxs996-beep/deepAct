@@ -342,50 +342,16 @@ type Dimension struct {
 	Improvement string  `json:"improvement"`
 }
 
-// CollabStageName labels a single stage of the /collab pipeline.
-type CollabStageName string
-
-const (
-	CollabRecon  CollabStageName = "recon"  // 侦察：扫描代码库
-	CollabDesign CollabStageName = "design" // 设计：出技术方案
-	CollabDev    CollabStageName = "dev"    // 开发：产实现内容
-	CollabReview CollabStageName = "review" // 把关：评审挑问题
-)
-
-// CollabStage captures one pipeline stage's output.
-type CollabStage struct {
-	Name    CollabStageName `json:"name"`
-	Content string          `json:"content"`
-}
-
-// CollabPhase describes which stage of the /collab pipeline we are in.
+// CollabPhase describes which stage of the /collab parallel research we are in.
 type CollabPhase int
 
 const (
-	CollabIdle                 CollabPhase = iota
-	CollabReconPhase                       // 侦察
-	CollabDesignPhase                      // 设计
-	CollabDevPhase                         // 开发
-	CollabReviewPhase                      // 把关
-	CollabAwaitingConfirmation             // 等待用户确认汇总
-	CollabDone                             // 完成
+	CollabIdle       CollabPhase = iota
+	CollabDecompose              // 拆解：LLM 拆解 agent 产出任务列表
+	CollabParallel               // 并行：并发执行各任务（只读调研）
+	CollabSynthesize             // 汇总：LLM 合并各 worker 报告
+	CollabDone                   // 完成：展示最终报告并清理
 )
-
-// --- Parallel research phases (new /collab) ---
-// 用 iota+10 偏移避免与旧常量（CollabIdle=0、CollabReconPhase=1 等）数值
-// 冲突——新常量暂与旧常量共存，任务 2 删除旧常量后数值会重新归一。
-const (
-	CollabDecompose CollabPhase = iota + 10
-	CollabParallel
-	CollabSynthesize
-)
-
-// CollabState tracks the current /collab pipeline within TaskState.
-type CollabState struct {
-	Goal   string        `json:"goal"`
-	Phase  CollabPhase   `json:"phase"`
-	Stages []CollabStage `json:"stages"` // 各流水线段产出，按执行顺序
-}
 
 // CollabTask is one research direction produced by the decomposer.
 type CollabTask struct {
@@ -395,6 +361,14 @@ type CollabTask struct {
 	Status    string `json:"status"`    // pending/running/done/failed
 	Result    string `json:"result,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// CollabState tracks the current /collab parallel research within TaskState.
+type CollabState struct {
+	Goal   string       `json:"goal"`
+	Phase  CollabPhase  `json:"phase"`
+	Tasks  []CollabTask `json:"tasks"`
+	Report string       `json:"report,omitempty"` // 汇总研究报告
 }
 
 // RATDPhase describes which stage of the /ratd harness we are in.

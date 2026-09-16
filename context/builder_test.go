@@ -177,29 +177,27 @@ func TestFormatTaskStateVolatile(t *testing.T) {
 	}
 }
 
-// TestFormatTaskStateVolatile_Collab asserts that a live /collab pipeline is
-// rendered into the volatile context (Block B) so the main agent can see the
-// collab-produced plan across all execution turns, mirroring roundtable.
+// TestFormatTaskStateVolatile_Collab asserts that a live /collab parallel
+// research run is rendered into the volatile context (Block B) so the main
+// agent can see the active research state across all execution turns.
 func TestFormatTaskStateVolatile_Collab(t *testing.T) {
 	state := &engine.TaskState{
 		TurnNumber: 3,
 		Collab: &engine.CollabState{
 			Goal:  "实现登录页改造",
-			Phase: engine.CollabAwaitingConfirmation,
-			Stages: []engine.CollabStage{
-				{Name: engine.CollabRecon, Content: "recon out"},
-				{Name: engine.CollabDesign, Content: "design out"},
-				{Name: engine.CollabDev, Content: "dev out"},
-				{Name: engine.CollabReview, Content: "review out"},
+			Phase: engine.CollabParallel,
+			Tasks: []engine.CollabTask{
+				{ID: "t1", Title: "调研缓存", Direction: "读 cache.go", Status: "done", Result: "发现 TTL 逻辑"},
+				{ID: "t2", Title: "调研选型", Direction: "评估第三方库", Status: "running"},
 			},
 		},
 	}
 	got := formatTaskStateVolatile(state)
 	for _, want := range []string{
 		`"collab":{`,
-		`"phase":"awaiting_confirmation"`,
+		`"phase":"parallel"`,
 		`"goal":"实现登录页改造"`,
-		`"stages":4`,
+		`"tasks":2`,
 	} {
 		if !strContains(got, want) {
 			t.Errorf("output should contain %q, got %q", want, got)

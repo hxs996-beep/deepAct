@@ -276,13 +276,13 @@ func currentPlanStep(plan []engine.PlanStep) string {
 	return ""
 }
 
-// collabVolatile is a compact representation of the /collab pipeline state
-// injected into Block B so the main agent can tell that the active plan is
-// a collab-pipeline output across all execution turns, not just the first.
+// collabVolatile is a compact representation of the /collab parallel research
+// state injected into Block B so the main agent can tell that a collab
+// research run is active across all execution turns.
 type collabVolatile struct {
-	Phase  string `json:"phase"`
-	Goal   string `json:"goal,omitempty"`
-	Stages int    `json:"stages,omitempty"`
+	Phase string `json:"phase"`
+	Goal  string `json:"goal,omitempty"`
+	Tasks int    `json:"tasks,omitempty"`
 }
 
 // flattenCollab converts engine.CollabState to the compact volatile form.
@@ -291,9 +291,9 @@ func flattenCollab(c *engine.CollabState) *collabVolatile {
 		return nil
 	}
 	return &collabVolatile{
-		Phase:  collabPhaseName(c.Phase),
-		Goal:   truncString(c.Goal, 120),
-		Stages: len(c.Stages),
+		Phase: collabPhaseName(c.Phase),
+		Goal:  truncString(c.Goal, 120),
+		Tasks: len(c.Tasks),
 	}
 }
 
@@ -301,16 +301,12 @@ func flattenCollab(c *engine.CollabState) *collabVolatile {
 // volatile context. CollabPhase has no String() method.
 func collabPhaseName(p engine.CollabPhase) string {
 	switch p {
-	case engine.CollabReconPhase:
-		return "recon"
-	case engine.CollabDesignPhase:
-		return "design"
-	case engine.CollabDevPhase:
-		return "dev"
-	case engine.CollabReviewPhase:
-		return "review"
-	case engine.CollabAwaitingConfirmation:
-		return "awaiting_confirmation"
+	case engine.CollabDecompose:
+		return "decompose"
+	case engine.CollabParallel:
+		return "parallel"
+	case engine.CollabSynthesize:
+		return "synthesize"
 	case engine.CollabDone:
 		return "done"
 	default:

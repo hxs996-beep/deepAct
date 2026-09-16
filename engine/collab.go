@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
+	"sync"
 )
 
 // CollabCommand represents a parsed /collab command.
@@ -40,7 +40,7 @@ func parseCollabCommand(userMsg string) *CollabCommand {
 	return &CollabCommand{Goal: goal}
 }
 
-// CollabHall orchestrates the /collab pipeline.
+// CollabHall orchestrates the /collab parallel research.
 type CollabHall struct {
 	engine *Engine
 }
@@ -109,9 +109,7 @@ func parseCollabTasks(content string) ([]CollabTask, error) {
 }
 
 // collabResearchRolePrompt returns the compact role system prompt for a
-// parallel-research harness role. Named distinctly from the legacy
-// collabRolePrompt(CollabStageName) which still exists until task 2 removes
-// the serial pipeline.
+// parallel-research harness role.
 func collabResearchRolePrompt(role string, zh bool) string {
 	switch role {
 	case "decomposer":
@@ -130,242 +128,92 @@ func collabResearchRolePrompt(role string, zh bool) string {
 	return ""
 }
 
-// collabStageMaxIterations 已移除：流水线阶段子代理不设轮数上限（MaxIterations
-// 默认 0 = 无上限）。阶段产出聚焦、靠 LLM 遵循 submit_result 收尾；不再用硬性
-// 轮数截断防跑飞（用户决策：关注指令遵循而非成本护栏）。
-// handleCollabArena runs the /collab pipeline through all stages until the
-// final review output is complete, then leaves the state AwaitingConfirmation
-// for the user to confirm the synthesized summary. Idempotent: completed
-// stages are skipped on re-entry (partial failure / resume safety).
+// handleCollabArena runs the /collab parallel research state machine to
+// completion within one Run(). Idempotent: re-entering after a partial failure
+// resumes from the stored Phase. On completion it renders the research report
+// and clears Collab state.
 func (h *CollabHall) handleCollabArena(ctx context.Context) (*EngineResponse, error) {
 	state := h.engine.state
 	if state.Collab == nil {
 		return nil, nil
 	}
-
 	zh := msgIsChinese(state.Collab.Goal)
 	goal := state.Collab.Goal
 
-	order := []struct {
-		phase CollabPhase
-		name  CollabStageName
-	}{
-		{CollabReconPhase, CollabRecon},
-		{CollabDesignPhase, CollabDesign},
-		{CollabDevPhase, CollabDev},
-		{CollabReviewPhase, CollabReview},
-	}
+	for {
+		switch state.Collab.Phase {
+		case CollabDecompose:
+			payload := h.runRole(ctx, "decomposer", buildDecomposerGoal(goal, zh), zh, collabDecomposerMaxIterations)
+			tasks, err := parseCollabTasks(payload)
+			if err != nil {
+				state.Collab = nil
+				return nil, fmt.Errorf("collab decompose: %w", err)
+			}
+			state.Collab.Tasks = tasks
+			state.Collab.Phase = CollabParallel
 
-	for _, o := range order {
-		if state.Collab.Phase <= o.phase {
-			prior := renderCollabPrior(state.Collab.Stages, zh)
-			content := h.runCollabStage(ctx, o.name, goal, prior, zh)
-			state.Collab.Stages = append(state.Collab.Stages, CollabStage{Name: o.name, Content: content})
-			state.Collab.Phase = o.phase + 1
+		case CollabParallel:
+			h.runWorkers(ctx, state.Collab, zh)
+			state.Collab.Phase = CollabSynthesize
+
+		case CollabSynthesize:
+			state.Collab.Report = h.runRole(ctx, "synthesizer", buildSynthesizerGoal(goal, state.Collab, zh), zh, collabSynthesizerMaxIterations)
+			state.Collab.Phase = CollabDone
+
+		case CollabDone:
+			resp := h.buildCollabReport(goal, state.Collab, zh)
+			h.engine.state.Collab = nil
+			return resp, nil
+
+		default:
+			h.engine.state.Collab = nil
+			return nil, nil
 		}
 	}
-
-	state.Collab.Phase = CollabAwaitingConfirmation
-
-	summary := h.buildCollabSummary(ctx, goal, zh)
-	return h.buildCollabPrompt(goal, zh, summary), nil
 }
 
-// runCollabStage executes a single pipeline stage via AgentSub with a
-// role-specific system prompt injected through RunWithPrompt. prior carries
-// the rendered outputs of already-completed stages ("" for recon).
-func (h *CollabHall) runCollabStage(ctx context.Context, stage CollabStageName, goal, prior string, zh bool) string {
+// buildDecomposerGoal instructs the Decomposer to split the goal into
+// research directions, output as JSON.
+func buildDecomposerGoal(goal string, zh bool) string {
+	return fmt.Sprintf(pickPrompt(zh,
+		"## Task\nSplit the following research goal into 2-6 non-overlapping research directions. Each direction must be self-contained: an independent researcher with read-only tools and NO shared context must be able to start from the direction text alone. Output ONLY the tasks JSON.\n\n## Research Goal\n%s",
+		"## 任务\n把下面的研究目标拆成 2~6 个互不重叠的研究方向。每个方向必须自包含：一个只有只读工具、没有共享上下文的独立研究员，仅凭方向描述就能开工。只输出 tasks JSON。\n\n## 研究目标\n%s"), goal)
+}
+
+// runRole executes a harness role via the sub agent with its role prompt.
+// Returns the sub-agent's Summary (the JSON payload / report) or "" on failure.
+func (h *CollabHall) runRole(ctx context.Context, role, goal string, zh bool, iterations int) string {
 	if h.engine.config.OnProgress != nil {
 		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "collab_stage",
-			Name:   string(stage),
-			Detail: collabStageLabel(stage, zh),
+			Type:   "collab_phase",
+			Name:   role,
+			Detail: collabPhaseLabel(role, zh),
 		})
 	}
-
-	stageGoal := buildCollabStageGoal(stage, goal, prior, zh)
 	handoff := Handoff{
 		Agent:         AgentSub,
-		Goal:          stageGoal,
+		Goal:          goal,
 		Tools:         []string{"read", "grep", "glob", "lsp"},
 		Depth:         0,
 		NoNudge:       true,
+		MaxIterations: iterations,
 		UserLanguage:  pickPrompt(zh, "", "中文"),
 	}
-
-	agent, err := h.engine.agents.Get(AgentSub)
-	if err != nil {
-		return fmt.Sprintf("collab stage %s failed: %v", stage, err)
-	}
-
-	type promptRunner interface {
-		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
-	}
-
-	var content string
-	if pr, ok := agent.(promptRunner); ok {
-		result, err := pr.RunWithPrompt(ctx, handoff, collabRolePrompt(stage, zh))
-		if err != nil {
-			content = fmt.Sprintf("collab stage %s failed: %v", stage, err)
-		} else if result != nil {
-			h.engine.accumulateUsage(result.Usage)
-			content = result.Summary
-		}
-	} else {
-		result, err := agent.Run(ctx, handoff)
-		if err != nil {
-			content = fmt.Sprintf("collab stage %s failed: %v", stage, err)
-		} else if result != nil {
-			h.engine.accumulateUsage(result.Usage)
-			content = result.Summary
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "[collab]   stage %s done, contentLen=%d\n", stage, len(content))
-	return content
-}
-
-// collabRolePrompt returns the compact role system prompt for a pipeline stage.
-func collabRolePrompt(stage CollabStageName, zh bool) string {
-	switch stage {
-	case CollabRecon:
-		return pickPrompt(zh,
-			"You are a codebase scout (Recon). Your job is to locate relevant files and understand the current code.",
-			"你是「侦察」——代码库侦察员。你的任务是定位相关文件、摸清当前代码现状。")
-	case CollabDesign:
-		return pickPrompt(zh,
-			"You are a system designer (Designer). Your job is to produce a concrete technical design for the requirement.",
-			"你是「设计」——系统架构师。你的任务是产出针对需求的具体技术方案。")
-	case CollabDev:
-		return pickPrompt(zh,
-			"You are an implementation engineer (Builder). Your job is to produce concrete implementation content (code-level changes, file-by-file) for the design.",
-			"你是「开发」——实现工程师。你的任务是产出具体的实现内容（逐文件的代码级改动）。")
-	case CollabReview:
-		return pickPrompt(zh,
-			"You are an independent reviewer (Reviewer). Your job is to critically review the implementation and flag risks, bugs, or missing pieces.",
-			"你是「把关」——独立评审员。你的任务是批判性审查实现，指出风险、缺陷或遗漏。")
-	}
-	return ""
-}
-
-// buildCollabStageGoal constructs the task prompt for a pipeline stage.
-// prior is the rendered output of already-completed stages; recon ignores it
-// (its job is only the initial scan), the downstream stages receive it as the
-// previous stages' output to build upon.
-func buildCollabStageGoal(stage CollabStageName, goal, prior string, zh bool) string {
-	switch stage {
-	case CollabRecon:
-		return fmt.Sprintf(pickPrompt(zh,
-			"## Task\nScan the codebase for context relevant to the requirement. Produce a structured report: relevant files (exact paths), key code references, constraints, risks.\n\n## Requirement\n%s\n\nDo NOT propose solutions — research only.",
-			"## 任务\n扫描代码库中与需求相关的上下文。产出结构化报告：相关文件（精确路径）、关键代码引用、约束、风险。\n\n## 需求\n%s\n\n不要提方案——只做调研。"), goal)
-	case CollabDesign:
-		return fmt.Sprintf(pickPrompt(zh,
-			"## Task\nBased on the codebase context, produce a concrete technical design for the requirement: approach, key design decisions, file-level changes.\n\n%s## Requirement\n%s",
-			"## 任务\n基于代码库上下文，为需求产出具体技术方案：方法、关键设计决策、逐文件改动。\n\n%s## 需求\n%s"), collabPriorSection(prior, zh), goal)
-	case CollabDev:
-		return fmt.Sprintf(pickPrompt(zh,
-			"## Task\nBased on the design, produce concrete implementation content: file-by-file changes with code snippets, function signatures, and integration points.\n\n%s## Requirement\n%s",
-			"## 任务\n基于设计方案，产出具体实现内容：逐文件改动 + 代码片段、函数签名、集成点。\n\n%s## 需求\n%s"), collabPriorSection(prior, zh), goal)
-	case CollabReview:
-		return fmt.Sprintf(pickPrompt(zh,
-			"## Task\nCritically review the implementation plan. Flag bugs, risks, missing edge cases, and concrete fixes. Be specific.\n\n%s## Requirement\n%s",
-			"## 任务\n批判性审查实现方案。指出 bug、风险、遗漏的边界情况，并给出具体修复建议。\n\n%s## 需求\n%s"), collabPriorSection(prior, zh), goal)
-	}
-	return ""
-}
-
-// collabPriorSection renders the previous-stage outputs block, or "" when no
-// stages have completed yet (so the downstream goal stays clean).
-func collabPriorSection(prior string, zh bool) string {
-	if prior == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Previous Stage Outputs", "## 前序阶段产出"), prior)
-}
-
-// renderCollabPrior renders the outputs of already-completed stages as the
-// "previous stage outputs" block passed to downstream stages. Each stage is
-// rendered as a labeled block of label + content. Returns "" when no stage has
-// completed yet (e.g. recon has no prior).
-func renderCollabPrior(stages []CollabStage, zh bool) string {
-	if len(stages) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, s := range stages {
-		sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
-// collabStageLabel returns a human-readable label for a pipeline stage.
-func collabStageLabel(stage CollabStageName, zh bool) string {
-	switch stage {
-	case CollabRecon:
-		return pickPrompt(zh, "Recon", "侦察")
-	case CollabDesign:
-		return pickPrompt(zh, "Design", "设计")
-	case CollabDev:
-		return pickPrompt(zh, "Dev", "开发")
-	case CollabReview:
-		return pickPrompt(zh, "Review", "把关")
-	}
-	return string(stage)
-}
-
-// buildCollabSummary runs a single LLM call that merges all pipeline stage
-// outputs into a concise collaboration summary for the user. Returns "" on
-// failure so the prompt falls back to showing raw stage outputs.
-func (h *CollabHall) buildCollabSummary(ctx context.Context, goal string, zh bool) string {
-	state := h.engine.state.Collab
-	if len(state.Stages) < 4 {
-		return ""
-	}
-
-	if h.engine.config.OnProgress != nil {
-		h.engine.config.OnProgress(ProgressEvent{
-			Type:   "collab_summary",
-			Name:   "summary",
-			Detail: pickPrompt(zh, "Synthesizing collaboration summary...", "正在合成协作摘要..."),
-		})
-	}
-
-	var record strings.Builder
-	for _, s := range state.Stages {
-		record.WriteString(fmt.Sprintf("## %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
-	}
-
-	taskGoal := fmt.Sprintf(pickPrompt(zh,
-		"## Task\nYou are a team lead. Below are the outputs of a collaboration pipeline (recon → design → dev → review). Merge them into a concise summary the user can confirm: what will be built, key decisions, and any review concerns.\n\n## Requirement\n%s\n\n## Pipeline Outputs\n%s",
-		"## 任务\n你是协作团队负责人。下面是协作流水线（侦察 → 设计 → 开发 → 把关）各环节的产出。把它们合并成一份用户可直接确认的简洁摘要：要做什么、关键决策、把关发现的问题。\n\n## 需求\n%s\n\n## 流水线产出\n%s"), goal, record.String())
-
-	handoff := Handoff{
-		Agent:         AgentSub,
-		Goal:          taskGoal,
-		Depth:         0,
-		NoNudge:       true,
-		MaxIterations: 3,
-		UserLanguage:  pickPrompt(zh, "", "中文"),
-	}
-
 	agent, err := h.engine.agents.Get(AgentSub)
 	if err != nil {
 		return ""
 	}
-
 	type promptRunner interface {
 		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
 	}
-
 	if pr, ok := agent.(promptRunner); ok {
-		result, err := pr.RunWithPrompt(ctx, handoff, "")
+		result, err := pr.RunWithPrompt(ctx, handoff, collabResearchRolePrompt(role, zh))
 		if err != nil || result == nil {
 			return ""
 		}
 		h.engine.accumulateUsage(result.Usage)
 		return result.Summary
 	}
-
 	result, err := agent.Run(ctx, handoff)
 	if err != nil || result == nil {
 		return ""
@@ -374,108 +222,154 @@ func (h *CollabHall) buildCollabSummary(ctx context.Context, goal string, zh boo
 	return result.Summary
 }
 
-// buildCollabPrompt renders the /collab confirmation screen: pipeline outputs
-// per stage + the merged summary, ending with confirmation instructions.
-func (h *CollabHall) buildCollabPrompt(goal string, zh bool, summary string) *EngineResponse {
-	var sb strings.Builder
+// runWorkers executes all collab tasks concurrently with a concurrency cap.
+// A single worker failure is tolerated — the task is marked failed and other
+// workers continue.
+func (h *CollabHall) runWorkers(ctx context.Context, c *CollabState, zh bool) {
+	sem := make(chan struct{}, collabMaxConcurrency)
+	var wg sync.WaitGroup
+	for i := range c.Tasks {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(t *CollabTask) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			t.Status = "running"
+			h.emitWorkerEvent("member_start", t.ID, t.Title, zh)
+			result, err := h.runWorker(ctx, t, zh)
+			if err != nil || result == "" {
+				t.Status = "failed"
+				t.Error = errText(err)
+				if result != "" {
+					t.Result = result
+				}
+			} else {
+				t.Status = "done"
+				t.Result = result
+			}
+			h.emitWorkerEvent("member_done", t.ID, t.Title, zh)
+		}(&c.Tasks[i])
+	}
+	wg.Wait()
+}
 
+// runWorker executes a single research task via AgentSub with the worker role.
+func (h *CollabHall) runWorker(ctx context.Context, t *CollabTask, zh bool) (string, error) {
+	goal := fmt.Sprintf(pickPrompt(zh,
+		"## Task\nInvestigate ONE research direction and produce a concise research summary with concrete evidence (file:line references).\n\n## Research Direction\n%s",
+		"## 任务\n调研一个研究方向，产出简洁的研究小结，附具体证据（file:line 引用）。\n\n## 研究方向\n%s"), t.Direction)
+	handoff := Handoff{
+		Agent:         AgentSub,
+		Goal:          goal,
+		Tools:         []string{"read", "grep", "glob", "lsp"},
+		Depth:         0,
+		NoNudge:       true,
+		MaxIterations: collabWorkerMaxIterations,
+		UserLanguage:  pickPrompt(zh, "", "中文"),
+	}
+	agent, err := h.engine.agents.Get(AgentSub)
+	if err != nil {
+		return "", err
+	}
+	type promptRunner interface {
+		RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error)
+	}
+	if pr, ok := agent.(promptRunner); ok {
+		result, err := pr.RunWithPrompt(ctx, handoff, collabResearchRolePrompt("worker", zh))
+		if err != nil || result == nil {
+			return "", err
+		}
+		h.engine.accumulateUsage(result.Usage)
+		return result.Summary, nil
+	}
+	result, err := agent.Run(ctx, handoff)
+	if err != nil || result == nil {
+		return "", err
+	}
+	h.engine.accumulateUsage(result.Usage)
+	return result.Summary, nil
+}
+
+// buildSynthesizerGoal assembles the Synthesizer's input: goal + all reports.
+func buildSynthesizerGoal(goal string, c *CollabState, zh bool) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(pickPrompt(zh,
+		"## Task\nMerge the worker reports below into one structured research report: an overview, per-direction findings, and a cross-cutting analysis with recommendations. Mark failed tasks as incomplete explicitly.\n\n## Research Goal\n%s\n\n## Worker Reports\n",
+		"## 任务\n把下面的各 worker 报告合并成一份结构化研究报告：总体结论、各方向发现、跨方向综合分析建议。失败任务明确标注未完成。\n\n## 研究目标\n%s\n\n## 各 worker 报告\n"), goal))
+	for _, t := range c.Tasks {
+		sb.WriteString(fmt.Sprintf("### %s (%s) — %s\n", t.Title, t.ID, t.Status))
+		if t.Result != "" {
+			sb.WriteString(t.Result + "\n\n")
+		}
+		if t.Error != "" {
+			sb.WriteString(fmt.Sprintf("(error: %s)\n\n", t.Error))
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// collabPhaseLabel returns a human-readable label for a harness role.
+func collabPhaseLabel(role string, zh bool) string {
+	switch role {
+	case "decomposer":
+		return pickPrompt(zh, "decomposing...", "拆解中...")
+	case "synthesizer":
+		return pickPrompt(zh, "synthesizing...", "汇总中...")
+	case "worker":
+		return pickPrompt(zh, "researching...", "调研中...")
+	}
+	return role
+}
+
+// emitWorkerEvent emits a member_start/member_done progress event for a worker.
+func (h *CollabHall) emitWorkerEvent(eventType, taskID, title string, zh bool) {
+	if h.engine.config.OnProgress == nil {
+		return
+	}
+	h.engine.config.OnProgress(ProgressEvent{
+		Type:   eventType,
+		Name:   "worker-" + taskID,
+		Detail: title,
+	})
+}
+
+// errText returns a compact error string, or "" for nil.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// buildCollabReport renders the final research report for the user.
+// Falls back to listing task results when the synthesized report is empty.
+func (h *CollabHall) buildCollabReport(goal string, c *CollabState, zh bool) *EngineResponse {
+	var sb strings.Builder
 	sb.WriteString(pickPrompt(zh,
-		"## Collaboration Complete - Review & Confirm\n\n",
-		"## 协作完成 - 请审阅并确认\n\n",
-	))
+		"## Parallel Research Complete\n\n",
+		"## 并行研究完成\n\n"))
 	sb.WriteString(fmt.Sprintf("**%s**: %s\n\n", pickPrompt(zh, "Goal", "需求"), goal))
 
-	state := h.engine.state.Collab
-
-	if summary != "" {
-		sb.WriteString(pickPrompt(zh, "### Collaboration Summary\n\n", "### 协作摘要\n\n"))
-		sb.WriteString(summary)
+	if c.Report != "" {
+		sb.WriteString(c.Report)
 		sb.WriteString("\n\n")
-	}
-
-	sb.WriteString(pickPrompt(zh, "### Pipeline Outputs\n\n", "### 流水线产出\n\n"))
-	for _, s := range state.Stages {
-		sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
+	} else {
+		sb.WriteString(pickPrompt(zh, "### Task Results\n\n", "### 各任务结果\n\n"))
+		for _, t := range c.Tasks {
+			sb.WriteString(fmt.Sprintf("#### %s (%s) — %s\n", t.Title, t.ID, t.Status))
+			if t.Result != "" {
+				sb.WriteString(t.Result + "\n\n")
+			}
+			if t.Error != "" {
+				sb.WriteString(fmt.Sprintf("**(error: %s)**\n\n", t.Error))
+			}
+		}
 	}
 
 	sb.WriteString("---\n\n")
 	sb.WriteString(pickPrompt(zh,
-		"**Your decision**: Type `support` to execute this plan, `but <condition>` to adjust, or `restart` to re-run the pipeline\n",
-		"**你的决定**: 输入 `支持` 执行此方案、`但要<条件>` 调整、或 `重新协作` 重跑流水线\n",
-	))
+		"Research complete. You can ask follow-up questions or run more research.",
+		"研究完成。你可以追问细节，或发起新的研究。"))
 
 	return &EngineResponse{Summary: sb.String(), Stage: StageAct}
-}
-
-// Advance handles user input during the /collab AwaitingConfirmation phase.
-func (h *CollabHall) Advance(ctx context.Context, userMsg string) (*EngineResponse, error) {
-	state := h.engine.state
-	if state.Collab == nil {
-		return nil, nil
-	}
-
-	zh := msgIsChinese(userMsg)
-	if !zh && userMsg == "" {
-		zh = msgIsChinese(state.Collab.Goal)
-	}
-
-	lower := strings.ToLower(strings.TrimSpace(userMsg))
-
-	switch state.Collab.Phase {
-	case CollabAwaitingConfirmation:
-		return h.handleConfirmation(userMsg, lower, zh), nil
-	case CollabDone:
-		return nil, nil
-	default:
-		return nil, nil
-	}
-}
-
-// handleConfirmation processes the user's decision on the /collab summary.
-func (h *CollabHall) handleConfirmation(userMsg, lower string, zh bool) *EngineResponse {
-	state := h.engine.state
-
-	// "重新协作" / "restart" → clear stages and restart the pipeline.
-	// 用前缀/精确匹配收窄判定，避免误吞"支持但要重新审视..."类确认+调整指令。
-	if strings.HasPrefix(lower, "重新") || lower == "restart" || lower == "重新协作" {
-		state.Collab.Phase = CollabReconPhase
-		state.Collab.Stages = nil
-		return &EngineResponse{
-			Summary: pickPrompt(zh, "Restarting collaboration pipeline...", "正在重新启动协作流水线..."),
-			Stage:   StageAct,
-		}
-	}
-
-	// User confirms (or adjusts). Include all stage outputs so the executing
-	// agent sees the full plan, not just the summary.
-	var record strings.Builder
-	for _, s := range state.Collab.Stages {
-		record.WriteString(fmt.Sprintf("## %s\n%s\n\n", collabStageLabel(s.Name, zh), s.Content))
-	}
-	pinned := fmt.Sprintf("[COLLAB PLAN: %s]\n\n%s\n\n%s\n%s",
-		state.Collab.Goal,
-		userMsg,
-		pickPrompt(zh,
-			"## Collaboration Pipeline Output (execute this plan)",
-			"## 协作流水线产出（请按此方案执行）"),
-		record.String())
-	h.engine.pendingPinnedMessages = append(h.engine.pendingPinnedMessages, pinned)
-	state.Collab.Phase = CollabDone
-
-	// Mark that the next Run() should skip confirmation gates — the user
-	// already approved the plan through the collaboration pipeline.
-	h.engine.collabVerdictPending = true
-
-	state.Decisions = append(state.Decisions, Decision{
-		ID:   "collab-plan",
-		Text: userMsg,
-	})
-
-	return &EngineResponse{
-		Summary: pickPrompt(zh,
-			fmt.Sprintf("✓ Collaboration confirmed. Proceeding with: %s", userMsg),
-			fmt.Sprintf("✓ 协作方案已确认。将按以下方向执行: %s", userMsg),
-		),
-		Stage: StageAct,
-	}
 }

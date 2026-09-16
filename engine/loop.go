@@ -99,12 +99,8 @@ type Engine struct {
 	// ratdHall orchestrates the /ratd harness (proposer/redteam/arbitrator).
 	ratdHall *RATDHall
 
-	// collabHall orchestrates the /collab pipeline (recon → design → dev → review).
+	// collabHall orchestrates the /collab parallel research (decompose → parallel → synthesize).
 	collabHall *CollabHall
-
-	// collabVerdictPending is set when the user confirms the /collab summary,
-	// skipping confirmation gates so the plan lands directly.
-	collabVerdictPending bool
 
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
@@ -321,17 +317,17 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	}
 
 	// Collab command handling — /collab <goal>
-	// Activates the collaboration pipeline: recon → design → dev → review.
+	// Activates the parallel research state machine: decompose → parallel → synthesize.
 	if cc := parseCollabCommand(userMsg); cc != nil {
 		e.state.Collab = &CollabState{
 			Goal:  cc.Goal,
-			Phase: CollabReconPhase,
+			Phase: CollabDecompose,
 		}
 		// Replace raw "/collab <goal>" so the main agent loop sees a proper prompt.
 		if len(e.history) > 0 {
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
-			userMsg = fmt.Sprintf("协作流水线已启动：%s\n\n请等待各环节完成。", cc.Goal)
+				"并行研究已启动：%s\n\n请等待各环节完成。", cc.Goal)
+			userMsg = fmt.Sprintf("并行研究已启动：%s\n\n请等待各环节完成。", cc.Goal)
 		}
 	}
 
@@ -630,45 +626,22 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 	}
 
-	// Collab pipeline phase — execute pipeline stages, then await confirmation.
+	// Collab parallel research phase — run decompose → parallel → synthesize.
 	if e.state.Collab != nil {
 		phase := e.state.Collab.Phase
 		switch phase {
-		case CollabReconPhase, CollabDesignPhase, CollabDevPhase, CollabReviewPhase:
+		case CollabDecompose, CollabParallel, CollabSynthesize:
 			response, err := e.collabHall.handleCollabArena(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("collab arena: %w", err)
+				return nil, fmt.Errorf("collab research: %w", err)
 			}
 			if response != nil {
 				return response, nil
 			}
-		case CollabAwaitingConfirmation:
-			response, err := e.collabHall.Advance(ctx, userMsg)
-			if err != nil {
-				return nil, fmt.Errorf("collab confirm: %w", err)
-			}
-			// 这里 return 的是"重新协作"的重启响应：流水线回到 CollabReconPhase，
-			// 由下一次 Run() 继续执行各阶段。若用户选定方案（"支持"/调整），
-			// handleConfirmation 把 Phase 置为 CollabDone——此 case 不 return，
-			// 直接 fall-through 到下方主 agent loop：在本 Run 内消费 pinned
-			// [COLLAB PLAN] 与 collabVerdictPending，执行方案并返回执行结论。
-			if e.state.Collab.Phase != CollabDone {
-				return response, nil
-			}
 		case CollabDone:
-			// 调度块处理上一 Run 遗留的 pre-existing CollabDone（本 Run 入口时
-			// 状态已是 Done，本 Run 未触发确认）：清空 collab 状态恢复普通流程。
-			// 本 Run 内 fall-through 产生的 CollabDone 不在此清理——由 Run()
-			// 末尾的清理逻辑处理（见下方 loop.go 末尾），两者互补不重复。
+			// Pipeline complete — clear collab state so normal flow resumes.
 			e.state.Collab = nil
 		}
-	}
-
-	// Collab verdict: the user already approved a plan through the pipeline.
-	if e.collabVerdictPending {
-		e.state.PlanConfirmed = true
-		e.collabVerdictPending = false
-		loopLog.Printf("collab verdict: PlanConfirmed=true, skipping edit-plan guard")
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -853,10 +826,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// not incremented after a Done break — it still points to the completed turn.
 	e.state.TurnNumber = turns + 1
 
-	// Clean up a completed collab pipeline the same way: the pinned plan was
-	// already consumed by this Run()'s agent loop.
-	// Run 末尾清理处理本 Run 内 fall-through 产生的 CollabDone（上方调度块
-	// AwaitingConfirmation case 确认后置位）；上一 Run 遗留的 pre-existing
+	// Clean up a completed collab pipeline.
+	// Run 末尾清理处理本 Run 内产生的 CollabDone；上一 Run 遗留的 pre-existing
 	// CollabDone 已在调度块 CollabDone case 清空，两者互补不重复。
 	if e.state.Collab != nil && e.state.Collab.Phase == CollabDone {
 		e.state.Collab = nil
