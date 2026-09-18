@@ -57,7 +57,7 @@ skill/builtin/
 标准 Claude Code 布局 + frontmatter（name / description / when_to_use / argument-hint），由现有 `ParseMarkdownSkill` 解析——内置技能是普通技能，不是新机制。
 
 三个技能的内容同构，各包含：
-- **角色提示词原文**：当前 `ratdRolePrompt`/`collabResearchRolePrompt` 的中英双语内容迁入 Markdown，指示模型在 handoff goal 中原样使用（ratd：Proposer/RedTeam/Arbitrator；collab：Decomposer/Worker/Synthesizer——collab 的拆解与汇总由主模型自身承担，仅 Worker 走 handoff；debate：四个辩论角色 + 评分规则）。
+- **角色提示词原文**：当前 `ratdRolePrompt`/`collabResearchRolePrompt` 的中英双语内容迁入 Markdown，两语言变体并列标注（对应现 `pickPrompt` 语义），技能文本指示模型按会话语言选用变体后放入 handoff goal（ratd：Proposer/RedTeam/Arbitrator；collab：Decomposer/Worker/Synthesizer——collab 的拆解与汇总由主模型自身承担，仅 Worker 走 handoff；debate：四个辩论角色 + 评分规则）。
 - **输出契约**：CodePayload / TestPayload / ArbitrationResult 的 JSON schema（作为 handoff goal 的一部分传给子代理）。
 - **编排规则**：每角色工具子集（read/grep/glob/lsp）、轮数上限（ratd 3 轮）、失败语义（仲裁失败默认 ACCEPT_TEST）、测试命令映射（go→`go test -timeout 60s ./...` 等）。
 - **完成判据**：交付摘要格式 + task_complete 调用要求。
@@ -82,10 +82,10 @@ func BuiltinSkills() ([]*Skill, error)
 | `engine/collab.go`（375 行） | 整文件删除 |
 | `engine/types.go` | 删 `CollabPhase/CollabTask/CollabState/RATDPhase/RATDSourceFile/RATDTest/RATDSandboxResult/RATDState`（约 100 行）；`TaskState` 删 `Collab/RATD` 字段；`ProgressEvent.Type` 注释删 `ratd_role` 枚举 |
 | `engine/loop.go` | 删 `parseRATDCommand`/`parseCollabCommand` 分派块（306-332）、RATD/Collab arena 分派块（618-645）、`ratdHall/collabHall` 字段（99-103）与 `NewEngine` 装配（184-185） |
-| `engine/sub_agent.go` | `RunWithPrompt` 专用通道若无其他调用方则一并清理（实现时核实） |
+| `engine/sub_agent.go` + `engine/default_agents.go` | 删 `SubAgentRunner.RunWithPrompt` / `genericSubAgent.RunWithPrompt` 及 ratd.go/collab.go 内的本地 `promptRunner` 接口声明——已验证生产调用方仅 ratd/collab，删除后无调用方；将来需要系统级提示注入时以 Handoff 字段形态回归 |
 | `engine/*_test.go` | ratd/collab 状态机相关测试删除（`ratd_parse_test.go` 等） |
 
-保留不动：`topLevelJSONObjects` 若被 debate/其他路径复用则迁移到使用方；`resolveSafePath`/`safeWriteFile` 系列是通用安全写工具，迁移到 tools 包或保留位置由实现计划核实调用方后决定。
+保留不动：`resolveSafePath`/`safeWriteFile` 系列无需迁移——已验证 `tools/builtin/pathutil.go` 有独立实现，engine 内副本是 RATD 专用重复代码，随 ratd.go 一并消失。
 
 #### 4. UI 清理
 
@@ -118,11 +118,11 @@ func BuiltinSkills() ([]*Skill, error)
 
 | 文件 | 改动 |
 |---|---|
-| `README.md` / `README.zh.md` | ① 架构图重画为真实拓扑（engine 类型中枢 + adapter 桥接；删 `policy/`；保留各包职责描述）；② `/debate` `/ratd` `/collab` 段落改写为内置技能机制说明（命令语法不变、无 `--members`/`--add` 参数——从未实现）；③ "Parallel Subagents" 段改为真实情况（单个通用 sub agent + handoff_to_agent 并行委托）；④ "Dual-model routing" 表述修正为主循环固定主模型保前缀缓存、flash 用于子代理与压缩路径（实现时验证 router 现状后落笔）；⑤ 技能优先级表头部加内置技能行（最低优先级，可被用户目录同名覆盖） |
+| `README.md` / `README.zh.md` | ① 架构图重画为真实拓扑（engine 类型中枢 + adapter 桥接；删 `policy/`；保留各包职责描述）；② `/debate` `/ratd` `/collab` 段落改写为内置技能机制说明（命令语法不变、无 `--members`/`--add` 参数——从未实现）；③ "Parallel Subagents" 段改为真实情况（单个通用 sub agent + handoff_to_agent 并行委托）；④ "Dual-model routing" 表述修正——已验证 `selectModel()` 固定返回主模型（turn.go:780-785，保 per-model 前缀缓存），flash 仅用于子代理与压缩路径；⑤ 技能优先级表头部加内置技能行（最低优先级，可被用户目录同名覆盖） |
 | `CLAUDE.md` | 分层规则改为真实依赖描述：engine 是共享类型/接口中枢（hub-and-spoke），llm/tools 核心文件零项目依赖、由 adapter 文件桥接到 engine 类型 |
 | `.claude/skills/check-archs/SKILL.md` | 检查规则同步真实拓扑（tools/llm 核心不导入 engine；adapter 桥接文件为例外并说明理由） |
 | `docs/archive/DESIGN.md` | 文件头加历史注记（已过时，仅存档） |
-| 根目录 `app/` `retrieval/` | 删除（实现时先确认确实为空且无引用） |
+| 根目录 `app/` `retrieval/` | 删除（已确认两目录为空且无引用） |
 
 ### 测试策略
 
