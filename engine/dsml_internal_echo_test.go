@@ -26,11 +26,6 @@ func TestStripInternalPromptEcho(t *testing.T) {
 			want: "修复完成。",
 		},
 		{
-			name: "strip block B echo",
-			in:   "# Block B: Runtime Context\n## Task State\n{\"turn\":3}\n\n结论。",
-			want: "结论。",
-		},
-		{
 			name: "strip legacy angle-bracket task reminder tags",
 			in:   "<TASK REMINDER>\n目标：修复\n</TASK REMINDER>\n\ndone.",
 			want: "done.",

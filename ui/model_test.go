@@ -507,7 +507,7 @@ func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
 		if strings.Contains(p, "Sub-Agents") {
 			headerIdx = i
 		}
-		if strings.Contains(p, "[s] sub") {
+		if strings.Contains(p, "[s]") {
 			agentIdx = i
 		}
 	}

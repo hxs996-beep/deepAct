@@ -1,7 +1,6 @@
 package context
 
 import (
-	"encoding/json"
 	"os"
 	"runtime"
 	"strings"
@@ -120,16 +119,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		}
 	}
 
-	// === VOLATILE TAIL (small, changes each turn — cache miss acceptable) ===
-
-	// Block B: runtime state as single compact JSON. Goal, open questions, recent
-	// decisions, recent modified files, current step and counts live here — kept as
-	// JSON (not prose) so the model treats it as reference data. The engine keeps the
-	// full state in-process (read loop-guard, cross-session memory, and the final
-	// completion summary) independent of what is rendered here.
-	blockB := BuildBlockB(formatTaskStateVolatile(state), a.userLang)
-	messages = append(messages, engine.ModelMessage{Role: "user", Content: blockB})
-
 	return messages
 }
 
@@ -178,147 +167,6 @@ func hasFirstUserMessage(history []engine.Message) bool {
 		}
 	}
 	return false
-}
-
-// Live-state rendering budget. The rendered Block B is the model's "current
-// reasoning state", so it must stay small and stable to keep the tail cache
-// miss small and avoid leaking stale all-session data. These caps sit well
-// above realistic single-task sizes (so nothing is lost mid-task) but bound a
-// long multi-task session where only the recent window is useful. The ENGINE
-// keeps the full state — read loop-guard, cross-session memory, and the final
-// completion summary — independent of how much is rendered here.
-const (
-	maxRenderedDecisions = 30
-	maxRenderedModified  = 20
-	maxRenderedMarkers   = 20
-)
-
-func formatTaskStateVolatile(state *engine.TaskState) string {
-	if state == nil {
-		return ""
-	}
-	volatile := struct {
-		Goal             string             `json:"goal,omitempty"`
-		MemoryMarkers    []string           `json:"memory_markers,omitempty"`
-		OpenQuestions    []string           `json:"open_questions,omitempty"`
-		Assumptions      []string           `json:"assumptions,omitempty"`
-		RecentDecisions  []decisionVolatile `json:"recent_decisions,omitempty"`
-		ModifiedCount    int                `json:"modified_count"`
-		RecentModified   []string           `json:"recent_modified,omitempty"`
-		CurrentStep      string             `json:"current_step,omitempty"`
-		TurnNumber       int                `json:"turn_number"`
-		ConsecutiveFails int                `json:"consecutive_failures"`
-		EditScopeFiles   int                `json:"edit_scope_files"`
-		Collab           *collabVolatile    `json:"collab,omitempty"`
-	}{
-		Goal:             state.Goal,
-		MemoryMarkers:    lastN(state.MemoryMarkers, maxRenderedMarkers),
-		OpenQuestions:    state.OpenQuestions,
-		Assumptions:      state.Assumptions,
-		RecentDecisions:  lastNDecisions(state.Decisions, maxRenderedDecisions),
-		ModifiedCount:    len(state.ModifiedFiles),
-		RecentModified:   lastN(state.ModifiedFiles, maxRenderedModified),
-		CurrentStep:      currentPlanStep(state.Plan),
-		TurnNumber:       state.TurnNumber,
-		ConsecutiveFails: state.ConsecutiveFailures,
-		EditScopeFiles:   state.EditScopeFiles,
-		Collab:           flattenCollab(state.Collab),
-	}
-	data, err := json.Marshal(volatile)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-// lastN returns the last n elements of in, or the whole slice when shorter.
-// A nil slice stays nil so the field is omitted from the rendered JSON.
-func lastN(in []string, n int) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	if len(in) <= n {
-		return in
-	}
-	return in[len(in)-n:]
-}
-
-// lastNDecisions projects the most recent n decisions into the compact form.
-// Only the recent window matters for consistent reasoning; the full history is
-// preserved by the session log and the cross-session memory store.
-func lastNDecisions(in []engine.Decision, n int) []decisionVolatile {
-	if len(in) == 0 {
-		return nil
-	}
-	start := 0
-	if len(in) > n {
-		start = len(in) - n
-	}
-	out := make([]decisionVolatile, 0, len(in)-start)
-	for _, d := range in[start:] {
-		out = append(out, decisionVolatile{Text: d.Text})
-	}
-	return out
-}
-
-// decisionVolatile is the compact form of a Decision rendered into Block B.
-type decisionVolatile struct {
-	Text string `json:"text"`
-}
-
-// currentPlanStep returns the text of the in-progress plan step, or "" if none.
-func currentPlanStep(plan []engine.PlanStep) string {
-	for _, s := range plan {
-		if s.Status == "in_progress" {
-			return s.Text
-		}
-	}
-	return ""
-}
-
-// collabVolatile is a compact representation of the /collab parallel research
-// state injected into Block B so the main agent can tell that a collab
-// research run is active across all execution turns.
-type collabVolatile struct {
-	Phase string `json:"phase"`
-	Goal  string `json:"goal,omitempty"`
-	Tasks int    `json:"tasks,omitempty"`
-}
-
-// flattenCollab converts engine.CollabState to the compact volatile form.
-func flattenCollab(c *engine.CollabState) *collabVolatile {
-	if c == nil {
-		return nil
-	}
-	return &collabVolatile{
-		Phase: collabPhaseName(c.Phase),
-		Goal:  truncString(c.Goal, 120),
-		Tasks: len(c.Tasks),
-	}
-}
-
-// collabPhaseName maps an engine.CollabPhase to a readable string for the
-// volatile context. CollabPhase has no String() method.
-func collabPhaseName(p engine.CollabPhase) string {
-	switch p {
-	case engine.CollabDecompose:
-		return "decompose"
-	case engine.CollabParallel:
-		return "parallel"
-	case engine.CollabSynthesize:
-		return "synthesize"
-	case engine.CollabDone:
-		return "done"
-	default:
-		return "idle"
-	}
-}
-
-func truncString(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
 }
 
 func mapMessage(msg engine.Message) engine.ModelMessage {

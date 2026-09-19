@@ -93,8 +93,6 @@ func hasDSMLToolCalls(content string) bool {
 // These markers are structural and unambiguous — prefix matching is safe because
 // they don't appear in natural conversation (e.g. "# Block B:", "## Environment").
 var internalPromptBlockPrefixes = []string{
-	"# Block B: Runtime Context",
-	"# Block B：运行时上下文",
 	"# Block S: Session Context",
 	"# Block S：会话上下文",
 	"## Task State",

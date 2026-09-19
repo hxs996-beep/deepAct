@@ -13,38 +13,6 @@ type EnvironmentInfo struct {
 	DirTree string // compact codebase directory snapshot (built once at startup)
 }
 
-// BuildBlockB renders the volatile tail (Block B) — a small (~200 tokens) JSON block
-// of runtime TaskState fields that change every turn. Placed after full history so that
-// the history prefix remains cacheable; only this tail and new messages cause cache miss.
-// See docs/cache-refactor-plan.md for the full architecture rationale.
-// Headers are rendered in the user's language to reinforce consistent output language
-// across turns — English structural text in a Chinese session pulls the model toward
-// mixed-language responses.
-func BuildBlockB(taskState string, userLang string) string {
-	isZH := userLang == "中文"
-	var builder strings.Builder
-	if isZH {
-		builder.WriteString("# Block B：当前状态（精简）\n\n")
-		builder.WriteString("> 本快照是当前权威运行状态，覆盖此前所有状态快照；若与历史 / 归档中的旧状态冲突，以本快照为准。\n\n")
-		builder.WriteString("## 实时状态\n")
-	} else {
-		builder.WriteString("# Block B: Current State (condensed)\n\n")
-		builder.WriteString("> This snapshot is the authoritative current state and supersedes all earlier runtime-state snapshots. Where it conflicts with older history or archive, this snapshot wins.\n\n")
-		builder.WriteString("## Live State\n")
-	}
-	if strings.TrimSpace(taskState) == "" {
-		if isZH {
-			builder.WriteString("（空）\n")
-		} else {
-			builder.WriteString("(empty)\n")
-		}
-	} else {
-		builder.WriteString(taskState)
-		builder.WriteString("\n")
-	}
-	return builder.String()
-}
-
 // BuildStableSessionContext returns a user message containing session-stable content
 // (environment). This message is at the top of the messages array (after
 // system prompt) and stays identical across turns, enabling prefix cache hits.

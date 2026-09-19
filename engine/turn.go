@@ -124,7 +124,79 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.config.OnProgress(ProgressEvent{Type: "content_delta", Detail: seg[:n]})
 		seg = seg[n:]
 	}
+	// steerStreamCancelled is set when the user's steer message interrupts
+	// the stream mid-flight. The in-flight stream is cancelled so the
+	// blocked Stream() call returns; the partially generated content is
+	// dropped (never executed as tools, never shown as a conclusion).
+	steerStreamCancelled := false
+	cancelStream := func() {
+		if !steerStreamCancelled {
+			steerStreamCancelled = true
+		}
+	}
+	// handleSteerInterrupt is the common exit for a soft interruption: it
+	// persists any fully-received assistant content (with tool calls but
+	// WITHOUT executing them) and returns a non-Done TurnResult so the Run
+	// loop drains the steer queue and starts a fresh turn.
+	handleSteerInterrupt := func() TurnResult {
+		flushUpTo(len(seg))
+		if contentBuilder.Len() > 0 || reasoningBuilder.Len() > 0 || len(toolCalls) > 0 {
+			assistant := Message{
+				Role:             "assistant",
+				Content:          contentBuilder.String(),
+				ReasoningContent: reasoningBuilder.String(),
+				Timestamp:        time.Now(),
+			}
+			if len(toolCalls) > 0 {
+				assistant.ToolCalls = make([]MessageToolCall, 0, len(toolCalls))
+				for _, call := range toolCalls {
+					if call.Function.Name == "" {
+						continue
+					}
+					assistant.ToolCalls = append(assistant.ToolCalls, MessageToolCall{
+						ID:        call.ID,
+						Name:      call.Function.Name,
+						Arguments: call.Function.Arguments,
+					})
+				}
+			}
+			e.history = append(e.history, assistant)
+		}
+		turnLog.Printf("turn %d: steer interrupted stream (content=%d reasoning=%d tool_calls=%d)",
+			e.state.TurnNumber, contentBuilder.Len(), reasoningBuilder.Len(), len(toolCalls))
+		// Done=false: the Run loop will drain the steer queue and
+		// continue with a fresh turn that sees the new direction.
+		return TurnResult{Done: false, FinishReason: "steer_interrupt"}
+	}
+	// checkSteerMidStream returns true when a steer message arrived while
+	// the model was streaming. Soft interruption: stop consuming the
+	// stream, let the Run loop inject the message and start a fresh turn
+	// that sees the user's new direction immediately.
+	checkSteerMidStream := func() bool {
+		if e.steerQueueLen() == 0 {
+			return false
+		}
+		// Cancelling the stream makes the blocked Stream() read return.
+		// The loop below will see steerStreamCancelled and exit.
+		cancelStream()
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{Type: "steer_interrupt", Detail: "steer"})
+		}
+		return true
+	}
 	for chunk := range stream {
+		// Soft interruption: a user steer message arrived mid-stream.
+		// Stop consuming, keep any fully-received tool_calls but do NOT
+		// execute them, and return so the Run loop drains the queue.
+		if steerStreamCancelled {
+			return handleSteerInterrupt(), nil
+		}
+		// Non-blocking steer check between chunks: a user message queued
+		// mid-stream triggers the soft interruption above at the top of the
+		// next iteration. This is cheap (mutex + len) and runs per chunk.
+		if checkSteerMidStream() {
+			continue
+		}
 		if chunk.Err != nil {
 			turnLog.Printf("stream chunk err: %v", chunk.Err)
 			e.state.ConsecutiveFailures++
@@ -169,6 +241,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if chunk.Usage != nil {
 			lastUsage = chunk.Usage
 		}
+	}
+	// Post-stream check: a steer message may arrive in the window between
+	// the last chunk and stream close. Interrupting here still avoids
+	// executing tools the user has redirected away from.
+	if steerStreamCancelled {
+		return handleSteerInterrupt(), nil
 	}
 	flushUpTo(len(seg)) // 流结束：发掉残余段
 

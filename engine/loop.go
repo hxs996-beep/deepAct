@@ -1464,6 +1464,15 @@ func (e *Engine) Steer(msg string) {
 	}
 }
 
+// steerQueueLen returns the number of messages currently queued for
+// injection. Used by the soft-interrupt check to detect a steer message
+// arriving mid-stream (see turn.go checkSteerMidStream).
+func (e *Engine) steerQueueLen() int {
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	return len(e.steerQueue)
+}
+
 // drainSteerQueue appends all queued steer messages to history as user
 // messages. Returns true if any messages were injected.
 func (e *Engine) drainSteerQueue() bool {

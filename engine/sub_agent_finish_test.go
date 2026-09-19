@@ -290,6 +290,41 @@ func TestSubAgentStructured_InvalidSubmitRetries(t *testing.T) {
 	}
 }
 
+// TestSubAgentStructured_NoNudgeDoesNotShortCircuit: a structured run must
+// never complete on a plain-text reply even when NoNudge is set. NoNudge is
+// a lenient mode ("any text is the answer") that must not bypass the
+// structured contract ("only submit_result counts"). Harness roles
+// (collab/ratd) pass NoNudge:true while the generic sub-agent forces
+// StructuredResult:true — the plain text must be nudged to submit_result
+// (3-strike → no_result), not returned as the final summary.
+func TestSubAgentStructured_NoNudgeDoesNotShortCircuit(t *testing.T) {
+	model := &stubSeqModel{
+		responses: []ModelResponse{
+			{Message: ModelMessage{Role: "assistant", Content: "好的，我来拆解这个目标。"}, FinishReason: "stop"},
+		},
+	}
+
+	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
+	result, err := runner.Run(context.Background(), Handoff{
+		Agent: AgentSub, Goal: "拆解", MaxIterations: 8, StructuredResult: true, NoNudge: true,
+	})
+	if err != nil {
+		t.Fatalf("runLoop error: %v", err)
+	}
+	if model.calls != 3 {
+		t.Errorf("expected 3 calls (3-strike nudge, no short-circuit), got %d", model.calls)
+	}
+	if result.FinishReason != HandoffReasonNoResult {
+		t.Errorf("expected FinishReason=%q, got %q", HandoffReasonNoResult, result.FinishReason)
+	}
+	if !strings.Contains(result.Summary, "拆解") {
+		t.Errorf("expected partial answer preserved, got %q", result.Summary)
+	}
+	if !toolsContain(model.lastReq.Tools, SubmitResultToolName) {
+		t.Errorf("expected submit_result in request tools, got %+v", model.lastReq.Tools)
+	}
+}
+
 // TestFormatHandoffResult_ReasonAwareHeading: the tool digest a sub-agent
 // handoff injects into the parent's history must name how the run ended
 // instead of always claiming "Agent completed".

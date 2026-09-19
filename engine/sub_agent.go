@@ -404,13 +404,14 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				})
 				continue
 			}
-			if input.NoNudge {
-				result := r.buildResult(msg.Content, input.Goal)
-				result.Usage = &totalUsage
-				return result, nil
-			}
 			// Structured run: text alone never completes. Nudge toward
-			// submit_result — no classifier probe, no ambiguity.
+			// submit_result — no classifier probe, no ambiguity. This MUST
+			// take precedence over NoNudge: harness roles (collab/ratd) pass
+			// NoNudge:true while the generic sub-agent forces
+			// StructuredResult:true. A lenient "any text is the answer" mode
+			// must not bypass the deterministic structured contract ("only
+			// submit_result counts") — otherwise a plain-text narration
+			// becomes the final summary and the harness parse fails.
 			if structured {
 				consecutiveIntermediate++
 				if consecutiveIntermediate >= 3 {
@@ -425,6 +426,11 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 					Content: content,
 				})
 				continue
+			}
+			if input.NoNudge {
+				result := r.buildResult(msg.Content, input.Goal)
+				result.Usage = &totalUsage
+				return result, nil
 			}
 			// Deterministic completion (C5): a text-only reply NEVER completes
 			// through an LLM judgment call. Text-only output is narration →
@@ -824,43 +830,37 @@ func compressSubHistory(history []ModelMessage) []ModelMessage {
 	stable := history[:2]
 	rest := history[2:]
 
-	// Group rest into turns: [assistant, tool...] pairs.
-	// Walk backward to find the last 3 complete turns (keep fresh).
+	// Group rest into turns: [assistant, tool...] pairs. Walk backward from the
+	// end so turns[0] is the MOST RECENT turn (kept fresh) and later indices are
+	// progressively older.
 	type turn struct {
 		start int
 		end   int
 	}
 	var turns []turn
-	i := len(rest) - 1
-	for i >= 0 {
-		if rest[i].Role == "assistant" {
-			// assistant marks the start of a turn; all tool messages after it
-			// belong to this turn. Walk forward from assistant to find tool messages.
-			end := i + 1
-			for end < len(rest) && rest[end].Role == "tool" {
-				end++
-			}
-			turns = append(turns, turn{start: i, end: end})
-			i--
-		} else {
-			i--
+	for i := len(rest) - 1; i >= 0; i-- {
+		if rest[i].Role != "assistant" {
+			continue
 		}
+		// assistant marks the start of a turn; all tool messages after it
+		// belong to this turn.
+		end := i + 1
+		for end < len(rest) && rest[end].Role == "tool" {
+			end++
+		}
+		turns = append(turns, turn{start: i, end: end})
 	}
 
-	// Keep fresh: last 20 turns
+	// Keep the most recent 20 turns verbatim; older turns have their tool
+	// results truncated (assistant messages and tool_call_ids stay intact).
 	keepTurns := 20
 	if keepTurns > len(turns) {
 		keepTurns = len(turns)
 	}
-	// Fresh turns are the last ones in the list (most recent)
 	fresh := turns[:keepTurns]
 
-	// Build result: stable + compressed old turns + fresh turns
-	result := make([]ModelMessage, 0, len(stable)+len(rest))
-	result = append(result, stable...)
-
-	// Compress turns NOT in fresh set
-	// Map fresh turn indices to actual ranges
+	// Build result: stable + compressed old turns + fresh turns.
+	// Map fresh turn indices to actual ranges.
 	freshRange := make(map[int]bool)
 	for _, ft := range fresh {
 		for j := ft.start; j < ft.end; j++ {
@@ -868,17 +868,36 @@ func compressSubHistory(history []ModelMessage) []ModelMessage {
 		}
 	}
 
+	result := make([]ModelMessage, 0, len(stable)+len(rest))
+	result = append(result, stable...)
 	for idx := 0; idx < len(rest); idx++ {
 		if freshRange[idx] {
 			result = append(result, rest[idx])
 		} else if rest[idx].Role == "tool" {
-			result = append(result, rest[idx])
+			// Stale tool result: keep the message (role + tool_call_id) so the
+			// DeepSeek assistant(tool_calls) → tool response contract holds, but
+			// cut the digest body to a compact preview.
+			result = append(result, truncateToolResult(rest[idx]))
 		} else {
 			result = append(result, rest[idx])
 		}
 	}
-
 	return result
+}
+
+// subAgentToolResultCap bounds each stale turn's tool-result body kept verbatim
+// after compressSubHistory compresses it (~512 chars ≈ 128 tokens, down from up
+// to 25k tokens for a full read). The message itself is preserved — only the
+// digest is truncated.
+const subAgentToolResultCap = 512
+
+// truncateToolResult shortens a stale tool-result message to a compact preview.
+func truncateToolResult(msg ModelMessage) ModelMessage {
+	if len(msg.Content) <= subAgentToolResultCap {
+		return msg
+	}
+	msg.Content = msg.Content[:subAgentToolResultCap] + "\n…[truncated: full result was in earlier context]"
+	return msg
 }
 
 // budgetTailNudge returns a user message telling a research sub-agent to stop

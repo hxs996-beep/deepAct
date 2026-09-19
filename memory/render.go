@@ -9,8 +9,7 @@ import (
 )
 
 // RenderMarkdown renders a human-readable summary of the snapshot. It is the
-// human-facing view of the machine-readable memory.json (which the model
-// consumes via Block B).
+// human-facing view of the machine-readable memory.json.
 func RenderMarkdown(snap *engine.MemorySnapshot) string {
 	var b strings.Builder
 	b.WriteString("# Memory\n")

@@ -75,7 +75,6 @@ type MemberStatus struct {
 	Name    string // display name e.g. "架构师"
 	Avatar  string // display tag e.g. "[A]"
 	Status  string // "running", "done", "error"
-	Score   int    // 0-100 (valid when done)
 	Verdict string // "approve", "conditional", "reject" (valid when done)
 }
 
@@ -522,7 +521,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.memberStatuses {
 				if m.memberStatuses[i].ID == msg.Name {
 					m.memberStatuses[i].Status = "running"
-					m.memberStatuses[i].Score = 0
 					m.memberStatuses[i].Verdict = ""
 					found = true
 					break
@@ -540,9 +538,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.memberStatuses {
 				if m.memberStatuses[i].ID == msg.Name {
 					m.memberStatuses[i].Status = "done"
-					if score := extractScore(msg.Detail); score >= 0 {
-						m.memberStatuses[i].Score = score
-					}
 					if strings.Contains(msg.Detail, "✓") {
 						m.memberStatuses[i].Verdict = "approve"
 					} else if strings.Contains(msg.Detail, "⚠") {
@@ -2338,26 +2333,6 @@ func memberAvatar(id string) string {
 	}
 }
 
-// extractScore parses a score value from a progress detail string.
-// Expected format: "(评分: 85)" or "(score: 85)"
-func extractScore(detail string) int {
-	if idx := strings.Index(detail, "评分: "); idx >= 0 {
-		rest := detail[idx+len("评分: "):]
-		var score int
-		if _, err := fmt.Sscanf(rest, "%d", &score); err == nil {
-			return score
-		}
-	}
-	if idx := strings.Index(detail, "score: "); idx >= 0 {
-		rest := detail[idx+len("score: "):]
-		var score int
-		if _, err := fmt.Sscanf(rest, "%d", &score); err == nil {
-			return score
-		}
-	}
-	return -1
-}
-
 // parseDiffHunks parses a unified diff into hunk-level children.
 // Each child has Detail = hunk header, DetailFull = full hunk content.
 func parseDiffHunks(fullDetail string) []ToolNode {
@@ -2787,7 +2762,6 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 	content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
 	content = append(content, "")
 	for _, a := range agents {
-		icon := agentIcon(a.Agent)
 		goal := a.Goal
 		if len(goal) > 60 {
 			goal = goal[:60] + "..."
@@ -2795,17 +2769,17 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 		switch a.Status {
 		case "running":
 			frame := spinnerFrames[0]
-			line := fmt.Sprintf("  %s %s %s  %s", frame, icon, a.Agent, SpinnerStyle.Render(goal))
+			line := fmt.Sprintf("  %s %s  %s", frame, agentIcon(a.Agent), SpinnerStyle.Render(goal))
 			content = append(content, line)
 		case "done":
 			summary := a.Summary
 			if len(summary) > 60 {
 				summary = summary[:60] + "..."
 			}
-			line := fmt.Sprintf("  ✓ %s %s  %s", icon, a.Agent, SpinnerDoneStyle.Render(summary))
+			line := fmt.Sprintf("  ✓ %s  %s", agentIcon(a.Agent), SpinnerDoneStyle.Render(summary))
 			content = append(content, line)
 		case "error":
-			line := fmt.Sprintf("  ✗ %s %s  [err]", icon, a.Agent)
+			line := fmt.Sprintf("  ✗ %s  [err]", agentIcon(a.Agent))
 			content = append(content, ErrorStyle.Render(line))
 		}
 	}
@@ -2833,7 +2807,8 @@ func splitLipglossBlock(rendered string, width int) []string {
 	return result
 }
 
-// agentIcon returns a default tag for known agent types.
+// agentIcon returns a display tag for a known agent type. Unknown types keep
+// their name so the tag still identifies the role.
 func agentIcon(agent string) string {
 	switch agent {
 	case "sub":
@@ -2841,7 +2816,7 @@ func agentIcon(agent string) string {
 	case "team-lead":
 		return "[t]"
 	default:
-		return "[a]"
+		return "[a] " + agent
 	}
 }
 
@@ -2869,7 +2844,7 @@ func renderMemberProgress(members []MemberStatus, width int) []string {
 			case "reject":
 				verdictIcon = "[fail]"
 			}
-			line := fmt.Sprintf("  ✓ %s %s  %s  score: %d", m.Avatar, m.Name, verdictIcon, m.Score)
+			line := fmt.Sprintf("  ✓ %s %s  %s", m.Avatar, m.Name, verdictIcon)
 			content = append(content, SpinnerDoneStyle.Render(line))
 		case "error":
 			line := fmt.Sprintf("  ✗ %s %s  [err]", m.Avatar, m.Name)

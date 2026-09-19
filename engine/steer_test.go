@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -117,6 +119,135 @@ func TestClearSessionState_ClearsSteerQueue(t *testing.T) {
 		t.Fatal("steer queue should be empty after clearSessionState")
 	}
 }
+
+// steerBlockingModel streams one chunk then waits for release before
+// closing the channel. It simulates a model stream that is still in
+// flight (blocked) when the user steers.
+type steerBlockingModel struct {
+	mu      sync.Mutex
+	callIdx int
+	// release is closed by the test to let the first stream finish
+	release chan struct{}
+}
+
+func (m *steerBlockingModel) Stream(_ context.Context, _ ModelRequest) (<-chan ModelChunk, error) {
+	m.mu.Lock()
+	idx := m.callIdx
+	m.callIdx++
+	m.mu.Unlock()
+	ch := make(chan ModelChunk)
+	go func() {
+		if idx == 0 {
+			// First call: emit one chunk, then block until release.
+			ch <- ModelChunk{Delta: "正在读A"}
+			<-m.release
+		} else {
+			// Second call: complete immediately with the new direction.
+			ch <- ModelChunk{Delta: "已转向去查看B文件的具体内容", FinishReason: "stop", Usage: &ModelUsage{}}
+		}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (m *steerBlockingModel) Complete(_ context.Context, _ ModelRequest) (*ModelResponse, error) {
+	return &ModelResponse{FinishReason: "stop"}, nil
+}
+
+// TestRun_SteerInterruptsMidStream verifies the soft interruption: a steer
+// message arriving while the model streams causes the current turn to be
+// abandoned (no tools executed) and the Run loop to continue with the
+// injected message on the next turn.
+func TestRun_SteerInterruptsMidStream(t *testing.T) {
+	model := &steerBlockingModel{release: make(chan struct{})}
+	tools := &recordingToolExecutor{}
+	e := &Engine{
+		model:     model,
+		tools:     tools,
+		context:   steerContextBuilder{},
+		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
+		history:   []Message{{Role: "user", Content: "读A", Timestamp: time.Now()}},
+		config:    EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopTracker(0, 6, false)},
+		readLoop:  NewLoopTracker(3, 4, false),
+		errorLoop: NewLoopTracker(0, 3, true),
+	}
+
+	// Run in a goroutine; it blocks on the first stream until we release.
+	respCh := make(chan *EngineResponse, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := e.Run(context.Background(), "读A")
+		respCh <- resp
+		errCh <- err
+	}()
+
+	// Wait until the first stream chunk has been consumed (turn started).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		model.mu.Lock()
+		callCount := model.callIdx
+		model.mu.Unlock()
+		if callCount >= 1 && len(tools.executed) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first stream chunk")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Steer while the stream is still in flight.
+	e.Steer("去看B，别读A了")
+
+	// Release the first stream; the soft interrupt should abandon it.
+	close(model.release)
+
+	resp := <-respCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("Run returned nil response")
+	}
+
+	// The steer message must be injected into history.
+	found := false
+	for _, msg := range e.history {
+		if msg.Content == "去看B，别读A了" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("steer message was not injected into history")
+	}
+
+	// The interrupted first turn's tools must NOT have executed: the user
+	// redirected before the plan ran.
+	if len(tools.executed) != 0 {
+		t.Errorf("tools executed during interrupted turn: %v", tools.executed)
+	}
+
+	// The Run must have continued and finished on turn 2 (which saw the
+	// steer message and produced the new direction).
+	if !strings.Contains(resp.Summary, "已转向去查看B文件的具体内容") {
+		t.Errorf("final summary = %q, want continuation with '已转向去查看B文件的具体内容'", resp.Summary)
+	}
+
+	// The final assistant message should be the second turn's reply, not a
+	// half-streamed first-turn fragment.
+	var lastAssistant string
+	for _, msg := range e.history {
+		if msg.Role == "assistant" {
+			lastAssistant = msg.Content
+		}
+	}
+	if !strings.Contains(lastAssistant, "已转向去查看B文件的具体内容") {
+		t.Errorf("last assistant content = %q, want '已转向去查看B文件的具体内容'", lastAssistant)
+	}
+}
+
 
 // multiTurnModel returns pre-configured chunk sets for each Stream call.
 type multiTurnModel struct {
