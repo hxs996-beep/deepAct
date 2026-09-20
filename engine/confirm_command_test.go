@@ -162,3 +162,60 @@ func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
 		t.Error("expected edit to execute without analysis-gate blocking (LastOp empty means no operation ran)")
 	}
 }
+
+// 危险命令确认走确定性 /confirm N 通道：/confirm 1 确认并注入 re-issue hint。
+func TestHandleConfirmCommand_Dangerous_Confirm(t *testing.T) {
+	guard := NewScopeGuard(false)
+	e := &Engine{
+		state:               &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
+		history:             []Message{{Role: "user", Content: "/confirm 1"}},
+		isChinese:           true,
+		guards:              &GuardSystem{scope: guard},
+	}
+
+	if !e.handleConfirmCommand("/confirm 1") {
+		t.Fatal("handleConfirmCommand should handle /confirm 1")
+	}
+	if !guard.dangerousConfirmed["rm -rf /tmp/folder"] {
+		t.Error("dangerous command should be marked confirmed in scope guard")
+	}
+	if e.state.PendingDangerousCmd != "" {
+		t.Errorf("PendingDangerousCmd should be cleared, got %q", e.state.PendingDangerousCmd)
+	}
+	joined := ""
+	for _, m := range e.history {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "重新执行之前被阻断的命令") {
+		t.Errorf("confirm path should inject re-issue hint, got %q", joined)
+	}
+}
+
+// 危险命令取消走 /confirm 2：清 pending，不标记 confirmed，命令下次仍被拦截。
+func TestHandleConfirmCommand_Dangerous_Cancel(t *testing.T) {
+	guard := NewScopeGuard(false)
+	e := &Engine{
+		state:               &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
+		history:             []Message{{Role: "user", Content: "/confirm 2"}},
+		isChinese:           true,
+		guards:              &GuardSystem{scope: guard},
+	}
+
+	if !e.handleConfirmCommand("/confirm 2") {
+		t.Fatal("handleConfirmCommand should handle /confirm 2")
+	}
+	if guard.dangerousConfirmed["rm -rf /tmp/folder"] {
+		t.Error("cancelled command must NOT be marked confirmed")
+	}
+	if e.state.PendingDangerousCmd != "" {
+		t.Errorf("PendingDangerousCmd should be cleared, got %q", e.state.PendingDangerousCmd)
+	}
+	// 取消路径不注入 re-issue hint。
+	joined := ""
+	for _, m := range e.history {
+		joined += m.Content + "\n"
+	}
+	if strings.Contains(joined, "重新执行之前被阻断的命令") {
+		t.Errorf("cancel path should NOT inject re-issue hint, got %q", joined)
+	}
+}

@@ -79,11 +79,6 @@ type Engine struct {
 	// prefix cache across turns — history only grows with actual conversation.
 	pendingPinnedMessages []string
 
-	// pendingEditPlan holds the agent's proposed edits for user confirmation.
-	// When non-nil, the agent has proposed file modifications and is awaiting
-	// user approval before execution.
-	pendingEditPlan *PendingEditPlan
-
 	// pendingAskUser holds the question the agent asked the user via ask_user.
 	// Non-nil means the engine is awaiting the user's response — with Options
 	// the popup shows the raw options for the user to choose, without Options
@@ -132,24 +127,6 @@ type Engine struct {
 	// only on /resume (SetHistory), never at startup, so a fresh session
 	// starts clean of cross-task markers/decisions.
 	memoryLoaded bool
-}
-
-// PendingEditPlan captures the agent's proposed changes before execution.
-// The agent's reasoning and planned edits are presented to the user for approval.
-type PendingEditPlan struct {
-	Reasoning string              // agent's explanation of what it understands
-	Edits     []PendingEditAction // individual file changes proposed
-	Calls     []ToolCallRequest   // stored tool calls to execute on confirmation
-	State     *TaskState          // snapshot of task state at proposal time
-}
-
-// PendingEditAction describes a single proposed file change.
-type PendingEditAction struct {
-	Tool    string `json:"tool"`          // "edit" or "write"
-	Path    string `json:"path"`          // target file
-	Summary string `json:"summary"`       // human-readable description of the change
-	OldText string `json:"old,omitempty"` // for edit: what will be replaced
-	NewText string `json:"new,omitempty"` // what will be written
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
@@ -378,203 +355,13 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
 	// 回输入框，或无 options 的 ask_user 直接输入），本组待决问题作废，
-	// 避免残留到下一轮再次弹出。
+	// 避免残留到下一轮再次弹出。危险命令同理：用户没有用 /confirm 1/2
+	// 确认就输入了别的消息，pending 状态作废，防止残留导致后续误确认。
 	if e.pendingAskUser != nil {
 		e.pendingAskUser = nil
 	}
-
-	if e.pendingEditPlan != nil {
-		if !isDangerousConfirmation(userMsg) {
-			// User is providing feedback/instruction on the proposed plan, not confirming it.
-			// Contextualize the user message so the LLM understands this is plan feedback
-			// and can revise its approach, rather than regenerating the same edits.
-			if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
-				if e.isChinese {
-					e.history[len(e.history)-1].Content = fmt.Sprintf(
-						"用户对之前提出的修改方案给出了反馈：%s\n\n请根据用户反馈重新思考并决定下一步做什么。如果用户要求修改方案，请提出更新后的方案。",
-						userMsg,
-					)
-				} else {
-					e.history[len(e.history)-1].Content = fmt.Sprintf(
-						"The user provided feedback on the previously proposed edit plan: %s\n\nReassess and decide what to do next. If the user requested changes, propose a revised plan.",
-						userMsg,
-					)
-				}
-			}
-			e.pendingEditPlan = nil
-			e.state.PlanConfirmed = false
-		}
-	}
-
-	// Phase 1: Edit plan confirmed — execute directly with progressive diff display
-	if e.pendingEditPlan != nil && isDangerousConfirmation(userMsg) {
-		zh := e.isChinese
-		plan := e.pendingEditPlan
-		e.pendingEditPlan = nil
-
-		if plan.State != nil {
-			*e.state = *plan.State
-		}
-		e.state.PlanConfirmed = true
-		e.state.ConfirmedScope = true
-
-		msg := "✓ 方案已确认，开始执行..."
-		if !zh {
-			msg = "✓ Plan confirmed, executing..."
-		}
-		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
-
-		// Re-emit the assistant message with tool_calls
-		assistantMsg := Message{
-			Role:      "assistant",
-			Content:   plan.Reasoning,
-			Timestamp: time.Now(),
-		}
-		assistantMsg.ToolCalls = make([]MessageToolCall, 0, len(plan.Calls))
-		for _, c := range plan.Calls {
-			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, MessageToolCall{
-				ID:        c.ID,
-				Name:      c.Name,
-				Arguments: string(c.Input),
-			})
-		}
-		e.history = append(e.history, assistantMsg)
-
-		// Execute the stored calls.
-		// read/grep/glob calls are intentionally skipped here (their results were
-		// already consumed when the plan was first proposed). But their IDs were
-		// still emitted as tool_calls in the assistant message above, so DeepSeek
-		// requires a tool message for each of them. We append placeholder tool
-		// messages to satisfy the "assistant(tool_calls) → tool" contract —
-		// otherwise the API returns 400 "insufficient tool messages following
-		// tool_calls message".
-		var handoffCalls, regularCalls []ToolCallRequest
-		for _, c := range plan.Calls {
-			switch c.Name {
-			case HandoffToolName:
-				handoffCalls = append(handoffCalls, c)
-			case "read", "grep", "glob":
-				e.history = append(e.history, Message{
-					Role:       "tool",
-					ToolCallID: c.ID,
-					Content:    "Skipped: read-only call already consumed before plan confirmation.",
-					Timestamp:  time.Now(),
-				})
-			default:
-				regularCalls = append(regularCalls, c)
-			}
-		}
-
-		// Execute handoff calls through the registered SubAgentTool.
-		if len(handoffCalls) > 0 {
-			// agent_start events for UI (mirrors turn.go handoff execution).
-			for _, call := range handoffCalls {
-				var params HandoffToAgentParams
-				if err := json.Unmarshal(call.Input, &params); err == nil && e.config.OnProgress != nil {
-					name := params.Agent
-					if name == "" {
-						name = "sub"
-					}
-					e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
-				}
-			}
-			execCtx := ToolExecContext{
-				WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
-				Ctx: ctx, Depth: 0,
-			}
-			results := e.tools.Execute(execCtx, handoffCalls)
-			// agent_done events for UI. Execute preserves order, so results[i]
-			// corresponds to handoffCalls[i]; parse the real agent name from
-			// the call input.
-			for i, r := range results {
-				if e.config.OnProgress != nil {
-					name := "sub"
-					if i < len(handoffCalls) {
-						var params HandoffToAgentParams
-						if err := json.Unmarshal(handoffCalls[i].Input, &params); err == nil && params.Agent != "" {
-							name = params.Agent
-						}
-					}
-					e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: briefDigest(r.Digest)})
-				}
-			}
-			for i := range handoffCalls {
-				result := results[i]
-				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-			}
-		}
-
-		// Execute regular calls with progressive UI (read-only batched, destructive sequential)
-		if len(regularCalls) > 0 {
-			var readOnlyCalls, destructiveCalls []ToolCallRequest
-			for _, call := range regularCalls {
-				if call.Name == "edit" || call.Name == "write" {
-					destructiveCalls = append(destructiveCalls, call)
-				} else {
-					readOnlyCalls = append(readOnlyCalls, call)
-				}
-			}
-
-			// Batch read-only tools
-			if len(readOnlyCalls) > 0 {
-				for _, call := range readOnlyCalls {
-					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
-					}
-				}
-				roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
-				for _, result := range roResults {
-					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
-					}
-					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-				}
-			}
-
-			// Sequential destructive tools with diff display
-			for _, call := range destructiveCalls {
-				if e.config.OnProgress != nil {
-					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
-				}
-				results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
-				if len(results) > 0 {
-					result := results[0]
-					if e.config.OnProgress != nil {
-						e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
-					}
-					e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
-				}
-			}
-
-			allCalls := append(readOnlyCalls, destructiveCalls...)
-			allResults := make([]ToolResult, 0)
-			for i := len(e.history) - len(regularCalls); i < len(e.history); i++ {
-				if i >= 0 && e.history[i].Role == "tool" {
-					allResults = append(allResults, ToolResult{ToolCallID: e.history[i].ToolCallID, Digest: e.history[i].Content})
-				}
-			}
-			e.updateTaskStateFromTools(allCalls, allResults)
-		}
-		// Fall through to the agent loop — the agent can see tool results
-		// and decide if further changes are needed.
-	}
-
-	// Dangerous command confirmation — simple exact match, safety feature only
-	if e.state.PendingDangerousCmd != "" && isDangerousConfirmation(userMsg) {
-		confirmedCmd := e.state.PendingDangerousCmd
-		e.guards.scope.ConfirmDangerous(e.state.PendingDangerousCmd)
+	if e.state.PendingDangerousCmd != "" && !isConfirmCommand(userMsg) {
 		e.state.PendingDangerousCmd = ""
-		msg := "✓ Dangerous command confirmed, proceeding..."
-		if zh {
-			msg = "✓ 危险命令已确认，继续执行..."
-		}
-		e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
-		// Tell the agent to re-issue the blocked command.
-		reissueHint := fmt.Sprintf("用户已确认执行危险命令。请重新执行之前被阻断的命令: `%s`", confirmedCmd)
-		if !zh {
-			reissueHint = fmt.Sprintf("The user confirmed the dangerous command. Please re-issue the previously blocked command: `%s`", confirmedCmd)
-		}
-		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 	}
 
 	// Scope is implicitly confirmed when user sends any message
@@ -629,13 +416,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		if turnResult.Blocked {
 			e.runErrorCount++
 			summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
-			// The edit-plan guard's Questions already contain the full plan
-			// summary (reasoning + confirmation prompt). Setting Summary to
-			// the same reasoning causes the UI to concatenate Summary +
-			// Questions, showing the reasoning twice.
-			if e.pendingEditPlan != nil {
-				summary = ""
-			}
 			// The awaiting_user block's Questions already contain the model's
 			// question text. Suppress the run summary (which would re-echo
 			// the question or a stale narration) so the user sees exactly one
@@ -643,9 +423,18 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			if turnResult.BlockedBy == "awaiting_user" {
 				summary = ""
 			}
+			// A pending dangerous command presents a deterministic confirmation
+			// popup: option 1 = confirm, option 2 = cancel (the last "自由输入"
+			// entry lets the user type an alternative command). /confirm 1/2
+			// is consumed by handleConfirmCommand on the next Run.
+			var opts []string
+			if e.state.PendingDangerousCmd != "" {
+				opts = []string{"确认执行", "取消"}
+			}
 			return &EngineResponse{
 				Summary:      summary,
 				Questions:    turnResult.Questions,
+				Options:      opts,
 				Stage:        StageAct,
 				Blocked:      true,
 				BlockedBy:    turnResult.BlockedBy,
@@ -923,86 +712,10 @@ func isSubstantiveSummary(summary string) bool {
 	return true
 }
 
-// isDangerousConfirmation is a narrow safety gate for dangerous command approval.
-// Only exact matches — this is a safety feature, not fuzzy intent detection.
-func isDangerousConfirmation(msg string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(msg))
-	switch normalized {
-	case "yes", "y", "ok", "okay", "confirm", "proceed", "go", "do it", "sure", "yep",
-		"同意", "确认", "是", "执行", "可以", "好的", "好", "行",
-		"对", "对的", "没问题", "嗯", "开始", "改", "改吧", "做", "做吧", "来", "来吧", "干", "干吧", "去吧":
-		return true
-	}
-	// Exact compound phrases users naturally type in reply to "确认执行修改？".
-	// "修改" is not a generic confirm word (it is ambiguous on its own), so these
-	// are enumerated explicitly rather than handled by isConcatOfConfirmWords.
-	switch normalized {
-	case "确认执行修改", "确认修改", "执行修改":
-		return true
-	}
-	// Handle compound confirmations like "对，改吧" or "好的，执行"
-	for _, sep := range []string{"，", ",", " ", "、"} {
-		if strings.Contains(normalized, sep) {
-			parts := strings.Split(normalized, sep)
-			allConfirm := true
-			for _, p := range parts {
-				p = strings.TrimSpace(p)
-				if p == "" {
-					continue
-				}
-				if !isSingleConfirmWord(p) {
-					allConfirm = false
-					break
-				}
-			}
-			if allConfirm {
-				return true
-			}
-		}
-	}
-	// Handle concatenations of confirm words with NO separator, e.g. "确认执行",
-	// "确认执行修改", "继续执行". Without this, a user replying "确认执行" to the
-	// "确认执行修改？" prompt is treated as plan feedback rather than confirmation,
-	// discarding the pending edit plan and re-proposing it forever.
-	if isConcatOfConfirmWords(normalized) {
-		return true
-	}
-	return false
-}
-
-// isConcatOfConfirmWords reports whether s is composed entirely of known single
-// confirmation words concatenated without separators (e.g. "确认执行" = "确认" +
-// "执行"). The whole string must be consumed — a real instruction like "确认但改下方案"
-// never matches, so this stays a safe affirmative gate.
-func isConcatOfConfirmWords(s string) bool {
-	if s == "" {
-		return false
-	}
-	runes := []rune(s)
-	n := len(runes)
-	// dp[i] is true if runes[i:] can be fully segmented into confirm words.
-	dp := make([]bool, n+1)
-	dp[n] = true
-	for i := n - 1; i >= 0; i-- {
-		for j := i + 1; j <= n; j++ {
-			if dp[j] && isSingleConfirmWord(string(runes[i:j])) {
-				dp[i] = true
-				break
-			}
-		}
-	}
-	return dp[0]
-}
-
-func isSingleConfirmWord(word string) bool {
-	switch word {
-	case "yes", "y", "ok", "okay", "confirm", "proceed", "go", "do", "it", "sure", "yep",
-		"同意", "确认", "是", "执行", "可以", "好的", "好", "行",
-		"对", "对的", "没问题", "嗯", "开始", "改", "改吧", "做", "做吧", "来", "来吧", "干", "干吧", "去吧", "吧",
-		"继续":
-		return true
-	}
-	return false
+// isConfirmCommand reports whether userMsg is a valid "/confirm N" command.
+func isConfirmCommand(userMsg string) bool {
+	_, ok := parseConfirmCommand(userMsg)
+	return ok
 }
 
 func (e *Engine) emitEvent(eventType string, stage Stage, payload any) error {
@@ -1238,20 +951,49 @@ func parseConfirmCommand(userMsg string) (int, bool) {
 }
 
 // handleConfirmCommand processes a /confirm N message deterministically,
-// bypassing isDangerousConfirmation.
+// bypassing any text-based confirmation heuristics.
 //
-// When the agent declared options via ask_user (pendingAskUser with a non-empty
-// Options list), /confirm N selects the Nth option and the choice is injected
-// into history so the agent implements the selected plan; an out-of-range N
-// injects an "invalid option number" feedback. With no pending ask_user,
-// /confirm N is a silent no-op (consumed but produces no history rewrite). The
-// last popup item ("输入你的意见") never reaches here — the UI returns to the
-// input box. Returns true if userMsg was a valid /confirm command.
+// Priority 1: a pending dangerous command (PendingDangerousCmd). /confirm 1
+// confirms it (marks the scope guard and injects the re-issue hint), /confirm 2
+// cancels it; any other N cancels as well (only two options are presented).
+// Priority 2: ask_user options (pendingAskUser with a non-empty Options list)
+// — /confirm N selects the Nth option and the choice is injected into history.
+// With neither pending, /confirm N is a silent no-op (consumed but produces
+// no history rewrite). The last popup item ("输入你的意见") never reaches
+// here — the UI returns to the input box. Returns true if userMsg was a valid
+// /confirm command.
 func (e *Engine) handleConfirmCommand(userMsg string) bool {
 	n, ok := parseConfirmCommand(userMsg)
 	if !ok {
 		return false
 	}
+
+	// Priority 1: dangerous command confirmation.
+	if e.state.PendingDangerousCmd != "" {
+		confirmedCmd := e.state.PendingDangerousCmd
+		if n == 1 {
+			// /confirm 1 → confirm. Mark the scope guard so the re-issued
+			// command passes, then inject the user confirmation + re-issue
+			// hint so the agent knows to retry the previously blocked command.
+			e.guards.scope.ConfirmDangerous(confirmedCmd)
+			msg := "✓ Dangerous command confirmed, proceeding..."
+			if e.isChinese {
+				msg = "✓ 危险命令已确认，继续执行..."
+			}
+			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			reissueHint := fmt.Sprintf("The user confirmed the dangerous command. Please re-issue the previously blocked command: `%s`", confirmedCmd)
+			if e.isChinese {
+				reissueHint = fmt.Sprintf("用户已确认执行危险命令。请重新执行之前被阻断的命令: `%s`", confirmedCmd)
+			}
+			e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
+		}
+		// /confirm 2 (or any other N) cancels: clear pending, no Confirm.
+		e.state.PendingDangerousCmd = ""
+		e.pendingAskUser = nil
+		loopLog.Printf("handleConfirmCommand: dangerous command confirmed=%v (n=%d)", n == 1, n)
+		return true
+	}
+
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
 		switch {
 		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 && n >= 1 && n <= len(e.pendingAskUser.Options):
@@ -1357,8 +1099,6 @@ func (e *Engine) clearSessionState() {
 	e.state.TurnNumber = 0
 	e.state.ConsecutiveFailures = 0
 	e.state.ConfirmedScope = false
-
-	e.pendingEditPlan = nil
 
 	e.steerMu.Lock()
 	e.steerQueue = nil
