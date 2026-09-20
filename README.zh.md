@@ -110,7 +110,7 @@ deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.
 deepact exec "/debate 给订单模块加幂等控制"
 ```
 
-先由一个搜索 agent 扫描代码库，把调研结果共享给所有辩论成员；随后四个性格角色**并行辩论**（提案 → 质询 → 反驳 → 终陈），各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。支持 `--members` 指定成员、`--add` 加载自定义角色（TOML）。
+`/debate` 是随二进制 `go:embed` 内置的三个协作技能之一（`ratd` / `collab` / `debate`）。命令语法不变，但编排由技能提示驱动：主 agent 按技能剧本用 `handoff_to_agent` 委派通用 `sub` agent——四个性格角色**并行辩论**（提案 → 质询 → 反驳 → 终陈），各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。任何用户技能目录放置同名 `SKILL.md` 可覆盖内置版本。
 
 ### 并行研究（/collab）
 
@@ -118,7 +118,7 @@ deepact exec "/debate 给订单模块加幂等控制"
 deepact exec "/collab 加一个缓存层"
 ```
 
-**拆解员** agent 把目标拆成 2~6 个研究方向；多个**研究员** agent 用只读工具**并行**调研（最多 4 个并发）；最后**汇总员**把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
+`/collab` 是另一个内置协作技能（`ratd` / `collab` / `debate`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具，最多 4 个并发），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
 
 ### 项目规范与技能（Skills）
 
@@ -128,6 +128,7 @@ deepact exec "/collab 加一个缓存层"
 
 | 优先级 | 目录 | 说明 |
 |--------|------|------|
+| 0 | 内置（`skill/builtin/`，go:embed） | `ratd` / `collab` / `debate` —— 最低优先级，可被同名用户技能覆盖 |
 | 1 | `~/.deepact/skills/` | DeepAct 专属 |
 | 2 | `<项目>/.claude/skills/` | 项目级 |
 | 3 | `~/.agent/skills/` | Agent 通用 |
@@ -159,7 +160,7 @@ DeepAct 从零为 DeepSeek 构建，不为"通用模型"妥协：
 - **前缀缓存分层** —— 请求稳定区全命中、仅 volatile tail 缺失，直接省 token、降延迟。
 - **`reasoning_content` 回显** —— DeepSeek 推理过程结构化存入会话，可回放、可审计。
 - **温度分级路由** —— 依据任务类型（分析 / 编码 / 工具调用）自动调配温度，减少幻觉与无效重试。
-- **双模型路由** —— `flash`（快、省）跑工具调用与日常任务，`pro`（强）跑设计评审与疑难推理，性价比按需分配。
+- **双模型路由** —— 主循环的 `selectModel()` 固定返回主模型（稳定的 model 字段保 DeepSeek per-model 前缀缓存命中）；`flash` 仅用于子代理与压缩路径，性价比按需分配。
 - **重试与限速** —— 按 DeepSeek 错误特征（限流 / 超时 / 截断）自动降级，不空转。
 
 配置示例（`~/.deepact/config.toml` 或项目级 `.deepact/config.toml`）：
@@ -182,7 +183,7 @@ max_results = 5
 
 ### 子代理并行
 
-复杂任务拆给专用子代理（searcher / planner / critic / tester）独立推进，结果汇聚回主循环——快而不乱。
+复杂任务通过 `handoff_to_agent` 委派给单个通用 `sub` agent；同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
 
 ### 可回退
 
@@ -201,14 +202,14 @@ max_results = 5
 
 ```text
 cmd/      CLI 入口（Cobra）        ui/       终端 UI（Bubble Tea）
-engine/   代理循环·圆桌·子代理  policy/   模糊检测·设计审查·范围检查
+engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
 tools/    内置工具 + MCP 适配        router/   模型路由
 session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
-skill/    外部技能加载与注册         config/   共享配置
+skill/    内置（ratd/collab/debate）+ 外部技能加载    config/   共享配置
 ```
 
-分层铁律：`engine/` 不依赖 `ui/`/`cmd/`；`tools/` 不依赖 `engine/`；跨层调用走接口。
+分层：`engine/` 是共享类型/接口中枢（hub-and-spoke）。核心 `llm/`、`tools/` 文件零项目依赖，由小型 `adapter.go` 桥接文件对接 engine 类型；`engine/` 不依赖 `ui/`/`cmd/`；跨层调用走接口。
 
 ---
 

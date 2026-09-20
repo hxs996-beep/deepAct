@@ -110,7 +110,7 @@ Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `-
 deepact exec "/debate add idempotency control to the order module"
 ```
 
-A search agent first scans the codebase and shares its findings with all debate members. Four personality roles then **debate in parallel** (proposal → challenge → rebuttal → final) with their own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. Supports `--members` for custom roles and `--add` to load TOML role files.
+`/debate` is one of the three built-in collaboration skills (`ratd` / `collab` / `debate`) shipped inside the binary via `go:embed`. The command syntax is unchanged, but orchestration is now driven by the skill prompt: the main agent follows the skill's playbook and delegates to the generic `sub` agent via `handoff_to_agent` — four personality roles **debate in parallel** (proposal → challenge → rebuttal → final) with their own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. A same-named `SKILL.md` in any user skills directory overrides the built-in.
 
 ### Parallel Research (/collab)
 
@@ -118,7 +118,7 @@ A search agent first scans the codebase and shares its findings with all debate 
 deepact exec "/collab add a cache layer"
 ```
 
-A Decomposer agent splits the goal into 2-6 research directions; multiple researcher agents then investigate them **in parallel** with read-only tools (up to 4 concurrent). A Synthesizer merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
+`/collab` is another built-in collaboration skill (`ratd` / `collab` / `debate`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools, up to 4 concurrent) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
 
 ### Project Rules & Skills
 
@@ -128,6 +128,7 @@ Skill directories are loaded by priority (later ones win on name conflicts):
 
 | Priority | Directory | Notes |
 |----------|-----------|-------|
+| 0 | built-in (`skill/builtin/`, go:embed) | `ratd` / `collab` / `debate` — lowest priority; overridden by any same-named user skill |
 | 1 | `~/.deepact/skills/` | DeepAct-specific |
 | 2 | `<project>/.claude/skills/` | Project-level |
 | 3 | `~/.agent/skills/` | Agent-generic |
@@ -159,7 +160,7 @@ DeepAct is built for DeepSeek from the ground up — it does not compromise for 
 - **Layered prefix caching** — the stable region of a request is fully cache-hit, only the volatile tail misses, saving tokens and cutting latency.
 - **`reasoning_content` echoes** — DeepSeek's reasoning is stored structurally in the session: replayable and auditable.
 - **Tiered temperature routing** — temperature is tuned per task type (analysis / coding / tool calls), reducing hallucinations and wasted retries.
-- **Dual-model routing** — `flash` (fast, cheap) handles tool calls and routine work; `pro` (strong) handles design review and hard reasoning. Pay the right price per task.
+- **Dual-model routing** — the main loop's `selectModel()` always returns the configured primary model (a stable model field keeps DeepSeek's per-model prefix cache warm); `flash` is used only for sub-agents and the compaction path. Pay the right price per task.
 - **Retry & rate limiting** — degrades gracefully on DeepSeek-specific error patterns (rate limits / timeouts / truncation) instead of spinning.
 
 Config example (`~/.deepact/config.toml`, or project-level `.deepact/config.toml`):
@@ -182,7 +183,7 @@ max_results = 5
 
 ### Parallel Subagents
 
-Complex tasks are split across dedicated subagents (searcher / planner / critic / tester) that run independently, with results merged back into the main loop — fast without getting messy.
+Complex tasks are split across a single generic `sub` agent delegated via `handoff_to_agent`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
 
 ### Rewindable Sessions
 
@@ -201,14 +202,14 @@ Every step is written to an immutable JSONL log: rewind to any step, fork a new 
 
 ```text
 cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
-engine/   agent loop·roundtable·subagents   policy/   ambiguity·design·scope checks
-context/  prompt build·tree snapshot·compaction   llm/      DeepSeek client (stream·retry·rate)
+engine/   agent loop · subagents · shared type hub
+context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
 tools/    built-in tools + MCP      router/    model routing
 session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
-skill/    external skill loading    config/    shared config
+skill/    built-in (ratd/collab/debate) + external skill loading    config/    shared config
 ```
 
-Layering rules: `engine/` never imports `ui/`/`cmd/`; `tools/` never imports `engine/`; cross-layer calls go through interfaces.
+Layering: `engine/` is the shared type/interface hub (hub-and-spoke). Core `llm/` and `tools/` files have zero project imports; small `adapter.go` files bridge them to engine types. `engine/` never imports `ui/`/`cmd/`; cross-layer calls go through interfaces.
 
 ---
 

@@ -1,5 +1,7 @@
 # DeepAct - Architecture Design Document
 
+> **历史注记（2026-09-20）：** 本文档已过时，仅存档。当前架构以 engine 为类型中枢、多代理模式（/ratd /collab /debate）由 `skill/builtin` 内置技能驱动，详见 README.md。
+
 > CLI-based code agent built for DeepSeek V4 (Flash + Pro dual-model routing)
 > Target: Cross-platform (macOS + Windows), single binary distribution
 
