@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -189,6 +190,10 @@ type Model struct {
 	// Resume session picker
 	resumeSessions []SessionSummary
 	selectedResume int
+
+	// workDir is the current working directory, shown on its own row inside
+	// the status bar (directly below the token/cache line).
+	workDir string
 }
 
 type messageRenderCache struct {
@@ -219,6 +224,7 @@ const (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
+	cwd, _ := os.Getwd()
 	progressChan := make(chan ProgressMsg, 256)
 	if runner != nil {
 		runner.SetProgressChan(progressChan)
@@ -238,6 +244,7 @@ func NewModel(runner EngineRunner, pricing engine.PricingConfig) Model {
 		progressChan: progressChan,
 		pricing:      pricing,
 		msgCache:     &messageRenderCache{},
+		workDir:      cwd,
 	}
 }
 
@@ -719,7 +726,9 @@ func (m Model) scrollUp() Model {
 // previous formula diverged from View by 1 row whenever a popup showed an
 // overflow indicator or was suppressed by state, shifting selection mapping.
 func (m Model) footerHeight() int {
-	h := 3 + renderedHeight(renderInputLine(m))
+	// Status bar is 4 lines: top padding, content line, workdir line, bottom
+	// padding — must stay in lockstep with View() Step 2.
+	h := 4 + renderedHeight(renderInputLine(m))
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		h += renderedHeight(renderSuggestions(m, m.width))
 	}
@@ -795,8 +804,9 @@ func (m Model) View() string {
 	inputLine := renderInputLine(m)
 
 	// ---- Step 2: Compute footer height — this area is FIXED and NEVER scrolls ----
-	// Status bar is always 3 lines (top padding, content line, bottom padding)
-	footerHeight := 3 + renderedHeight(inputLine)
+	// Status bar is always 4 lines (top padding, content line, workdir line,
+	// bottom padding)
+	footerHeight := 4 + renderedHeight(inputLine)
 	if suggestionPopup != "" {
 		footerHeight += renderedHeight(suggestionPopup)
 	}
@@ -878,7 +888,7 @@ func (m Model) View() string {
 	}
 
 	// ---- Step 5: Render status bar with actual scroll info (single pass) ----
-	statusLine := renderStatusBar(m.status, scrollOff, maxScroll, contentWidth, m.clipboardFeedback, m.clipboardError)
+	statusLine := renderStatusBar(m.status, m.workDir, scrollOff, maxScroll, contentWidth, m.clipboardFeedback, m.clipboardError)
 
 	// ---- Step 6: Pad/trim body to exactly bodyHeight ----
 	if m.state == stateInit || (len(m.messages) == 0 && m.streaming == "" && len(m.spinners) == 0) {
@@ -3337,7 +3347,7 @@ func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *
 	return inputCost + outputCost
 }
 
-func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, clipboardFeedback time.Time, clipboardError string) string {
+func renderStatusBar(status StatusInfo, workDir string, scrollOffset, scrollMax int, width int, clipboardFeedback time.Time, clipboardError string) string {
 	dragHint := "Drag to select"
 	if !clipboardFeedback.IsZero() && time.Since(clipboardFeedback) < 2*time.Second {
 		if clipboardError != "" {
@@ -3386,6 +3396,18 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 	if w := displayWidth(line); w < contentWidth {
 		line += strings.Repeat(" ", contentWidth-w)
 	}
+
+	// Work directory row: directly below the token/cache line, dimmed and
+	// padded to fill. The dim open/reopen pair is used instead of
+	// DimStyle.Render so the status bar's background survives (the renderer
+	// opens its own background per row).
+	wd := "  " + workDir
+	if w := displayWidth(wd); w < contentWidth {
+		wd += strings.Repeat(" ", contentWidth-w)
+	}
+	wd = truncateToWidth(wd, contentWidth)
+	dimOpen := strings.TrimSuffix(DimStyle.Render(""), "\x1b[0m")
+	wdLine := dimOpen + wd
 	// Render ALL THREE rows as a SINGLE background block: bg set once via a
 	// manual ANSI code (NOT lipgloss), fg inlined via ANSI codes, single
 	// \033[0m at the end. lipgloss.Render is not used: it measures width with
@@ -3411,6 +3433,7 @@ func renderStatusBar(status StatusInfo, scrollOffset, scrollMax int, width int, 
 	rows := strings.Join([]string{
 		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 		bgOpen + fgBar + "▍" + fgContent + line,
+		bgOpen + fgBar + "▍" + fgContent + wdLine,
 		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 	}, "\n")
 	return rows + "\x1b[0m"

@@ -209,7 +209,7 @@ func TestStatusBarShowsCacheHitRate(t *testing.T) {
 				TokensIn:       tt.tokensIn,
 				CacheHitTokens: tt.cacheHit,
 			}
-			line := renderStatusBar(status, 0, 0, 80, time.Time{}, "")
+			line := renderStatusBar(status, "", 0, 0, 80, time.Time{}, "")
 			if !strings.Contains(line, tt.wantSubstring) {
 				t.Errorf("renderStatusBar wants %q in output, got: %q", tt.wantSubstring, line)
 			}
@@ -224,7 +224,7 @@ func TestStatusBarShowsCacheUpDown(t *testing.T) {
 		CacheHitTokens:  6000,
 		CacheMissTokens: 4000,
 	}
-	line := renderStatusBar(status, 0, 0, 80, time.Time{}, "")
+	line := renderStatusBar(status, "", 0, 0, 80, time.Time{}, "")
 	for _, want := range []string{"10.0K", "2.0K"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("renderStatusBar wants %q in output, got: %q", want, line)
@@ -248,7 +248,7 @@ func TestStatusBarRowsFitWidth(t *testing.T) {
 	// Every rendered row must fit within the terminal width.
 	for _, width := range []int{80, 100, 120, 160} {
 		status := StatusInfo{TokensIn: 10000, TokensOut: 2000, CacheHitTokens: 5000}
-		s := renderStatusBar(status, 0, 0, width, time.Time{}, "")
+		s := renderStatusBar(status, "", 0, 0, width, time.Time{}, "")
 		for i, l := range strings.Split(stripAnsi(s), "\n") {
 			if w := displayWidth(l); w > width {
 				t.Errorf("width=%d row %d displayWidth=%d exceeds terminal width", width, i, w)
@@ -267,7 +267,7 @@ func TestStatusBarRowsSelfContainedBackground(t *testing.T) {
 	// its background on every row via InputBlockStyle).
 	for _, width := range []int{80, 120} {
 		status := StatusInfo{TokensIn: 10000, TokensOut: 2000, CacheHitTokens: 5000}
-		s := renderStatusBar(status, 0, 0, width, time.Time{}, "")
+		s := renderStatusBar(status, "", 0, 0, width, time.Time{}, "")
 		for i, l := range strings.Split(s, "\n") {
 			if !strings.Contains(l, "\x1b[48;5;") {
 				t.Errorf("width=%d status row %d lacks its own background code: %q", width, i, l)
@@ -283,7 +283,7 @@ func TestFooterHeightMatchesViewFooterHeight(t *testing.T) {
 	m.height = 24
 
 	inputLine := renderInputLine(m)
-	viewFooterHeight := 3 + renderedHeight(inputLine)
+	viewFooterHeight := 4 + renderedHeight(inputLine)
 	if got := m.footerHeight(); got != viewFooterHeight {
 		t.Fatalf("footerHeight should match View footer height: got %d, want %d", got, viewFooterHeight)
 	}

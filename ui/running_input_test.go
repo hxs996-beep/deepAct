@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -107,3 +108,23 @@ func TestRenderInputLineRunningCursorVisible(t *testing.T) {
 		t.Fatalf("cursor should be visible while running, got: %q", line)
 	}
 }
+
+func TestStatusBarShowsWorkDir(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.width = 80
+	m.workDir = "/tmp/project"
+
+	line := stripAnsi(renderStatusBar(m.status, m.workDir, 0, 0, 80, time.Time{}, ""))
+	if !strings.Contains(line, "/tmp/project") {
+		t.Fatalf("status bar should show workDir, got: %q", line)
+	}
+	// The workdir row must come after the token/cache line (bottom of the
+	// status bar block).
+	tokenIdx := strings.Index(line, "0%")
+	wdIdx := strings.Index(line, "/tmp/project")
+	if tokenIdx == -1 || wdIdx == -1 || wdIdx < tokenIdx {
+		t.Fatalf("workDir row must come after the token line, got: %q", line)
+	}
+}
+
