@@ -309,7 +309,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Messages:        history,
 			Tools:           filteredTools,
 			MaxTokens:       r.outputTokenCap(),
-			ThinkingEnabled: false, // sub-agents do structured tasks, don't need open-ended thinking
+			ThinkingEnabled: true, // deepseek-chat 支持原生 thinking：让子代理先推理再行动，提升调研/分析深度
 		}
 
 		// Heartbeat — emit periodic progress during the blocking LLM call so the UI
