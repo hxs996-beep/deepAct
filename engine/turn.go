@@ -103,10 +103,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.state.ConsecutiveFailures++
 		// Graceful degradation: don't crash the session on transient API errors.
 		// The caller (Run) will see Blocked=true and return to the user.
+		// 透传底层真实错误（HTTP 状态码/响应体/重试日志），避免把所有失败
+		// 都呈现为"断网"，掩盖限流（429）等真实原因。
 		return TurnResult{
 			Blocked:      true,
 			BlockedBy:    "model_error",
-			Questions:    []string{fmt.Sprintf("API 请求失败，请检查网络连接和 API Key 后重试。\n\nAPI request failed. Please check your connection and API key, then try again.")},
+			Questions:    []string{fmt.Sprintf("模型 API 请求失败，任务已中断。请检查网络与 API Key 配置后重新发起。\n\n具体原因：%v\n\nModel API request failed and the task was interrupted. Check your network and API key, then retry.\n\nReason: %v", err, err)},
 			FinishReason: "model_error",
 		}, nil
 	}
@@ -200,10 +202,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if chunk.Err != nil {
 			turnLog.Printf("stream chunk err: %v", chunk.Err)
 			e.state.ConsecutiveFailures++
+			// 透传底层真实错误：HTTP 状态码/响应体、超时类型、重试日志。
+			// 429 限流、5xx、网络波动都各归其位，不再一律提示"断网"。
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "stream_error",
-				Questions:    []string{fmt.Sprintf("网络连接中断，请检查网络后重试。\n\nConnection interrupted. Please check your network and try again.")},
+				Questions:    []string{fmt.Sprintf("模型响应中断，自动重试已耗尽，任务终止。请检查网络后重新发起。\n\n具体原因：%v\n\nModel response was interrupted after automatic retries were exhausted. Check your network and retry.\n\nReason: %v", chunk.Err, chunk.Err)},
 				FinishReason: "stream_error",
 			}, nil
 		}

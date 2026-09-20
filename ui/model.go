@@ -178,8 +178,8 @@ type Model struct {
 	resumeSessions []SessionSummary
 	selectedResume int
 
-	// workDir is the current working directory, shown on its own row inside
-	// the status bar (directly below the token/cache line).
+	// workDir is the current working directory, shown on the bottom row of
+	// the status bar (flush with the screen's bottom boundary).
 	workDir string
 }
 
@@ -663,9 +663,9 @@ func (m Model) scrollUp() Model {
 // previous formula diverged from View by 1 row whenever a popup showed an
 // overflow indicator or was suppressed by state, shifting selection mapping.
 func (m Model) footerHeight() int {
-	// Status bar is 4 lines: top padding, content line, workdir line, bottom
-	// padding — must stay in lockstep with View() Step 2.
-	h := 4 + renderedHeight(renderInputLine(m))
+	// Status bar is 3 lines: top padding, content line, workdir line — must
+	// stay in lockstep with View() Step 2.
+	h := 3 + renderedHeight(renderInputLine(m))
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		h += renderedHeight(renderSuggestions(m, m.width))
 	}
@@ -741,9 +741,9 @@ func (m Model) View() string {
 	inputLine := renderInputLine(m)
 
 	// ---- Step 2: Compute footer height — this area is FIXED and NEVER scrolls ----
-	// Status bar is always 4 lines (top padding, content line, workdir line,
-	// bottom padding)
-	footerHeight := 4 + renderedHeight(inputLine)
+	// Status bar is always 3 lines (top padding, content line, workdir line —
+	// flush at the bottom boundary)
+	footerHeight := 3 + renderedHeight(inputLine)
 	if suggestionPopup != "" {
 		footerHeight += renderedHeight(suggestionPopup)
 	}
@@ -3232,10 +3232,10 @@ func renderStatusBar(status StatusInfo, workDir string, scrollOffset, scrollMax 
 		line += strings.Repeat(" ", contentWidth-w)
 	}
 
-	// Work directory row: directly below the token/cache line, dimmed and
-	// padded to fill. The dim open/reopen pair is used instead of
-	// DimStyle.Render so the status bar's background survives (the renderer
-	// opens its own background per row).
+	// Work directory row: bottom row of the status bar, flush with the screen
+	// bottom boundary, dimmed and padded to fill. The dim open/reopen pair is
+	// used instead of DimStyle.Render so the status bar's background survives
+	// (the renderer opens its own background per row).
 	wd := "  " + workDir
 	if w := displayWidth(wd); w < contentWidth {
 		wd += strings.Repeat(" ", contentWidth-w)
@@ -3269,7 +3269,6 @@ func renderStatusBar(status StatusInfo, workDir string, scrollOffset, scrollMax 
 		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 		bgOpen + fgBar + "▍" + fgContent + line,
 		bgOpen + fgBar + "▍" + fgContent + wdLine,
-		bgOpen + fgBar + "▍" + fgContent + strings.Repeat(" ", contentWidth),
 	}, "\n")
 	return rows + "\x1b[0m"
 }

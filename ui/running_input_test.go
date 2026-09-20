@@ -119,12 +119,18 @@ func TestStatusBarShowsWorkDir(t *testing.T) {
 	if !strings.Contains(line, "/tmp/project") {
 		t.Fatalf("status bar should show workDir, got: %q", line)
 	}
-	// The workdir row must come after the token/cache line (bottom of the
-	// status bar block).
+	// The workdir row is the bottom row of the status bar block — the token
+	// line must come before it.
 	tokenIdx := strings.Index(line, "0%")
 	wdIdx := strings.Index(line, "/tmp/project")
 	if tokenIdx == -1 || wdIdx == -1 || wdIdx < tokenIdx {
 		t.Fatalf("workDir row must come after the token line, got: %q", line)
+	}
+	// The workdir row must be the LAST row of the status bar block (flush
+	// with the screen bottom boundary).
+	rows := strings.Split(line, "\n")
+	if last := rows[len(rows)-1]; !strings.Contains(last, "/tmp/project") {
+		t.Fatalf("workDir row must be the bottom row of the status bar, got last row: %q", last)
 	}
 }
 

@@ -283,7 +283,7 @@ func TestFooterHeightMatchesViewFooterHeight(t *testing.T) {
 	m.height = 24
 
 	inputLine := renderInputLine(m)
-	viewFooterHeight := 4 + renderedHeight(inputLine)
+	viewFooterHeight := 3 + renderedHeight(inputLine)
 	if got := m.footerHeight(); got != viewFooterHeight {
 		t.Fatalf("footerHeight should match View footer height: got %d, want %d", got, viewFooterHeight)
 	}
