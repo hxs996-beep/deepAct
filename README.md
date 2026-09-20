@@ -45,7 +45,7 @@
 
 *Measured on release 1.0.6 (macOS arm64); figures vary slightly by platform.*
 
-One 16 MB Go file that ships a full agent: team collaboration, parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
+One 16 MB Go file that ships a full agent: built-in collaboration skills (ratd/collab/debate), parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
 
 ## Quick Start
 
@@ -110,7 +110,7 @@ Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `-
 deepact exec "/debate add idempotency control to the order module"
 ```
 
-`/debate` is one of the three built-in collaboration skills (`ratd` / `collab` / `debate`) shipped inside the binary via `go:embed`. The command syntax is unchanged, but orchestration is now driven by the skill prompt: the main agent follows the skill's playbook and delegates to the generic `sub` agent via `handoff_to_agent` — four personality roles **debate in parallel** (proposal → challenge → rebuttal → final) with their own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. A same-named `SKILL.md` in any user skills directory overrides the built-in.
+`/debate` is one of the three built-in collaboration skills (`ratd` / `collab` / `debate`) shipped inside the binary via `go:embed`. The command syntax is unchanged, but orchestration is now driven by the skill prompt: the main agent follows the skill's playbook and delegates to the generic `sub` agent via `handoff_to_agent` — four personality roles **debate in parallel**, each with its own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. A same-named `SKILL.md` in any user skills directory overrides the built-in.
 
 ### Parallel Research (/collab)
 
@@ -118,7 +118,7 @@ deepact exec "/debate add idempotency control to the order module"
 deepact exec "/collab add a cache layer"
 ```
 
-`/collab` is another built-in collaboration skill (`ratd` / `collab` / `debate`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools, up to 4 concurrent) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
+`/collab` is another built-in collaboration skill (`ratd` / `collab` / `debate`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
 
 ### Project Rules & Skills
 

@@ -224,3 +224,37 @@ Do the thing.
 		t.Errorf("Paths = %v", s.Paths)
 	}
 }
+
+func TestRegistry_RegisterOverridesSameName(t *testing.T) {
+	reg := NewRegistry()
+	builtin := &Skill{Name: "ratd", Description: "builtin"}
+	user := &Skill{Name: "ratd", Description: "user override"}
+
+	// 内置技能先注册（最低优先级）
+	reg.Register(builtin)
+	if got := reg.Get("ratd"); got != builtin {
+		t.Fatalf("Get after builtin register = %v, want builtin", got)
+	}
+	if len(reg.All()) != 1 {
+		t.Fatalf("All() len = %d, want 1", len(reg.All()))
+	}
+
+	// 用户同名技能后注册 → 覆盖内置
+	reg.Register(user)
+	got := reg.Get("ratd")
+	if got != user {
+		t.Fatalf("Get after user override = %v, want user", got)
+	}
+	if got.Description != "user override" {
+		t.Errorf("description = %q, want %q", got.Description, "user override")
+	}
+	if len(reg.All()) != 1 {
+		t.Errorf("All() len = %d, want 1 (no duplicate)", len(reg.All()))
+	}
+
+	// 无同名技能时普通追加
+	reg.Register(&Skill{Name: "collab", Description: "other"})
+	if len(reg.All()) != 2 {
+		t.Errorf("All() len = %d, want 2", len(reg.All()))
+	}
+}

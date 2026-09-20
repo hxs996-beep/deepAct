@@ -110,7 +110,7 @@ deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.
 deepact exec "/debate 给订单模块加幂等控制"
 ```
 
-`/debate` 是随二进制 `go:embed` 内置的三个协作技能之一（`ratd` / `collab` / `debate`）。命令语法不变，但编排由技能提示驱动：主 agent 按技能剧本用 `handoff_to_agent` 委派通用 `sub` agent——四个性格角色**并行辩论**（提案 → 质询 → 反驳 → 终陈），各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。任何用户技能目录放置同名 `SKILL.md` 可覆盖内置版本。
+`/debate` 是随二进制 `go:embed` 内置的三个协作技能之一（`ratd` / `collab` / `debate`）。命令语法不变，但编排由技能提示驱动：主 agent 按技能剧本用 `handoff_to_agent` 委派通用 `sub` agent——四个性格角色**并行辩论**，各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。任何用户技能目录放置同名 `SKILL.md` 可覆盖内置版本。
 
 ### 并行研究（/collab）
 
@@ -118,7 +118,7 @@ deepact exec "/debate 给订单模块加幂等控制"
 deepact exec "/collab 加一个缓存层"
 ```
 
-`/collab` 是另一个内置协作技能（`ratd` / `collab` / `debate`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具，最多 4 个并发），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
+`/collab` 是另一个内置协作技能（`ratd` / `collab` / `debate`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
 
 ### 项目规范与技能（Skills）
 
