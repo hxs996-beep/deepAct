@@ -70,15 +70,6 @@ type Suggestion struct {
 	Description string // e.g. "分析需求，探索代码并制定方案"
 }
 
-// MemberStatus tracks a member agent's review progress for UI display.
-type MemberStatus struct {
-	ID      string // member ID e.g. "architect"
-	Name    string // display name e.g. "架构师"
-	Avatar  string // display tag e.g. "[A]"
-	Status  string // "running", "done", "error"
-	Verdict string // "approve", "conditional", "reject" (valid when done)
-}
-
 // SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
 type SubAgentStatus struct {
 	ID      string // unique key for tracking (agent type + index)
@@ -91,8 +82,9 @@ type SubAgentStatus struct {
 var slashCommands = []Suggestion{
 	{Command: "/help", Args: "", Description: "Show this help screen"},
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/ratd", Args: "<需求>", Description: "反向测试驱动协作：Proposer 写代码 → 红队对抗测试 → 沙箱验证 → 仲裁收敛"},
-	{Command: "/collab", Args: "<需求>", Description: "并行研究：拆解→并行调研→汇总报告"},
+	{Command: "/ratd", Args: "<需求>", Description: "反向测试驱动：内置技能（红队写对抗测试驱动实现）"},
+	{Command: "/collab", Args: "<需求>", Description: "并行研究：内置技能（拆解→并行委派调研→汇总）"},
+	{Command: "/debate", Args: "<议题>", Description: "多角色辩论：内置技能（并行发言→评分→实施蓝图）"},
 	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
 }
 
@@ -176,10 +168,6 @@ type Model struct {
 	autoScrollDir     int       // auto-scroll direction during drag: -1=up, 0=none, +1=down
 	lastMouseX        int       // last mouse X during drag (screen coords, for auto-scroll)
 	lastMouseY        int       // last mouse Y during drag (screen coords, for auto-scroll)
-
-	// memberStatuses tracks per-agent progress cards (fed by member_start/
-	// member_done events; legacy debate UI — no longer emitted by /ratd).
-	memberStatuses []MemberStatus
 
 	// Generic step-progress tracking (driven by todo_write from any skill)
 	todoItems []engine.TodoItem
@@ -483,9 +471,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.thinkingContent = ""
 		m.thinkingActivity = ""
-		m.memberStatuses = nil // roundtable phase done, clear member cards
-		m.subAgents = nil      // sub-agent panel done, clear
-		m.todoItems = nil      // todo list done, clear items
+		m.subAgents = nil // sub-agent panel done, clear
+		m.todoItems = nil // todo list done, clear items
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
 	case ProgressMsg:
@@ -520,55 +507,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// to display. Agent activity is shown via "thinking" events instead.
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = "thinking..."
-			}
-		case "member_start":
-			// Dedup: if member already exists (from a previous debate round),
-			// reset to "running" instead of appending a duplicate entry.
-			found := false
-			for i := range m.memberStatuses {
-				if m.memberStatuses[i].ID == msg.Name {
-					m.memberStatuses[i].Status = "running"
-					m.memberStatuses[i].Verdict = ""
-					found = true
-					break
-				}
-			}
-			if !found {
-				m.memberStatuses = append(m.memberStatuses, MemberStatus{
-					ID:     msg.Name,
-					Name:   msg.Detail,
-					Avatar: memberAvatar(msg.Name),
-					Status: "running",
-				})
-			}
-		case "member_done":
-			for i := range m.memberStatuses {
-				if m.memberStatuses[i].ID == msg.Name {
-					m.memberStatuses[i].Status = "done"
-					if strings.Contains(msg.Detail, "✓") {
-						m.memberStatuses[i].Verdict = "approve"
-					} else if strings.Contains(msg.Detail, "⚠") {
-						m.memberStatuses[i].Verdict = "conditional"
-					} else if strings.Contains(msg.Detail, "✗") {
-						m.memberStatuses[i].Verdict = "reject"
-					}
-					break
-				}
-			}
-		case "roundtable_enter":
-			m.memberStatuses = nil
-			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = msg.Detail
-			}
-		case "roundtable_phase":
-			if msg.Name == "review" {
-				m.memberStatuses = nil
-			}
-			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = msg.Detail
-			}
-			if msg.Name == "explore_done" || msg.Name == "review_done" {
-				m.memberStatuses = nil
 			}
 		case "agent_start":
 			displayName := msg.Name
@@ -1488,7 +1426,6 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.messages = append(m.messages, DisplayMessage{Role: "user", Content: content})
 	m.toolTree = nil
 	m.spinners = nil
-	m.memberStatuses = nil
 	m.subAgents = nil
 	m.streaming = ""
 	m.narration = ""
@@ -1952,10 +1889,10 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		subAgentLines := renderSubAgentPanel(m.subAgents, width)
 		lines = append(lines, subAgentLines...)
 	}
-	if len(m.memberStatuses) > 0 || len(m.todoItems) > 0 {
-		// Overlay status area: render the step-progress todo list (left) and/or
-		// member progress (right) in a single status block above the input.
-		overlayLines := renderOverlayStatus(m.todoItems, m.memberStatuses, width)
+	if len(m.todoItems) > 0 {
+		// Overlay status area: render the step-progress todo list in a single
+		// status block above the input.
+		overlayLines := renderOverlayStatus(m.todoItems, width)
 		lines = append(lines, overlayLines...)
 	} else if m.narration != "" {
 		narrationLines := renderStreaming(m.narration, width)
@@ -2322,22 +2259,6 @@ func toolIcon(name string) string {
 		return "[+]"
 	case "handoff_to_agent":
 		return "[→]"
-	default:
-		return "[*]"
-	}
-}
-
-// memberAvatar returns a default tag for known member IDs.
-func memberAvatar(id string) string {
-	switch id {
-	case "architect":
-		return "[A]"
-	case "security":
-		return "[S]"
-	case "quality":
-		return "[Q]"
-	case "maintainer":
-		return "[M]"
 	default:
 		return "[*]"
 	}
@@ -2830,41 +2751,6 @@ func agentIcon(agent string) string {
 	}
 }
 
-// renderMemberProgress renders roundtable member status cards above the input.
-// Each member shows as a compact card: avatar + name + status (running spinner
-// or done checkmark with score). This replaces the thinking box during review.
-func renderMemberProgress(members []MemberStatus, width int) []string {
-	if len(members) == 0 {
-		return nil
-	}
-	var content []string
-	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Multi-Agent Review"))
-	content = append(content, "")
-	for _, m := range members {
-		switch m.Status {
-		case "running":
-			frame := spinnerFrames[0]
-			line := fmt.Sprintf("  %s %s %s  %s", frame, m.Avatar, m.Name, SpinnerStyle.Render("reviewing..."))
-			content = append(content, line)
-		case "done":
-			verdictIcon := "[pass]"
-			switch m.Verdict {
-			case "conditional":
-				verdictIcon = "[warn]"
-			case "reject":
-				verdictIcon = "[fail]"
-			}
-			line := fmt.Sprintf("  ✓ %s %s  %s", m.Avatar, m.Name, verdictIcon)
-			content = append(content, SpinnerDoneStyle.Render(line))
-		case "error":
-			line := fmt.Sprintf("  ✗ %s %s  [err]", m.Avatar, m.Name)
-			content = append(content, ErrorStyle.Render(line))
-		}
-	}
-	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return splitLipglossBlock(rendered, width)
-}
-
 // renderTodoList renders the generic step-progress todo list above the input.
 // Plain-text markers: [ ] pending, [~] in_progress, [✓] completed.
 // [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
@@ -2890,63 +2776,13 @@ func renderTodoList(items []engine.TodoItem, width int) []string {
 	return splitLipglossBlock(rendered, width)
 }
 
-// renderOverlayStatus renders both the step-progress todo list and member
-// progress in a single overlay block. When both are present, they're displayed
-// side-by-side (left/right) with a vertical divider.
-func renderOverlayStatus(todoItems []engine.TodoItem, members []MemberStatus, width int) []string {
-	todoActive := len(todoItems) > 0
-	memberActive := len(members) > 0
-
-	if !todoActive && !memberActive {
+// renderOverlayStatus renders the step-progress todo list in a single overlay
+// block above the input.
+func renderOverlayStatus(todoItems []engine.TodoItem, width int) []string {
+	if len(todoItems) == 0 {
 		return nil
 	}
-
-	if todoActive && memberActive {
-		// Side-by-side layout: split width in half
-		halfWidth := (width - 3) / 2 // account for divider and spacing
-		if halfWidth < 30 {
-			halfWidth = 30
-		}
-		leftLines := renderTodoList(todoItems, halfWidth)
-		rightLines := renderMemberProgress(members, halfWidth)
-
-		// Combine side by side
-		maxLines := len(leftLines)
-		if len(rightLines) > maxLines {
-			maxLines = len(rightLines)
-		}
-
-		// Pad both columns to same height
-		for len(leftLines) < maxLines {
-			leftLines = append(leftLines, "")
-		}
-		for len(rightLines) < maxLines {
-			rightLines = append(rightLines, "")
-		}
-
-		divider := DimStyle.Render(" ┃ ")
-		combined := make([]string, maxLines)
-		for i := 0; i < maxLines; i++ {
-			l := leftLines[i]
-			r := rightLines[i]
-			// Pad/truncate by terminal columns (displayWidth), not byte len().
-			dw := displayWidth(l)
-			if dw > halfWidth {
-				l = truncateAnsi(l, halfWidth)
-			} else if dw < halfWidth {
-				l += strings.Repeat(" ", halfWidth-dw)
-			}
-			combined[i] = l + divider + r
-		}
-		return combined
-	}
-
-	if todoActive {
-		// Ensure todo list panel gets full width (renderTodoList handles this via width)
-		return renderTodoList(todoItems, width)
-	}
-
-	return renderMemberProgress(members, width)
+	return renderTodoList(todoItems, width)
 }
 
 // truncateAnsi truncates a string containing ANSI escape codes to the given
@@ -3179,7 +3015,7 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 	b.WriteString("- (skills) — loadable via `/<name>` or the `load_skill` tool\n\n")
 
 	b.WriteString("Type a natural language request to start, or use `/ratd <需求>` for reverse-test-driven harness.\n")
-	b.WriteString("Use `/collab <需求>` for parallel research: decompose → parallel research → synthesis.\n")
+	b.WriteString("Use `/collab <需求>` for parallel research, `/debate <议题>` for multi-role debate — all via built-in skills.\n")
 	return b.String()
 }
 
