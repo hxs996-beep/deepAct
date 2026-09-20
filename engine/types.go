@@ -33,7 +33,7 @@ type TodoItem struct {
 }
 
 type ProgressEvent struct {
-	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage" | "todo_update" | "ratd_role" (one per /ratd harness role execution)
+	Type       string // "tool_start" | "tool_done" | "thinking" | "content_delta" | "reasoning_delta" | "agent_start" | "agent_done" | "usage" | "todo_update"
 	Name       string
 	Detail     string // brief digest for live display
 	FullDetail string // full content (e.g., diff) for final rendering
@@ -255,8 +255,6 @@ type TaskState struct {
 	ConsecutiveFailures int              `json:"consecutive_failures"`
 	EditScopeFiles      int              `json:"edit_scope_files"`
 	PendingDangerousCmd string           `json:"pending_dangerous_cmd,omitempty"` // normalized command awaiting user confirmation
-	Collab              *CollabState     `json:"collab,omitempty"`
-	RATD                *RATDState       `json:"ratd,omitempty"`
 
 	// ReadHistory records each file read this session (path + scope) for the
 	// loop guard to count repeated reads of the same (path, scope) and block
@@ -340,104 +338,4 @@ type Dimension struct {
 	Evidence    string  `json:"evidence"`
 	Issue       string  `json:"issue"`
 	Improvement string  `json:"improvement"`
-}
-
-// CollabPhase describes which stage of the /collab parallel research we are in.
-type CollabPhase int
-
-const (
-	CollabIdle       CollabPhase = iota
-	CollabDecompose              // 拆解：LLM 拆解 agent 产出任务列表
-	CollabParallel               // 并行：并发执行各任务（只读调研）
-	CollabSynthesize             // 汇总：LLM 合并各 worker 报告
-	CollabDone                   // 完成：展示最终报告并清理
-)
-
-// CollabTask is one research direction produced by the decomposer.
-type CollabTask struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Direction string `json:"direction"` // 研究方向（自包含，worker 独立开工）
-	Status    string `json:"status"`    // pending/running/done/failed
-	Result    string `json:"result,omitempty"`
-	Error     string `json:"error,omitempty"`
-}
-
-// CollabState tracks the current /collab parallel research within TaskState.
-type CollabState struct {
-	Goal   string       `json:"goal"`
-	Phase  CollabPhase  `json:"phase"`
-	Tasks  []CollabTask `json:"tasks"`
-	Report string       `json:"report,omitempty"` // 汇总研究报告
-}
-
-// RATDPhase describes which stage of the /ratd harness we are in.
-type RATDPhase int
-
-const (
-	RATDIdle      RATDPhase = iota
-	RATDPropose             // Proposer 生成代码
-	RATDRedTeam             // RedTeam 生成对抗测试
-	RATDSandbox             // 引擎跑沙箱
-	RATDArbitrate           // Arbitrator 判定失败测试
-	RATDDone                // 收敛交付
-)
-
-func (p RATDPhase) String() string {
-	switch p {
-	case RATDPropose:
-		return "propose"
-	case RATDRedTeam:
-		return "red_team"
-	case RATDSandbox:
-		return "sandbox"
-	case RATDArbitrate:
-		return "arbitrate"
-	case RATDDone:
-		return "done"
-	default:
-		return "idle"
-	}
-}
-
-// RATDSourceFile is one file produced by the Proposer, written to the workdir.
-type RATDSourceFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-// RATDTest is the RedTeam's adversarial test contribution.
-type RATDTest struct {
-	Category   string `json:"test_category"`
-	Severity   string `json:"severity"`
-	TargetFile string `json:"target_file"`
-	TestCode   string `json:"test_code"`
-	Rationale  string `json:"assertion_rationale"`
-}
-
-// RATDSandboxResult captures one sandbox execution outcome.
-type RATDSandboxResult struct {
-	ExitCode    int    `json:"exit_code"`
-	Output      string `json:"output,omitempty"`
-	TimedOut    bool   `json:"timed_out,omitempty"`
-	Unavailable bool   `json:"unavailable,omitempty"` // 无可用测试命令，无法物理验证
-}
-
-// RATDState tracks the current /ratd session within TaskState.
-type RATDState struct {
-	Goal        string           `json:"goal"`
-	Phase       RATDPhase        `json:"phase"`
-	Language    string           `json:"language,omitempty"`
-	SourceFiles []RATDSourceFile `json:"source_files,omitempty"`
-	DesignNotes string           `json:"design_notes,omitempty"`
-	Tests       []RATDTest       `json:"tests,omitempty"`
-	// WrittenTestFiles tracks test file paths already written to disk, so a
-	// REJECTed test can be removed and stale files do not accumulate.
-	WrittenTestFiles []string           `json:"written_test_files,omitempty"`
-	CurrentRound     int                `json:"current_round"`
-	LastSandbox      *RATDSandboxResult `json:"last_sandbox,omitempty"`
-	FinalVerify      bool               `json:"final_verify,omitempty"` // no_issues 触发的最终验证轮
-	// ActionableFeedback carries the Arbitrator's fix instructions, injected
-	// into the Proposer refactor round.
-	ActionableFeedback string `json:"actionable_feedback,omitempty"` // Arbitrator 的修复指令，注入 Proposer 重构轮
 }

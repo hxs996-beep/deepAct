@@ -28,8 +28,4 @@ func (a *genericSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResul
 	input.StructuredResult = a.Spec().StructuredResult
 	return a.runner.Run(ctx, input)
 }
-func (a *genericSubAgent) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
-	input.StructuredResult = a.Spec().StructuredResult
-	return a.runner.RunWithPrompt(ctx, input, extraPrompt)
-}
 func (a *genericSubAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }

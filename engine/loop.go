@@ -96,12 +96,6 @@ type Engine struct {
 	// bubble up questions concurrently, so the write must be serialized.
 	askUserMu sync.Mutex
 
-	// ratdHall orchestrates the /ratd harness (proposer/redteam/arbitrator).
-	ratdHall *RATDHall
-
-	// collabHall orchestrates the /collab parallel research (decompose → parallel → synthesize).
-	collabHall *CollabHall
-
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
 	runUsageAccum    ModelUsage
@@ -181,8 +175,6 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		errorLoop:    NewLoopTracker(0, 3, true),  // 3 errors → block, success resets
 		progressLoop: NewLoopTracker(4, 6, true),  // 4th nudge / 6th block, progress resets
 	}
-	e.ratdHall = NewRATDHall(e)
-	e.collabHall = NewCollabHall(e)
 
 	// Persistent memory (memory_markers, decisions, open_questions,
 	// assumptions) is loaded lazily on /resume (see SetHistory), NOT at
@@ -300,36 +292,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runErrorCount = 0
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
-
-	// RATD command handling — /ratd <goal>
-	// Activates the reverse-test-driven harness: propose → red-team → sandbox.
-	if rc := parseRATDCommand(userMsg); rc != nil {
-		e.state.RATD = &RATDState{
-			Goal:  rc.Goal,
-			Phase: RATDPropose,
-		}
-		// Replace raw "/ratd <goal>" so the main agent loop sees a proper prompt.
-		if len(e.history) > 0 {
-			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"反向测试驱动协作已启动：%s\n\n请等待 Harness 完成。", rc.Goal)
-			userMsg = fmt.Sprintf("反向测试驱动协作已启动：%s\n\n请等待 Harness 完成。", rc.Goal)
-		}
-	}
-
-	// Collab command handling — /collab <goal>
-	// Activates the parallel research state machine: decompose → parallel → synthesize.
-	if cc := parseCollabCommand(userMsg); cc != nil {
-		e.state.Collab = &CollabState{
-			Goal:  cc.Goal,
-			Phase: CollabDecompose,
-		}
-		// Replace raw "/collab <goal>" so the main agent loop sees a proper prompt.
-		if len(e.history) > 0 {
-			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"并行研究已启动：%s\n\n请等待各环节完成。", cc.Goal)
-			userMsg = fmt.Sprintf("并行研究已启动：%s\n\n请等待各环节完成。", cc.Goal)
-		}
-	}
 
 	// Skill command handling — /skills (list) and /skill <name> (load)
 	if sc := parseSkillCommand(userMsg); sc != nil {
@@ -615,35 +577,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 	}
 
-	// RATD harness phase — execute the harness state machine to completion.
-	if e.state.RATD != nil {
-		response, err := e.ratdHall.handleRATDArena(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("ratd harness: %w", err)
-		}
-		if response != nil {
-			return response, nil
-		}
-	}
-
-	// Collab parallel research phase — run decompose → parallel → synthesize.
-	if e.state.Collab != nil {
-		phase := e.state.Collab.Phase
-		switch phase {
-		case CollabDecompose, CollabParallel, CollabSynthesize:
-			response, err := e.collabHall.handleCollabArena(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("collab research: %w", err)
-			}
-			if response != nil {
-				return response, nil
-			}
-		case CollabDone:
-			// Pipeline complete — clear collab state so normal flow resumes.
-			e.state.Collab = nil
-		}
-	}
-
 	// Scope is implicitly confirmed when user sends any message
 	if !e.state.ConfirmedScope {
 		e.state.ConfirmedScope = true
@@ -825,13 +758,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Run() call continues from the correct position. +1 because 'turns' was
 	// not incremented after a Done break — it still points to the completed turn.
 	e.state.TurnNumber = turns + 1
-
-	// Clean up a completed collab pipeline.
-	// Run 末尾清理处理本 Run 内产生的 CollabDone；上一 Run 遗留的 pre-existing
-	// CollabDone 已在调度块 CollabDone case 清空，两者互补不重复。
-	if e.state.Collab != nil && e.state.Collab.Phase == CollabDone {
-		e.state.Collab = nil
-	}
 
 	if err := e.emitEvent("act_complete", StageAct, nil); err != nil {
 		return nil, err

@@ -138,14 +138,6 @@ func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult
 	return r.runLoop(ctx, input, "", input.MaxIterations)
 }
 
-// RunWithPrompt runs a sub-agent with an extra system-level instruction prompt
-// prepended to the volatile content. This is used by roundtable member agents
-// that need a role-specific instruction (e.g. "你是一位安全工程师...") injected
-// as a high-priority user message after the stable system prompt.
-func (r *SubAgentRunner) RunWithPrompt(ctx context.Context, input Handoff, extraPrompt string) (*HandoffResult, error) {
-	return r.runLoop(ctx, input, extraPrompt, input.MaxIterations)
-}
-
 // runLoop is the core sub-agent execution loop.
 // extraPrompt is additional system-level instructions injected for specialist agents.
 // maxIterations caps the number of LLM turns for this agent; 0 = no cap.
