@@ -45,7 +45,7 @@
 
 *Measured on release 1.0.6 (macOS arm64); figures vary slightly by platform.*
 
-One 16 MB Go file that ships a full agent: built-in collaboration skills (ratd/collab/debate), parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
+One 16 MB Go file that ships a full agent: built-in collaboration skills (ratd/collab), parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
 
 ## Quick Start
 
@@ -104,21 +104,13 @@ deepact exec "review the last 5 commits for potential bugs" --output jsonl > rev
 
 Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`.
 
-### Multi-Agent Debate Mode (/debate)
-
-```bash
-deepact exec "/debate add idempotency control to the order module"
-```
-
-`/debate` is one of the three built-in collaboration skills (`ratd` / `collab` / `debate`) shipped inside the binary via `go:embed`. The command syntax is unchanged, but orchestration is now driven by the skill prompt: the main agent follows the skill's playbook and delegates to the generic `sub` agent via `handoff_to_agent` — four personality roles **debate in parallel**, each with its own tool access. The member with the **highest average score** wins; its proposal is rewritten into a detailed **implementation blueprint** you can approve directly. A same-named `SKILL.md` in any user skills directory overrides the built-in.
-
 ### Parallel Research (/collab)
 
 ```bash
 deepact exec "/collab add a cache layer"
 ```
 
-`/collab` is another built-in collaboration skill (`ratd` / `collab` / `debate`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
+`/collab` is another built-in collaboration skill (`ratd` / `collab`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
 
 ### Project Rules & Skills
 
@@ -128,7 +120,7 @@ Skill directories are loaded by priority (later ones win on name conflicts):
 
 | Priority | Directory | Notes |
 |----------|-----------|-------|
-| 0 | built-in (`skill/builtin/`, go:embed) | `ratd` / `collab` / `debate` — lowest priority; overridden by any same-named user skill |
+| 0 | built-in (`skill/builtin/`, go:embed) | `ratd` / `collab` — lowest priority; overridden by any same-named user skill |
 | 1 | `~/.deepact/skills/` | DeepAct-specific |
 | 2 | `<project>/.claude/skills/` | Project-level |
 | 3 | `~/.agent/skills/` | Agent-generic |
@@ -206,7 +198,7 @@ engine/   agent loop · subagents · shared type hub
 context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
 tools/    built-in tools + MCP      router/    model routing
 session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
-skill/    built-in (ratd/collab/debate) + external skill loading    config/    shared config
+skill/    built-in (ratd/collab) + external skill loading    config/    shared config
 ```
 
 Layering: `engine/` is the shared type/interface hub (hub-and-spoke). Core `llm/` and `tools/` files have zero project imports; small `adapter.go` files bridge them to engine types. `engine/` never imports `ui/`/`cmd/`; cross-layer calls go through interfaces.

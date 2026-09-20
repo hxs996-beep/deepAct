@@ -104,21 +104,13 @@ deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.
 
 `exec` 常用参数：`--auto` 跳过确认 · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`。
 
-### 多角色辩论模式（/debate）
-
-```bash
-deepact exec "/debate 给订单模块加幂等控制"
-```
-
-`/debate` 是随二进制 `go:embed` 内置的三个协作技能之一（`ratd` / `collab` / `debate`）。命令语法不变，但编排由技能提示驱动：主 agent 按技能剧本用 `handoff_to_agent` 委派通用 `sub` agent——四个性格角色**并行辩论**，各自可用工具核实代码。**平均分最高**的成员胜出，其方案被重写为一份详细的**实施蓝图**供你直接批准。任何用户技能目录放置同名 `SKILL.md` 可覆盖内置版本。
-
 ### 并行研究（/collab）
 
 ```bash
 deepact exec "/collab 加一个缓存层"
 ```
 
-`/collab` 是另一个内置协作技能（`ratd` / `collab` / `debate`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
+`/collab` 是另一个内置协作技能（`ratd` / `collab`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
 
 ### 项目规范与技能（Skills）
 
@@ -128,7 +120,7 @@ deepact exec "/collab 加一个缓存层"
 
 | 优先级 | 目录 | 说明 |
 |--------|------|------|
-| 0 | 内置（`skill/builtin/`，go:embed） | `ratd` / `collab` / `debate` —— 最低优先级，可被同名用户技能覆盖 |
+| 0 | 内置（`skill/builtin/`，go:embed） | `ratd` / `collab` —— 最低优先级，可被同名用户技能覆盖 |
 | 1 | `~/.deepact/skills/` | DeepAct 专属 |
 | 2 | `<项目>/.claude/skills/` | 项目级 |
 | 3 | `~/.agent/skills/` | Agent 通用 |
@@ -206,7 +198,7 @@ engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
 tools/    内置工具 + MCP 适配        router/   模型路由
 session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
-skill/    内置（ratd/collab/debate）+ 外部技能加载    config/   共享配置
+skill/    内置（ratd/collab）+ 外部技能加载    config/   共享配置
 ```
 
 分层：`engine/` 是共享类型/接口中枢（hub-and-spoke）。核心 `llm/`、`tools/` 文件零项目依赖，由小型 `adapter.go` 桥接文件对接 engine 类型；`engine/` 不依赖 `ui/`/`cmd/`；跨层调用走接口。

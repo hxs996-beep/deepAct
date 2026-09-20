@@ -46,7 +46,7 @@ func NewRegistry() *Registry {
 // Register adds a skill to the registry. If a skill with the same name is
 // already registered, the new one replaces it (later registration wins) —
 // this is how user-directory skills override the built-in pipeline skills
-// (ratd/collab/debate) at the lowest priority.
+// (ratd/collab) at the lowest priority.
 func (r *Registry) Register(s *Skill) {
 	for i, existing := range r.skills {
 		if existing.Name == s.Name {

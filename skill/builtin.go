@@ -10,7 +10,7 @@ import (
 //go:embed builtin/*/SKILL.md
 var builtinSkillFS embed.FS
 
-// BuiltinSkills 解析嵌入的官方保留技能（ratd/collab/debate）。
+// BuiltinSkills 解析嵌入的官方保留技能（ratd/collab）。
 // 内置技能是最低优先级：cmd/run.go 先注册内置、后注册用户目录，同名覆盖。
 func BuiltinSkills() ([]*Skill, error) {
 	var skills []*Skill

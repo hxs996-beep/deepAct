@@ -163,7 +163,7 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 				IdleConnTimeout: 90 * time.Second,
 				// Streaming responses hold a connection until SSE ends, so a
 				// single host needs more than Go's default 2 idle connections
-				// when parallel agents/debate members are in flight. Sized at
+				// when parallel agents are in flight. Sized at
 				// 2× the limiter's max slots: 20 idle + live streams cannot
 				// exceed 10, so the pool never thrashes with TCP/TLS redials.
 				MaxIdleConns:       100,

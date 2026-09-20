@@ -271,7 +271,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	// conflicts.
 	skillReg := skill.NewRegistry()
 
-	// 内置官方技能（ratd/collab/debate）最先注册，作为最低优先级。
+	// 内置官方技能（ratd/collab）最先注册，作为最低优先级。
 	// 用户目录同名技能按"后者覆盖前者"规则覆盖内置技能。
 	builtinSkills, err := skill.BuiltinSkills()
 	if err != nil {

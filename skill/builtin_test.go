@@ -10,7 +10,7 @@ func TestBuiltinSkills_Parsable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuiltinSkills() error: %v", err)
 	}
-	want := map[string]bool{"ratd": false, "collab": false, "debate": false}
+	want := map[string]bool{"ratd": false, "collab": false}
 	for _, s := range skills {
 		if _, ok := want[s.Name]; !ok {
 			t.Errorf("unexpected builtin skill %q", s.Name)

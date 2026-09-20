@@ -84,7 +84,6 @@ var slashCommands = []Suggestion{
 	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
 	{Command: "/ratd", Args: "<需求>", Description: "反向测试驱动：内置技能（红队写对抗测试驱动实现）"},
 	{Command: "/collab", Args: "<需求>", Description: "并行研究：内置技能（拆解→并行委派调研→汇总）"},
-	{Command: "/debate", Args: "<议题>", Description: "多角色辩论：内置技能（并行发言→评分→实施蓝图）"},
 	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
 }
 
@@ -3015,7 +3014,7 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 	b.WriteString("- (skills) — loadable via `/<name>` or the `load_skill` tool\n\n")
 
 	b.WriteString("Type a natural language request to start, or use `/ratd <需求>` for reverse-test-driven harness.\n")
-	b.WriteString("Use `/collab <需求>` for parallel research, `/debate <议题>` for multi-role debate — all via built-in skills.\n")
+	b.WriteString("Use `/collab <需求>` for parallel research — via built-in skills.\n")
 	return b.String()
 }
 
