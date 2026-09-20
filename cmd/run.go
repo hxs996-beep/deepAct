@@ -270,6 +270,17 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	// supplemental sources. Later directories override earlier ones on name
 	// conflicts.
 	skillReg := skill.NewRegistry()
+
+	// 内置官方技能（ratd/collab/debate）最先注册，作为最低优先级。
+	// 用户目录同名技能按"后者覆盖前者"规则覆盖内置技能。
+	builtinSkills, err := skill.BuiltinSkills()
+	if err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("load builtin skills: %w", err)
+	}
+	for _, s := range builtinSkills {
+		skillReg.Register(s)
+	}
+
 	if home, err := os.UserHomeDir(); err == nil {
 		skillDirs := []string{
 			filepath.Join(home, ".claude", "skills"),
