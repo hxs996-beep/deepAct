@@ -1373,6 +1373,38 @@ func (e *Engine) processLoadSkillCalls(calls []ToolCallRequest) []Message {
 	return pendingLoadMsgs
 }
 
+// processPlanTaskCalls intercepts plan_task tool calls from the assistant's
+// response. For each call it returns the built-in deep-planning methodology
+// as the tool result (pure capability injection — no engine state, no gate).
+// Every plan_task call receives a tool response, satisfying the DeepSeek API
+// requirement that every tool_call_id in an assistant message has a matching
+// tool response.
+func (e *Engine) processPlanTaskCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != PlanTaskToolName {
+			continue
+		}
+		var params map[string]json.RawMessage
+		if err := json.Unmarshal(call.Input, &params); err != nil {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: invalid plan_task arguments: %v", err),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		msgs = append(msgs, Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    fmt.Sprintf("[PLAN_METHODOLOGY]\n\n%s", planMethodology(e.isChinese)),
+			Timestamp:  time.Now(),
+		})
+	}
+	return msgs
+}
+
 // processTodoWriteCalls intercepts todo_write tool calls from the assistant's
 // response. Each call carries a FULL snapshot of the step list; the engine
 // validates it and forwards it to the UI as a "todo_update" progress event.
