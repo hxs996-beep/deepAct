@@ -541,6 +541,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
 	// followed by tool messages responding to each tool_call_id.
 	pendingLoadMsgs := e.processLoadSkillCalls(calls)
+	pendingPlanMsgs := e.processPlanTaskCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
 
@@ -549,6 +550,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Add load_skill tool messages AFTER the assistant message, so the
 	// DeepSeek API sees the correct order: assistant(tool_calls) → tool.
 	for _, msg := range pendingLoadMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingPlanMsgs {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingTodoMsgs {
@@ -573,6 +577,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == TodoWriteToolName {
 			continue
 		} else if call.Name == AskUserToolName {
+			continue
+		} else if call.Name == PlanTaskToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -813,6 +819,7 @@ func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
 	specs = append(specs, loadSkillToolSpec())
+	specs = append(specs, planTaskToolSpec(e.isChinese))
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, askUserToolSpec(e.isChinese))
@@ -893,6 +900,8 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 			return fmt.Sprintf("update todos: %d 项", len(todos))
 		}
 		return "update todos"
+	case "plan_task":
+		return "deep plan"
 	case "skill_install", "load_skill":
 		// skill_install uses "name"; load_skill uses "skill_name".
 		if n, ok := m["name"].(string); ok && n != "" {
