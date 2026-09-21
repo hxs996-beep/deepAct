@@ -19,6 +19,7 @@ const (
 	TodoWriteToolName    = "todo_write"
 	SubmitResultToolName = "submit_result"
 	AskUserToolName      = "ask_user"
+	PlanTaskToolName     = "plan_task"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -181,6 +182,26 @@ func loadSkillToolSpec() ModelTool {
 				},
 				"required": ["skill_name"]
 			}`),
+		},
+	}
+}
+
+// planTaskToolSpec returns the tool definition for the model to invoke
+// deep-planning on complex tasks. Mirrors load_skill: the engine intercepts
+// the call and injects the built-in planning methodology as the tool result.
+// No parameters. The model decides when a task is complex enough to plan.
+func planTaskToolSpec(zh bool) ModelTool {
+	desc := "When you judge the current task to be complex, multi-step, or requiring deep analysis before acting, call this tool to receive a deep-planning methodology. The engine injects a planning framework; follow it to understand the background, decompose, analyze, and produce a plan before executing. For simple tasks, use todo_write directly instead."
+	if zh {
+		desc = "当你判断当前任务复杂、多步骤、需要先深度分析再动手时，调用本工具获得深度分析方法论。引擎会注入规划框架，请先理解背景、拆解、多假设验证、产出计划，再开始执行。简单任务请直接用 todo_write，不必调用本工具。"
+	}
+	params := `{"type":"object","properties":{},"required":[]}`
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        PlanTaskToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
 		},
 	}
 }
