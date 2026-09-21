@@ -365,3 +365,94 @@ max_results = 8
 		t.Errorf("MaxResults = %d, want 8", f.Search.MaxResults)
 	}
 }
+
+func TestApply_UserAgentRoles(t *testing.T) {
+	var cfg engine.EngineConfig
+	f := &File{
+		Agents: map[string]agentRoleConfig{
+			"researcher": {
+				Description: "只读调研员",
+				Persona:     "你是研究员……",
+				Tools:       []string{"read", "grep", "glob", "lsp"},
+				Model:       "flash",
+				MaxIterations: 20,
+			},
+			"full-tool": {
+				Description: "全部工具角色",
+				Persona:     "全能",
+				Tools:       []string{"*"},
+			},
+		},
+	}
+	Apply(&cfg, f)
+	if len(cfg.AgentSpecs) != 2 {
+		t.Fatalf("AgentSpecs len = %d, want 2", len(cfg.AgentSpecs))
+	}
+	var researcher, fullTool *engine.AgentSpec
+	for i := range cfg.AgentSpecs {
+		switch cfg.AgentSpecs[i].ID {
+		case "researcher":
+			researcher = &cfg.AgentSpecs[i]
+		case "full-tool":
+			fullTool = &cfg.AgentSpecs[i]
+		}
+	}
+	if researcher == nil {
+		t.Fatal("researcher role not found")
+	}
+	if researcher.Persona != "你是研究员……" {
+		t.Errorf("Persona = %q", researcher.Persona)
+	}
+	if len(researcher.ToolNames) != 4 {
+		t.Errorf("ToolNames = %v, want 4 tools", researcher.ToolNames)
+	}
+	if researcher.ModelName != "flash" {
+		t.Errorf("ModelName = %q, want flash", researcher.ModelName)
+	}
+	if researcher.MaxIterations != 20 {
+		t.Errorf("MaxIterations = %d, want 20", researcher.MaxIterations)
+	}
+	if fullTool == nil {
+		t.Fatal("full-tool role not found")
+	}
+	// tools = ["*"] → empty ToolNames (all tools)
+	if len(fullTool.ToolNames) != 0 {
+		t.Errorf("full-tool ToolNames = %v, want empty (all tools)", fullTool.ToolNames)
+	}
+}
+
+func TestLoad_AgentRolesSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := []byte(`
+[agents.researcher]
+description = "只读调研"
+persona = "你是研究员"
+tools = ["read", "grep", "glob", "lsp"]
+model = "flash"
+
+[agents.fixer]
+description = "修复者"
+persona = "你是修复者"
+tools = ["*"]
+structured_result = true
+`)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if f.Agents == nil || len(f.Agents) != 2 {
+		t.Fatalf("Agents = %+v, want 2 roles", f.Agents)
+	}
+	r := f.Agents["researcher"]
+	if r.Persona != "你是研究员" || len(r.Tools) != 4 || r.Model != "flash" {
+		t.Errorf("researcher = %+v", r)
+	}
+	fx := f.Agents["fixer"]
+	if fx.StructuredResult == nil || !*fx.StructuredResult {
+		t.Errorf("fixer.StructuredResult not set true: %+v", fx)
+	}
+}

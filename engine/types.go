@@ -66,6 +66,10 @@ type EngineConfig struct {
 	FlashModelName       string // Flash model name for cheaper agents
 	BaseURL              string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
 	MaxConcurrentRequests int // cap on concurrent in-flight LLM requests; 0 = default 8
+	// AgentSpecs are user-defined sub-agent roles loaded from config.toml
+	// [agents] section. Registered alongside built-ins; user roles override
+	// built-ins with the same name.
+	AgentSpecs           []AgentSpec
 	MaxTurns             int
 	MaxIterationsPerTurn int
 	MaxContextTokens     int

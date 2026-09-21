@@ -17,22 +17,55 @@ func TestSubAgentTool_Spec_DynamicEnum(t *testing.T) {
 		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
-		func() []string { return []string{"sub", "team-lead"} },
+		func() []AgentInfo {
+			return []AgentInfo{{ID: "sub", Description: "generic"}, {ID: "researcher", Description: "read-only investigator"}}
+		},
 		2,
 	)
 	spec := tool.Spec()
 	var params struct {
 		Properties struct {
 			Agent struct {
-				Enum []string `json:"enum"`
+				Enum []AgentInfo `json:"enum"`
 			} `json:"agent"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal(spec.Parameters, &params); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(params.Properties.Agent.Enum) != 2 || params.Properties.Agent.Enum[1] != "team-lead" {
-		t.Errorf("enum = %v, want [sub team-lead]", params.Properties.Agent.Enum)
+	if len(params.Properties.Agent.Enum) != 2 || params.Properties.Agent.Enum[1].ID != "researcher" {
+		t.Errorf("enum = %+v, want [sub researcher]", params.Properties.Agent.Enum)
+	}
+	if params.Properties.Agent.Enum[1].Description == "" {
+		t.Errorf("enum[1].Description empty, want role description injected")
+	}
+}
+
+func TestSubAgentTool_Spec_FallbackEnum(t *testing.T) {
+	// nil agents callback → fallback single "sub"
+	tool := NewSubAgentTool(
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+			return engine.ToolResult{}, nil
+		},
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+			return engine.ToolResult{}, nil
+		},
+		nil,
+		2,
+	)
+	spec := tool.Spec()
+	var params struct {
+		Properties struct {
+			Agent struct {
+				Enum []AgentInfo `json:"enum"`
+			} `json:"agent"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(spec.Parameters, &params); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(params.Properties.Agent.Enum) != 1 || params.Properties.Agent.Enum[0].ID != "sub" {
+		t.Errorf("enum = %+v, want fallback [sub]", params.Properties.Agent.Enum)
 	}
 }
 
@@ -47,7 +80,7 @@ func TestSubAgentTool_Run_DepthDispatch(t *testing.T) {
 			nestedCalled = true
 			return engine.ToolResult{Status: "ok", Digest: "nested"}, nil
 		},
-		func() []string { return []string{"sub"} },
+		func() []AgentInfo { return []AgentInfo{{ID: "sub"}} },
 		3, // maxDepth=3 so depth 2 still dispatches to nested
 	)
 
@@ -76,7 +109,7 @@ func TestSubAgentTool_Run_QuestionsPassthrough(t *testing.T) {
 		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
-		func() []string { return []string{"sub"} },
+		func() []AgentInfo { return []AgentInfo{{ID: "sub"}} },
 		2,
 	)
 	env, err := tool.Run(ToolContext{Depth: 0, Ctx: context.Background()},
@@ -101,7 +134,7 @@ func TestSubAgentTool_Run_MaxDepthRejected(t *testing.T) {
 		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
 			return engine.ToolResult{Status: "ok", Digest: "nested"}, nil
 		},
-		func() []string { return []string{"sub"} },
+		func() []AgentInfo { return []AgentInfo{{ID: "sub"}} },
 		2,
 	)
 	env, err := tool.Run(ToolContext{Depth: 3, Ctx: context.Background()},

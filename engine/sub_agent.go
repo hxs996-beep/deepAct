@@ -144,7 +144,10 @@ func (r *SubAgentRunner) contextLimit() int {
 // MaxIterations <= 0 means no turn cap — the loop runs until a normal
 // completion or a built-in guard (stalled narration, loop detection, etc.).
 func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
-	return r.runLoop(ctx, input, "", input.MaxIterations)
+	// The role's stable persona (codex-style developer instructions) is
+	// injected as part of the stable system prefix, not the volatile goal,
+	// so it stays constant across turns and keeps the prefix cache hot.
+	return r.runLoop(ctx, input, input.Persona, input.MaxIterations, input.ModelOverride)
 }
 
 // runLoop is the core sub-agent execution loop.
@@ -207,13 +210,15 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	}
 
 	// Stable system message — identical across all sub-agent calls → prefix cache hit
-	// Stable agent-type instructions (extraPrompt) — identical per agent type → prefix cache hit
+	// Role persona (extraPrompt) — appended to the system prefix so it stays
+	// constant across the sub-agent's turns → prefix cache hit per role.
 	// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
-	history := []ModelMessage{
-		{Role: "system", Content: r.stableSystemPrompt(input.UserLanguage)},
-	}
+	system := r.stableSystemPrompt(input.UserLanguage)
 	if extraPrompt != "" {
-		history = append(history, ModelMessage{Role: "user", Content: extraPrompt})
+		system += "\n\n" + extraPrompt
+	}
+	history := []ModelMessage{
+		{Role: "system", Content: system},
 	}
 	if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
 		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
@@ -754,7 +759,17 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // is not duplicated.
 func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
 	all := r.tools.Specs()
-	result := []ModelTool{handoffToolSpec(zhFromLang(userLang))}
+	// Prefer the registered SubAgentTool spec (dynamic role enum) so sub-agents
+	// see the same roles as the main agent when they delegate further. Fall back
+	// to the static handoffToolSpec if the tool is not registered.
+	handoffSpec := handoffToolSpec(zhFromLang(userLang))
+	for _, spec := range all {
+		if spec.Function.Name == HandoffToolName {
+			handoffSpec = spec
+			break
+		}
+	}
+	result := []ModelTool{handoffSpec}
 	result = append(result, askUserToolSpec(zhFromLang(userLang)))
 
 	if len(allowList) == 0 {

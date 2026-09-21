@@ -18,12 +18,34 @@ type File struct {
 	Routing routingConfig `toml:"routing"`
 	Context contextConfig `toml:"context"`
 	Guards  guardsConfig  `toml:"guards"`
+	// Agents holds user-defined sub-agent roles. Each key is a role name that
+	// becomes selectable in the handoff tool's agent enum; user roles override
+	// built-in roles with the same name. Mirrors codex's agent_roles toml.
+	Agents map[string]agentRoleConfig `toml:"agents"`
 	// Conference field removed — ConferenceEnabled was dead code (never read by engine).
 	// Conference state is managed via TaskState.Conference in the engine package.
 	Team   teamConfig   `toml:"team"`
 	LSP    lspConfig    `toml:"lsp"`
 	Search searchConfig `toml:"search"`
 	UI     uiConfig     `toml:"ui"`
+}
+
+// agentRoleConfig is one user-defined sub-agent role (codex-style).
+//
+//	[agents.researcher]
+//	description = "只读调研员"
+//	persona     = "你是研究员……"
+//	tools       = ["read", "grep", "glob", "lsp"]   # 或 ["*"] 全部工具
+//	model       = "flash"                            # 可选，per-role 模型覆盖
+//	max_iterations = 15                              # 可选，轮次上限
+//	structured_result = true                         # 可选，结构化完成
+type agentRoleConfig struct {
+	Description      string   `toml:"description"`
+	Persona          string   `toml:"persona"`
+	Tools            []string `toml:"tools"`
+	Model            string   `toml:"model"`
+	MaxIterations    int      `toml:"max_iterations"`
+	StructuredResult *bool    `toml:"structured_result"`
 }
 
 // searchConfig configures the native web_search tool.
@@ -221,6 +243,34 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
+	}
+	// User-defined sub-agent roles: convert [agents] section to AgentSpecs.
+	// tools = ["*"] means all tools (empty ToolNames in AgentSpec means all).
+	for name, rc := range f.Agents {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		spec := engine.AgentSpec{
+			ID:          engine.AgentID(name),
+			Description: rc.Description,
+			Persona:     rc.Persona,
+			ModelName:   rc.Model,
+			MaxIterations: rc.MaxIterations,
+		}
+		tools := make([]string, 0, len(rc.Tools))
+		for _, t := range rc.Tools {
+			if t != "*" {
+				tools = append(tools, t)
+			}
+		}
+		// Only set ToolNames when the user listed specific tools (empty = all).
+		if len(tools) > 0 {
+			spec.ToolNames = tools
+		}
+		if rc.StructuredResult != nil {
+			spec.StructuredResult = *rc.StructuredResult
+		}
+		cfg.AgentSpecs = append(cfg.AgentSpecs, spec)
 	}
 	// scope_guard=false means auto-confirm (invert the boolean)
 	cfg.AutoConfirmScope = !f.Guards.ScopeGuard

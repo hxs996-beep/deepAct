@@ -61,6 +61,7 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		Tools:          params.Tools,
 		Constraints:    params.Constraints,
 		ExpectedOutput: params.ExpectedOutput,
+		Persona:        params.Persona,
 		Depth:          opts.depth,
 		UserLanguage:   opts.userLang,
 	}

@@ -49,6 +49,14 @@ type Handoff struct {
 	// criteria the delegating agent sets). Injected into the volatile prompt
 	// so the sub-agent knows the deliverable's shape instead of guessing.
 	ExpectedOutput string `json:"expected_output,omitempty"`
+	// Persona is the role's stable system instruction (codex-style developer
+	// instructions). Unlike the volatile goal, it is injected as part of the
+	// stable system prefix, so it stays constant across the sub-agent's turns
+	// and keeps the shared system prompt prefix-cache hot. Empty = no role.
+	Persona string `json:"persona,omitempty"`
+	// ModelOverride, if set, overrides the runner's default model for this run
+	// (e.g. a cheap role uses flash). "flash" selects the flash model.
+	ModelOverride string `json:"model_override,omitempty"`
 	Depth          int    `json:"depth"`
 	NoNudge        bool   `json:"no_nudge,omitempty"`
 	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
@@ -88,6 +96,11 @@ type AgentSpec struct {
 	ToolNames     []string // default tool allowlist (empty = all tools)
 	ModelName     string   // if set, overrides runner's default model for this agent
 	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. critic: 15).
+	// Persona is the role's stable system instruction (codex-style developer
+	// instructions). Injected as part of the sub-agent's stable system prefix
+	// when this agent runs, keeping the shared prefix cache hot across turns.
+	// Empty = generic sub-agent (no role personality).
+	Persona string
 	// StructuredResult injects a scoped submit_result tool: a text-only reply
 	// never completes the run — the agent MUST call submit_result with its
 	// final summary, so termination never depends on an LLM judgment call.
@@ -117,6 +130,10 @@ type HandoffToAgentParams struct {
 	// ExpectedOutput states what a successful result looks like — acceptance
 	// criteria the delegating agent sets for the sub-agent.
 	ExpectedOutput string `json:"expected_output,omitempty"`
+	// Persona, when set, overrides the target agent's default persona for this
+	// run (codex-style developer instructions injected into the stable system
+	// prefix). Most callers leave it empty and use the role's built-in persona.
+	Persona string `json:"persona,omitempty"`
 }
 
 // TaskCompleteParams is the JSON schema for the task_complete tool call.
@@ -212,7 +229,7 @@ func planTaskToolSpec(zh bool) ModelTool {
 // in an otherwise Chinese session.
 func handoffToolSpec(zh bool) ModelTool {
 	desc := "Delegate a sub-task to a specialized agent. Sub-agents can research code, brainstorm solutions, or critically review decisions."
-	agentDesc := "Target agent: sub (generic)"
+	agentDesc := "Target agent (role): sub (generic), researcher (read-only investigation), critic (adversarial review)"
 	goalDesc := "What the agent should accomplish"
 	ctxDesc := "Relevant context for the sub-agent"
 	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
@@ -220,7 +237,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
-		agentDesc = "目标代理：sub（通用代理）"
+		agentDesc = "目标代理（角色）：sub（通用）、researcher（只读调研）、critic（对抗审查）"
 		goalDesc = "代理需要完成的目标"
 		ctxDesc = "提供给子代理的相关上下文"
 		toolsDesc = "允许子代理使用的工具（可选）"
@@ -232,7 +249,7 @@ func handoffToolSpec(zh bool) ModelTool {
 				"properties": {
 					"agent": {
 						"type": "string",
-						"enum": ["sub"],
+						"enum": ["sub", "researcher", "critic"],
 						"description": %q
 					},
 					"goal": {

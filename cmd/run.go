@@ -249,7 +249,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	runner.SetCompressor(compressor)
 
-	agentReg := engine.NewDefaultRegistry(runner)
+	agentReg := engine.NewDefaultRegistry(runner, config.AgentSpecs)
 	runner.SetRegistry(agentReg)
 
 	store, err := session.NewStore(defaultSessionDir())
@@ -355,13 +355,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
 				return runner.RunSubAgent(ctx, p, depth, lang)
 			},
-			func() []string {
+			func() []tools.AgentInfo {
 				specs := agentReg.AgentSpecs()
-				ids := make([]string, 0, len(specs))
+				infos := make([]tools.AgentInfo, 0, len(specs))
 				for _, s := range specs {
-					ids = append(ids, string(s.ID))
+					infos = append(infos, tools.AgentInfo{ID: string(s.ID), Description: s.Description})
 				}
-				return ids
+				return infos
 			},
 			runner.MaxDepth(),
 		))
