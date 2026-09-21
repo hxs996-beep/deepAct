@@ -736,3 +736,44 @@ func TestValidateReasoningEcho_SkipsClean(t *testing.T) {
 		t.Errorf("tool message should not be touched: got %q", got[2].ReasoningContent)
 	}
 }
+
+func TestSubAgentEndpointFor_Partition(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      string
+		partition string
+		want      string
+	}{
+		{"default endpoint", "https://api.deepseek.com", "sub-0-1", "https://api.deepseek.com?sub=sub-0-1"},
+		{"openrouter", "https://openrouter.ai/api/v1", "sub-1-2", "https://openrouter.ai/api/v1?sub=sub-1-2"},
+		{"already has query", "https://api.deepseek.com?foo=bar", "sub-0-3", "https://api.deepseek.com?foo=bar&sub=sub-0-3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SubAgentEndpointFor(tt.base, "test-key", tt.partition); got != tt.want {
+				t.Errorf("SubAgentEndpointFor(%q, %q) = %q, want %q", tt.base, tt.partition, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyStatusError(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		want error
+	}{
+		{"429 rate limit", 429, ErrRateLimit},
+		{"402 insufficient balance", 402, ErrInsufficientBalance},
+		{"500 server error", 500, ErrInvalidResponse},
+		{"404 unexpected", 404, ErrInvalidResponse},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyStatusError(tt.code)
+			if !errors.Is(got, tt.want) {
+				t.Errorf("classifyStatusError(%d) = %v, want %v", tt.code, got, tt.want)
+			}
+		})
+	}
+}

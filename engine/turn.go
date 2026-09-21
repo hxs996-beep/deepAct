@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -101,16 +102,49 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if err != nil {
 		turnLog.Printf("stream model err: %v", err)
 		e.state.ConsecutiveFailures++
-		// Graceful degradation: don't crash the session on transient API errors.
-		// The caller (Run) will see Blocked=true and return to the user.
-		// 透传底层真实错误（HTTP 状态码/响应体/重试日志），避免把所有失败
-		// 都呈现为"断网"，掩盖限流（429）等真实原因。
-		return TurnResult{
-			Blocked:      true,
-			BlockedBy:    "model_error",
-			Questions:    []string{fmt.Sprintf("模型 API 请求失败，任务已中断。请检查网络与 API Key 配置后重新发起。\n\n具体原因：%v\n\nModel API request failed and the task was interrupted. Check your network and API key, then retry.\n\nReason: %v", err, err)},
-			FinishReason: "model_error",
-		}, nil
+		// Rate limits: the llm layer already retried with Retry-After backoff.
+		// If it still failed, wait one more quiet window and re-attempt once —
+		// the user should not be forced to type "continue" for a transient 429.
+		if errors.Is(err, ErrModelRateLimit) {
+			turnLog.Printf("rate limit persisted after llm retries; sleeping 60s then one final retry")
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ProgressEvent{Type: "retry", Detail: "Rate limit hit — waiting 60s before retrying…"})
+			}
+			select {
+			case <-time.After(60 * time.Second):
+			case <-ctx.Done():
+				return TurnResult{Blocked: true, BlockedBy: "model_error", FinishReason: "cancelled"}, nil
+			}
+			stream, err = e.model.Stream(ctx, req)
+			if err != nil {
+				turnLog.Printf("final retry after rate limit still failed: %v", err)
+				return TurnResult{
+					Blocked:      true,
+					BlockedBy:    "model_error",
+					Questions:    []string{fmt.Sprintf("模型 API 持续限流，请稍后重试。\n\n具体原因：%v\n\nThe model API is rate-limited. Please retry later.\n\nReason: %v", err, err)},
+					FinishReason: "model_error",
+				}, nil
+			}
+		} else if errors.Is(err, ErrModelInsufficientBal) {
+			// Insufficient balance is persistent: retrying is pointless. Surface
+			// a clear, actionable message instead of a generic network error.
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "model_error",
+				Questions:    []string{"模型 API 余额不足，请充值后重试。\n\nInsufficient model API balance. Please top up and retry."},
+				FinishReason: "model_error",
+			}, nil
+		} else {
+			// Other errors (network, 5xx, etc.): llm layer retried; surface it.
+			// 透传底层真实错误（HTTP 状态码/响应体/重试日志），避免把所有失败
+			// 都呈现为"断网"，掩盖限流（429）等真实原因。
+			return TurnResult{
+				Blocked:      true,
+				BlockedBy:    "model_error",
+				Questions:    []string{fmt.Sprintf("模型 API 请求失败，任务已中断。请检查网络与 API Key 配置后重新发起。\n\n具体原因：%v\n\nModel API request failed and the task was interrupted. Check your network and API key, then retry.\n\nReason: %v", err, err)},
+				FinishReason: "model_error",
+			}, nil
+		}
 	}
 
 	var contentBuilder strings.Builder
@@ -204,6 +238,15 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			e.state.ConsecutiveFailures++
 			// 透传底层真实错误：HTTP 状态码/响应体、超时类型、重试日志。
 			// 429 限流、5xx、网络波动都各归其位，不再一律提示"断网"。
+			// 402 余额不足：持久性错误，明确提示充值。
+			if errors.Is(chunk.Err, ErrModelInsufficientBal) {
+				return TurnResult{
+					Blocked:      true,
+					BlockedBy:    "stream_error",
+					Questions:    []string{"模型 API 余额不足，请充值后重试。\n\nInsufficient model API balance. Please top up and retry."},
+					FinishReason: "stream_error",
+				}, nil
+			}
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "stream_error",

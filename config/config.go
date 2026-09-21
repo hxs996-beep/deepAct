@@ -59,9 +59,12 @@ type lspServerOverride struct {
 type modelConfig struct {
 	Default     string `toml:"default"`
 	Escalation  string `toml:"escalation"`
-	BaseURL     string `toml:"base_url"`      // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
-	SubAgentURL string `toml:"sub_agent_url"` // separate endpoint for sub-agents (cache isolation)
-	APIKey      string `toml:"api_key"`       // DeepSeek/OpenRouter API key
+	BaseURL     string `toml:"base_url"` // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
+	APIKey      string `toml:"api_key"`  // DeepSeek/OpenRouter API key
+	// MaxConcurrentRequests caps concurrent in-flight LLM requests (shared
+	// AdaptiveLimiter slots). 0 = default 8. Lower it if the provider rate-limits
+	// you (e.g. 1-minute TPM windows); raise it for parallel sub-agent workloads.
+	MaxConcurrentRequests int `toml:"max_concurrent_requests"`
 }
 
 type routingConfig struct {
@@ -207,8 +210,8 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	if f.Model.BaseURL != "" {
 		cfg.BaseURL = f.Model.BaseURL
 	}
-	if f.Model.SubAgentURL != "" {
-		cfg.SubAgentBaseURL = f.Model.SubAgentURL
+	if f.Model.MaxConcurrentRequests > 0 {
+		cfg.MaxConcurrentRequests = f.Model.MaxConcurrentRequests
 	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens

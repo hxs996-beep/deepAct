@@ -197,7 +197,13 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	config.SessionID = fmt.Sprintf("session-%d", time.Now().UnixNano())
 
 	estimator := llm.NewTokenEstimator()
-	client, err := buildModelClient(estimator, config.BaseURL)
+	client, err := buildModelClient(estimator, config.BaseURL, config.MaxConcurrentRequests)
+	if err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, err
+	}
+	// Sub-agents get their own client with an independent limiter, so parallel
+	// sub-agents never starve the main agent's request slots (and vice versa).
+	subClient, err := buildSubAgentClient(estimator, config.BaseURL, config.MaxConcurrentRequests)
 	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, err
 	}
@@ -213,16 +219,15 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	toolExecutor := tools.NewEngineExecutor(registry)
 	toolExecutor.ArtifactDir = defaultArtifactDir()
 
-	runner := engine.NewSubAgentRunner(client, toolExecutor, nil, config.ModelName)
-	// Always give sub-agents their own API endpoint for prefix cache isolation.
-	// If explicitly configured (SubAgentBaseURL), use that; otherwise auto-derive
-	// from the main agent's endpoint by appending a harmless query parameter.
-	if config.SubAgentBaseURL != "" {
-		runner.SetSubAgentBaseURL(config.SubAgentBaseURL)
-	} else {
-		apiKey, _ := loadAPIKey()
-		runner.SetSubAgentBaseURL(llm.SubAgentEndpoint(config.BaseURL, apiKey))
-	}
+	runner := engine.NewSubAgentRunner(subClient, toolExecutor, nil, config.ModelName)
+	// Always give sub-agents their own per-run prefix-cache partition. The injected
+	// function derives a partition URL from a partition name (e.g. "sub-0-3") by
+	// appending a harmless query param to the main endpoint, so each sub-agent's
+	// calls get their own DeepSeek cache partition instead of polluting each other.
+	apiKey, _ := loadAPIKey()
+	runner.SetSubAgentPartitionURL(func(partition string) string {
+		return llm.SubAgentEndpointFor(config.BaseURL, apiKey, partition)
+	})
 	if config.FlashModelName != "" {
 		runner.SetFlashModel(config.FlashModelName)
 	}
@@ -395,14 +400,32 @@ func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp
 	return nil
 }
 
-func buildModelClient(estimator *llm.TokenEstimator, baseURL string) (*llm.EngineClient, error) {
+// buildModelClient creates an LLM client with an AdaptiveLimiter sized to
+// maxConcurrent (0 = default 8 slots). The limiter bounds concurrent in-flight
+// requests so parallel agents don't hammer the provider's rate limit.
+func buildModelClient(estimator *llm.TokenEstimator, baseURL string, maxConcurrent int) (*llm.EngineClient, error) {
 	apiKey, err := loadAPIKey()
 	if err != nil {
 		return nil, fmt.Errorf("API key: %w", err)
 	}
 	endpoint := llm.DetectBaseURL(baseURL, apiKey)
-	client := llm.NewDeepSeekClientWithEndpoint(endpoint, apiKey, nil, nil, llm.DefaultRetryPolicy(), estimator)
+	var limiter *llm.AdaptiveLimiter
+	if maxConcurrent > 0 {
+		limiter = llm.NewAdaptiveLimiter(int64(maxConcurrent), int64(maxConcurrent), 1, 20, maxConcurrent)
+	}
+	client := llm.NewDeepSeekClientWithEndpoint(endpoint, apiKey, nil, limiter, llm.DefaultRetryPolicy(), estimator)
 	return llm.NewEngineClient(client), nil
+}
+
+// buildSubAgentClient creates an independent LLM client for sub-agents, with
+// its own limiter so parallel sub-agents never starve the main agent's slots
+// (and vice versa). Defaults to min(4, maxConcurrent/2) slots.
+func buildSubAgentClient(estimator *llm.TokenEstimator, baseURL string, maxConcurrent int) (*llm.EngineClient, error) {
+	slots := maxConcurrent / 2
+	if slots <= 0 || slots > 4 {
+		slots = 4
+	}
+	return buildModelClient(estimator, baseURL, slots)
 }
 
 func registerBuiltinTools(registry *tools.Registry, lspOverrides map[string]builtin.LSPCommand, searchCfg builtin.WebSearchConfig) {

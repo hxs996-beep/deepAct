@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	dlog "github.com/deepact/deepact/internal/log"
@@ -87,6 +89,15 @@ type DeepSeekClient struct {
 	// returns ErrTimeout so the caller can retry instead of waiting forever.
 	// 0 disables the watchdog (legacy behavior). See streamOnce/parseSSE.
 	idleTimeout time.Duration
+
+	// retryAfterMu guards retryAfter, written by streamOnce on a 429 and read
+	// by the client's RetryAfterFunc. Protected because forked clients share
+	// this DeepSeekClient's limiter but each call mutates retryAfter; a mutex
+	// keeps concurrent 429 responses from racing.
+	retryAfterMu sync.Mutex
+	// retryAfter is the earliest time (from server Retry-After header) at which
+	// a retried request may succeed. Zero = no known window.
+	retryAfter time.Time
 }
 
 // Fork creates a new DeepSeekClient sharing the same HTTP client, limiter, retry policy,
@@ -181,7 +192,7 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 		estimator = NewTokenEstimator()
 	}
 	endpoint := chatCompletionsURL(baseURL)
-	return &DeepSeekClient{
+	client := &DeepSeekClient{
 		apiKey:       apiKey,
 		endpoint:     endpoint,
 		http:         httpClient,
@@ -191,6 +202,53 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 		reasoningMgr: NewReasoningEchoManager(),
 		idleTimeout:  DefaultIdleTimeout,
 	}
+	// Wire the 429 Retry-After window into the retry policy: when the server
+	// tells us when the rate-limit window resets, respect it instead of using
+	// short exponential backoff (which hammers a 1-minute TPM window).
+	client.retry.RetryAfterFunc = client.retryAfterDelay
+	return client
+}
+
+// retryAfterDelay returns the time remaining until the server's rate-limit
+// window resets, or 0 if no Retry-After was recorded (falls back to backoff).
+func (c *DeepSeekClient) retryAfterDelay() time.Duration {
+	c.retryAfterMu.Lock()
+	defer c.retryAfterMu.Unlock()
+	if c.retryAfter.IsZero() {
+		return 0
+	}
+	d := time.Until(c.retryAfter)
+	if d <= 0 {
+		// Window passed; clear so the next 429 re-records it.
+		c.retryAfter = time.Time{}
+		return 0
+	}
+	return d
+}
+
+// recordRetryAfter parses the server's Retry-After header (either seconds or an
+// HTTP date) and stores the earliest retry time. Providers like DeepSeek send
+// Retry-After on 429 to indicate when the TPM/RPM window resets.
+func (c *DeepSeekClient) recordRetryAfter(h http.Header) {
+	val := h.Get("Retry-After")
+	if val == "" {
+		return
+	}
+	// HTTP-date form: "Wed, 21 Oct 2026 07:28:00 GMT"
+	if t, err := http.ParseTime(val); err == nil {
+		c.retryAfterMu.Lock()
+		c.retryAfter = t
+		c.retryAfterMu.Unlock()
+		return
+	}
+	// Delta-seconds form: "60"
+	if secs, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && secs >= 0 {
+		c.retryAfterMu.Lock()
+		c.retryAfter = time.Now().Add(time.Duration(secs) * time.Second)
+		c.retryAfterMu.Unlock()
+		return
+	}
+	debugLog.Printf("unparseable Retry-After header: %q", val)
 }
 
 // SetIdleTimeout overrides the per-client SSE idle timeout. Pass 0 to disable
@@ -226,11 +284,21 @@ func DetectBaseURL(configuredBaseURL, apiKey string) string {
 // The derivation appends a harmless query parameter that changes the cache key without
 // affecting request routing or behavior.
 func SubAgentEndpoint(configuredBaseURL, apiKey string) string {
+	return SubAgentEndpointFor(configuredBaseURL, apiKey, "1")
+}
+
+// SubAgentEndpointFor returns an API base URL for a sub-agent partition identified by
+// partition (e.g. "sub-0-3"). Like SubAgentEndpoint, it creates a separate prefix cache
+// partition on DeepSeek's server, keyed by the appended query parameter. Each partition
+// keeps its own cached prefix, so parallel sub-agents with different volatile prompts no
+// longer overwrite each other's system-prefix cache entries.
+func SubAgentEndpointFor(configuredBaseURL, apiKey, partition string) string {
 	mainEndpoint := DetectBaseURL(configuredBaseURL, apiKey)
+	param := "sub=" + partition
 	if strings.Contains(mainEndpoint, "?") {
-		return mainEndpoint + "&sub=1"
+		return mainEndpoint + "&" + param
 	}
-	return mainEndpoint + "?sub=1"
+	return mainEndpoint + "?" + param
 }
 
 func (c *DeepSeekClient) Stream(ctx context.Context, req ChatRequest) (<-chan Chunk, error) {
@@ -278,20 +346,6 @@ func (c *DeepSeekClient) Complete(ctx context.Context, req ChatRequest) (*ChatRe
 func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, ch chan<- Chunk) error {
 	var retryLog []string
 	for attempt := 0; attempt <= c.retry.MaxRetries; attempt++ {
-		if attempt > 0 {
-			backoffStart := time.Now()
-			if err := c.retry.Sleep(ctx, attempt); err != nil {
-				return fmt.Errorf("backoff: %w", classifyContextError(err))
-			}
-			backoffDur := time.Since(backoffStart)
-			debugLog.Printf("retry attempt=%d after backoff=%s", attempt, backoffDur)
-			retryLog = append(retryLog, fmt.Sprintf("retry %d/%d (waited %s)", attempt, c.retry.MaxRetries, backoffDur.Round(time.Millisecond)))
-			// Send retry progress to the caller so the UI can show it in real time.
-			select {
-			case ch <- Chunk{RetryProgress: fmt.Sprintf("Retrying %d/%d after %s...", attempt, c.retry.MaxRetries, backoffDur.Round(time.Millisecond))}:
-			default:
-			}
-		}
 		status, err := c.streamOnce(ctx, req, ch)
 		if err == nil {
 			if attempt > 0 {
@@ -301,6 +355,11 @@ func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, c
 		}
 		debugLog.Printf("streamOnce failed attempt=%d status=%d err=%v", attempt, status, err)
 		retryLog = append(retryLog, fmt.Sprintf("attempt %d: %v", attempt+1, err))
+		// Persistent failures (e.g. insufficient balance / 402) are fatal —
+		// retrying is pointless until the user tops up.
+		if c.retry.IsFatal(status) {
+			return err
+		}
 		// Context errors are not retryable — the caller cancelled or deadline passed
 		if errors.Is(err, ErrContextCanceled) || errors.Is(err, ErrTimeout) {
 			return err
@@ -313,6 +372,22 @@ func (c *DeepSeekClient) streamWithRetry(ctx context.Context, req ChatRequest, c
 				return fmt.Errorf("%w\n\n%s", err, strings.Join(retryLog, "\n"))
 			}
 			return err
+		}
+		// Wait before the next attempt: honor the server's Retry-After window
+		// for 429 (covers a 1-minute TPM window) instead of short backoff.
+		isRateLimit := errors.Is(err, ErrRateLimit)
+		delay := c.retry.RetryDelay(attempt+1, isRateLimit)
+		if delay > 0 {
+			if err := c.retry.SleepFor(ctx, delay); err != nil {
+				return fmt.Errorf("backoff: %w", classifyContextError(err))
+			}
+		}
+		debugLog.Printf("retry attempt=%d after delay=%s", attempt+1, delay.Round(time.Millisecond))
+		retryLog = append(retryLog, fmt.Sprintf("retry %d/%d (waited %s)", attempt+1, c.retry.MaxRetries, delay.Round(time.Millisecond)))
+		// Send retry progress to the caller so the UI can show it in real time.
+		select {
+		case ch <- Chunk{RetryProgress: fmt.Sprintf("Retrying %d/%d after %s...", attempt+1, c.retry.MaxRetries, delay.Round(time.Millisecond))}:
+		default:
 		}
 	}
 	return ErrInvalidResponse
@@ -375,6 +450,11 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 		debugLog.Printf("API returned %d, body=%q (len=%d)", resp.StatusCode, string(body), len(body))
 		// hex dump the body to catch non-printable characters
 		debugLog.Printf("API body hex: %x", body)
+		// Record the server's rate-limit window so the retry layer waits for it
+		// instead of hammering a 1-minute TPM window with short backoffs.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			c.recordRetryAfter(resp.Header)
+		}
 		return resp.StatusCode, fmt.Errorf("status %d: %s: %w", resp.StatusCode, string(body), classifyStatusError(resp.StatusCode))
 	}
 	reader := bufio.NewReader(resp.Body)
@@ -606,6 +686,9 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 func classifyStatusError(status int) error {
 	if status == http.StatusTooManyRequests {
 		return ErrRateLimit
+	}
+	if status == http.StatusPaymentRequired {
+		return ErrInsufficientBalance
 	}
 	if status >= 500 && status <= 599 {
 		return fmt.Errorf("server error (%d): %w", status, ErrInvalidResponse)

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/deepact/deepact/engine"
 )
@@ -22,7 +23,7 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 	chatReq := mapToChatRequest(req)
 	stream, err := c.client.Stream(ctx, chatReq)
 	if err != nil {
-		return nil, err
+		return nil, mapModelError(err)
 	}
 	engineStream := make(chan engine.ModelChunk, 16)
 	go func() {
@@ -32,7 +33,7 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 				Delta:          chunk.Delta,
 				ReasoningDelta: chunk.ReasoningDelta,
 				FinishReason:   chunk.FinishReason,
-				Err:            chunk.Err,
+				Err:            mapModelError(chunk.Err),
 				RetryProgress:  chunk.RetryProgress,
 			}
 			if len(chunk.ToolCalls) > 0 {
@@ -100,9 +101,26 @@ func (c *EngineClient) Complete(ctx context.Context, req engine.ModelRequest) (*
 	chatReq := mapToChatRequest(req)
 	resp, err := c.client.Complete(ctx, chatReq)
 	if err != nil {
-		return nil, err
+		return nil, mapModelError(err)
 	}
 	return mapToModelResponse(resp), nil
+}
+
+// mapModelError translates llm-layer error sentinels into engine-layer sentinels
+// the engine can act on (rate-limit retry vs. persistent balance error), while
+// preserving the full original error text for user-facing messages.
+func mapModelError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, ErrInsufficientBalance):
+		return fmt.Errorf("%w: %v", engine.ErrModelInsufficientBal, err)
+	case errors.Is(err, ErrRateLimit):
+		return fmt.Errorf("%w: %v", engine.ErrModelRateLimit, err)
+	default:
+		return err
+	}
 }
 
 func mapToChatRequest(req engine.ModelRequest) ChatRequest {

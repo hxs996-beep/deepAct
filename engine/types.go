@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -64,7 +65,7 @@ type EngineConfig struct {
 	ModelName            string // default (Pro) model name
 	FlashModelName       string // Flash model name for cheaper agents
 	BaseURL              string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
-	SubAgentBaseURL      string // separate API base URL for sub-agents (cache isolation); empty = same as BaseURL
+	MaxConcurrentRequests int // cap on concurrent in-flight LLM requests; 0 = default 8
 	MaxTurns             int
 	MaxIterationsPerTurn int
 	MaxContextTokens     int
@@ -173,6 +174,15 @@ type ModelChunk struct {
 	Err            error
 	RetryProgress  string // non-empty when a retry is about to start
 }
+
+// Model error sentinels surfaced by the LLM adapter. The engine checks these
+// (via errors.Is) to decide how to handle a failed request: rate limits are
+// transient and worth a silent in-loop retry, while insufficient balance is
+// persistent and needs a clear user-facing message.
+var (
+	ErrModelRateLimit       = errors.New("model rate limit")
+	ErrModelInsufficientBal = errors.New("model insufficient balance")
+)
 
 type ToolExecContext struct {
 	WorkDir    string

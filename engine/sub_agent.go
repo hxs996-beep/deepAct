@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/deepact/deepact/context/promptset"
@@ -28,7 +29,14 @@ type SubAgentRunner struct {
 	maxOutputTokens  int    // per-turn completion cap; 0 = use DefaultMaxOutputTokens
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
-	subAgentBaseURL  string // separate API endpoint for cache isolation; empty = use main agent's
+	// partitionURL derives a per-sub-agent prefix-cache partition URL from a
+	// partition name. Injected by cmd/run.go (which can import llm) so engine stays
+	// llm-free. nil = sub-agents share the main agent's endpoint (no isolation).
+	partitionURL func(partition string) string
+	// partitionSeq is a session-global atomic counter giving each sub-agent run a
+	// unique partition suffix, so parallel sub-agents get distinct prefix-cache
+	// partitions instead of overwriting each other's cached system prefix.
+	partitionSeq atomic.Int64
 	langPackZh       string // Chinese language pack (Go/Python rules in zh)
 	langPackEn       string // English language pack (Go/Python rules in en)
 	maxDepth         int    // absolute delegation-depth cap; 0 = default 2
@@ -93,11 +101,12 @@ func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
 	r.compressor = c
 }
 
-// SetSubAgentBaseURL sets a separate API base URL for sub-agents. When set, sub-agents
-// use this URL instead of the main agent's, giving them their own DeepSeek prefix cache
-// partition. Empty string (default) means sub-agents share the main agent's endpoint.
-func (r *SubAgentRunner) SetSubAgentBaseURL(url string) {
-	r.subAgentBaseURL = url
+// SetSubAgentPartitionURL injects a function that derives a per-sub-agent prefix-cache
+// partition URL from a partition name (e.g. "sub-0-3"). The injected function closes over
+// the base URL and API key; it lives in cmd/run.go so engine stays free of the llm package.
+// Passing nil disables isolation (sub-agents share the main agent's endpoint).
+func (r *SubAgentRunner) SetSubAgentPartitionURL(fn func(partition string) string) {
+	r.partitionURL = fn
 }
 
 // SetMaxDepth caps how deep sub-agent nesting may go. 0 resets to the default (2).
@@ -179,12 +188,21 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
 		model = f.Fork()
 	}
-	// If a separate sub-agent base URL is configured, fork again with a different
-	// endpoint for cache isolation. This gives sub-agents their own DeepSeek prefix
-	// cache partition so their calls don't pollute the main agent's cached prefix.
-	if r.subAgentBaseURL != "" {
+	// Derive a per-run prefix-cache partition so this sub-agent's calls get their
+	// own DeepSeek cache partition keyed by the URL query param. The partition name
+	// combines the agent name, nesting depth, and a unique session-global sequence
+	// number — parallel sub-agents therefore never overwrite each other's cached
+	// system prefix (their volatile prompts differ, but their shared system prefix
+	// stays hot within each partition). No partitionURL = no isolation.
+	if r.partitionURL != nil {
+		seq := r.partitionSeq.Add(1)
+		agentName := string(input.Agent)
+		if agentName == "" {
+			agentName = "sub"
+		}
+		partition := fmt.Sprintf("%s-%d-%d", agentName, input.Depth, seq)
 		if f, ok := model.(interface{ ForkWithBaseURL(string) ModelClient }); ok {
-			model = f.ForkWithBaseURL(r.subAgentBaseURL)
+			model = f.ForkWithBaseURL(r.partitionURL(partition))
 		}
 	}
 
