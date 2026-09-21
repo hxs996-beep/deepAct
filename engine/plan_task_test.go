@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -102,5 +104,110 @@ func TestProcessPlanTaskCalls_Mixed(t *testing.T) {
 	}
 	if msgs[0].ToolCallID != "call_plan" {
 		t.Errorf("ToolCallID = %q, want call_plan", msgs[0].ToolCallID)
+	}
+}
+
+// recorderExecutor mimics tools/registry.go's Execute for turn-level
+// classification tests: unknown tool names (which includes plan_task if it
+// ever leaked into regularCalls) produce a "tool not found: <name>" result,
+// exactly like the production executor.
+type recorderExecutor struct {
+	calls []ToolCallRequest
+}
+
+func (r *recorderExecutor) Execute(_ ToolExecContext, calls []ToolCallRequest) []ToolResult {
+	r.calls = append(r.calls, calls...)
+	results := make([]ToolResult, 0, len(calls))
+	for _, call := range calls {
+		results = append(results, ToolResult{
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Status:     "error",
+			Digest:     fmt.Sprintf("tool not found: %s", call.Name),
+		})
+	}
+	return results
+}
+
+func (r *recorderExecutor) Specs() []ModelTool { return nil }
+
+// TestPlanTaskNotInRegularCalls verifies the executeTurn classification loop
+// (turn.go: separate handoff calls from regular tool calls): plan_task is
+// intercepted by processPlanTaskCalls and must NOT enter regularCalls.
+// Otherwise the tool executor would produce a duplicate "tool not found:
+// plan_task" message for the same tool_call_id, violating the DeepSeek API
+// contract — the same failure mode load_skill guards against.
+func TestPlanTaskNotInRegularCalls(t *testing.T) {
+	recorder := &recorderExecutor{}
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "先深度规划，再执行。", ToolCalls: []ModelToolCall{
+				{ID: "call_plan", Type: "function", Function: ModelFunctionCall{
+					Name:      PlanTaskToolName,
+					Arguments: `{}`,
+				}},
+				{ID: "call_read", Type: "function", Function: ModelFunctionCall{
+					Name:      "read",
+					Arguments: `{"path":"a.go"}`,
+				}},
+			}, FinishReason: "tool_calls"},
+		}},
+		context: &stubContextBuilder{},
+		tools:   recorder,
+		state:   &TaskState{TurnNumber: 1, Goal: "规划并执行"},
+		history: []Message{{Role: "user", Content: "规划并执行"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.Done {
+		t.Fatalf("expected Done=false (regular read call executed), got Done=true")
+	}
+
+	// plan_task must never reach the tool executor's regularCalls path.
+	for _, call := range recorder.calls {
+		if call.Name == PlanTaskToolName {
+			t.Errorf("plan_task leaked into regularCalls: executed by tools with ID %q", call.ID)
+		}
+	}
+
+	// The only executed tool must be the regular read call.
+	if len(recorder.calls) != 1 || recorder.calls[0].Name != "read" || recorder.calls[0].ID != "call_read" {
+		t.Fatalf("expected exactly 1 regular call (read/call_read), got %+v", recorder.calls)
+	}
+
+	// No duplicate "tool not found: plan_task" message may appear in history.
+	// The plan_task tool_call_id must be answered exactly once, with the
+	// injected methodology, and the read call once with its executor result.
+	planMsgs, readMsgs, notFound := 0, 0, 0
+	for _, msg := range e.history {
+		if msg.Role != "tool" {
+			continue
+		}
+		switch msg.ToolCallID {
+		case "call_plan":
+			planMsgs++
+			if !strings.Contains(msg.Content, "[PLAN_METHODOLOGY") {
+				t.Errorf("plan_task tool message = %q, want [PLAN_METHODOLOGY marker", msg.Content)
+			}
+		case "call_read":
+			readMsgs++
+		}
+		if strings.Contains(msg.Content, "tool not found: plan_task") {
+			notFound++
+		}
+	}
+	if planMsgs != 1 {
+		t.Errorf("expected exactly 1 tool message for plan_task, got %d", planMsgs)
+	}
+	if readMsgs != 1 {
+		t.Errorf("expected exactly 1 tool message for read, got %d", readMsgs)
+	}
+	if notFound != 0 {
+		t.Errorf("expected no 'tool not found: plan_task' in history, got %d", notFound)
 	}
 }
