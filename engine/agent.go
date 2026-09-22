@@ -20,6 +20,7 @@ const (
 	SubmitResultToolName = "submit_result"
 	AskUserToolName      = "ask_user"
 	PlanTaskToolName     = "plan_task"
+	AgentPollToolName    = "agent_poll"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -36,6 +37,11 @@ const (
 	HandoffReasonNoResult         = "no_result"         // structured run ended without submitting a result
 	HandoffReasonMaxDepth         = "max_depth"         // nesting depth exceeded
 	HandoffReasonAwaitingUser     = "awaiting_user"     // sub-agent asked the user; parent must present the question
+	// HandoffReasonAsyncRunning is the FinishReason on the immediate dispatch
+	// result of an async handoff (handoff_to_agent async:true). It is NOT a
+	// failure: the sub-agent is still running in the background and the
+	// delegating agent should poll it later via agent_poll.
+	HandoffReasonAsyncRunning = "async_running"
 )
 
 // Handoff carries delegation parameters from parent to sub-agent.
@@ -134,6 +140,10 @@ type HandoffToAgentParams struct {
 	// run (codex-style developer instructions injected into the stable system
 	// prefix). Most callers leave it empty and use the role's built-in persona.
 	Persona string `json:"persona,omitempty"`
+	// Async starts the sub-agent in the background and returns immediately
+	// with a job_id; the delegating agent polls it later via agent_poll.
+	// Only honored at depth 0 (main agent); nested delegations ignore it.
+	Async bool `json:"async,omitempty"`
 }
 
 // TaskCompleteParams is the JSON schema for the task_complete tool call.
@@ -235,6 +245,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
 	constraintsDesc := "Constraints for the sub-agent (optional)"
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
+	asyncDesc := "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent tasks (builds, tests, batch scripts, standalone research)."
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
 		agentDesc = "目标代理（角色）：sub（通用）、researcher（只读调研）、critic（对抗审查）"
@@ -243,6 +254,7 @@ func handoffToolSpec(zh bool) ModelTool {
 		toolsDesc = "允许子代理使用的工具（可选）"
 		constraintsDesc = "对子代理的约束（可选）"
 		expectedOutputDesc = "什么样的结果算完成——验收标准、输出结构或子代理必须交付的格式（可选）"
+		asyncDesc = "true = 后台运行子代理并立即返回 job_id；你可以继续其他工作，稍后用 agent_poll(job_id) 查询结果。false/省略 = 同步等待（默认）。长耗时的独立任务（构建、测试、批量脚本、独立调研）优先用 async。"
 	}
 	params := fmt.Sprintf(`{
 				"type": "object",
@@ -273,10 +285,14 @@ func handoffToolSpec(zh bool) ModelTool {
 					"expected_output": {
 						"type": "string",
 						"description": %q
+					},
+					"async": {
+						"type": "boolean",
+						"description": %q
 					}
 				},
 				"required": ["agent", "goal"]
-			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc)
+			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc, asyncDesc)
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
@@ -360,6 +376,37 @@ func askUserToolSpec(zh bool) ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        AskUserToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// agentPollToolSpec returns the tool definition for polling a background
+// async sub-agent task. The engine intercepts the call and returns the
+// task's current status (running/done/error); a done task delivers its
+// result and is removed.
+func agentPollToolSpec(zh bool) ModelTool {
+	desc := "Query the status and result of a background async sub-agent task (started with handoff_to_agent async:true). Returns running / done / error; a done task returns its result and is removed."
+	jobDesc := "The job_id returned by the async handoff dispatch"
+	if zh {
+		desc = "查询后台异步子代理任务（通过 handoff_to_agent async:true 启动）的状态与结果。返回 running / done / error；done 时返回结果并移除该任务。"
+		jobDesc = "异步委派返回的 job_id"
+	}
+	params := fmt.Sprintf(`{
+				"type": "object",
+				"properties": {
+					"job_id": {
+						"type": "string",
+						"description": %q
+					}
+				},
+				"required": ["job_id"]
+			}`, jobDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        AgentPollToolName,
 			Description: desc,
 			Parameters:  json.RawMessage(params),
 		},
