@@ -91,6 +91,13 @@ type Engine struct {
 	// bubble up questions concurrently, so the write must be serialized.
 	askUserMu sync.Mutex
 
+	// Background async sub-agent tasks (handoff_to_agent async:true).
+	// bgMu guards bgTasks and bgSeq. Tasks are cancelled at Run exit —
+	// they never outlive the Run that started them.
+	bgMu    sync.Mutex
+	bgSeq   int
+	bgTasks map[string]*bgTask
+
 	// Per-Run efficiency tracking
 	runStartAt       time.Time
 	runUsageAccum    ModelUsage
@@ -127,6 +134,44 @@ type Engine struct {
 	// only on /resume (SetHistory), never at startup, so a fresh session
 	// starts clean of cross-task markers/decisions.
 	memoryLoaded bool
+}
+
+// bgTask is one background (async) sub-agent run started via
+// handoff_to_agent(async:true). It lives only for the current Run(): the
+// Run's exit path cancels it and drops any un-polled result.
+type bgTask struct {
+	id      string            // "bg-<seq>"
+	agent   AgentID
+	goal    string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	result  chan *HandoffResult // 容量1：完成/错误/等待中
+	startAt time.Time
+}
+
+// initBackgroundTasks initializes the background task map. Safe to call
+// multiple times (idempotent).
+func (e *Engine) initBackgroundTasks() {
+	e.bgMu.Lock()
+	defer e.bgMu.Unlock()
+	if e.bgTasks == nil {
+		e.bgTasks = make(map[string]*bgTask)
+	}
+}
+
+// cancelBackgroundTasks cancels every outstanding background task and clears
+// the table. Called at the end of every Run() so no sub-agent goroutine or
+// LLM request outlives the Run. Un-polled results are dropped (the UI already
+// showed their progress via agent_done events).
+func (e *Engine) cancelBackgroundTasks() {
+	e.bgMu.Lock()
+	tasks := e.bgTasks
+	e.bgTasks = nil
+	e.bgMu.Unlock()
+	for id, t := range tasks {
+		t.cancel()
+		loopLog.Printf("background task %s (%s) cancelled at run end; result dropped", id, t.agent)
+	}
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
@@ -217,6 +262,8 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Persist this Run's conversation history as message events on every exit
 	// path (Run has ~20 returns). tool messages are stored as brief digests.
 	defer e.persistHistory()
+	// Background async sub-agent tasks never outlive this Run.
+	defer e.cancelBackgroundTasks()
 	// Detect language once at session start, not per-turn.
 	// This prevents "ok"/"yes"/"confirm" from switching UI to English.
 	if !e.langDetected {
