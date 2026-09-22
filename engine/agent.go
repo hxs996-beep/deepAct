@@ -245,6 +245,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	toolsDesc := "Tools the sub-agent is allowed to use (optional)"
 	constraintsDesc := "Constraints for the sub-agent (optional)"
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
+	asyncDesc := "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent tasks (builds, tests, batch scripts, standalone research)."
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理可以研究代码、头脑风暴方案，或批判性地审查决策。"
 		agentDesc = "目标代理（角色）：sub（通用）、researcher（只读调研）、critic（对抗审查）"
@@ -253,6 +254,7 @@ func handoffToolSpec(zh bool) ModelTool {
 		toolsDesc = "允许子代理使用的工具（可选）"
 		constraintsDesc = "对子代理的约束（可选）"
 		expectedOutputDesc = "什么样的结果算完成——验收标准、输出结构或子代理必须交付的格式（可选）"
+		asyncDesc = "true = 后台运行子代理并立即返回 job_id；你可以继续其他工作，稍后用 agent_poll(job_id) 查询结果。false/省略 = 同步等待（默认）。长耗时的独立任务（构建、测试、批量脚本、独立调研）优先用 async。"
 	}
 	params := fmt.Sprintf(`{
 				"type": "object",
@@ -286,11 +288,11 @@ func handoffToolSpec(zh bool) ModelTool {
 					},
 					"async": {
 						"type": "boolean",
-						"description": "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent tasks (builds, tests, batch scripts, standalone research)."
+						"description": %q
 					}
 				},
 				"required": ["agent", "goal"]
-			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc)
+			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc, asyncDesc)
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
