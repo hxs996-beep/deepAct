@@ -82,6 +82,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Append pinned messages (skill activations, etc.) at the very end
 	// for highest recency attention. Clear after first use so subsequent
 	// turns within the same Run() call don't repeat them.
+	// Remind the model about outstanding background async sub-agent tasks.
+	e.injectBackgroundJobsSummary()
 	for _, pm := range e.pendingPinnedMessages {
 		messages = append(messages, ModelMessage{Role: "user", Content: pm})
 	}
@@ -587,6 +589,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingPlanMsgs := e.processPlanTaskCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
+	pendingPollMsgs := e.processAgentPollCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -602,6 +605,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingAskUserMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingPollMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -622,6 +628,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == AskUserToolName {
 			continue
 		} else if call.Name == PlanTaskToolName {
+			continue
+		} else if call.Name == AgentPollToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -866,6 +874,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, taskCompleteToolSpec(e.isChinese))
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, askUserToolSpec(e.isChinese))
+	specs = append(specs, agentPollToolSpec(e.isChinese))
 	return specs
 }
 
@@ -1517,6 +1526,101 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 		})
 	}
 	return msgs
+}
+
+// processAgentPollCalls intercepts agent_poll tool calls from the assistant's
+// response. Each call queries one background async sub-agent task by job_id.
+// A running task returns "running"; a done task returns its result and is
+// removed from the table; an unknown job_id returns an error. Every call
+// receives a tool response (satisfying the DeepSeek API requirement that
+// every tool_call_id has a matching tool response).
+func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != AgentPollToolName {
+			continue
+		}
+		var params struct {
+			JobID string `json:"job_id"`
+		}
+		if err := json.Unmarshal(call.Input, &params); err != nil || strings.TrimSpace(params.JobID) == "" {
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    "Error: agent_poll requires a non-empty job_id",
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		e.initBackgroundTasks()
+		e.bgMu.Lock()
+		task, ok := e.bgTasks[params.JobID]
+		if !ok {
+			e.bgMu.Unlock()
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: agent_poll job %q not found (already consumed or run ended).", params.JobID),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		e.bgMu.Unlock()
+
+		select {
+		case result := <-task.result:
+			// Done: remove from table and return the result.
+			e.bgMu.Lock()
+			delete(e.bgTasks, params.JobID)
+			e.bgMu.Unlock()
+			if result == nil {
+				result = &HandoffResult{Summary: "(no result)"}
+			}
+			content := fmt.Sprintf("Job %s done.\n%s", params.JobID, formatHandoffResult(result, e.isChinese))
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    content,
+				Timestamp:  time.Now(),
+			})
+		default:
+			// Still running.
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Job %s (%s) is still running. Goal: %s. Poll again later.", params.JobID, task.agent, task.goal),
+				Timestamp:  time.Now(),
+			})
+		}
+	}
+	return msgs
+}
+
+// injectBackgroundJobsSummary appends a pinned message listing outstanding
+// background async sub-agent tasks so the model knows it has jobs running and
+// can continue working while remembering to poll them. No-op when none exist.
+// The pinned message is consumed next turn (pendingPinnedMessages semantics)
+// and never persists into history.
+func (e *Engine) injectBackgroundJobsSummary() {
+	e.bgMu.Lock()
+	n := len(e.bgTasks)
+	if n == 0 {
+		e.bgMu.Unlock()
+		return
+	}
+	var b strings.Builder
+	b.WriteString("[Background jobs] ")
+	first := true
+	for id, t := range e.bgTasks {
+		if !first {
+			b.WriteString("; ")
+		}
+		first = false
+		fmt.Fprintf(&b, "%s (%s): %s — running", id, t.agent, t.goal)
+	}
+	e.bgMu.Unlock()
+	b.WriteString(". Continue your work; use agent_poll(job_id) to fetch results.")
+	e.pendingPinnedMessages = append(e.pendingPinnedMessages, b.String())
 }
 
 // processAskUserCalls intercepts ask_user tool calls from the assistant's
