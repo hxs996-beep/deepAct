@@ -222,3 +222,64 @@ func TestCancelBackgroundTasks_OnRunEnd(t *testing.T) {
 		t.Fatalf("bgTasks len after cancel = %d, want 0", n)
 	}
 }
+
+func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
+	a := &mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
+		Summary: "后台调研完成", FinishReason: HandoffReasonCompleted,
+	}}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	var events []ProgressEvent
+	e := &Engine{
+		agents:    reg,
+		isChinese: true,
+		state:     &TaskState{},
+		config:    EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }},
+	}
+	e.initBackgroundTasks()
+
+	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "调研", Async: true,
+	}, 0, "中文")
+	if err != nil {
+		t.Fatalf("RunSubAgent error: %v", err)
+	}
+	if res.FinishReason != HandoffReasonAsyncRunning {
+		t.Fatalf("FinishReason = %q, want async_running", res.FinishReason)
+	}
+
+	// 后台 goroutine 会很快完成；轮询直到 result channel 有值。
+	deadline := time.Now().Add(2 * time.Second)
+	var got *HandoffResult
+	for time.Now().Before(deadline) {
+		e.bgMu.Lock()
+		for _, task := range e.bgTasks {
+			select {
+			case r := <-task.result:
+				got = r
+			default:
+			}
+		}
+		e.bgMu.Unlock()
+		if got != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got == nil {
+		t.Fatal("background result never arrived")
+	}
+	if got.Summary != "后台调研完成" {
+		t.Fatalf("background result summary = %q, want 后台调研完成", got.Summary)
+	}
+
+	foundDone := false
+	for _, ev := range events {
+		if ev.Type == "agent_done" && strings.Contains(ev.Detail, "后台调研完成") {
+			foundDone = true
+		}
+	}
+	if !foundDone {
+		t.Fatalf("expected agent_done event with result, got events: %+v", events)
+	}
+}

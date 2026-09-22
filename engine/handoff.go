@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // runHandoff is the shared delegation core used by both backends.
@@ -104,6 +105,9 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 	if e.agents == nil {
 		return ToolResult{Status: "error", Digest: "no agent registry configured"}, nil
 	}
+	if params.Async && depth == 0 {
+		return e.dispatchAsync(ctx, params, userLang)
+	}
 	call := ToolCallRequest{Name: HandoffToolName, Input: mustJSON(params)}
 	userLang = ""
 	if e.isChinese {
@@ -134,6 +138,97 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		e.askUserMu.Unlock()
 	}
 	return res, nil
+}
+
+// dispatchAsync starts the sub-agent in the background and returns
+// immediately with a job_id. The delegating agent polls the result later via
+// agent_poll(job_id). The background task is cancelled at Run exit — it never
+// outlives the Run that started it.
+func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams, userLang string) (ToolResult, error) {
+	agent, err := e.agents.Get(AgentID(params.Agent))
+	if err != nil {
+		return ToolResult{Status: "error", Digest: fmt.Sprintf("agent not found: %s - %v", params.Agent, err)}, nil
+	}
+	handoff := Handoff{
+		Agent:          AgentID(params.Agent),
+		Goal:           params.Goal,
+		Context:        params.Context,
+		Tools:          params.Tools,
+		Constraints:    params.Constraints,
+		ExpectedOutput: params.ExpectedOutput,
+		Persona:        params.Persona,
+		Depth:          0,
+		UserLanguage:   userLang,
+	}
+	if e.state != nil {
+		params = injectMainAgentContext(params, e.state)
+		handoff.Context = params.Context
+	}
+
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgSeq++
+	jobID := fmt.Sprintf("bg-%d", e.bgSeq)
+	bgCtx, cancel := context.WithCancel(ctx)
+	task := &bgTask{
+		id:      jobID,
+		agent:   AgentID(params.Agent),
+		goal:    params.Goal,
+		ctx:     bgCtx,
+		cancel:  cancel,
+		result:  make(chan *HandoffResult, 1),
+		startAt: time.Now(),
+	}
+	e.bgTasks[jobID] = task
+	e.bgMu.Unlock()
+
+	// agent_start event for UI (same as synchronous handoff).
+	if e.config.OnProgress != nil {
+		name := params.Agent
+		if name == "" {
+			name = "sub"
+		}
+		e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+	}
+
+	go func() {
+		result, runErr := agent.Run(bgCtx, handoff)
+		if result == nil {
+			summary := "(no result)"
+			reason := HandoffReasonError
+			if runErr != nil {
+				summary = "(sub-agent error: " + runErr.Error() + ")"
+			}
+			result = &HandoffResult{
+				Summary:      summary,
+				Blocked:      true,
+				BlockedBy:    "sub_agent_error",
+				FinishReason: reason,
+			}
+		}
+		if result.Usage != nil {
+			e.accumulateUsage(result.Usage)
+		}
+		select {
+		case task.result <- result:
+		default:
+		}
+		if e.config.OnProgress != nil {
+			e.config.OnProgress(ProgressEvent{
+				Type:   "agent_done",
+				Name:   string(task.agent),
+				Detail: result.Summary,
+			})
+		}
+	}()
+
+	return ToolResult{
+		ToolCallID:   "",
+		ToolName:     HandoffToolName,
+		Status:       "ok",
+		Digest:       fmt.Sprintf("Dispatched async job %s (%s): %s. Use agent_poll(%s) to check the result.", jobID, params.Agent, params.Goal, jobID),
+		FinishReason: HandoffReasonAsyncRunning,
+	}, nil
 }
 
 // RunSubAgent implements the nested-agent backend for SubAgentTool: depth > 0.
