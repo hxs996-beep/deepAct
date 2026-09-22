@@ -518,3 +518,28 @@ func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
 		t.Errorf("want exactly 1 blank line between header and agent, got %d: %q", gap, plain)
 	}
 }
+
+// TestAgentDoneUpdatesSubAgentPanel locks in the regression that an async
+// sub-agent's completion (agent_done event) updates its entry in the
+// sub-agent panel: status flips to "done" and the summary is attached.
+func TestAgentDoneUpdatesSubAgentPanel(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateRunning
+	m.width = 80
+	m.height = 40
+	// agent_start 追加子代理
+	res, _ := m.Update(ProgressMsg{Type: "agent_start", Name: "researcher", Detail: "调研缓存方案"})
+	m = res.(Model)
+	// agent_done 标记完成
+	res, _ = m.Update(ProgressMsg{Type: "agent_done", Name: "researcher", Detail: "调研完成"})
+	m = res.(Model)
+	if len(m.subAgents) != 1 {
+		t.Fatalf("subAgents len = %d, want 1", len(m.subAgents))
+	}
+	if m.subAgents[0].Status != "done" {
+		t.Errorf("subAgent status = %q, want done", m.subAgents[0].Status)
+	}
+	if !strings.Contains(m.subAgents[0].Summary, "调研完成") {
+		t.Errorf("subAgent summary = %q, want contain 调研完成", m.subAgents[0].Summary)
+	}
+}

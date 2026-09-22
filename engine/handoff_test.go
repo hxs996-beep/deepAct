@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -230,11 +231,16 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 	reg := NewAgentRegistry()
 	reg.Register(a)
 	var events []ProgressEvent
+	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
 		isChinese: true,
 		state:     &TaskState{},
-		config:    EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }},
+		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+			eventsMu.Lock()
+			events = append(events, ev)
+			eventsMu.Unlock()
+		}},
 	}
 	e.initBackgroundTasks()
 
@@ -248,7 +254,8 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 		t.Fatalf("FinishReason = %q, want async_running", res.FinishReason)
 	}
 
-	// 后台 goroutine 会很快完成；轮询直到 result channel 有值。
+	// 后台 goroutine 会很快完成；轮询直到 result channel 有值且
+	// agent_done 事件已发出（result 发送先于 OnProgress 调用）。
 	deadline := time.Now().Add(2 * time.Second)
 	var got *HandoffResult
 	for time.Now().Before(deadline) {
@@ -261,7 +268,15 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 			}
 		}
 		e.bgMu.Unlock()
-		if got != nil {
+		eventsMu.Lock()
+		done := false
+		for _, ev := range events {
+			if ev.Type == "agent_done" && strings.Contains(ev.Detail, "后台调研完成") {
+				done = true
+			}
+		}
+		eventsMu.Unlock()
+		if got != nil && done {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -273,13 +288,16 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 		t.Fatalf("background result summary = %q, want 后台调研完成", got.Summary)
 	}
 
+	eventsMu.Lock()
+	evs := append([]ProgressEvent(nil), events...)
+	eventsMu.Unlock()
 	foundDone := false
-	for _, ev := range events {
+	for _, ev := range evs {
 		if ev.Type == "agent_done" && strings.Contains(ev.Detail, "后台调研完成") {
 			foundDone = true
 		}
 	}
 	if !foundDone {
-		t.Fatalf("expected agent_done event with result, got events: %+v", events)
+		t.Fatalf("expected agent_done event with result, got events: %+v", evs)
 	}
 }
