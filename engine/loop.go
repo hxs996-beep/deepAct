@@ -264,6 +264,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	defer e.persistHistory()
 	// Background async sub-agent tasks never outlive this Run.
 	defer e.cancelBackgroundTasks()
+	// Ensure the background task table exists for this Run (paired with the
+	// cancelBackgroundTasks defer on exit).
+	e.initBackgroundTasks()
 	// Detect language once at session start, not per-turn.
 	// This prevents "ok"/"yes"/"confirm" from switching UI to English.
 	if !e.langDetected {
