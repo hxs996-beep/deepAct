@@ -1731,7 +1731,7 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 // the former delivered a real result, the latter was a user/context decision.
 func isHandoffFollowUpReason(reason string) bool {
 	switch reason {
-	case "", HandoffReasonCompleted, HandoffReasonCancelled:
+	case "", HandoffReasonCompleted, HandoffReasonCancelled, HandoffReasonAsyncRunning:
 		return false
 	default:
 		return true
