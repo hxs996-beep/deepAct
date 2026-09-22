@@ -115,3 +115,27 @@ func TestSubAgentRunnerRunSubAgent_Nested(t *testing.T) {
 		t.Errorf("Digest = %q, want Chinese completed digest", res.Digest)
 	}
 }
+
+func TestHandoffToAgentParams_AsyncField(t *testing.T) {
+	// async 字段必须存在于 handoff spec 的 parameters JSON 中。
+	spec := handoffToolSpec(false)
+	if !strings.Contains(string(spec.Function.Parameters), `"async"`) {
+		t.Fatalf("handoff spec parameters must contain async field, got: %s", spec.Function.Parameters)
+	}
+}
+
+func TestAgentPollToolSpec_Exists(t *testing.T) {
+	spec := agentPollToolSpec(false)
+	if spec.Function.Name != AgentPollToolName {
+		t.Fatalf("Name = %q, want %q", spec.Function.Name, AgentPollToolName)
+	}
+	if !strings.Contains(string(spec.Function.Parameters), `"job_id"`) {
+		t.Fatalf("agent_poll parameters must contain job_id, got: %s", spec.Function.Parameters)
+	}
+}
+
+func TestHandoffReasonAsyncRunning_Exists(t *testing.T) {
+	if HandoffReasonAsyncRunning == "" {
+		t.Fatal("HandoffReasonAsyncRunning must be non-empty")
+	}
+}

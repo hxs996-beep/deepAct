@@ -62,7 +62,9 @@ func (t *SubAgentTool) Spec() ToolSpec {
 			"constraints": {"type": "array", "items": {"type": "string"},
 				"description": "Constraints for the sub-agent (optional)"},
 			"expected_output": {"type": "string",
-				"description": "What a successful result looks like — acceptance criteria (optional)"}
+				"description": "What a successful result looks like — acceptance criteria (optional)"},
+			"async": {"type": "boolean",
+				"description": "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent tasks (builds, tests, batch scripts, standalone research)."}
 		},
 		"required": ["agent", "goal"]
 	}`, enumJSON)
