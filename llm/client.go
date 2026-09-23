@@ -18,7 +18,6 @@ type ChatRequest struct {
 	MaxTokens       int       `json:"max_tokens,omitempty"`
 	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 	JsonMode        bool      `json:"-"`
-	ThinkingEnabled bool      `json:"-"`
 }
 
 type Message struct {

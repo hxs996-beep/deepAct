@@ -13,9 +13,12 @@ func tokenCount(s string) int {
 	return len([]rune(s))/4 + 1
 }
 
-// RebuildHistory 从会话事件重建可重放的对话历史：
+// RebuildHistory 从会话事件重建可重放的对话历史（纯文本流）：
 //  1. 过滤 message 事件
-//  2. 跳过 tool 消息、剥离 ToolCalls（规避 assistant(tool_calls)→tool 的 API 契约）
+//  2. 跳过 tool 消息，并剥离 ToolCalls 与 ReasoningContent —— 恢复后的历史
+//     只含 user+assistant 文本，不含任何工具链。这样同时规避两条 API 约束：
+//     assistant(tool_calls) 后必须紧跟 tool 消息；以及携带 tools 的请求必须
+//     回传历史轮次的 reasoning_content。纯文本流下二者都不再适用。
 //  3. 从尾部向前按 budget 累加 token，超预算时切割到最近的 user 消息边界，
 //     保证恢复起点是完整用户提问
 func RebuildHistory(events []Event, budget int) []Message {
@@ -31,7 +34,10 @@ func RebuildHistory(events []Event, budget int) []Message {
 		if m.Role == "tool" {
 			continue
 		}
+		// 纯文本流不变量：不带工具链，也不带推理链。显式清空（而非依赖落盘时
+		// 已清）以保证对任何来源的事件文件都成立。
 		m.ToolCalls = nil
+		m.ReasoningContent = ""
 		msgs = append(msgs, m)
 	}
 	if budget <= 0 || len(msgs) == 0 {

@@ -10,49 +10,30 @@
 </p>
 
 <p align="center">
-  <b>⚡ Single binary · ~6 MB download · ~25 MB memory · Zero runtime deps · DeepSeek-native</b>
+  <b>⚡ Single binary · Zero runtime deps · DeepSeek-native</b>
 </p>
 
-**DeepAct is an AI coding agent that lives in your terminal** — written in Go, statically compiled, open source (MIT), and tuned end-to-end for the DeepSeek API.
-
-- **Light** — a ~6 MB download. No Node, no Python, no Docker.
-- **Fast** — prompt engineering, prefix caching, temperature scheduling, and tool-call formats are all tailored to DeepSeek.
-- **Accurate** — compared to "a generic agent pointed at DeepSeek," it is **cheaper, faster, and follows instructions more precisely**.
+**DeepAct is an AI coding agent that lives in your terminal** — written in Go, statically compiled, open source (MIT), and tuned end-to-end for the DeepSeek API. No Node, no Python, no Docker — just a binary and a DeepSeek API key.
 
 ---
 
 ## 📖 Contents
 
-1. [How Lightweight It Is](#how-lightweight-it-is)
-2. [Quick Start](#quick-start)
-3. [Day-to-Day Use](#day-to-day-use)
-4. [Connecting to DeepSeek](#connecting-to-deepseek)
-5. [Core Capabilities](#core-capabilities)
-6. [CLI Reference](#cli-reference)
-7. [Architecture](#architecture)
+1. [Quick Start](#quick-start)
+2. [Day-to-Day Use](#day-to-day-use)
+3. [Connecting to DeepSeek](#connecting-to-deepseek)
+4. [Core Capabilities](#core-capabilities)
+5. [CLI Reference](#cli-reference)
+6. [Architecture](#architecture)
 
 ---
-
-## How Lightweight It Is
-
-| Metric | Measured | Notes |
-|--------|----------|-------|
-| Download size | **~6 MB** (tar.gz) | Linux / macOS / Windows, amd64 + arm64 |
-| Single binary | **~16 MB** | Static build (`CGO_ENABLED=0` + `-s -w`), zero external libraries |
-| Peak startup memory | **~25 MB** | Measured with `deepact --help` (macOS arm64) |
-| Startup time | **~10 ms** | Same measurement |
-| Runtime dependencies | **0** | No Node / Python / Docker / Electron — just a DeepSeek API key |
-
-*Measured on release 1.0.6 (macOS arm64); figures vary slightly by platform.*
-
-One 16 MB Go file that ships a full agent: built-in collaboration skills (ratd/collab), parallel subagents, MCP extension, and rewindable sessions. No browser kernel, no runtime baggage — **launch and go**; it runs happily on servers, CI runners, and low-end laptops.
 
 ## Quick Start
 
 > [!NOTE]
-> You need a [DeepSeek API Key](https://platform.deepseek.com/) (sign up at [platform.deepseek.com](https://platform.deepseek.com/)).
+> You need a [DeepSeek API Key](https://platform.deepseek.com/). On first launch, DeepAct prompts for it interactively in the TUI and persists it to `~/.deepact/config.toml` — no manual config step needed.
 
-### Step 1 · Install
+### Install
 
 ```bash
 # macOS / Linux one-liner
@@ -64,23 +45,14 @@ go install github.com/deepact/deepact@latest
 
 Windows users: see [Releases](https://github.com/hxs996-beep/deepAct/releases) (PowerShell or manual download).
 
-### Step 2 · Configure Your DeepSeek API Key
-
-```bash
-deepact set api-key          # interactive; writes ~/.deepact/config.toml (mode 0600)
-```
-
-> [!TIP]
-> A project-level `.deepact/config.toml` overrides the global config, so different repos can use different models and permission modes.
-
-### Step 3 · Start Using
+### Start Using
 
 ```bash
 deepact                      # interactive TUI (Windows / macOS / Linux)
 deepact exec "fix the connection-pool race"   # non-interactive / CI mode
-deepact --auto exec "..."    # auto mode (skip confirmations)
-deepact --model pro "..."    # pick a model: flash (fast/cheap) or pro (strong/full)
 ```
+
+The environment variable `DEEPSEEK_API_KEY` takes priority; a project-level `.deepact/config.toml` overrides the global config.
 
 ## Day-to-Day Use
 
@@ -89,20 +61,20 @@ deepact --model pro "..."    # pick a model: flash (fast/cheap) or pro (strong/f
 | Key | Action |
 |-----|--------|
 | `Ctrl+Q` | Quit |
-| `Esc` | Cancel current task |
+| `Esc` | Cancel current task / clear input |
 | `Enter` | Submit |
+| `Shift+Enter` | Newline |
 | `Tab` | Complete |
-| `Alt+Enter` | Newline |
 
 ### One-Line Tasks (from the shell)
 
 ```bash
 deepact exec "add timeout and circuit breaker to LoginHandler"
-deepact exec "migrate the user table to Postgres and fix all compile errors" --auto
-deepact exec "review the last 5 commits for potential bugs" --output jsonl > review.jsonl
+deepact exec "migrate the user table to Postgres and fix all compile errors"
+deepact exec "review the last 5 commits for potential bugs"
 ```
 
-Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`.
+Common `exec` flags: `--max-turns N` · `--verbose`.
 
 ### Parallel Research (/collab)
 
@@ -110,21 +82,13 @@ Common `exec` flags: `--auto` skip confirmations · `--output human|jsonl` · `-
 deepact exec "/collab add a cache layer"
 ```
 
-`/collab` is another built-in collaboration skill (`ratd` / `collab`) driven by the skill prompt with `handoff_to_agent`: the main agent itself decomposes the goal into 2-6 research directions, then delegates each direction to a generic `sub` agent **in parallel** (read-only tools) and merges their findings into one structured research report — faster than serial investigation when you need breadth quickly.
+`/collab` is a built-in collaboration skill driven by `handoff_to_agent`: the main agent decomposes the goal into 2-6 research directions, then delegates each direction to a `researcher` sub-agent **in parallel** (read-only tools) and merges their findings into one structured report — faster than serial investigation when you need breadth quickly.
 
 ### Project Rules & Skills
 
 Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent loads a skill's full instructions via the `load_skill` tool when your message names or clearly matches that skill. You can also load a skill directly with `/<name>`.
 
-Skill directories are loaded by priority (later ones win on name conflicts):
-
-| Priority | Directory | Notes |
-|----------|-----------|-------|
-| 0 | built-in (`skill/builtin/`, go:embed) | `ratd` / `collab` — lowest priority; overridden by any same-named user skill |
-| 1 | `~/.deepact/skills/` | DeepAct-specific |
-| 2 | `<project>/.claude/skills/` | Project-level |
-| 3 | `~/.agent/skills/` | Agent-generic |
-| 4 | `~/.claude/skills/` | Claude Code compatible |
+Built-in skills (`skill/builtin/`, go:embed: `ratd` / `collab`) load first at the lowest priority; user skills are loaded from common agent skill directories (`~/.claude/skills/`, `~/.agent/skills/`, `<project>/.claude/skills/`, `~/.deepact/skills/`), with `~/.deepact/skills/` winning on name conflicts. Skills are also installable from the community registry with `deepact`'s `skill_install` tool.
 
 Format: `<name>/SKILL.md` (Claude Code layout, YAML frontmatter):
 
@@ -143,7 +107,15 @@ next_skills: [writing-plans]
 
 ### MCP Support
 
-Register any MCP server in the `[mcp]` section of `config.toml`; its tools join the available tool set automatically, no code changes needed.
+Register any MCP server in `.deepact/mcp.json` (or `~/.deepact/mcp.json`); its tools join the available tool set automatically, no code changes needed.
+
+```json
+{
+  "servers": [
+    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } }
+  ]
+}
+```
 
 ## Connecting to DeepSeek
 
@@ -159,8 +131,10 @@ Config example (`~/.deepact/config.toml`, or project-level `.deepact/config.toml
 
 ```toml
 [model]
-api_key = "sk-..."        # or: deepact set api-key
-default = "flash"         # default routing model
+api_key = "sk-..."        # or: DEEPSEEK_API_KEY env var / first-launch TUI prompt
+default = "flash"         # model used for the main loop
+escalation = "pro"        # model used for complex tasks (optional)
+reasoning_effort = "high" # thinking effort: none | low | high | max (optional; default high)
 
 [search]
 provider    = "tavily"    # built-in web_search tool
@@ -169,13 +143,13 @@ max_results = 5
 ```
 
 > [!TIP]
-> See the comments inside the config file for the full field list: model & routing, permission modes, context budget, UI, LSP, and MCP servers are all TOML-configurable.
+> See the comments inside the config file for the full field list: model & routing, context budget, UI, LSP, MCP servers, and user-defined sub-agent roles are all TOML-configurable.
 
 ## Core Capabilities
 
 ### Parallel Subagents
 
-Complex tasks are split across a single generic `sub` agent delegated via `handoff_to_agent`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
+`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general), `researcher` (read-only investigation), `critic` (adversarial review), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
 
 ### Rewindable Sessions
 
@@ -185,9 +159,9 @@ Every step is written to an immutable JSONL log: rewind to any step, fork a new 
 
 | Command | Description |
 |---------|-------------|
-| `deepact` | Interactive TUI |
-| `deepact exec <prompt>` | Non-interactive / CI mode (`--auto`, `--output`, `--max-turns`) |
-| `deepact set [key] [value]` | Config entries (e.g. `set api-key`) |
+| `deepact` | Interactive TUI (first launch prompts for the API key) |
+| `deepact exec <prompt>` | Non-interactive / CI mode (`--max-turns`, `--verbose`) |
+| `deepact set api-key <key>` | Store the API key in `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | Prompt-version evaluation and comparison |
 
 ## Architecture
@@ -196,9 +170,10 @@ Every step is written to an immutable JSONL log: rewind to any step, fork a new 
 cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
 engine/   agent loop · subagents · shared type hub
 context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
-tools/    built-in tools + MCP      router/    model routing
+tools/    built-in tools (builtin/) + MCP (mcp/)      router/    model routing
 session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
 skill/    built-in (ratd/collab) + external skill loading    config/    shared config
+memory/   cross-session persistent memory
 ```
 
 Layering: `engine/` is the shared type/interface hub (hub-and-spoke). Core `llm/` and `tools/` files have zero project imports; small `adapter.go` files bridge them to engine types. `engine/` never imports `ui/`/`cmd/`; cross-layer calls go through interfaces.

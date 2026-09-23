@@ -136,7 +136,7 @@ data: [DONE]
 	stream, err := client.Stream(context.Background(), ChatRequest{
 		Model:           "deepseek-v4-pro",
 		Messages:        []Message{{Role: "user", Content: "what is the meaning?"}},
-		ThinkingEnabled: true,
+		ReasoningEffort: "high",
 	})
 	if err != nil {
 		t.Fatalf("Stream() error: %v", err)
@@ -441,7 +441,6 @@ func TestBuildRequestBody_ThinkingMode(t *testing.T) {
 	body, err := client.buildRequestBody(ChatRequest{
 		Model:           "deepseek-v4-pro",
 		Messages:        []Message{{Role: "user", Content: "think"}},
-		ThinkingEnabled: true,
 		ReasoningEffort: "high",
 		JsonMode:        true,
 	})
@@ -461,16 +460,26 @@ func TestBuildRequestBody_ThinkingMode(t *testing.T) {
 		t.Errorf("reasoning_effort = %v, want high", parsed["reasoning_effort"])
 	}
 
-	eb, ok := parsed["extra_body"].(map[string]interface{})
-	if !ok {
-		t.Fatal("extra_body missing or not object")
+	// thinking is a top-level Chat Completions parameter on DeepSeek. It must
+	// NOT be wrapped in extra_body (that is an OpenAI SDK merging convention;
+	// a raw JSON request carrying extra_body sends a literal unsupported key).
+	// With a non-none reasoning_effort, the thinking block is attached alongside
+	// reasoning_effort — the canonical DeepSeek thinking-mode request shape.
+	if _, ok := parsed["extra_body"]; ok {
+		t.Error("extra_body must not appear in the request; thinking is a top-level parameter")
 	}
-	thinking, ok := eb["thinking"].(map[string]interface{})
+	thinking, ok := parsed["thinking"].(map[string]interface{})
 	if !ok {
 		t.Fatal("thinking missing or not object")
 	}
 	if thinking["type"] != "enabled" {
 		t.Errorf("thinking.type = %v, want enabled", thinking["type"])
+	}
+
+	// parallel_tool_calls is not part of DeepSeek's Chat Completions schema and
+	// must not be sent.
+	if _, ok := parsed["parallel_tool_calls"]; ok {
+		t.Error("parallel_tool_calls must not appear in the request")
 	}
 
 	rf, ok := parsed["response_format"].(map[string]interface{})
@@ -479,6 +488,58 @@ func TestBuildRequestBody_ThinkingMode(t *testing.T) {
 	}
 	if rf["type"] != "json_object" {
 		t.Errorf("response_format.type = %v, want json_object", rf["type"])
+	}
+}
+
+// TestBuildRequestBody_ThinkingNone checks that reasoning_effort="none"
+// (thinking mode disabled) omits the thinking block — "none" is DeepSeek's
+// documented way to turn thinking mode off, and attaching {"type":"enabled"}
+// alongside it would contradict the request.
+func TestBuildRequestBody_ThinkingNone(t *testing.T) {
+	client := &DeepSeekClient{}
+	body, err := client.buildRequestBody(ChatRequest{
+		Model:           "deepseek-v4-pro",
+		Messages:        []Message{{Role: "user", Content: "no think"}},
+		ReasoningEffort: "none",
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if parsed["reasoning_effort"] != "none" {
+		t.Errorf("reasoning_effort = %v, want none", parsed["reasoning_effort"])
+	}
+	if _, ok := parsed["thinking"]; ok {
+		t.Error("thinking must not be attached when reasoning_effort=none")
+	}
+}
+
+// TestBuildRequestBody_EmptyEffortOmitsThinking checks that an unset
+// reasoning_effort (caller did not configure thinking) sends neither parameter,
+// leaving the provider default untouched.
+func TestBuildRequestBody_EmptyEffortOmitsThinking(t *testing.T) {
+	client := &DeepSeekClient{}
+	body, err := client.buildRequestBody(ChatRequest{
+		Model:    "deepseek-v4-pro",
+		Messages: []Message{{Role: "user", Content: "plain"}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if _, ok := parsed["reasoning_effort"]; ok {
+		t.Error("reasoning_effort must be omitted when not configured")
+	}
+	if _, ok := parsed["thinking"]; ok {
+		t.Error("thinking must be omitted when reasoning_effort is not configured")
 	}
 }
 
@@ -564,20 +625,18 @@ func TestBuildRequestBody_BackfillsOrphanedToolCallID(t *testing.T) {
 	}
 }
 
-// TestBuildRequestBody_StripsReasoningContent guards the cache/cost fix: an
-// assistant turn's reasoning_content is a response-only field and must never be
-// echoed back in the outgoing request. DeepSeek counts re-sent reasoning as
-// billable prompt input (~500 tok/turn on a reasoner chain) and can reject it
-// outright. The session keeps it for display/archive; the wire request must not
-// carry it — regardless of what the caller put in the ChatRequest messages
-// (including the ReasoningEchoManager's echo).
-func TestBuildRequestBody_StripsReasoningContent(t *testing.T) {
+// TestBuildRequestBody_SendsReasoningContent guards the thinking-mode contract:
+// when a request carries tools, DeepSeek requires the reasoning_content of every
+// previous turn to be passed back verbatim (it is concatenated into the context).
+// Omitting it makes the API return a 400 error. So the outgoing request MUST
+// carry reasoning_content, and the visible answer + tool calls must survive too.
+func TestBuildRequestBody_SendsReasoningContent(t *testing.T) {
 	client := &DeepSeekClient{}
 	body, err := client.buildRequestBody(ChatRequest{
 		Model: "deepseek-v4-pro",
 		Messages: []Message{
 			{Role: "user", Content: "explain"},
-			{Role: "assistant", Content: "the answer", ReasoningContent: "SECRET-CHAIN-OF-THOUGHT"},
+			{Role: "assistant", Content: "the answer", ReasoningContent: "CHAIN-OF-THOUGHT"},
 			{Role: "assistant", ReasoningContent: "tool reasoning", ToolCalls: []ToolCall{
 				{ID: "call_1", Type: "function", Function: FunctionCall{Name: "read", Arguments: `{"path":"a.go"}`}},
 			}},
@@ -588,13 +647,10 @@ func TestBuildRequestBody_StripsReasoningContent(t *testing.T) {
 		t.Fatalf("buildRequestBody error: %v", err)
 	}
 	raw := string(body)
-	if strings.Contains(raw, "reasoning_content") {
-		t.Errorf("outgoing request must not carry a reasoning_content field: %s", raw)
+	if !strings.Contains(raw, "reasoning_content") {
+		t.Errorf("outgoing request must carry reasoning_content (tools require it): %s", raw)
 	}
-	if strings.Contains(raw, "SECRET-CHAIN-OF-THOUGHT") || strings.Contains(raw, "tool reasoning") {
-		t.Errorf("assistant chain-of-thought leaked into the request: %s", raw)
-	}
-	// The visible answer and tool calls must survive — we only drop reasoning.
+
 	var parsed struct {
 		Messages []Message `json:"messages"`
 	}
@@ -605,13 +661,16 @@ func TestBuildRequestBody_StripsReasoningContent(t *testing.T) {
 		t.Fatalf("len(messages) = %d, want 4", len(parsed.Messages))
 	}
 	if parsed.Messages[1].Content != "the answer" {
-		t.Errorf("assistant content was dropped along with reasoning: %q", parsed.Messages[1].Content)
+		t.Errorf("assistant content was dropped: %q", parsed.Messages[1].Content)
+	}
+	if parsed.Messages[1].ReasoningContent != "CHAIN-OF-THOUGHT" {
+		t.Errorf("msgs[1].ReasoningContent = %q, want CHAIN-OF-THOUGHT", parsed.Messages[1].ReasoningContent)
 	}
 	if len(parsed.Messages[2].ToolCalls) != 1 {
-		t.Errorf("tool_calls were dropped along with reasoning: %+v", parsed.Messages[2])
+		t.Errorf("tool_calls were dropped: %+v", parsed.Messages[2])
 	}
-	if parsed.Messages[2].ReasoningContent != "" {
-		t.Errorf("parsed message still carries reasoning: %q", parsed.Messages[2].ReasoningContent)
+	if parsed.Messages[2].ReasoningContent != "tool reasoning" {
+		t.Errorf("msgs[2].ReasoningContent = %q, want %q", parsed.Messages[2].ReasoningContent, "tool reasoning")
 	}
 }
 
@@ -684,58 +743,6 @@ func TestChatCompletionsURL(t *testing.T) {
 	}
 }
 
-func TestValidateReasoningEcho_FillsMissing(t *testing.T) {
-	client := NewDeepSeekClient("test-key", nil, nil, DefaultRetryPolicy(), nil)
-
-	// Simulate that manager observed a reasoning
-	client.reasoningMgr.ObserveAssistant(Message{
-		Role:             "assistant",
-		ReasoningContent: "deep reasoning here",
-		ToolCalls:        []ToolCall{{ID: "call_1", Function: FunctionCall{Name: "bash"}}},
-	})
-
-	msgs := []Message{
-		{Role: "user", Content: "hello"},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_2"}}}, // missing reasoning
-	}
-
-	got := client.validateReasoningEcho(msgs)
-	if got[1].ReasoningContent != "deep reasoning here" {
-		t.Errorf("msgs[1].ReasoningContent = %q, want %q", got[1].ReasoningContent, "deep reasoning here")
-	}
-}
-
-func TestValidateReasoningEcho_FallbackPlaceholder(t *testing.T) {
-	client := NewDeepSeekClient("test-key", nil, nil, DefaultRetryPolicy(), nil)
-	// manager never observed anything — no pending echo
-
-	msgs := []Message{
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1"}}, ReasoningContent: ""},
-	}
-
-	got := client.validateReasoningEcho(msgs)
-	if got[0].ReasoningContent != ".." {
-		t.Errorf("msgs[0].ReasoningContent = %q, want placeholder %q", got[0].ReasoningContent, "..")
-	}
-}
-
-func TestValidateReasoningEcho_SkipsClean(t *testing.T) {
-	client := NewDeepSeekClient("test-key", nil, nil, DefaultRetryPolicy(), nil)
-
-	msgs := []Message{
-		{Role: "user", Content: "hello"},
-		{Role: "assistant", Content: "hi", ToolCalls: []ToolCall{{ID: "c1"}}, ReasoningContent: "ok"},
-		{Role: "tool", ToolCallID: "c1", Content: "result"},
-	}
-
-	got := client.validateReasoningEcho(msgs)
-	if got[1].ReasoningContent != "ok" {
-		t.Errorf("clean message corrupted: got %q", got[1].ReasoningContent)
-	}
-	if got[2].ReasoningContent != "" {
-		t.Errorf("tool message should not be touched: got %q", got[2].ReasoningContent)
-	}
-}
 
 func TestSubAgentEndpointFor_Partition(t *testing.T) {
 	tests := []struct {

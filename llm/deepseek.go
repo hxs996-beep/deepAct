@@ -81,7 +81,6 @@ type DeepSeekClient struct {
 	limiter      *AdaptiveLimiter
 	retry        RetryPolicy
 	estimator    *TokenEstimator
-	reasoningMgr *ReasoningEchoManager
 	// idleTimeout is the max time allowed between two SSE data lines during a
 	// streaming response. Streaming LLM output can legitimately pause between
 	// tokens, but a connection that goes silent for this long is almost
@@ -101,37 +100,33 @@ type DeepSeekClient struct {
 }
 
 // Fork creates a new DeepSeekClient sharing the same HTTP client, limiter, retry policy,
-// and token estimator, but with an independent ReasoningEchoManager.
-// This prevents reasoning_content cross-contamination between nested agent calls
-// (e.g. main agent → sub-agent reasoning leaking into the wrong context).
+// and token estimator. Used to give nested agent calls (e.g. sub-agents) an isolated
+// client that does not share state with the parent.
 func (c *DeepSeekClient) Fork() *DeepSeekClient {
 	return &DeepSeekClient{
-		apiKey:       c.apiKey,
-		endpoint:     c.endpoint,
-		http:         c.http,
-		limiter:      c.limiter,
-		retry:        c.retry,
-		estimator:    c.estimator,
-		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
-		idleTimeout:  c.idleTimeout,
+		apiKey:      c.apiKey,
+		endpoint:    c.endpoint,
+		http:        c.http,
+		limiter:     c.limiter,
+		retry:       c.retry,
+		estimator:   c.estimator,
+		idleTimeout: c.idleTimeout,
 	}
 }
 
 // ForkWithEndpoint creates a new DeepSeekClient sharing the same HTTP client, limiter,
-// retry policy, and token estimator, but with an independent ReasoningEchoManager AND
-// a different API endpoint. Used by sub-agents to isolate their prefix cache partition
-// from the main agent's, preventing sub-agent calls from polluting the main agent's
-// DeepSeek server-side prefix cache.
+// retry policy, and token estimator, but with a different API endpoint. Used by
+// sub-agents to isolate their prefix cache partition from the main agent's,
+// preventing sub-agent calls from polluting the main agent's server-side prefix cache.
 func (c *DeepSeekClient) ForkWithEndpoint(endpoint string) *DeepSeekClient {
 	return &DeepSeekClient{
-		apiKey:       c.apiKey,
-		endpoint:     chatCompletionsURL(endpoint),
-		http:         c.http,
-		limiter:      c.limiter,
-		retry:        c.retry,
-		estimator:    c.estimator,
-		reasoningMgr: NewReasoningEchoManager(), // fresh, independent manager
-		idleTimeout:  c.idleTimeout,
+		apiKey:      c.apiKey,
+		endpoint:    chatCompletionsURL(endpoint),
+		http:        c.http,
+		limiter:     c.limiter,
+		retry:       c.retry,
+		estimator:   c.estimator,
+		idleTimeout: c.idleTimeout,
 	}
 }
 
@@ -193,14 +188,13 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 	}
 	endpoint := chatCompletionsURL(baseURL)
 	client := &DeepSeekClient{
-		apiKey:       apiKey,
-		endpoint:     endpoint,
-		http:         httpClient,
-		limiter:      limiter,
-		retry:        retry,
-		estimator:    estimator,
-		reasoningMgr: NewReasoningEchoManager(),
-		idleTimeout:  DefaultIdleTimeout,
+		apiKey:      apiKey,
+		endpoint:    endpoint,
+		http:        httpClient,
+		limiter:     limiter,
+		retry:       retry,
+		estimator:   estimator,
+		idleTimeout: DefaultIdleTimeout,
 	}
 	// Wire the 429 Retry-After window into the retry policy: when the server
 	// tells us when the rate-limit window resets, respect it instead of using
@@ -312,7 +306,6 @@ func (c *DeepSeekClient) Stream(ctx context.Context, req ChatRequest) (<-chan Ch
 	if d := time.Since(acqStart); d > 50*time.Millisecond {
 		debugLog.Printf("limiter acquire blocked for %s (slots=%d)", d, c.limiter.Slots())
 	}
-	req.Messages = c.reasoningMgr.ApplyEcho(req.Messages)
 	ch := make(chan Chunk, 16)
 	go func() {
 		defer c.limiter.Release()
@@ -486,12 +479,6 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 		return nil
 	}); err != nil {
 		if errors.Is(err, errSSEDone) {
-			// Observe the assembled message for reasoning echo on next turn
-			if c.reasoningMgr != nil {
-				if obsMsg := assembler.observeMessage(); obsMsg != nil {
-					c.reasoningMgr.ObserveAssistant(*obsMsg)
-				}
-			}
 			return http.StatusOK, nil
 		}
 		if errors.Is(err, io.EOF) {
@@ -507,58 +494,6 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 		return http.StatusOK, err
 	}
 	return http.StatusOK, nil
-}
-
-// validateReasoningEcho is a pre-flight check that runs after ApplyEcho.
-// It only scans the LAST assistant message with tool_calls for missing
-// ReasoningContent — never modifies history messages, preserving their
-// stable JSON serialization for prefix cache hits.
-// If missing, it attempts recovery using the manager's lastReasoning
-// or a fallback placeholder ".." to prevent a 400 from DeepSeek API.
-func (c *DeepSeekClient) validateReasoningEcho(msgs []Message) []Message {
-	var fixed bool
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) > 0 {
-			if msgs[i].ReasoningContent != "" {
-				break // found last assistant with tool_calls AND reasoning OK
-			}
-			// Try manager's lastReasoning first
-			if c.reasoningMgr != nil {
-				if pending, ok := c.reasoningMgr.PendingEcho(); ok {
-					debugLog.Printf("pre-flight fix: filling reasoning_content (from manager) at msgs[%d]", i)
-					msgs[i].ReasoningContent = pending
-					fixed = true
-					break
-				}
-			}
-			// Fallback: use ".." placeholder to prevent 400
-			debugLog.Printf("pre-flight fix: filling reasoning_content (placeholder) at msgs[%d]", i)
-			msgs[i].ReasoningContent = ".."
-			fixed = true
-			break
-		}
-	}
-	if fixed {
-		debugLog.Println("pre-flight: reasoning_content fixed")
-	}
-	return msgs
-}
-
-// validateAssistantContent ensures all assistant messages have at least content or tool_calls.
-// DeepSeek/OpenAI API rejects assistant messages with neither field set (400 error).
-// This handles cases where the model returned only reasoning_content with no visible output.
-func (c *DeepSeekClient) validateAssistantContent(msgs []Message) []Message {
-	for i := range msgs {
-		if msgs[i].Role != "assistant" {
-			continue
-		}
-		if msgs[i].Content != "" || len(msgs[i].ToolCalls) > 0 {
-			continue
-		}
-		msgs[i].Content = ".."
-		debugLog.Printf("pre-flight fix: filling empty assistant content at msgs[%d]", i)
-	}
-	return msgs
 }
 
 // validateToolCallResponses ensures every tool_call_id emitted by an assistant
@@ -629,20 +564,6 @@ func validateToolCallResponses(msgs []Message) []Message {
 }
 
 func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
-	// Pre-send validation: ensure assistant messages with tool_calls have reasoning_content.
-	// Uses ReasoningEchoManager for stateful echo instead of scanning the message list.
-	if c.reasoningMgr != nil {
-		req.Messages = c.reasoningMgr.ApplyEcho(req.Messages)
-	}
-
-	// Pre-flight check: after ApplyEcho, verify no assistant+tool_calls message is still
-	// missing reasoning_content. If found, auto-fix before sending to prevent 400.
-	req.Messages = c.validateReasoningEcho(req.Messages)
-
-	// Pre-flight check: ensure all assistant messages have at least content or tool_calls.
-	// The API requires one of these to be set; messages with only reasoning_content are invalid.
-	req.Messages = c.validateAssistantContent(req.Messages)
-
 	// Pre-flight check: every tool_call_id in an assistant message must be answered by
 	// a following tool message. If any call went unanswered (e.g. a read-only call was
 	// skipped during plan-confirmation replay), DeepSeek rejects the request with
@@ -650,12 +571,10 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 	// placeholder tool messages for any orphaned ids so the request is always valid.
 	req.Messages = validateToolCallResponses(req.Messages)
 
-	// reasoning_content is a response-only field and is deliberately NOT sent back:
-	// DeepSeek counts re-sent reasoning as billable prompt input (measured ~500
-	// extra tokens per turn on a reasoner chain) and can reject it outright. The
-	// session keeps it for display/archive; the wire request must not carry it.
-	req.Messages = stripReasoningContent(req.Messages)
-
+	// reasoning_content IS sent back: when a request carries the tools parameter,
+	// DeepSeek requires the reasoning_content of every previous turn to be passed
+	// back verbatim (it is concatenated into the context). Omitting it makes the
+	// API return a 400 error. See the Thinking Mode guide ("工具调用" section).
 	payload := requestBody{
 		Model:           req.Model,
 		Messages:        req.Messages,
@@ -666,19 +585,18 @@ func (c *DeepSeekClient) buildRequestBody(req ChatRequest) ([]byte, error) {
 		Stream:          true,
 		StreamOptions:   &streamOptions{IncludeUsage: true},
 	}
-	// When tools are present, request parallel tool calls so the model can emit
-	// multiple tool_use blocks (e.g. several reads) in a single response. Without
-	// this, DeepSeek defaults to one tool call per turn, which turns reading N
-	// files into N rapid sequential requests and triggers rate limits.
-	if len(req.Tools) > 0 {
-		t := true
-		payload.ParallelToolCalls = &t
-	}
 	if req.JsonMode {
 		payload.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
-	if req.ThinkingEnabled {
-		payload.ExtraBody = &extraBody{Thinking: &thinkingBody{Type: "enabled"}}
+	// thinking is a top-level Chat Completions parameter on DeepSeek (unlike the
+	// OpenAI SDK convention of passing it via extra_body, which the SDK merges
+	// into the top level; a raw JSON request must send it at the top level).
+	// DeepSeek's canonical thinking-mode request sends BOTH parameters:
+	// {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}.
+	// reasoning_effort="none" disables thinking mode, so no thinking block is
+	// attached then; an empty effort leaves the provider default untouched.
+	if req.ReasoningEffort != "" && req.ReasoningEffort != "none" {
+		payload.Thinking = &thinkingBody{Type: "enabled"}
 	}
 	return json.Marshal(payload)
 }
@@ -710,17 +628,16 @@ func classifyContextError(err error) error {
 }
 
 type requestBody struct {
-	Model              string          `json:"model"`
-	Messages           []Message       `json:"messages"`
-	Tools              []ToolDef       `json:"tools,omitempty"`
-	Temperature        float64         `json:"temperature,omitempty"`
-	MaxTokens          int             `json:"max_tokens,omitempty"`
-	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
-	Stream             bool            `json:"stream"`
-	StreamOptions      *streamOptions  `json:"stream_options,omitempty"`
-	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
-	ResponseFormat     *responseFormat `json:"response_format,omitempty"`
-	ExtraBody          *extraBody      `json:"extra_body,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []Message       `json:"messages"`
+	Tools           []ToolDef       `json:"tools,omitempty"`
+	Temperature     float64         `json:"temperature,omitempty"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Stream          bool            `json:"stream"`
+	StreamOptions   *streamOptions  `json:"stream_options,omitempty"`
+	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
+	Thinking        *thinkingBody   `json:"thinking,omitempty"`
 }
 
 // streamOptions requests usage statistics in streaming responses.
@@ -735,10 +652,9 @@ type responseFormat struct {
 	Type string `json:"type"`
 }
 
-type extraBody struct {
-	Thinking *thinkingBody `json:"thinking,omitempty"`
-}
-
+// thinkingBody is the top-level DeepSeek thinking-mode switch:
+// {"thinking": {"type": "enabled"}} turns thinking mode on, {"type":
+// "disabled"} off. effort is controlled separately via reasoning_effort.
 type thinkingBody struct {
 	Type string `json:"type"`
 }
@@ -896,29 +812,16 @@ func (s *streamAssembler) buildResponse(model string) *ChatResponse {
 }
 
 // promptText approximates the prompt actually sent to the provider, for token
-// calibration. reasoning_content is deliberately excluded: the wire request
-// strips it (see stripReasoningContent), so counting it here would inflate the
-// char count and drag avgPerChar down, under-estimating every later Estimate.
+// calibration. reasoning_content is included: when the request carries tools,
+// the wire request sends it back (DeepSeek requires it), so it does contribute
+// to the billed prompt.
 func (s *streamAssembler) promptText(req ChatRequest) string {
 	var builder strings.Builder
 	for _, msg := range req.Messages {
 		builder.WriteString(msg.Content)
+		builder.WriteString(msg.ReasoningContent)
 	}
 	return builder.String()
-}
-
-// observeMessage returns a Message with the assembled reasoning and tool calls.
-// Used by ReasoningEchoManager.ObserveAssistant after a successful stream.
-// Returns nil if there's nothing meaningful to observe (no reasoning, no tool calls).
-func (s *streamAssembler) observeMessage() *Message {
-	if s.reasoning.Len() == 0 && len(s.toolCalls) == 0 {
-		return nil
-	}
-	return &Message{
-		Role:             "assistant",
-		ReasoningContent: s.reasoning.String(),
-		ToolCalls:        s.toolCalls,
-	}
 }
 
 // parseSSE reads an SSE stream line by line, invoking handle for each

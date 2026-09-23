@@ -6,18 +6,18 @@ import (
 )
 
 // TestRebuildHistory 验证 RebuildHistory：过滤 message 事件、跳过 tool、
-// 剥离 ToolCalls、按 budget 裁剪（user 边界）。
+// 剥离 ToolCalls 与 ReasoningContent（纯文本流）、按 budget 裁剪（user 边界）。
 func TestRebuildHistory(t *testing.T) {
 	events := []Event{
 		{Type: "user_message", Payload: jsonRaw(`"旧事件被忽略"`)},
 		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"user","content":"问题1"}`)},
 		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"assistant","content":"回答1"}`)},
 		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"tool","tool_call_id":"c1","content":"工具结果"}`)},
-		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"assistant","content":"回答2","tool_calls":[{"id":"c1","name":"grep","arguments":"{}"}]}`)},
+		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"assistant","content":"回答2","reasoning_content":"思维链","tool_calls":[{"id":"c1","name":"grep","arguments":"{}"}]}`)},
 		{Type: EventTypeMessage, Payload: jsonRaw(`{"role":"user","content":"问题3"}`)},
 	}
 	msgs := RebuildHistory(events, 1<<30) // 大预算：全保留
-	// 期望：user/assistant 文本流，tool 被跳过，tool_calls 被剥离
+	// 期望：user/assistant 文本流，tool 被跳过，tool_calls 与 reasoning 被剥离
 	if len(msgs) != 4 {
 		t.Fatalf("len(msgs) = %d, want 4 (user,assistant,assistant,user)", len(msgs))
 	}
@@ -32,6 +32,11 @@ func TestRebuildHistory(t *testing.T) {
 	}
 	if len(msgs[2].ToolCalls) != 0 {
 		t.Errorf("msgs[2].ToolCalls = %+v, want stripped", msgs[2].ToolCalls)
+	}
+	// 纯文本流不变量：恢复的历史不得携带推理链（否则携带 tools 的请求会被
+	// 要求回传它，而落盘时已丢弃，导致恢复后无法满足契约）。
+	if msgs[2].ReasoningContent != "" {
+		t.Errorf("msgs[2].ReasoningContent = %q, want stripped", msgs[2].ReasoningContent)
 	}
 	if msgs[3].Role != "user" || msgs[3].Content != "问题3" {
 		t.Errorf("msgs[3] = %+v, want user 问题3", msgs[3])

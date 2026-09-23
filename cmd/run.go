@@ -233,6 +233,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetMaxOutputTokens(config.MaxOutputTokens)
+	runner.SetReasoningEffort(config.ReasoningEffort)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
 
@@ -483,6 +484,7 @@ func defaultEngineConfig() engine.EngineConfig {
 			ModelName:              "deepseek/deepseek-chat",
 			FlashModelName:         "deepseek/deepseek-chat",
 			BaseURL:                llm.DefaultOpenRouterURL,
+			ReasoningEffort:        "high",
 			MaxTurns:               999,
 			MaxIterationsPerTurn:   15,
 			MaxContextTokens:       1048576,
@@ -512,6 +514,7 @@ func defaultEngineConfig() engine.EngineConfig {
 		ModelName:              "deepseek-v4-flash",
 		FlashModelName:         "deepseek-v4-flash",
 		BaseURL:                llm.DefaultDeepSeekEndpoint,
+		ReasoningEffort:        "high",
 		MaxTurns:               999,
 		MaxIterationsPerTurn:   15,
 		MaxContextTokens:       1048576,

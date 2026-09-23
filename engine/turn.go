@@ -93,10 +93,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	modelName := e.selectModel()
 
 	req := ModelRequest{
-		Model:     modelName,
-		Messages:  messages,
-		Tools:     e.toolSpecsWithHandoff(),
-		MaxTokens: e.maxOutputTokens(),
+		Model:           modelName,
+		Messages:        messages,
+		Tools:           e.toolSpecsWithHandoff(),
+		MaxTokens:       e.maxOutputTokens(),
+		ReasoningEffort: e.config.ReasoningEffort,
 	}
 	turnLog.Printf("turn %d start: model=%s msgs=%d ctx_build=%s", e.state.TurnNumber, modelName, len(messages), ctxBuildDur)
 	streamStart := time.Now()

@@ -57,9 +57,11 @@ func (p RetryPolicy) ShouldRetry(status int) bool {
 	return status >= 500 && status <= 599
 }
 
-// IsFatal reports whether a status must NOT be retried (persistent errors such
-// as insufficient balance/402, invalid request, auth failure). Returning true
-// short-circuits the retry loop.
+// IsFatal reports whether a status is a persistent failure that must NOT be
+// retried. Only 402 (insufficient balance) qualifies: retrying is pointless
+// until the user tops up. The other non-retryable client errors (400 invalid
+// format, 401 auth, 422 invalid parameters) are already excluded by
+// ShouldRetry, which retries only 429 and 5xx.
 func (p RetryPolicy) IsFatal(status int) bool {
 	return status == http.StatusPaymentRequired
 }

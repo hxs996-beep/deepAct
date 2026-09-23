@@ -87,6 +87,11 @@ type modelConfig struct {
 	// AdaptiveLimiter slots). 0 = default 8. Lower it if the provider rate-limits
 	// you (e.g. 1-minute TPM windows); raise it for parallel sub-agent workloads.
 	MaxConcurrentRequests int `toml:"max_concurrent_requests"`
+	// ReasoningEffort controls the DeepSeek thinking effort for all model calls
+	// (main loop + sub-agents). Valid values: none | low | high | max (also
+	// minimal/medium/xhigh/ultra accepted by the API and mapped). Empty = the
+	// engine default (high, DeepSeek's own default).
+	ReasoningEffort string `toml:"reasoning_effort"`
 }
 
 type routingConfig struct {
@@ -234,6 +239,9 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	if f.Model.MaxConcurrentRequests > 0 {
 		cfg.MaxConcurrentRequests = f.Model.MaxConcurrentRequests
+	}
+	if f.Model.ReasoningEffort != "" {
+		cfg.ReasoningEffort = f.Model.ReasoningEffort
 	}
 	if f.Context.MaxBudgetTokens > 0 {
 		cfg.MaxContextTokens = f.Context.MaxBudgetTokens

@@ -27,6 +27,7 @@ type SubAgentRunner struct {
 	flashModelName   string // Flash model for cheaper agents
 	maxContextTokens int    // context window limit; 0 = use defaultSubAgentContext
 	maxOutputTokens  int    // per-turn completion cap; 0 = use DefaultMaxOutputTokens
+	reasoningEffort  string // DeepSeek thinking effort for sub-agent calls; "" = engine default (high)
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
 	// partitionURL derives a per-sub-agent prefix-cache partition URL from a
@@ -86,6 +87,12 @@ func (r *SubAgentRunner) SetMaxContextTokens(tokens int) {
 // SetMaxOutputTokens overrides the per-turn completion cap for sub-agents.
 func (r *SubAgentRunner) SetMaxOutputTokens(tokens int) {
 	r.maxOutputTokens = tokens
+}
+
+// SetReasoningEffort sets the DeepSeek thinking effort for sub-agent calls.
+// Empty string = engine default (high).
+func (r *SubAgentRunner) SetReasoningEffort(effort string) {
+	r.reasoningEffort = effort
 }
 
 func (r *SubAgentRunner) outputTokenCap() int {
@@ -184,9 +191,8 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}, nil
 	}
 
-	// Fork model client to get an independent ReasoningEchoManager.
-	// Prevents the sub-agent's reasoning_content from leaking into the main agent's
-	// next request via the shared mux-protected manager on DeepSeekClient.
+	// Fork model client for an isolated client instance (no shared state with
+	// the parent agent).
 	model := r.model
 	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
 		model = f.Fork()
@@ -324,7 +330,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			Messages:        history,
 			Tools:           filteredTools,
 			MaxTokens:       r.outputTokenCap(),
-			ThinkingEnabled: true, // deepseek-chat 支持原生 thinking：让子代理先推理再行动，提升调研/分析深度
+			ReasoningEffort: r.reasoningEffort, // thinking effort, configured via [model].reasoning_effort; "" = engine default high
 		}
 
 		// Heartbeat — emit periodic progress during the blocking LLM call so the UI
@@ -825,13 +831,12 @@ func (r *SubAgentRunner) buildResult(content string, goal string) *HandoffResult
 }
 
 // estimatedTokens returns a rough token count for a slice of model messages.
-// Uses len/4 heuristic (no external estimator dependency). reasoning_content
-// is excluded: the wire request strips it (see llm.stripReasoningContent), so
-// it never contributes to the billed prompt.
+// Uses len/4 heuristic (no external estimator dependency).
 func estimatedTokens(history []ModelMessage) int {
 	total := 0
 	for _, msg := range history {
 		total += len(msg.Content) / 4
+		total += len(msg.ReasoningContent) / 4
 		for _, tc := range msg.ToolCalls {
 			total += len(tc.ID) / 4
 			total += len(tc.Function.Name) / 4

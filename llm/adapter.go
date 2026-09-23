@@ -64,9 +64,9 @@ func (c *EngineClient) Stream(ctx context.Context, req engine.ModelRequest) (<-c
 	return engineStream, nil
 }
 
-// Fork creates a new EngineClient with an independent ReasoningEchoManager
-// for safe nested agent use. The underlying HTTP connection pool, rate limiter,
-// retry policy, and token estimator are shared with the parent.
+// Fork creates a new EngineClient for safe nested agent use. The underlying
+// HTTP connection pool, rate limiter, retry policy, and token estimator are
+// shared with the parent.
 func (c *EngineClient) Fork() *EngineClient {
 	if c == nil || c.client == nil {
 		return c
@@ -78,10 +78,10 @@ func (c *EngineClient) Fork() *EngineClient {
 	return &EngineClient{client: dsClient.Fork()}
 }
 
-// ForkWithBaseURL creates a new EngineClient with an independent ReasoningEchoManager
-// and a DIFFERENT API endpoint derived from baseURL. This gives sub-agents their own
-// prefix cache partition on DeepSeek's server side, preventing sub-agent calls from
-// polluting the main agent's cache.
+// ForkWithBaseURL creates a new EngineClient with a DIFFERENT API endpoint
+// derived from baseURL. This gives sub-agents their own prefix cache partition
+// on the provider's server side, preventing sub-agent calls from polluting the
+// main agent's cache.
 func (c *EngineClient) ForkWithBaseURL(baseURL string) *EngineClient {
 	if c == nil || c.client == nil {
 		return c
@@ -168,7 +168,6 @@ func mapToChatRequest(req engine.ModelRequest) ChatRequest {
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.ReasoningEffort,
 		JsonMode:        req.JsonMode,
-		ThinkingEnabled: req.ThinkingEnabled,
 	}
 }
 

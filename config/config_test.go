@@ -128,9 +128,10 @@ func TestApply(t *testing.T) {
 
 	f := &File{
 		Model: modelConfig{
-			Default:    "new-flash",
-			Escalation: "new-pro",
-			BaseURL:    "https://new.api.com",
+			Default:         "new-flash",
+			Escalation:      "new-pro",
+			BaseURL:         "https://new.api.com",
+			ReasoningEffort: "low",
 		},
 		Context: contextConfig{
 			MaxBudgetTokens: 200000,
@@ -152,6 +153,9 @@ func TestApply(t *testing.T) {
 	}
 	if cfg.BaseURL != "https://new.api.com" {
 		t.Errorf("BaseURL = %q", cfg.BaseURL)
+	}
+	if cfg.ReasoningEffort != "low" {
+		t.Errorf("ReasoningEffort = %q, want 'low'", cfg.ReasoningEffort)
 	}
 	if cfg.MaxContextTokens != 200000 {
 		t.Errorf("MaxContextTokens = %d, want 200000", cfg.MaxContextTokens)

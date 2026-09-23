@@ -1948,8 +1948,8 @@ func renderLogoBox(width int) string {
 		"  ╚═════╝ ╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═╝   ",
 	}
 
-	// Model name line
-	flashLine := FlashModelStyle.Render("  deepseek V4 flash")
+	// Design philosophy tagline
+	flashLine := FlashModelStyle.Render("  Capability over rules.")
 
 	// Style each mascot line: whale body in cyan, blowhole dot in yellow, waves in blue
 	styledMascot := make([]string, len(mascotLines))
@@ -2009,10 +2009,7 @@ func renderLogoBox(width int) string {
 		combined[i] = left + "  " + rightCol[i]
 	}
 
-	// Slogan below the left-right layout
-	slogan := SloganStyle.Render("Your AI-powered coding companion")
-
-	allLines := append(combined, "", flashLine, "", slogan)
+	allLines := append(combined, "", flashLine)
 	boxed := boxWithBorder(allLines, width)
 	return LogoStyle.Render(boxed)
 }

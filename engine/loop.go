@@ -786,6 +786,15 @@ func (e *Engine) emitEvent(eventType string, stage Stage, payload any) error {
 // persistHistory writes this Run's new conversation messages as message
 // events. user/assistant are stored in full; tool messages keep only a
 // briefDigest; reasoning_content is not persisted.
+//
+// The on-disk transcript is a display/audit record and the source for /resume.
+// /resume rebuilds a plain-text history (see RebuildHistory): it drops tool
+// messages and strips both ToolCalls and ReasoningContent, so the restored
+// conversation carries no tool chain and no chain-of-thought. That sidesteps
+// the two API contracts that only apply when those fields are present:
+// assistant(tool_calls) must be followed by tool responses, and a request with
+// tools must echo back every turn's reasoning_content. Storing reasoning here
+// would only inflate the session file, since it is discarded on restore.
 func (e *Engine) persistHistory() {
 	if e.session == nil {
 		return

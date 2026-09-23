@@ -10,49 +10,30 @@
 </p>
 
 <p align="center">
-  <b>⚡ 单二进制 · ~6 MB 下载 · ~25 MB 内存 · 零运行时依赖 · DeepSeek 原生</b>
+  <b>⚡ 单二进制 · 零运行时依赖 · DeepSeek 原生</b>
 </p>
 
-**DeepAct 是一个跑在终端里的 AI coding agent（AI 编码代理）**：用 Go 编写、静态编译、开源（MIT）、为 DeepSeek API 全链路调优。
-
-- **轻** —— 安装只需一个 ~6 MB 的压缩包，没有 Node、没有 Python、没有 Docker。
-- **快** —— 提示工程、前缀缓存、温度调度、工具调用格式全部针对 DeepSeek 逐项调校。
-- **准** —— 相比"通用代理换上 DeepSeek 模型"，**成本更低、响应更快、指令遵循更准**。
+**DeepAct 是一个跑在终端里的 AI coding agent（AI 编码代理）**：用 Go 编写、静态编译、开源（MIT）、为 DeepSeek API 全链路调优。没有 Node、没有 Python、没有 Docker——一个二进制加一个 DeepSeek API Key 即可。
 
 ---
 
 ## 📖 目录
 
-1. [它有多轻](#它有多轻)
-2. [快速开始](#快速开始)
-3. [日常使用](#日常使用)
-4. [对接 DeepSeek](#对接-deepseek)
-5. [核心能力](#核心能力)
-6. [CLI 命令一览](#cli-命令一览)
-7. [架构](#架构)
+1. [快速开始](#快速开始)
+2. [日常使用](#日常使用)
+3. [对接 DeepSeek](#对接-deepseek)
+4. [核心能力](#核心能力)
+5. [CLI 命令一览](#cli-命令一览)
+6. [架构](#架构)
 
 ---
-
-## ⚡ 它有多轻
-
-| 指标 | 实测值 | 说明 |
-|------|--------|------|
-| 下载体积 | **~6 MB**（tar.gz） | Linux / macOS / Windows，amd64 + arm64 |
-| 单文件大小 | **~16 MB** | 静态编译（`CGO_ENABLED=0` + `-s -w`），零外部库 |
-| 启动峰值内存 | **~25 MB** | 实测 `deepact --help`（macOS arm64） |
-| 启动耗时 | **~10 ms** | 同上实测 |
-| 运行时依赖 | **0** | 无需 Node / Python / Docker / Electron，只要一个 DeepSeek API Key |
-
-*上文数据实测于 release 1.0.6（macOS arm64），不同平台略有差异。*
-
-一个 16 MB 的 Go 文件，装下完整的代理能力：团队协作、子代理并行、MCP 扩展、可回退会话。没有浏览器内核，没有运行时拖累——**启动即用，用完即走**，服务器 / CI / 低配笔记本都能轻松跑。
 
 ## 🚀 快速开始
 
 > [!NOTE]
-> 需要一个 [DeepSeek API Key](https://platform.deepseek.com/)（在 [platform.deepseek.com](https://platform.deepseek.com/) 注册领取）。
+> 需要一个 [DeepSeek API Key](https://platform.deepseek.com/)。首次启动时 TUI 会交互式提示输入，并自动持久化到 `~/.deepact/config.toml`——无需手动配置步骤。
 
-### 第 1 步 · 安装
+### 安装
 
 ```bash
 # macOS / Linux 一键安装
@@ -64,23 +45,14 @@ go install github.com/deepact/deepact@latest
 
 Windows 用户见 [Releases](https://github.com/hxs996-beep/deepAct/releases)（PowerShell 或手动下载）。
 
-### 第 2 步 · 配置 DeepSeek API Key
-
-```bash
-deepact set api-key          # 交互式输入，写入 ~/.deepact/config.toml（权限 0600）
-```
-
-> [!TIP]
-> 项目级配置 `.deepact/config.toml` 会覆盖全局配置，可为不同仓库设置不同模型与权限。
-
-### 第 3 步 · 开始使用
+### 开始使用
 
 ```bash
 deepact                      # 启动交互式 TUI（Windows / macOS / Linux 通用）
 deepact exec "修复连接池竞态"  # 非交互 / CI 模式
-deepact --auto exec "..."    # 自动模式（跳过确认）
-deepact --model pro "..."    # 指定模型：flash（快/省）或 pro（强/全）
 ```
+
+环境变量 `DEEPSEEK_API_KEY` 优先级最高；项目级配置 `.deepact/config.toml` 覆盖全局配置。
 
 ## 🖥️ 日常使用
 
@@ -89,20 +61,20 @@ deepact --model pro "..."    # 指定模型：flash（快/省）或 pro（强/�
 | 按键 | 作用 |
 |------|------|
 | `Ctrl+Q` | 退出 |
-| `Esc` | 取消当前任务 |
+| `Esc` | 取消当前任务 / 清空输入 |
 | `Enter` | 提交 |
+| `Shift+Enter` | 换行 |
 | `Tab` | 补全 |
-| `Alt+Enter` | 换行 |
 
 ### 一句话开工（命令行直出）
 
 ```bash
 deepact exec "给 LoginHandler 加超时和熔断"
-deepact exec "把 user 表迁移到 Postgres 并修好所有编译错误" --auto
-deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.jsonl
+deepact exec "把 user 表迁移到 Postgres 并修好所有编译错误"
+deepact exec "review 最近 5 个 commit 的潜在 bug"
 ```
 
-`exec` 常用参数：`--auto` 跳过确认 · `--output human|jsonl` · `--max-turns N` · `--model flash|pro` · `--verbose`。
+`exec` 常用参数：`--max-turns N` · `--verbose`。
 
 ### 并行研究（/collab）
 
@@ -110,21 +82,13 @@ deepact exec "review 最近 5 个 commit 的潜在 bug" --output jsonl > review.
 deepact exec "/collab 加一个缓存层"
 ```
 
-`/collab` 是另一个内置协作技能（`ratd` / `collab`），由技能提示驱动 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给通用 `sub` agent（只读工具），再把各方向发现合并成一份结构化研究报告——需要快速摸清广度时，比串行调研更快。
+`/collab` 是内置协作技能，由 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给 `researcher` 子代理（只读工具），再把各方向发现合并成一份结构化报告——需要快速摸清广度时，比串行调研更快。
 
 ### 项目规范与技能（Skills）
 
 项目规范、工作流、领域知识通过**技能**注入系统提示：技能列表渲染进稳定区，Agent 在任务明显匹配某技能描述时调用 `load_skill` 工具加载其全文再遵循，也可用 `/<name>` 直接加载。
 
-技能目录按优先级加载（重名时后者覆盖）：
-
-| 优先级 | 目录 | 说明 |
-|--------|------|------|
-| 0 | 内置（`skill/builtin/`，go:embed） | `ratd` / `collab` —— 最低优先级，可被同名用户技能覆盖 |
-| 1 | `~/.deepact/skills/` | DeepAct 专属 |
-| 2 | `<项目>/.claude/skills/` | 项目级 |
-| 3 | `~/.agent/skills/` | Agent 通用 |
-| 4 | `~/.claude/skills/` | Claude Code 兼容 |
+内置技能（`skill/builtin/`，go:embed：`ratd` / `collab`）最先注册、优先级最低；用户技能从常见 agent 技能目录加载（`~/.claude/skills/`、`~/.agent/skills/`、`<项目>/.claude/skills/`、`~/.deepact/skills/`），同名冲突时 `~/.deepact/skills/` 覆盖。也可用 `skill_install` 工具从社区仓库安装技能。
 
 格式为 `<name>/SKILL.md`（Claude Code 布局，YAML frontmatter）：
 
@@ -143,7 +107,15 @@ next_skills: [writing-plans]
 
 ### MCP 扩展
 
-在 `config.toml` 的 `[mcp]` 段注册外部 MCP 服务器，其工具自动并入可用工具集，无需改代码。
+在 `.deepact/mcp.json`（或 `~/.deepact/mcp.json`）注册外部 MCP 服务器，其工具自动并入可用工具集，无需改代码。
+
+```json
+{
+  "servers": [
+    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } }
+  ]
+}
+```
 
 ## 🔌 对接 DeepSeek
 
@@ -159,8 +131,10 @@ DeepAct 从零为 DeepSeek 构建，不为"通用模型"妥协：
 
 ```toml
 [model]
-api_key = "sk-..."        # 也可以 deepact set api-key
-default = "flash"         # 默认路由模型
+api_key = "sk-..."        # 或：DEEPSEEK_API_KEY 环境变量 / 首次启动 TUI 提示
+default = "flash"         # 主循环使用的模型
+escalation = "pro"        # 复杂任务使用的模型（可选）
+reasoning_effort = "high" # 思考强度：none | low | high | max（可选，默认 high）
 
 [search]
 provider    = "tavily"    # 原生 web_search 工具
@@ -169,13 +143,13 @@ max_results = 5
 ```
 
 > [!TIP]
-> 完整字段见配置文件内注释。模型与路由、权限模式、上下文预算、UI、LSP、MCP 服务器均可在 TOML 中配置。
+> 完整字段见配置文件内注释。模型与路由、上下文预算、UI、LSP、MCP 服务器、自定义子代理角色均可在 TOML 中配置。
 
 ## ✨ 核心能力
 
 ### 子代理并行
 
-复杂任务通过 `handoff_to_agent` 委派给单个通用 `sub` agent；同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
+`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用）、`researcher`（只读调研）、`critic`（对抗式审查），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
 
 ### 可回退
 
@@ -185,9 +159,9 @@ max_results = 5
 
 | 命令 | 说明 |
 |------|------|
-| `deepact` | 交互式 TUI |
-| `deepact exec <prompt>` | 非交互 / CI 模式（`--auto`、`--output`、`--max-turns`） |
-| `deepact set [key] [value]` | 配置项（如 `set api-key`） |
+| `deepact` | 交互式 TUI（首次启动提示输入 API Key） |
+| `deepact exec <prompt>` | 非交互 / CI 模式（`--max-turns`、`--verbose`） |
+| `deepact set api-key <key>` | 将 API Key 写入 `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | 提示版本评估与对比 |
 
 ## 🧱 架构
@@ -196,9 +170,10 @@ max_results = 5
 cmd/      CLI 入口（Cobra）        ui/       终端 UI（Bubble Tea）
 engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
-tools/    内置工具 + MCP 适配        router/   模型路由
+tools/    内置工具（builtin/）+ MCP（mcp/）   router/   模型路由
 session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
 skill/    内置（ratd/collab）+ 外部技能加载    config/   共享配置
+memory/   跨会话持久记忆
 ```
 
 分层：`engine/` 是共享类型/接口中枢（hub-and-spoke）。核心 `llm/`、`tools/` 文件零项目依赖，由小型 `adapter.go` 桥接文件对接 engine 类型；`engine/` 不依赖 `ui/`/`cmd/`；跨层调用走接口。
