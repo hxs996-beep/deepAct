@@ -552,7 +552,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.finalizeTurnBlocks(false)
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
 			if len(m.spinners) > 0 {
-				m.spinners[0].Goal = msg.Name + ": " + msg.Detail
+				if msg.Name == "bash" {
+					// bash 完整命令已在输出流的 [>_] Execute 块展示，spinner 只表示正在执行
+					m.spinners[0].Goal = "bash running..."
+				} else {
+					m.spinners[0].Goal = msg.Name + ": " + msg.Detail
+				}
 			}
 		case "tool_done":
 			for i := range m.toolTree {
