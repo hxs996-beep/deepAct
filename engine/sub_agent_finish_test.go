@@ -22,7 +22,7 @@ func (r *recordingToolExecutor) Execute(_ ToolExecContext, calls []ToolCallReque
 }
 
 func (r *recordingToolExecutor) Specs() []ModelTool {
-	return []ModelTool{{Type: "function", Function: ModelToolFunction{Name: "bash"}}}
+	return []ModelTool{{Type: "function", Function: ModelToolFunction{Name: "read"}}}
 }
 
 // TestSubAgentTruncation_NeverEndsOnPartialText: a response cut off by the
@@ -63,7 +63,7 @@ func TestSubAgentTruncation_DropsTruncatedToolCalls(t *testing.T) {
 		{
 			Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
 				ID: "c1", Type: "function",
-				Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"rm -rf"}`},
+				Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
 			}}},
 			FinishReason: "length",
 		},
@@ -127,7 +127,7 @@ func TestSubAgentRunLoop_MaxIterationsReason(t *testing.T) {
 		{
 			Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
 				ID: "c1", Type: "function",
-				Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"go build ./..."}`},
+				Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
 			}}},
 			FinishReason: "tool_calls",
 		},

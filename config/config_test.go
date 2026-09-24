@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/deepact/deepact/engine"
@@ -160,6 +161,48 @@ func TestApply_NilFile(t *testing.T) {
 	Apply(cfg, nil)
 	if cfg.ModelName != "pro" {
 		t.Error("Apply with nil file should not change config")
+	}
+}
+
+// TestApply_AgentToolsUniverseValidation: [agents.<role>].tools naming a
+// write-class tool fails loud at startup with a message that names the role
+// and guides migration; ["*"] (stripped to empty) means the whole read-only
+// universe and must NOT be rejected.
+func TestApply_AgentToolsUniverseValidation(t *testing.T) {
+	cfg := &engine.EngineConfig{}
+	err := Apply(cfg, &File{Agents: map[string]agentRoleConfig{
+		"deployer": {Description: "d", Tools: []string{"bash", "edit"}},
+	}})
+	if err == nil {
+		t.Fatal("expected an error for a write-class tool in a role's tools")
+	}
+	if !strings.Contains(err.Error(), "agents.deployer") || !strings.Contains(err.Error(), "bash") {
+		t.Errorf("error must name the role and the offending tool, got %q", err)
+	}
+	if len(cfg.AgentSpecs) != 0 {
+		t.Errorf("a rejected role must not be registered, got %d specs", len(cfg.AgentSpecs))
+	}
+
+	cfg2 := &engine.EngineConfig{}
+	err = Apply(cfg2, &File{Agents: map[string]agentRoleConfig{
+		"scout": {Description: "d", Tools: []string{"*"}},
+	}})
+	if err != nil {
+		t.Fatalf("[\"*\"] means the whole read-only universe and must pass, got %v", err)
+	}
+	if len(cfg2.AgentSpecs) != 1 || len(cfg2.AgentSpecs[0].ToolNames) != 0 {
+		t.Errorf("star must strip to empty ToolNames (full universe), got %+v", cfg2.AgentSpecs)
+	}
+
+	cfg3 := &engine.EngineConfig{}
+	err = Apply(cfg3, &File{Agents: map[string]agentRoleConfig{
+		"scout": {Description: "d", Tools: []string{"read", "grep"}},
+	}})
+	if err != nil {
+		t.Fatalf("universe members must pass, got %v", err)
+	}
+	if len(cfg3.AgentSpecs[0].ToolNames) != 2 {
+		t.Errorf("expected the listed tools kept, got %+v", cfg3.AgentSpecs[0].ToolNames)
 	}
 }
 

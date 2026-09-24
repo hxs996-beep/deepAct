@@ -38,7 +38,7 @@ func NewSubAgentTool(main, nested SubAgentBackend, agents func() []AgentInfo, ma
 }
 
 func (t *SubAgentTool) Spec() ToolSpec {
-	infos := []AgentInfo{{ID: "sub", Description: "Execute a well-defined subtask with specified tools"}}
+	infos := []AgentInfo{{ID: "sub", Description: "General-purpose read-only analyst: answer a well-scoped question or analyze the provided context, and return a structured conclusion. Cannot modify files or run commands."}}
 	if t.agents != nil {
 		if got := t.agents(); len(got) > 0 {
 			infos = got
@@ -58,13 +58,13 @@ func (t *SubAgentTool) Spec() ToolSpec {
 			"goal": {"type": "string", "description": "What the agent should accomplish"},
 			"context": {"type": "string", "description": "Relevant context for the sub-agent"},
 			"tools": {"type": "array", "items": {"type": "string"},
-				"description": "Tools the sub-agent is allowed to use (optional; defaults to the role's tool set)"},
+				"description": "Read-only tools the sub-agent may use (optional; defaults to the role's set — you may only narrow it). Available: read, read_multi, grep, glob, lsp, web_search, fetch. Sub-agents cannot run bash/write/edit/revert or MCP tools; the main agent applies changes itself."},
 			"constraints": {"type": "array", "items": {"type": "string"},
 				"description": "Constraints for the sub-agent (optional)"},
 			"expected_output": {"type": "string",
 				"description": "What a successful result looks like — acceptance criteria (optional)"},
 			"async": {"type": "boolean",
-				"description": "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent tasks (builds, tests, batch scripts, standalone research)."}
+				"description": "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent read-only tasks (large-scope research, parallel review)."}
 		},
 		"required": ["agent", "goal"]
 	}`, enumJSON)

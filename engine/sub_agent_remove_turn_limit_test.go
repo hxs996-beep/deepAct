@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+// readStubExecutor registers only the read tool: sub-agents are read-only, so
+// a universe member must back the script's calls or the execution gate would
+// refuse them. stubToolExecutor (Specs() == nil) cannot serve this test.
+type readStubExecutor struct{}
+
+func (readStubExecutor) Execute(_ ToolExecContext, calls []ToolCallRequest) []ToolResult {
+	out := make([]ToolResult, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, ToolResult{ToolCallID: c.ID, ToolName: c.Name, Status: "ok", Digest: "ok"})
+	}
+	return out
+}
+
+func (readStubExecutor) Specs() []ModelTool {
+	return []ModelTool{{Type: "function", Function: ModelToolFunction{Name: "read"}}}
+}
+
 // TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes 锁定移除默认 99 轮上限：
 // MaxIterations=0（默认）时子代理可跑超过 99 轮工具调用，最终经 submit_result
 // 正常完成（FinishReason=completed），绝不因轮次上限被截断。
@@ -18,7 +35,7 @@ func TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes(t *testing.T) {
 			Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
 				ID:       "c",
 				Type:     "function",
-				Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"echo progress"}`},
+				Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
 			}}},
 			FinishReason: "tool_calls",
 		})
@@ -32,7 +49,7 @@ func TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes(t *testing.T) {
 		FinishReason: "tool_calls",
 	})
 	model := &stubSeqModel{responses: responses}
-	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
+	runner := &SubAgentRunner{model: model, tools: readStubExecutor{}, modelName: "test"}
 
 	result, err := runner.Run(context.Background(), Handoff{
 		Agent:            AgentSub,

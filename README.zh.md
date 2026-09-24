@@ -147,7 +147,9 @@ max_results = 5
 
 ### 子代理并行
 
-`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用）、`researcher`（只读调研）、`critic`（对抗式审查），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
+`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用只读分析）、`researcher`（只读调研）、`critic`（对抗式审查），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
+
+子代理是**只读的**：可以读、搜、分析（`read`、`read_multi`、`grep`、`glob`、`lsp`、`web_search`、`fetch`），不能修改文件或运行命令——`bash`/`write`/`edit`/`revert`、`skill_install` 与 MCP 工具在任何委派深度都被排除，per-call 的 `tools` 覆盖只能收窄角色工具集、不能放宽。修改属于主代理（其 bash 仍经过危险命令守卫）。`config.toml` 里 `[agents]` 角色声明写类工具会在启动时报错并给出迁移指引。
 
 ### 可回退
 

@@ -1,6 +1,11 @@
 package engine
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Built-in agent IDs (AgentSub is declared in agent.go).
 const (
@@ -55,12 +60,33 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 	// Apply the role's structural configuration (codex-style): stable persona
 	// injected as system instructions, default tool allowlist, model override,
 	// turn cap, and structured-result completion. The delegating model may
-	// still override tools/constraints per call; the role provides defaults.
+	// only NARROW the tool set per call: the read-only universe and the role's
+	// own allowlist are invariants a per-call tools override cannot widen.
 	if input.Persona == "" {
 		input.Persona = spec.Persona
 	}
 	if len(input.Tools) == 0 {
 		input.Tools = spec.ToolNames
+	} else {
+		zh := zhFromLang(input.UserLanguage)
+		if bad := universeViolations(input.Tools); len(bad) > 0 {
+			return nil, errors.New(pickPrompt(zh,
+				fmt.Sprintf("tools not available to sub-agents: [%s]. Sub-agents are read-only; available tools: [%s]. Modification work belongs to the main agent — run it yourself",
+					strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", ")),
+				fmt.Sprintf("工具 [%s] 对子代理不可用。子代理是只读的；可用工具：[%s]。修改类操作由你（主代理）直接执行",
+					strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", "))))
+		}
+		if len(spec.ToolNames) > 0 {
+			narrowed := intersectToolSets(input.Tools, spec.ToolNames)
+			if len(narrowed) == 0 {
+				return nil, errors.New(pickPrompt(zh,
+					fmt.Sprintf("role %s only has tools [%s]; requested [%s] does not overlap — delegate to a role that has them, or drop the tools override",
+						string(spec.ID), strings.Join(spec.ToolNames, ", "), strings.Join(input.Tools, ", ")),
+					fmt.Sprintf("角色 %s 只拥有工具 [%s]，请求的 [%s] 与之无交集——请委派给拥有这些工具的角色，或去掉 tools 覆盖",
+						string(spec.ID), strings.Join(spec.ToolNames, ", "), strings.Join(input.Tools, ", "))))
+			}
+			input.Tools = narrowed
+		}
 	}
 	if input.ModelOverride == "" {
 		input.ModelOverride = spec.ModelName
@@ -74,11 +100,32 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 
 func (a *specSubAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }
 
-// subSpec is the generic, fully-capable sub-agent (the historical default).
+// intersectToolSets returns the intersection of a and b, preserving a's
+// order. A role-restricted agent can only have its tool set narrowed.
+func intersectToolSets(a, b []string) []string {
+	set := make(map[string]bool, len(b))
+	for _, n := range b {
+		set[n] = true
+	}
+	var out []string
+	for _, n := range a {
+		if set[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// subSpec is the general-purpose read-only analyst: no persona, the full
+// read-only universe. It is distinct from researcher (evidence-driven
+// investigation with file:line citations) and critic (adversarial review):
+// sub is the one-shot analyst to feed a large context into and get a
+// structured conclusion back from. Sub-agents cannot modify files or run
+// commands; the main agent applies changes itself.
 func subSpec() AgentSpec {
 	return AgentSpec{
 		ID:               AgentSub,
-		Description:      "Execute a well-defined subtask with specified tools",
+		Description:      "General-purpose read-only analyst: answer a well-scoped question or analyze the provided context, and return a structured conclusion. Cannot modify files or run commands.",
 		StructuredResult: true,
 	}
 }

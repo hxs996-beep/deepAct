@@ -215,10 +215,13 @@ func saveAPIKeyAtPath(path, key string) error {
 }
 
 // Apply overwrites engine config fields that are explicitly set in the TOML file.
-// Fields not present in the file keep their default values.
-func Apply(cfg *engine.EngineConfig, f *File) {
+// Fields not present in the file keep their default values. It returns an
+// error when an [agents] role names tools outside the sub-agent read-only
+// universe, so an invalid role fails loud at startup instead of silently
+// filtering at delegation time.
+func Apply(cfg *engine.EngineConfig, f *File) error {
 	if f == nil {
-		return
+		return nil
 	}
 	if f.Model.Default != "" {
 		cfg.FlashModelName = f.Model.Default
@@ -248,7 +251,8 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
 	}
 	// User-defined sub-agent roles: convert [agents] section to AgentSpecs.
-	// tools = ["*"] means all tools (empty ToolNames in AgentSpec means all).
+	// tools = ["*"] means all sub-agent tools (empty ToolNames in AgentSpec
+	// means the full read-only universe).
 	for name, rc := range f.Agents {
 		if strings.TrimSpace(name) == "" {
 			continue
@@ -266,6 +270,11 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 				tools = append(tools, t)
 			}
 		}
+		// Universe check runs AFTER "*" stripping: ["*"] means the whole
+		// read-only universe and must not be rejected here.
+		if err := engine.ValidateSubAgentTools(tools); err != nil {
+			return fmt.Errorf("[agents.%s] %w", name, err)
+		}
 		// Only set ToolNames when the user listed specific tools (empty = all).
 		if len(tools) > 0 {
 			spec.ToolNames = tools
@@ -277,6 +286,7 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 	}
 	// ConferenceEnabled was removed (dead code - Conference state is managed
 	// via TaskState.Conference field in the engine, not via EngineConfig).
+	return nil
 }
 
 type uiConfig struct {

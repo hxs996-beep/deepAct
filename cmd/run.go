@@ -190,7 +190,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	var lspOverrides map[string]builtin.LSPCommand
 	searchCfg := builtin.WebSearchConfig{}
 	if f := deeplogconfig.LoadProject(workDir); f != nil {
-		deeplogconfig.Apply(&config, f)
+		if err := deeplogconfig.Apply(&config, f); err != nil {
+			return engine.EngineConfig{}, engine.EngineDeps{}, err
+		}
 		lspOverrides = toLSPOverrides(f)
 		searchCfg = toWebSearchConfig(f)
 	}

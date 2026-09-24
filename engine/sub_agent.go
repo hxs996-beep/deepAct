@@ -15,6 +15,56 @@ const (
 	defaultSubAgentContext = 1_048_576 // ~1M — match main engine context window
 )
 
+// subAgentUniverseNames is the closed set of tools a sub-agent may ever be
+// offered or run: sub-agents are read-only, and all modification work
+// (bash/write/edit/revert, skill_install, MCP tools) belongs to the main
+// agent, whose bash calls still pass the danger guard. Channels
+// (handoff_to_agent, ask_user, submit_result) are injected separately by
+// filterTools and are not listed here. The set is closed: tools absent from
+// it — new built-ins, every MCP "<server>_<tool>" name — are excluded from
+// sub-agents; unknown never means allowed.
+var subAgentUniverseNames = []string{"fetch", "glob", "grep", "lsp", "read", "read_multi", "web_search"}
+
+var subAgentUniverse = func() map[string]bool {
+	m := make(map[string]bool, len(subAgentUniverseNames))
+	for _, n := range subAgentUniverseNames {
+		m[n] = true
+	}
+	return m
+}()
+
+// isSubAgentChannelTool reports whether name is an always-injected delegation
+// channel, exempt from the universe intersection.
+func isSubAgentChannelTool(name string) bool {
+	return name == HandoffToolName || name == AskUserToolName || name == SubmitResultToolName
+}
+
+// universeViolations returns the subset of names outside the read-only
+// universe. Channels are always allowed.
+func universeViolations(names []string) []string {
+	var bad []string
+	for _, n := range names {
+		if isSubAgentChannelTool(n) || subAgentUniverse[n] {
+			continue
+		}
+		bad = append(bad, n)
+	}
+	return bad
+}
+
+// ValidateSubAgentTools checks names against the sub-agent read-only universe.
+// The error is user- and model-facing guidance: it names the violations, the
+// universe, and where modification work belongs, so both a startup config
+// mistake and a delegating model's tool override can be self-corrected.
+func ValidateSubAgentTools(names []string) error {
+	bad := universeViolations(names)
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tools not available to sub-agents: [%s]. Sub-agents are read-only; available tools: [%s]. Remove the write-class tools (bash/write/edit/revert, skill_install, MCP tools) — modification work belongs to the main agent",
+		strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", "))
+}
+
 // SubAgentRunner runs the generic sub-agent loop.
 // It is shared by all agent types; specialists inject extra system prompt content.
 type SubAgentRunner struct {
@@ -38,9 +88,9 @@ type SubAgentRunner struct {
 	// unique partition suffix, so parallel sub-agents get distinct prefix-cache
 	// partitions instead of overwriting each other's cached system prefix.
 	partitionSeq atomic.Int64
-	langPackZh       string // Chinese language pack (Go/Python rules in zh)
-	langPackEn       string // English language pack (Go/Python rules in en)
-	maxDepth         int    // absolute delegation-depth cap; 0 = default 2
+	langPackZh   string // Chinese language pack (Go/Python rules in zh)
+	langPackEn   string // English language pack (Go/Python rules in en)
+	maxDepth     int    // absolute delegation-depth cap; 0 = default 2
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -250,6 +300,17 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		filteredTools = append(filteredTools, submitResultToolSpec(zhFromLang(input.UserLanguage)))
 	}
 
+	// Execution gate set: the shared registry resolves any registered name by
+	// lookup, so an out-of-set call — hallucinated or injected — must be
+	// refused against this set at dispatch time. Visible-set filtering alone is
+	// not a security boundary.
+	effectiveSet := make(map[string]bool, len(filteredTools))
+	effectiveNames := make([]string, 0, len(filteredTools))
+	for _, spec := range filteredTools {
+		effectiveSet[spec.Function.Name] = true
+		effectiveNames = append(effectiveNames, spec.Function.Name)
+	}
+
 	modelName := r.modelName
 	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
 	if len(modelOverride) > 0 && modelOverride[0] != "" {
@@ -270,6 +331,10 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	var totalUsage ModelUsage
 	consecutiveIntermediate := 0
 	consecutiveTruncation := 0
+	// consecutiveBlocked counts gate-refused calls with no real dispatch in
+	// between; 3 in a row ends the run with loop_detected. A real dispatch
+	// anywhere resets it. Blocked turns still count toward MaxIterations.
+	consecutiveBlocked := 0
 	streamer := subAgentStreamer{}
 	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
 	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
@@ -479,7 +544,10 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			})
 			continue
 		}
-		consecutiveIntermediate = 0 // reset on tool calls — agent is making progress
+		// dispatchedAny tracks whether this turn dispatched at least one tool
+		// call through the execution gate; only then is the narration streak
+		// reset below — a gate-blocked call is not progress.
+		dispatchedAny := false
 
 		// Process tool calls
 		calls := make([]ToolCallRequest, 0, len(msg.ToolCalls))
@@ -552,6 +620,28 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		// the model decides how to proceed.
 
 		for _, call := range calls {
+			// Execution gate: refuse calls outside this run's offered set. The
+			// registry would resolve them anyway (it never checks the offered
+			// list), so this is the only deterministic refusal point for a
+			// hallucinated or injected out-of-set call.
+			if !effectiveSet[call.Name] {
+				consecutiveBlocked++
+				history = append(history, ModelMessage{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    blockedToolMessage(call.Name, effectiveNames, zhFromLang(input.UserLanguage)),
+				})
+				if consecutiveBlocked >= 3 {
+					return &HandoffResult{
+						Summary:      r.summarizeHistory(history, input.Goal),
+						FinishReason: HandoffReasonLoopDetected,
+						Usage:        &totalUsage,
+					}, nil
+				}
+				continue
+			}
+			consecutiveBlocked = 0
+			dispatchedAny = true
 			if r.onProgress != nil {
 				r.onProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, r.workDir)})
 			}
@@ -603,6 +693,9 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 					})
 				}
 			}
+		}
+		if dispatchedAny {
+			consecutiveIntermediate = 0
 		}
 	}
 
@@ -721,8 +814,9 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // user-questions are core sub-agent capabilities that an allowList must not
 // strip (the old code always prepended handoff; /ratd and /collab pass a
 // read-only allowList but their members still need to delegate and ask).
-// The constructed specs are used for both so the registry copy (if present)
-// is not duplicated.
+// Non-channel specs are additionally restricted to the read-only universe:
+// an allowList can only narrow, never widen. The constructed specs are used
+// for both so the registry copy (if present) is not duplicated.
 func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
 	all := r.tools.Specs()
 	// Prefer the registered SubAgentTool spec (dynamic role enum) so sub-agents
@@ -743,6 +837,9 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []Mode
 			if spec.Function.Name == HandoffToolName || spec.Function.Name == AskUserToolName {
 				continue // already added above
 			}
+			if !subAgentUniverse[spec.Function.Name] {
+				continue // read-only universe: excluded from sub-agents
+			}
 			result = append(result, spec)
 		}
 		return result
@@ -756,11 +853,25 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []Mode
 		if spec.Function.Name == HandoffToolName || spec.Function.Name == AskUserToolName {
 			continue // already added above
 		}
+		if !subAgentUniverse[spec.Function.Name] {
+			continue // read-only universe: excluded from sub-agents
+		}
 		if allowSet[spec.Function.Name] {
 			result = append(result, spec)
 		}
 	}
 	return result
+}
+
+// blockedToolMessage composes the tool-result text for a call refused by the
+// execution gate. It is educational: naming this run's effective tools stops
+// the model from burning turns probing other out-of-set names.
+func blockedToolMessage(name string, effective []string, zh bool) string {
+	avail := strings.Join(effective, ", ")
+	if zh {
+		return fmt.Sprintf("Blocked: %s 对子代理不可用。子代理是只读的；本 run 可用工具：%s。修改类操作属于主代理。", name, avail)
+	}
+	return fmt.Sprintf("Blocked: %s is not available to sub-agents. Sub-agents are read-only; tools available in this run: %s. Modification work belongs to the main agent.", name, avail)
 }
 
 // buildResult builds the handoff result from the agent's final text response.

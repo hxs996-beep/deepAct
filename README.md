@@ -147,7 +147,9 @@ max_results = 5
 
 ### Parallel Subagents
 
-`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general), `researcher` (read-only investigation), `critic` (adversarial review), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
+`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general read-only analysis), `researcher` (read-only investigation), `critic` (adversarial review), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
+
+Sub-agents are **read-only**: they can read, search, and analyze (`read`, `read_multi`, `grep`, `glob`, `lsp`, `web_search`, `fetch`) but cannot modify files or run commands — `bash`/`write`/`edit`/`revert`, `skill_install`, and MCP tools are excluded at every delegation depth, and the per-call `tools` override can only narrow a role's set, never widen it. Modification work belongs to the main agent, whose bash calls still pass the danger guard. A `[agents]` role in `config.toml` naming a write-class tool fails at startup with migration guidance.
 
 ### Rewindable Sessions
 
