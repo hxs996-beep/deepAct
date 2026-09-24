@@ -17,7 +17,6 @@ type File struct {
 	Model   modelConfig   `toml:"model"`
 	Routing routingConfig `toml:"routing"`
 	Context contextConfig `toml:"context"`
-	Guards  guardsConfig  `toml:"guards"`
 	// Agents holds user-defined sub-agent roles. Each key is a role name that
 	// becomes selectable in the handoff tool's agent enum; user roles override
 	// built-in roles with the same name. Mirrors codex's agent_roles toml.
@@ -105,10 +104,6 @@ type contextConfig struct {
 	// completions; a generous budget lets the model emit full code edits in one
 	// turn instead of being cut off and forced to continue piecemeal.
 	MaxOutputTokens int `toml:"max_output_tokens"`
-}
-
-type guardsConfig struct {
-	ScopeGuard bool `toml:"scope_guard"`
 }
 
 // conferenceConfig struct removed — ConferenceEnabled was dead code (never read by engine).
@@ -280,8 +275,6 @@ func Apply(cfg *engine.EngineConfig, f *File) {
 		}
 		cfg.AgentSpecs = append(cfg.AgentSpecs, spec)
 	}
-	// scope_guard=false means auto-confirm (invert the boolean)
-	cfg.AutoConfirmScope = !f.Guards.ScopeGuard
 	// ConferenceEnabled was removed (dead code - Conference state is managed
 	// via TaskState.Conference field in the engine, not via EngineConfig).
 }

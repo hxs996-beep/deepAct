@@ -74,8 +74,6 @@ deepact exec "migrate the user table to Postgres and fix all compile errors"
 deepact exec "review the last 5 commits for potential bugs"
 ```
 
-Common `exec` flags: `--max-turns N` · `--verbose`.
-
 ### Parallel Research (/collab)
 
 ```bash
@@ -160,7 +158,7 @@ Every step is written to an immutable JSONL log: rewind to any step, fork a new 
 | Command | Description |
 |---------|-------------|
 | `deepact` | Interactive TUI (first launch prompts for the API key) |
-| `deepact exec <prompt>` | Non-interactive / CI mode (`--max-turns`, `--verbose`) |
+| `deepact exec <prompt>` | Non-interactive / CI mode |
 | `deepact set api-key <key>` | Store the API key in `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | Prompt-version evaluation and comparison |
 

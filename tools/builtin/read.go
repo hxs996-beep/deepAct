@@ -25,6 +25,14 @@ const (
 
 	// lspHint is appended to read results to nudge toward lsp for symbol/type queries.
 	lspHint = "\n\n---\nNeed to find a symbol definition, type info, or references? Use the `lsp` tool instead of reading the whole file (e.g., `lsp operation=hover file_path=<path> line=<line> character=<char>`)."
+
+	// unchangedReadHint prefixes a read result when the file has not changed
+	// since the last read: the model already has this content, so re-reading
+	// yields nothing new. This is information, not a block — the content is
+	// still returned in full and the model decides what to do with it.
+	unchangedReadHint = "File unchanged since your last read — its content is already in the conversation. " +
+		"Do not re-read it; act on what you already have or read a different section. " +
+		"文件自上次读取后未变更，内容已在对话中，请勿重读；请基于已有内容行动或读取其他部分。\n\n"
 )
 
 type ReadTool struct {
@@ -77,29 +85,28 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: fmt.Sprintf("symbol %s (%d lines)\n%s", payload.Symbol, lineCount, content)}, nil
 	}
 
-	// Full read (no offset/limit): use readFullContent and update mtime cache.
+	// When the file is unchanged since the last read, prefix a do-not-re-read
+	// hint: a repeated read gives the model no new information and fuels
+	// narration+read loops. The content is still returned so nothing is lost,
+	// but the hint steers the model to act on what it already has. Applies to
+	// both full and offset/limit reads.
+	unchanged := false
+	if info, statErr := os.Stat(safePath); statErr == nil {
+		mtime := info.ModTime().UnixMilli()
+		if prev, ok := t.mtimeCache.Load(safePath); ok && prev == mtime {
+			unchanged = true
+		}
+		t.mtimeCache.Store(safePath, mtime)
+	}
+
+	// Full read (no offset/limit): use readFullContent.
 	if payload.Offset == 0 && payload.Limit == 0 {
 		content, err := readFullContent(safePath)
 		if err != nil {
 			return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
 		}
-		// When the file is unchanged since the last full read, prefix a
-		// do-not-re-read hint: repeated identical reads give the model no new
-		// information and fuel narration+read loops. The content is still
-		// returned so nothing is lost, but the hint steers the model to act
-		// on what it already has.
-		unchanged := false
-		if info, statErr := os.Stat(safePath); statErr == nil {
-			mtime := info.ModTime().UnixMilli()
-			if prev, ok := t.mtimeCache.Load(safePath); ok && prev == mtime {
-				unchanged = true
-			}
-			t.mtimeCache.Store(safePath, mtime)
-		}
 		if unchanged {
-			content = "File unchanged since your last full read — its content is already in the conversation. " +
-				"Do not re-read it; act on what you already have or read a different section. " +
-				"文件自上次完整读取后未变更，内容已在对话中，请勿重读；请基于已有内容行动或读取其他部分。\n\n" + content
+			content = unchangedReadHint + content
 		}
 		return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 	}
@@ -108,6 +115,9 @@ func (t *ReadTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	content, err := readLinesContent(safePath, payload.Offset, payload.Limit)
 	if err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
+	}
+	if unchanged {
+		content = unchangedReadHint + content
 	}
 	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: content + lspHint}, nil
 }

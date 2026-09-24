@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,23 +28,17 @@ type TurnResult struct {
 	BlockedBy    string
 	Questions    []string
 	FinishReason string
-	LastOp       string // "toolName:path" for loop detection, empty if irrelevant
-	// LastOpError is true when the operation recorded in LastOp returned an
-	// error status this turn. Used by the errorLoop tracker to detect
-	// repeated failing operations that defeat the content-hash-based loop
-	// guards.
-	LastOpError bool
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
 	// MadeProgress is true when this turn produced a progress signal: a
 	// successful edit/write/revert/bash call, a handoff, a novel read (a
-	// (path, scope) not yet read this Run), or a novel search (grep/glob
-	// with a new pattern/path key). Repeated reads and repeated searches,
-	// lsp, todo_write, ask_user and narration are NOT progress.
-	// ProgressLoopState uses it to detect "N turns without progress" loops
-	// (narration + repeated read/todo) while leaving legitimate
-	// investigation — reading or searching new content — alone.
+	// (path, scope) not yet read this Run), a novel search (grep/glob with a
+	// new pattern/path key), or a novel lsp query. Repeated reads, repeated
+	// searches and repeated lsp queries, todo_write, ask_user and narration
+	// are NOT progress. The progressLoop breaker uses it to detect "N turns
+	// without progress" loops while leaving legitimate investigation — reading,
+	// searching or inspecting new content — alone.
 	MadeProgress bool
 }
 
@@ -507,61 +500,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// failing test was HARD-GATE-blocked and could only loop on todo_write/read.
 
 	for _, call := range calls {
-		// Check loop guard: same (tool, path) repeated → block to prevent cycles.
-		if e.guards.loop != nil {
-			var loopAction GuardAction
-			if call.Name == "read_multi" {
-				// Default to Allow. Without this, when every sub-target is Allow,
-				// loopAction stays zero-valued (Type=""), and "" != GuardAllow
-				// below would falsely block the call (with an empty message) -
-				// blocking every read_multi on new files.
-				loopAction = GuardAction{Type: GuardAllow}
-				// read_multi bypasses the single-call key (extractToolKey returns ""
-				// for unknown tools); check each sub-target as a synthetic read so
-				// repeated fan-out reads of the same (path, scope) are still caught.
-				for _, tgt := range parseReadMultiTargets(call.Input) {
-					key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
-					a := e.guards.loop.Check(key, false)
-					if a.Type != GuardAllow {
-						loopAction = GuardAction{Type: a.Type, Message: fmt.Sprintf("read_multi target %s: %s", tgt.Path, a.Message)}
-						break
-					}
-				}
-			} else {
-				key := extractToolKey(call, e.config.WorkDir)
-				if key == "" {
-					loopAction = GuardAction{Type: GuardAllow}
-				} else {
-					loopAction = e.guards.loop.Check(key, false)
-				}
-			}
-			if loopAction.Type != GuardAllow {
-				// LoopTracker's Message is a placeholder ("loop-block"); build a
-				// user-visible bilingual message. The original loop guard's count
-				// is no longer available, so use a concise generic loop message.
-				// NOTE: this bilingual block message duplicates the consecutiveSameOp
-				// message in loop.go — keep them in sync if either changes.
-				msg := loopAction.Message
-				if zh := e.isChinese; zh {
-					msg = "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
-				} else {
-					msg = "Detected repeated operation loop. The agent may be stuck. Please provide new direction."
-				}
-				e.history = append(e.history, assistant)
-				for _, c := range calls {
-					e.history = append(e.history, Message{
-						Role:       "tool",
-						ToolCallID: c.ID,
-						Content:    "Blocked: " + msg,
-						Timestamp:  time.Now(),
-					})
-				}
-				turnLog.Printf("loop block: %s", msg)
-				return TurnResult{Blocked: true, BlockedBy: loopAction.Type, Questions: []string{msg}}, nil
-			}
-		}
-
-		scopeAction := e.guards.scope.CheckTool(call, e.state)
+		scopeAction := e.guards.scope.CheckTool(call)
 		if scopeAction.Type != GuardAllow {
 			// If blocked due to dangerous bash command, store it as pending user confirmation
 			if call.Name == "bash" {
@@ -682,19 +621,23 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	// Execute regular tool calls.
 	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
-	// statusByID records each call's outcome status so the loop-detection block
-	// below can tell whether the first op errored (feeds the errorLoop tracker).
+	// statusByID records each call's outcome status.
 	statusByID := make(map[string]string, len(regularCalls))
 	if len(regularCalls) > 0 {
 		toolsStart := time.Now()
 		var readOnlyCalls, destructiveCalls []ToolCallRequest
+		callByID := make(map[string]ToolCallRequest, len(regularCalls))
 		for _, call := range regularCalls {
+			callByID[call.ID] = call
 			if call.Name == "edit" || call.Name == "write" {
 				destructiveCalls = append(destructiveCalls, call)
 			} else {
 				readOnlyCalls = append(readOnlyCalls, call)
 			}
 		}
+		// rawResults keeps the un-annotated tool digests for task-state
+		// extraction, while history carries the repeat annotation.
+		rawResults := make([]ToolResult, 0, len(regularCalls))
 
 		// Batch execute read-only tools (grep, glob, read, lsp, bash — no diffs, fast)
 		if len(readOnlyCalls) > 0 {
@@ -709,7 +652,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
 				statusByID[result.ToolCallID] = result.Status
-				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+				rawResults = append(rawResults, ToolResult{ToolCallID: result.ToolCallID, Digest: result.Digest})
+				content := e.annotateRepeats(callByID[result.ToolCallID], result.Digest)
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})
 			}
 		}
 
@@ -725,18 +670,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
 				}
 				statusByID[result.ToolCallID] = result.Status
-				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: result.Digest, Timestamp: time.Now()})
+				rawResults = append(rawResults, ToolResult{ToolCallID: result.ToolCallID, Digest: result.Digest})
+				content := e.annotateRepeats(call, result.Digest)
+				e.history = append(e.history, Message{Role: "tool", ToolCallID: result.ToolCallID, Content: content, Timestamp: time.Now()})
 			}
 		}
 
 		allCalls := append(readOnlyCalls, destructiveCalls...)
-		allResults := make([]ToolResult, 0)
-		for i := len(e.history) - len(regularCalls); i < len(e.history); i++ {
-			if i >= 0 && e.history[i].Role == "tool" {
-				allResults = append(allResults, ToolResult{ToolCallID: e.history[i].ToolCallID, Digest: e.history[i].Content})
-			}
-		}
-		e.updateTaskStateFromTools(allCalls, allResults)
+		e.updateTaskStateFromTools(allCalls, rawResults)
 		e.runToolCallCount += len(regularCalls)
 		e.stopHookRetryCount = 0 // reset on tool calls — agent is making progress
 
@@ -761,38 +702,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			result.Questions = []string{e.pendingAskUser.Question}
 		}
 	}
-	// Record the first operation for loop detection.
-	// For destructive tools (edit/write), include content hash so different edits
-	// on the same file are recognized as distinct operations.
-	// For read operations, include a human-readable scope (symbol/offset/limit) so
-	// reading different sections of the same file produces distinct LastOps and is
-	// not counted as a loop. Repeated reads of the SAME scope are still caught.
-	// Key form is aligned with the loop guard's read key ("read:path::scope").
-	for _, c := range regularCalls {
-		path := extractPathFromArgs(c.Input, e.config.WorkDir)
-		if path == "" {
-			continue
-		}
-		if c.Name == "read" {
-			result.LastOp = c.Name + ":" + path + "::" + extractReadScope(c.Input)
-		} else {
-			result.LastOp = c.Name + ":" + path + "#" + contentSignature(c.Input)
-		}
-		// Record whether this op errored so the errorLoop tracker can catch
-		// repeated failures on the same (tool, path) that defeat content-hash
-		// guards.
-		result.LastOpError = statusByID[c.ID] == "error"
-		break
-	}
-	// Progress signal for the progressLoop tracker: a successful destructive
+	// Progress signal for the progressLoop breaker: a successful destructive
 	// call (edit/write/revert/bash), a handoff, a NOVEL read (a (path, scope)
-	// not yet read this Run), or a NOVEL search (grep/glob with a new
-	// pattern/path key) counts as progress. Repeated reads of the same scope
-	// and repeated searches do not. This distinguishes legitimate
-	// investigation — reading or searching new content advances the task —
-	// from a "N turns narrate but never act" loop, and complements the
-	// readLoop tracker which separately catches repeated same-scope reads
-	// (3rd nudge, 4th block).
+	// not yet read this Run), a NOVEL search (grep/glob with a new
+	// pattern/path key), or a NOVEL lsp query counts as progress. Repeated
+	// reads, searches and lsp queries do not. This distinguishes legitimate
+	// investigation — reading, searching or inspecting new content advances
+	// the task — from a "N turns narrate but never act" loop.
 	if e.progressKeys == nil {
 		e.progressKeys = make(map[string]bool)
 	}
@@ -824,6 +740,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		case "grep", "glob":
 			// 新信息获取（新 pattern/路径的搜索）＝推进理解＝进展。
 			key := searchKey(c, e.config.WorkDir)
+			if key != "" && !e.progressKeys[key] {
+				e.progressKeys[key] = true
+				result.MadeProgress = true
+			}
+		case "lsp":
+			// 同理：新的 lsp 查询（新 operation/文件/符号/位置）＝获取新信息＝
+			// 进展；重复同一查询不算。
+			key := lspKey(c, e.config.WorkDir)
 			if key != "" && !e.progressKeys[key] {
 				e.progressKeys[key] = true
 				result.MadeProgress = true
@@ -1305,36 +1229,6 @@ func searchKey(c ToolCallRequest, workDir string) string {
 		return ""
 	}
 	return c.Name + ":" + pattern + ":" + path
-}
-
-// contentSignature returns a short hash of the tool call's input arguments,
-// used to distinguish operations with different content on the same file.
-// The hash is derived from content-bearing fields (pattern, old_string, content)
-// rather than the full JSON, so trivial changes like path or filename don't
-// collapse the signature.
-func contentSignature(input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	// Collect content-bearing fields only
-	var parts []string
-	for _, key := range []string{"pattern", "old_string", "new_string", "content", "command", "symbol"} {
-		if v, ok := m[key]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				parts = append(parts, key+"="+s)
-			}
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	combined := strings.Join(parts, "&")
-	h := sha256.Sum256([]byte(combined))
-	return fmt.Sprintf("%x", h[:4])
 }
 
 // appendUniqMarkers appends markers that aren't already in the list,

@@ -91,14 +91,10 @@ func hasDSMLToolCalls(content string) bool {
 // history (they pollute subsequent turns and surface as a fake "完成" summary).
 //
 // These markers are structural and unambiguous — prefix matching is safe because
-// they don't appear in natural conversation (e.g. "# Block B:", "## Environment").
+// they don't appear in natural conversation (e.g. "# Block S:", "[TASK REMINDER]").
 var internalPromptBlockPrefixes = []string{
 	"# Block S: Session Context",
 	"# Block S：会话上下文",
-	"## Task State",
-	"## 任务状态",
-	"## Environment",
-	"## 环境",
 	"# Language Pack",
 	"[TASK REMINDER]",
 	"<TASK REMINDER>",
@@ -114,6 +110,13 @@ var internalPromptBlockPrefixes = []string{
 var internalPromptExactHeaders = []string{
 	"Files already read",
 	"已读文件",
+	// Generic section titles the model may legitimately reuse as subheadings
+	// in an answer: match the whole line (or the line followed by "：" / ":")
+	// rather than any prefix, so a real heading is not deleted with its body.
+	"## Task State",
+	"## 任务状态",
+	"## Environment",
+	"## 环境",
 }
 
 func isInternalPromptHeader(line string) bool {

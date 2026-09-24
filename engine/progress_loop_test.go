@@ -101,7 +101,7 @@ func TestExecuteTurn_MadeProgress_EditSuccess(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "改"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -128,7 +128,7 @@ func TestExecuteTurn_MadeProgress_NovelRead(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -155,9 +155,9 @@ func TestExecuteTurn_MadeProgress_RepeatedRead(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
-		// 该 (path, scope) 本轮已读过：key 形式与 read 的 LastOp 一致
-		// "read:path::scope"。
+		guards:  &GuardSystem{scope: NewScopeGuard()},
+		// 该 (path, scope) 本轮已读过：key 形式与 read 的 repeat/progress key
+		// 一致（"read:path::scope"）。
 		progressKeys: map[string]bool{"read:a.go::": true},
 	}
 	result, err := e.executeTurn(context.Background())
@@ -184,7 +184,7 @@ func TestExecuteTurn_MadeProgress_NovelReadMulti(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "看"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -217,7 +217,7 @@ func TestExecuteTurn_MadeProgress_ReadKeyRecordedWithEdit(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "改"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	// 第一轮：edit + 新 read b.go → 有进展，且 b.go 的 key 应被记录。
 	r1, err := e.executeTurn(context.Background())
@@ -261,7 +261,7 @@ func TestExecuteTurn_MadeProgress_NovelGrep(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "搜"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -286,7 +286,7 @@ func TestExecuteTurn_MadeProgress_RepeatedGrep(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "搜"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 		// 该 pattern 本轮已搜过：key 形式 "grep:<pattern>:"
 		progressKeys: map[string]bool{"grep:LoopTracker:": true},
 	}
@@ -313,7 +313,7 @@ func TestExecuteTurn_MadeProgress_NovelGlob(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "找"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -385,10 +385,8 @@ func TestRun_ProgressLoop_NovelReadsAllowed(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopTracker(0, 6, false),
-			scope: NewScopeGuard(false),
+			scope: NewScopeGuard(),
 		},
-		readLoop:     NewLoopTracker(3, 4, false),
 		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}
@@ -421,10 +419,8 @@ func TestRun_ProgressLoop_NoNovelReadBlocked(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopTracker(0, 6, false),
-			scope: NewScopeGuard(false),
+			scope: NewScopeGuard(),
 		},
-		readLoop:     NewLoopTracker(3, 4, false),
 		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}
@@ -469,10 +465,8 @@ func TestRun_ProgressLoop_EditResetsStreak(t *testing.T) {
 		history: []Message{},
 		config:  EngineConfig{ModelName: "test-model"},
 		guards: &GuardSystem{
-			loop:  NewLoopTracker(0, 6, false),
-			scope: NewScopeGuard(true),
+			scope: NewScopeGuard(),
 		},
-		readLoop:     NewLoopTracker(3, 4, false),
 		progressLoop: NewLoopTracker(4, 6, true),
 		isChinese:    true,
 	}

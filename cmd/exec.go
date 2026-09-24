@@ -47,6 +47,4 @@ func runHeadless(cmd *cobra.Command, args []string) error {
 
 func init() {
 	rootCmd.AddCommand(execCmd)
-	execCmd.Flags().String("output", "human", "output format: human | jsonl")
-	execCmd.Flags().Int("max-turns", 30, "maximum agent turns before stopping")
 }

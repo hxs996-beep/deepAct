@@ -30,9 +30,6 @@ base_url = "https://api.deepseek.com"
 [context]
 max_budget_tokens = 100000
 
-[guards]
-scope_guard = false
-
 [routing]
 risk_threshold = 0.5
 `)
@@ -58,9 +55,6 @@ risk_threshold = 0.5
 	}
 	if f.Context.MaxBudgetTokens != 100000 {
 		t.Errorf("Context.MaxBudgetTokens = %d, want 100000", f.Context.MaxBudgetTokens)
-	}
-	if f.Guards.ScopeGuard {
-		t.Error("Guards.ScopeGuard should be false")
 	}
 	if f.Routing.RiskThreshold != 0.5 {
 		t.Errorf("Routing.RiskThreshold = %f, want 0.5", f.Routing.RiskThreshold)
@@ -123,7 +117,6 @@ func TestApply(t *testing.T) {
 		BaseURL:          "https://custom.api.com",
 		MaxContextTokens: 500000,
 		RiskThreshold:    0.5,
-		AutoConfirmScope: false,
 	}
 
 	f := &File{
@@ -138,9 +131,6 @@ func TestApply(t *testing.T) {
 		},
 		Routing: routingConfig{
 			RiskThreshold: 0.7,
-		},
-		Guards: guardsConfig{
-			ScopeGuard: false, // = auto-confirm scope = true
 		},
 	}
 
@@ -162,9 +152,6 @@ func TestApply(t *testing.T) {
 	}
 	if cfg.RiskThreshold != 0.7 {
 		t.Errorf("RiskThreshold = %f, want 0.7", cfg.RiskThreshold)
-	}
-	if !cfg.AutoConfirmScope {
-		t.Error("AutoConfirmScope should be true (scope_guard=false)")
 	}
 }
 
@@ -265,9 +252,6 @@ func TestSaveAPIKey_AddToExistingModelSection(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 	original := []byte(`[model]
 default = "flash"
-
-[guards]
-scope_guard = true
 `)
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -284,9 +268,6 @@ scope_guard = true
 	}
 	if f.Model.Default != "flash" {
 		t.Errorf("Default = %q, want flash", f.Model.Default)
-	}
-	if !f.Guards.ScopeGuard {
-		t.Error("ScopeGuard should remain true")
 	}
 }
 

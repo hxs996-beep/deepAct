@@ -84,10 +84,8 @@ type EngineConfig struct {
 	MaxOutputTokens        int
 	PlanningEnabled        bool
 	PlanningThresholdChars int
-	AutoConfirmScope       bool
 	ShowThinking           bool    // stream model reasoning/thinking to UI
 	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
-	ToolAllowList          []string
 	WorkDir                string
 	OnProgress             ProgressFunc
 	Pricing                PricingConfig
@@ -257,7 +255,6 @@ type MessageToolCall struct {
 type TaskState struct {
 	TaskID              string           `json:"task_id"`
 	Goal                string           `json:"goal"`
-	ConfirmedScope      bool             `json:"confirmed_scope"`
 	Constraints         []string         `json:"constraints"`
 	Assumptions         []string         `json:"assumptions"`
 	Decisions           []Decision       `json:"decisions"`

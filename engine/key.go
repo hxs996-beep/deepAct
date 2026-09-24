@@ -26,11 +26,12 @@ func normalizePath(p, workDir string) string {
 	return filepath.Clean(filepath.Join(workDir, p))
 }
 
-// extractToolKey extracts a unique key from a tool call for loop detection.
+// extractToolKey extracts a unique per-target key from a tool call, used for
+// repeat reporting (Engine.annotateRepeats) and progress-novelty detection.
 // Returns "toolName:path:contentHash" for destructive tools, or "" for
 // exploratory tools. Content hash ensures that different edits on the same
 // file (different old_string→new_string) are treated as distinct operations,
-// preventing false loop detection when modifying multiple locations.
+// preventing false repeat detection when modifying multiple locations.
 func extractToolKey(call ToolCallRequest, workDir string) string {
 	path := extractPathField(call.Input, workDir)
 	if path == "" {
@@ -45,7 +46,7 @@ func extractToolKey(call ToolCallRequest, workDir string) string {
 		contentHash = extractWriteContentHash(call.Input)
 	case "read":
 		// Human-readable scope ("", "symbol:Run", "L10-50") — aligned with
-		// LastOp and ReadRecord so all three use one consistent key form.
+		// the ReadRecord so both use one consistent key form.
 		return "read:" + path + "::" + extractReadScope(call.Input)
 	default:
 		// grep/glob/bash etc. — not tracked for loops
@@ -143,4 +144,78 @@ func extractPathField(input json.RawMessage, workDir string) string {
 		return normalizePath(p, workDir)
 	}
 	return ""
+}
+
+// repeatKeys returns the per-target keys a tool call counts against for repeat
+// reporting. Most calls yield one key; read_multi yields one per target. Empty
+// when the call has no comparable target (bash, todo_write, handoff, ...).
+func repeatKeys(call ToolCallRequest, workDir string) []string {
+	switch call.Name {
+	case "read", "edit", "write":
+		if k := extractToolKey(call, workDir); k != "" {
+			return []string{k}
+		}
+	case "read_multi":
+		var keys []string
+		for _, tgt := range parseReadMultiTargets(call.Input) {
+			if tgt.Path == "" {
+				continue
+			}
+			keys = append(keys, "read:"+normalizePath(tgt.Path, workDir)+"::"+readMultiTargetScope(tgt))
+		}
+		return keys
+	case "grep", "glob":
+		if k := searchKey(call, workDir); k != "" {
+			return []string{k}
+		}
+	case "lsp":
+		if k := lspKey(call, workDir); k != "" {
+			return []string{k}
+		}
+	}
+	return nil
+}
+
+// lspKey builds a per-query key for lsp calls:
+// "lsp:<operation>:<file>:<query>:<line>". A novel query counts as progress;
+// repeating the same query does not.
+func lspKey(call ToolCallRequest, workDir string) string {
+	var m map[string]interface{}
+	if len(call.Input) == 0 || json.Unmarshal(call.Input, &m) != nil {
+		return ""
+	}
+	op, _ := m["operation"].(string)
+	if op == "" {
+		return ""
+	}
+	file := ""
+	if p, ok := m["file_path"].(string); ok {
+		file = normalizePath(p, workDir)
+	}
+	query, _ := m["query"].(string)
+	line, _ := m["line"].(float64)
+	return fmt.Sprintf("lsp:%s:%s:%s:%d", op, file, query, int(line))
+}
+
+// annotateRepeats prefixes a tool result with an objective repeat count when the
+// same target has already been addressed in this Run. This is information for
+// the model to act on — it never blocks the call or ends the Run, unlike the
+// per-target loop guards it replaces. The model decides whether to change
+// approach or conclude from what it already has.
+func (e *Engine) annotateRepeats(call ToolCallRequest, digest string) string {
+	if e.repeatCounts == nil {
+		e.repeatCounts = make(map[string]int)
+	}
+	highest := 0
+	for _, k := range repeatKeys(call, e.config.WorkDir) {
+		e.repeatCounts[k]++
+		if e.repeatCounts[k] > highest {
+			highest = e.repeatCounts[k]
+		}
+	}
+	if highest < 2 {
+		return digest
+	}
+	return fmt.Sprintf("[repeat %d× this run: %s]\n%s",
+		highest, summarizeArgs(call.Name, call.Input, e.config.WorkDir), digest)
 }

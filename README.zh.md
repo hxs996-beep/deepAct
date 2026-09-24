@@ -74,8 +74,6 @@ deepact exec "把 user 表迁移到 Postgres 并修好所有编译错误"
 deepact exec "review 最近 5 个 commit 的潜在 bug"
 ```
 
-`exec` 常用参数：`--max-turns N` · `--verbose`。
-
 ### 并行研究（/collab）
 
 ```bash
@@ -160,7 +158,7 @@ max_results = 5
 | 命令 | 说明 |
 |------|------|
 | `deepact` | 交互式 TUI（首次启动提示输入 API Key） |
-| `deepact exec <prompt>` | 非交互 / CI 模式（`--max-turns`、`--verbose`） |
+| `deepact exec <prompt>` | 非交互 / CI 模式 |
 | `deepact set api-key <key>` | 将 API Key 写入 `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | 提示版本评估与对比 |
 

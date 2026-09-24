@@ -31,7 +31,7 @@ func TestExecuteTurn_ReadMultiNotBlockedWhenNewFiles(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0, Goal: "分析"},
 		history: []Message{{Role: "user", Content: "分析"}},
 		config:  EngineConfig{ModelName: "test"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 	result, err := e.executeTurn(context.Background())
 	if err != nil {

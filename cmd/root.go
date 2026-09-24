@@ -14,10 +14,3 @@ var rootCmd = &cobra.Command{
 func Execute() error {
 	return rootCmd.Execute()
 }
-
-func init() {
-	rootCmd.PersistentFlags().String("config", "", "config file")
-	rootCmd.PersistentFlags().String("model", "", "override model (flash/pro)")
-	rootCmd.PersistentFlags().Bool("auto", false, "auto mode (skip confirmations)")
-	rootCmd.PersistentFlags().Bool("verbose", false, "verbose output")
-}

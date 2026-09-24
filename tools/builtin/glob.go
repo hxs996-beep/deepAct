@@ -23,13 +23,17 @@ func (t *GlobTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "glob",
 		Description: "Find files matching a glob pattern. For searching symbols by name (e.g., finding which file defines a type/function), prefer `lsp workspaceSymbol` — it's more precise and doesn't require knowing the filename pattern in advance.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"max_results":{"type":"integer","description":"Maximum results (default 100)"}},"required":["pattern"]}`),
 	}
 }
 
+// globDefaultResults caps the result list when the caller does not ask for more.
+const globDefaultResults = 100
+
 type globInput struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
+	Pattern    string `json:"pattern"`
+	Path       string `json:"path"`
+	MaxResults int    `json:"max_results"`
 }
 
 type globMatch struct {
@@ -66,15 +70,26 @@ func (t *GlobTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i].ModTime.After(matches[j].ModTime)
 	})
-	if len(matches) > 100 {
-		matches = matches[:100]
+	maxResults := payload.MaxResults
+	if maxResults <= 0 {
+		maxResults = globDefaultResults
+	}
+	total := len(matches)
+	truncated := total > maxResults
+	if truncated {
+		matches = matches[:maxResults]
 	}
 	var builder strings.Builder
 	for _, match := range matches {
 		builder.WriteString(match.Path)
 		builder.WriteString("\n")
 	}
-	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: strings.TrimRight(builder.String(), "\n")}, nil
+	digest := strings.TrimRight(builder.String(), "\n")
+	if truncated {
+		// Never truncate silently: the model must know the list is partial.
+		digest += fmt.Sprintf("\n[showing %d of %d matches; raise max_results to see more]", len(matches), total)
+	}
+	return tools.ToolResultEnvelope{Status: tools.StatusOK, Digest: digest}, nil
 }
 
 func globSearch(root, pattern string) ([]globMatch, error) {

@@ -68,9 +68,8 @@ func TestSummarizeHistory_NoTools_ReadableFallback(t *testing.T) {
 	}
 }
 
-// TestSummarizeHistory_SubstantiveAssistant_KeptVerbatim: the substantive
-// final-text path must be preserved — a real final message (>=50 chars, not a
-// self-instruction line) is still the summary.
+// TestSummarizeHistory_SubstantiveAssistant_KeptVerbatim: the final-text path
+// is preserved — the last assistant message carrying text is the summary.
 func TestSummarizeHistory_SubstantiveAssistant_KeptVerbatim(t *testing.T) {
 	r := &SubAgentRunner{}
 	history := []ModelMessage{
@@ -131,5 +130,22 @@ func TestSummarizeHistory_PlanStatementVariantsAsPartialResult(t *testing.T) {
 	}
 	if !strings.Contains(got, "analysis timed out") {
 		t.Errorf("partial result should carry the timeout prefix, got %q", got)
+	}
+}
+
+// TestSummarizeHistory_ShortAssistantTextKept: 长度阈值删除后，短结论也作为
+// 部分结果返回，不再被跳过而退化成"子代理未产出最终结论"。
+func TestSummarizeHistory_ShortAssistantTextKept(t *testing.T) {
+	r := &SubAgentRunner{}
+	history := []ModelMessage{
+		{Role: "user", Content: "分析"},
+		{Role: "assistant", Content: "根因：锁获取顺序不一致。"},
+	}
+	got := r.summarizeHistory(history, "分析")
+	if !strings.Contains(got, "锁获取顺序不一致") {
+		t.Errorf("short conclusion must be kept as the partial result, got %q", got)
+	}
+	if strings.Contains(got, "未产出最终结论") {
+		t.Errorf("must not degrade to the no-conclusion fallback, got %q", got)
 	}
 }

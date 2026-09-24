@@ -21,26 +21,63 @@ const (
 	LangGeneric    Language = "generic"
 )
 
-func DetectLanguage(projectRoot string) Language {
+// LanguageHit records a detected project language and the file that revealed
+// it. The marker is carried into the prompt so the model can see the basis of
+// the heuristic and correct course when it is wrong.
+type LanguageHit struct {
+	Lang   Language
+	Marker string
+}
+
+// DetectLanguages returns every language detected at projectRoot, in priority
+// order, together with the marker file behind each hit.
+//
+// A first-match-wins probe reports exactly one language, which is wrong for
+// polyglot repositories (a Go service with a TypeScript frontend): the model
+// then gets one language's rules and no hint that another language is in play.
+// Reporting all hits lets every detected language's pack be injected.
+//
+// Detection is a heuristic on manifest files — the returned Marker names the
+// file that triggered each hit so the prompt can state its basis.
+func DetectLanguages(projectRoot string) []LanguageHit {
 	if projectRoot == "" {
-		return LangGeneric
+		return nil
 	}
+	var hits []LanguageHit
+	add := func(lang Language, marker string) {
+		for _, h := range hits {
+			if h.Lang == lang {
+				return
+			}
+		}
+		hits = append(hits, LanguageHit{Lang: lang, Marker: marker})
+	}
+
 	if exists(filepath.Join(projectRoot, "go.mod")) {
-		return LangGo
+		add(LangGo, "go.mod")
 	}
-	if exists(filepath.Join(projectRoot, "tsconfig.json")) || packageHasTypeScript(filepath.Join(projectRoot, "package.json")) {
-		return LangTypeScript
+	switch {
+	case exists(filepath.Join(projectRoot, "tsconfig.json")):
+		add(LangTypeScript, "tsconfig.json")
+	case packageHasTypeScript(filepath.Join(projectRoot, "package.json")):
+		add(LangTypeScript, "package.json")
 	}
-	if exists(filepath.Join(projectRoot, "pyproject.toml")) || exists(filepath.Join(projectRoot, "requirements.txt")) || exists(filepath.Join(projectRoot, "setup.py")) {
-		return LangPython
+	for _, m := range []string{"pyproject.toml", "requirements.txt", "setup.py"} {
+		if exists(filepath.Join(projectRoot, m)) {
+			add(LangPython, m)
+			break
+		}
 	}
 	if exists(filepath.Join(projectRoot, "Cargo.toml")) {
-		return LangRust
+		add(LangRust, "Cargo.toml")
 	}
-	if exists(filepath.Join(projectRoot, "pom.xml")) || exists(filepath.Join(projectRoot, "build.gradle")) || exists(filepath.Join(projectRoot, "build.gradle.kts")) {
-		return LangJava
+	for _, m := range []string{"pom.xml", "build.gradle", "build.gradle.kts"} {
+		if exists(filepath.Join(projectRoot, m)) {
+			add(LangJava, m)
+			break
+		}
 	}
-	return LangGeneric
+	return hits
 }
 
 func exists(path string) bool {

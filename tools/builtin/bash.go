@@ -18,7 +18,7 @@ import (
 	"github.com/deepact/deepact/tools"
 )
 
-const bashOutputLimit = 10240
+const bashOutputLimit = 32768
 
 type BashTool struct {
 	blocked map[string]string
@@ -109,11 +109,17 @@ func (t *BashTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 
 	artifactRef := storeFullOutput(ctx.ArtifactDir, stdout.Bytes(), stderr.Bytes(), stdoutTruncated || stderrTruncated)
 
+	// Tell the model the output was cut and how to read the rest. Without the
+	// ref the note is a dead end: the artifact tool is the only way back.
+	truncNote := fmt.Sprintf(" [truncated at %d bytes]", bashOutputLimit)
+	if artifactRef != "" {
+		truncNote = fmt.Sprintf(" [truncated at %d bytes, full output in artifact: %s]", bashOutputLimit, artifactRef)
+	}
 	if stdoutTruncated {
-		stdoutStr += " [truncated, full output in artifact]"
+		stdoutStr += truncNote
 	}
 	if stderrTruncated {
-		stderrStr += " [truncated, full output in artifact]"
+		stderrStr += truncNote
 	}
 
 	digest := strings.TrimSpace(stdoutStr)

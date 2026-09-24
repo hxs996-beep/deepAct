@@ -90,11 +90,10 @@ func TestConfirmOptions_AskUserWithOptions_Mounted(t *testing.T) {
 		model:     model,
 		tools:     stubToolExecutor{},
 		context:   steerContextBuilder{},
-		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
+		state:     &TaskState{TaskID: "test"},
 		config:    EngineConfig{ModelName: "test-model"},
 		isChinese: true,
-		guards:    &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
-		readLoop:  NewLoopTracker(3, 4, false),
+		guards:    &GuardSystem{scope: NewScopeGuard()},
 	}
 
 	resp, err := e.Run(context.Background(), "修改代码")
@@ -134,6 +133,7 @@ func TestConfirmOptions_NotReturnedWithoutAskUser(t *testing.T) {
 // 回归测试：移除 analysis gate 后，搜索过代码（runToolCallCount > 0）再直接
 // 提交 edit 不再被拦截——模型自主决定是否用 ask_user 确认。
 func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
+	tools := &recordingToolExecutor{}
 	e := &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{{
 			Delta: "修改代码",
@@ -146,31 +146,30 @@ func TestExecuteTurn_EditAfterSearch_NotBlocked(t *testing.T) {
 			FinishReason: "tool_calls",
 		}}},
 		context:          &stubContextBuilder{},
-		tools:            &recordingToolExecutor{},
+		tools:            tools,
 		state:            &TaskState{TurnNumber: 0},
 		history:          []Message{{Role: "user", Content: "改"}},
 		config:           EngineConfig{ModelName: "test-model"},
-		guards:           &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(true)},
+		guards:           &GuardSystem{scope: NewScopeGuard()},
 		runToolCallCount: 2, // 已做过搜索
 	}
 
-	result, err := e.executeTurn(context.Background())
-	if err != nil {
+	if _, err := e.executeTurn(context.Background()); err != nil {
 		t.Fatalf("executeTurn error: %v", err)
 	}
-	if result.LastOp == "" {
-		t.Error("expected edit to execute without analysis-gate blocking (LastOp empty means no operation ran)")
+	if len(tools.executed) == 0 {
+		t.Error("expected edit to execute without analysis-gate blocking (no tool ran)")
 	}
 }
 
 // 危险命令确认走确定性 /confirm N 通道：/confirm 1 确认并注入 re-issue hint。
 func TestHandleConfirmCommand_Dangerous_Confirm(t *testing.T) {
-	guard := NewScopeGuard(false)
+	guard := NewScopeGuard()
 	e := &Engine{
-		state:               &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
-		history:             []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese:           true,
-		guards:              &GuardSystem{scope: guard},
+		state:     &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
+		history:   []Message{{Role: "user", Content: "/confirm 1"}},
+		isChinese: true,
+		guards:    &GuardSystem{scope: guard},
 	}
 
 	if !e.handleConfirmCommand("/confirm 1") {
@@ -193,12 +192,12 @@ func TestHandleConfirmCommand_Dangerous_Confirm(t *testing.T) {
 
 // 危险命令取消走 /confirm 2：清 pending，不标记 confirmed，命令下次仍被拦截。
 func TestHandleConfirmCommand_Dangerous_Cancel(t *testing.T) {
-	guard := NewScopeGuard(false)
+	guard := NewScopeGuard()
 	e := &Engine{
-		state:               &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
-		history:             []Message{{Role: "user", Content: "/confirm 2"}},
-		isChinese:           true,
-		guards:              &GuardSystem{scope: guard},
+		state:     &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
+		history:   []Message{{Role: "user", Content: "/confirm 2"}},
+		isChinese: true,
+		guards:    &GuardSystem{scope: guard},
 	}
 
 	if !e.handleConfirmCommand("/confirm 2") {

@@ -47,23 +47,25 @@ type EngineDeps struct {
 }
 
 type Engine struct {
-	model        ModelClient
-	tools        ToolExecutor
-	context      ContextBuilder
-	compressor   Compressor
-	session      SessionStore
-	memory       MemoryStore
-	agents       *AgentRegistry
-	skills       *skill.Registry
-	router       ModelRouter
-	config       EngineConfig
-	state        *TaskState
-	history      []Message
-	steerMu      sync.Mutex
-	steerQueue   []string
-	guards       *GuardSystem
-	readLoop     *LoopTracker
-	errorLoop    *LoopTracker
+	model      ModelClient
+	tools      ToolExecutor
+	context    ContextBuilder
+	compressor Compressor
+	session    SessionStore
+	memory     MemoryStore
+	agents     *AgentRegistry
+	skills     *skill.Registry
+	router     ModelRouter
+	config     EngineConfig
+	state      *TaskState
+	history    []Message
+	steerMu    sync.Mutex
+	steerQueue []string
+	guards     *GuardSystem
+	// progressLoop is the single no-progress breaker — the only loop guard that
+	// can still end a Run. Per-target repetition is no longer blocked: it is
+	// reported to the model as a fact (see noteRepeats), so the model decides
+	// whether to change approach or conclude.
 	progressLoop *LoopTracker
 	// progressKeys tracks "new information" keys already seen this Run
 	// ("read:path::scope", "grep:<pattern>:<path>", "glob:<pattern>:<path>").
@@ -71,6 +73,11 @@ type Engine struct {
 	// (progressLoop), so legitimate investigation — reading or searching new
 	// content — is not mistaken for a no-progress loop. Reset each Run.
 	progressKeys map[string]bool
+	// repeatCounts counts per-target tool invocations within the current Run
+	// ("read:path::scope", "edit:path#sig", "grep:pattern:path", ...). A repeat
+	// is reported to the model as a fact alongside the tool result — it never
+	// blocks the call or ends the Run. Reset each Run.
+	repeatCounts map[string]int
 	evalStore    EvalStore
 
 	// pendingPinnedMessages holds messages (e.g., skill loads) that should
@@ -176,8 +183,7 @@ func (e *Engine) cancelBackgroundTasks() {
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
-		scope: NewScopeGuard(cfg.AutoConfirmScope),
-		loop:  NewLoopTracker(0, 6, false), // block after 6 repeats of same (tool, path)
+		scope: NewScopeGuard(),
 	}
 	e := &Engine{
 		model:        deps.Model,
@@ -193,9 +199,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		state:        &TaskState{TaskID: cfg.SessionID},
 		history:      make([]Message, 0),
 		guards:       guard,
-		readLoop:     NewLoopTracker(3, 4, false), // 3rd nudge / 4th block
-		errorLoop:    NewLoopTracker(0, 3, true),  // 3 errors → block, success resets
-		progressLoop: NewLoopTracker(4, 6, true),  // 4th nudge / 6th block, progress resets
+		progressLoop: NewLoopTracker(4, 6, true), // 4th nudge / 6th block, progress resets
 	}
 
 	// Persistent memory (memory_markers, decisions, open_questions,
@@ -294,25 +298,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Drain steer queue: inject messages retained from a previous Blocked run.
 	e.drainSteerQueue()
 
-	// Reset loop tracking (loop guard + read loop) on each Run. Read
-	// counts must NOT accumulate across Runs: a user retrying or revisiting a
-	// task legitimately re-reads the same core files, and cross-Run accumulation
-	// falsely blocked normal reads as "loops" (maxRepeats reached across
-	// retries). Within a Run, the readLoop tracker still catches true read
-	// loops (4th same-read blocks). Edit/write loop counts also reset per Run -
-	// same-Run repetition is still caught, and the edit-plan guard +
-	// contentHash differentiation cover cross-Run edit cases. The errorLoop
-	// tracker persists (error streaks across Runs are meaningful).
-	if e.guards != nil && e.guards.loop != nil {
-		e.guards.loop.Reset()
-	}
-	if e.readLoop != nil {
-		e.readLoop.Reset()
-	}
+	// Reset the no-progress breaker and the repeat counters on each Run: a user
+	// retrying or revisiting a task legitimately re-reads the same core files,
+	// so cross-Run accumulation would misreport normal work as a loop.
 	if e.progressLoop != nil {
 		e.progressLoop.Reset()
 	}
 	e.progressKeys = make(map[string]bool)
+	e.repeatCounts = make(map[string]int)
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
 	e.runToolCallCount = 0
@@ -414,11 +407,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.state.PendingDangerousCmd = ""
 	}
 
-	// Scope is implicitly confirmed when user sends any message
-	if !e.state.ConfirmedScope {
-		e.state.ConfirmedScope = true
-	}
-
 	// Record the history boundary for this Run() so buildRunSummary only
 	// surfaces assistant text produced THIS run. Without this, a prior run's
 	// narration gets returned every turn when the model only emits tool calls.
@@ -432,8 +420,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	if maxTurns <= 0 {
 		maxTurns = 50 // safe default to prevent infinite loops
 	}
-	var lastOp string // "toolName:path" of the previous turn
-	consecutiveSameOp := 0
 	var completionSummary string
 	for {
 		select {
@@ -502,71 +488,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			break
 		}
 
-		// Loop detection: read ops go through readLoop (two-tier:
-		// 3rd same (path,scope) → nudge, 4th → block). Non-read ops keep the
-		// original consecutiveSameOp guard (5 consecutive same first-calls →
-		// block), which covers tools the loop guard doesn't track (grep/bash/etc.).
-		if turnResult.LastOp != "" {
-			if strings.HasPrefix(turnResult.LastOp, "read:") {
-				action := e.readLoop.Check(turnResult.LastOp, false)
-				switch action.Type {
-				case GuardDiagnose:
-					nudge := buildReadLoopNudge(turnResult.LastOp, zh)
-					// Pinned (not persisted to history): the nudge is a runtime
-					// reminder to the model for the next turn, not a real user
-					// message — avoids context pollution.
-					e.pendingPinnedMessages = append(e.pendingPinnedMessages, nudge)
-					loopLog.Printf("read-loop nudge pinned for %s", turnResult.LastOp)
-				case GuardBlock:
-					msg := buildReadLoopBlockMsg(turnResult.LastOp, zh)
-					return &EngineResponse{
-						Summary:      msg,
-						Stage:        StageAct,
-						Blocked:      true,
-						BlockedBy:    "loop_guard",
-						FinishReason: "loop_detected",
-					}, nil
-				}
-				// read ops do not feed consecutiveSameOp
-			} else {
-				// Error-streak guard: keys on coarse (tool, path) — without the
-				// content signature — so repeated FAILING calls with slightly
-				// varied args on the same target still accumulate and trip,
-				// unlike the content-hash-based loop guard/consecutiveSameOp.
-				if e.errorLoop != nil {
-					// LoopTracker.Check 取 success 语义；errorLoop 的
-					// resetOnSuccess=true，故 LastOpError 需取反（成功=清除连错计数）。
-					action := e.errorLoop.Check(coarseOp(turnResult.LastOp), !turnResult.LastOpError)
-					if action.Type == GuardBlock {
-						msg := "检测到重复的工具错误，Agent 在同一操作上反复失败。请提供新的方向或修正参数。"
-						if !zh {
-							msg = "Detected repeated tool errors on the same operation. The agent may be stuck. Please provide new direction or correct the parameters."
-						}
-						loopLog.Printf("error-loop block for %s", turnResult.LastOp)
-						return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "loop_guard", FinishReason: "loop_detected"}, nil
-					}
-				}
-				if turnResult.LastOp == lastOp {
-					consecutiveSameOp++
-					if consecutiveSameOp >= 5 {
-						msg := "检测到重复操作循环，Agent 可能卡住了。请提供新的方向。"
-						if !zh {
-							msg = "Detected repeated operation loop. The agent may be stuck. Please provide new direction."
-						}
-						return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "loop_guard", FinishReason: "loop_detected"}, nil
-					}
-				} else {
-					consecutiveSameOp = 0
-				}
-				lastOp = turnResult.LastOp
-			}
-		}
-
-		// Progress guard: N consecutive turns without a progress signal
-		// (successful edit/write/revert/bash or handoff) → nudge then block.
-		// Catches the "narration + read + todo_write" loop that bypasses all
-		// operation-repeat guards: every turn is a *different* operation, so
-		// readLoop / consecutiveSameOp / errorLoop never fire.
+		// Progress guard — the only loop guard that can end a Run: N consecutive
+		// turns without a progress signal (novel read/search, successful
+		// edit/write/revert/bash, handoff, novel lsp query) → nudge then block.
+		// It catches the "narration + repeat" loop where every turn is a
+		// different call, which per-target counting alone would not see.
 		if e.progressLoop != nil {
 			action := e.progressLoop.Check("", turnResult.MadeProgress)
 			switch action.Type {
@@ -678,9 +604,6 @@ func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool
 		}
 	}
 	summary = stripDSMLTokens(summary)
-	if summary != "" && !isSubstantiveSummary(summary) {
-		summary = ""
-	}
 	if summary != "" {
 		return summary
 	}
@@ -689,77 +612,6 @@ func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool
 		return fmt.Sprintf("（本轮未生成回复文本，已执行 %d 次工具调用）", toolCallCount)
 	}
 	return fmt.Sprintf("(no text reply generated; %d tool calls executed this run)", toolCallCount)
-}
-
-// isSubstantiveSummary checks whether a summary string contains meaningful
-// analysis content, as opposed to a bare "Done"/"完成" or an echo of the
-// internal read_history block. Returns false for empty-shell summaries that
-// should be replaced by the diagnostic fallback.
-func isSubstantiveSummary(summary string) bool {
-	if summary == "" {
-		return true // empty is not "unsubstantive" — caller decides fallback
-	}
-
-	trimmed := strings.TrimSpace(summary)
-
-	// Rule 1: length threshold.
-	// English text under 20 chars with no CJK → too short to be meaningful.
-	// Chinese text under 10 chars → too short.
-	hasCJK := false
-	for _, r := range trimmed {
-		if unicode.Is(unicode.Han, r) {
-			hasCJK = true
-			break
-		}
-	}
-	if hasCJK {
-		if len([]rune(trimmed)) < 6 {
-			return false
-		}
-	} else {
-		if len(trimmed) < 20 {
-			return false
-		}
-	}
-
-	// Rule 2: bare shell words — exact or nearly exact match.
-	shellWords := []string{"done", "完成", "ok", "好的", "i'm done", "im done", "done."}
-	lower := strings.ToLower(trimmed)
-	for _, w := range shellWords {
-		if lower == w {
-			return false
-		}
-	}
-
-	// Rule 3: file-list echo detection.
-	// If ≥50% of non-empty lines start with a path-like pattern, treat as echo.
-	lines := strings.Split(trimmed, "\n")
-	pathLike := 0
-	total := 0
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if t == "" {
-			continue
-		}
-		total++
-		// Match lines starting with common path/icon patterns:
-		//   - /path/to/file
-		//   [<>] path
-		//   [@] path
-		//   [?] path
-		//   [~] path
-		//   [>_] path
-		if strings.HasPrefix(t, "- /") || strings.HasPrefix(t, "[<>]") ||
-			strings.HasPrefix(t, "[@]") || strings.HasPrefix(t, "[?]") ||
-			strings.HasPrefix(t, "[~]") || strings.HasPrefix(t, "[>_]") {
-			pathLike++
-		}
-	}
-	if total > 0 && pathLike*2 >= total {
-		return false
-	}
-
-	return true
 }
 
 // isConfirmCommand reports whether userMsg is a valid "/confirm N" command.
@@ -1157,7 +1009,6 @@ func (e *Engine) clearSessionState() {
 	e.state.PendingDangerousCmd = ""
 	e.state.TurnNumber = 0
 	e.state.ConsecutiveFailures = 0
-	e.state.ConfirmedScope = false
 
 	e.steerMu.Lock()
 	e.steerQueue = nil
@@ -1226,33 +1077,6 @@ func (e *Engine) drainSteerQueue() bool {
 	return true
 }
 
-// buildReadLoopNudge builds the nudge message for the 3rd repeated read of the
-// same (path, scope). key has form "read:path::scope".
-func buildReadLoopNudge(key string, zh bool) string {
-	path, scope := splitReadKey(key)
-	scopeDesc := describeScope(scope, zh)
-	if zh {
-		return fmt.Sprintf("[LOOP NUDGE] 你已 3 次读取 %s 的 %s，内容已在对话历史中。"+
-			"不要再读取它。请直接基于已有内容产出分析结论；如需新的具体信息，改用 lsp"+
-			"（hover/goToDefinition/workspaceSymbol）或读取该文件尚未读过的区段。", path, scopeDesc)
-	}
-	return fmt.Sprintf("[LOOP NUDGE] You have read %s (%s) 3 times; its content is already in conversation history. "+
-		"Do not read it again. Produce your analysis from existing content; for new specifics use lsp "+
-		"(hover/goToDefinition/workspaceSymbol) or read an un-read section of the file.", path, scopeDesc)
-}
-
-// buildReadLoopBlockMsg builds the block message for the 4th repeated read.
-func buildReadLoopBlockMsg(key string, zh bool) string {
-	path, scope := splitReadKey(key)
-	scopeDesc := describeScope(scope, zh)
-	if zh {
-		return fmt.Sprintf("检测到重复读取循环：已反复读取 %s（%s），nudge 后仍未改善。"+
-			"Agent 可能卡住了。请澄清：是想查看哪段未读内容，还是基于已有内容直接给出结论？", path, scopeDesc)
-	}
-	return fmt.Sprintf("Repeated read loop detected: %s (%s) has been read repeatedly despite a nudge. "+
-		"The agent may be stuck. Please clarify: do you want to view an un-read section, or conclude from existing content?", path, scopeDesc)
-}
-
 // buildProgressNudge builds the nudge message for the 4th consecutive
 // no-progress turn.
 func buildProgressNudge(zh bool) string {
@@ -1273,53 +1097,4 @@ func buildProgressBlockMsg(zh bool) string {
 	}
 	return "Detected a no-progress loop: you have spent many turns on read-only/planning work without a code change or conclusion, despite a nudge. " +
 		"The agent may be stuck. Please clarify: conclude from existing content, or adjust the task direction?"
-}
-
-// splitReadKey splits "read:path::scope" into (path, scope).
-func splitReadKey(key string) (path, scope string) {
-	const prefix = "read:"
-	if !strings.HasPrefix(key, prefix) {
-		return key, ""
-	}
-	rest := key[len(prefix):]
-	if before, after, ok := strings.Cut(rest, "::"); ok {
-		return before, after
-	}
-	return rest, ""
-}
-
-// coarseOp reduces a LastOp key to its "tool:path" form by dropping the
-// content-signature suffix ("#sig") used for edit/write and the scope suffix
-// ("::scope") used for read. The errorLoop tracker keys on this coarse form
-// so that repeated failing attempts with varied arguments on the same
-// (tool, path) still accumulate into one streak.
-func coarseOp(op string) string {
-	if before, _, ok := strings.Cut(op, "#"); ok {
-		op = before
-	}
-	if before, _, ok := strings.Cut(op, "::"); ok {
-		op = before
-	}
-	return op
-}
-
-// describeScope turns a scope string into a human-readable phrase.
-func describeScope(scope string, zh bool) string {
-	if scope == "" {
-		if zh {
-			return "整个文件"
-		}
-		return "entire file"
-	}
-	if strings.HasPrefix(scope, "symbol:") {
-		name := scope[len("symbol:"):]
-		if zh {
-			return name + " 方法"
-		}
-		return name + " symbol"
-	}
-	if zh {
-		return "第 " + scope + " 行区间"
-	}
-	return "lines " + scope
 }

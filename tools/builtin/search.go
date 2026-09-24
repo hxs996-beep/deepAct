@@ -24,7 +24,7 @@ const (
 	searchMaxBody        = 1 * 1024 * 1024 // 1MB cap on the response body read
 	searchInlineBytes    = 2000            // inline-digest threshold
 	searchInlineLines    = 250             // inline-digest line cap
-	searchSnippetCap     = 300             // chars kept per-result snippet inline
+	searchSnippetCap     = 800             // chars kept per-result snippet inline
 )
 
 // WebSearchConfig configures the web search tool. All fields are optional;
@@ -117,8 +117,10 @@ func (t *WebSearchTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools
 	if maxResults <= 0 {
 		maxResults = t.cfg.MaxResults
 	}
+	clamped := false
 	if maxResults > searchMaxResults {
 		maxResults = searchMaxResults
+		clamped = true
 	}
 	depth := payload.SearchDepth
 	if depth == "" {
@@ -131,6 +133,11 @@ func (t *WebSearchTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools
 	}
 
 	content := formatSearchResults(payload.Query, resp)
+	if clamped {
+		// Never clamp silently: the model must know it asked for more than the
+		// provider cap allows.
+		content = fmt.Sprintf("[max_results capped at %d]\n%s", searchMaxResults, content)
+	}
 	return truncateOrStoreSearch(content, ctx.ArtifactDir)
 }
 

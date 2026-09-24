@@ -270,9 +270,6 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	var totalUsage ModelUsage
 	consecutiveIntermediate := 0
 	consecutiveTruncation := 0
-	lastOpKey := ""
-	sameOpCount := 0
-	maxSameOp := 5
 	streamer := subAgentStreamer{}
 	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
 	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
@@ -550,24 +547,9 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 			}
 		}
 
-		// Per-file loop detection: same tool+file repeated N consecutive turns → block
-		opKey := firstOpKey(calls, r.workDir)
-		if opKey != "" {
-			if opKey == lastOpKey {
-				sameOpCount++
-				if sameOpCount >= maxSameOp {
-					summary := r.summarizeHistory(history, input.Goal)
-					return &HandoffResult{
-						Summary:      summary,
-						FinishReason: HandoffReasonLoopDetected,
-						Usage:        &totalUsage,
-					}, nil
-				}
-			} else {
-				sameOpCount = 1
-			}
-			lastOpKey = opKey
-		}
+		// Per-file repetition is no longer blocked here: the engine reports the
+		// repeat count to the model as a fact (see Engine.annotateRepeats) and
+		// the model decides how to proceed.
 
 		for _, call := range calls {
 			if r.onProgress != nil {
@@ -659,21 +641,6 @@ func getSubmitResultNudge(zh bool) string {
 	return "Call submit_result now to report your final result (summary is required). Do not continue with plain text or further tool calls."
 }
 
-// summarizeHistory extracts the last meaningful assistant output from history
-// when the sub-agent runs out of iterations. Falls back to listing tool outputs.
-// firstOpKey extracts "toolName:path" from the first path-bearing call for loop detection.
-func firstOpKey(calls []ToolCallRequest, workDir string) string {
-	for _, c := range calls {
-		if c.Name != "edit" && c.Name != "write" {
-			continue
-		}
-		if path := extractPathFromArgs(c.Input, workDir); path != "" {
-			return c.Name + ":" + path
-		}
-	}
-	return ""
-}
-
 func firstLine(s string, max int) string {
 	if idx := strings.IndexByte(s, '\n'); idx > 0 {
 		s = s[:idx]
@@ -686,23 +653,14 @@ func firstLine(s string, max int) string {
 }
 
 func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) string {
-	// Walk backward to find a substantive assistant message.
-	// Skip messages that are structurally non-substantive: too short, or a
-	// single line ending with ":" (model talking to itself about next step).
+	// Walk backward to the last assistant message that has text. On an
+	// interruption (per-call timeout, loop guard, or iteration cap) that text
+	// is the model's real output, so it is returned verbatim as the partial
+	// result — no length or shape heuristic decides what counts as a
+	// conclusion.
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "assistant" && history[i].Content != "" {
-			content := history[i].Content
-			trimmed := strings.TrimSpace(content)
-			if len(trimmed) < 50 {
-				continue
-			}
-			// Single line ending with ":" → model self-instruction, not output
-			if !strings.Contains(trimmed, "\n") && strings.HasSuffix(trimmed, ":") {
-				continue
-			}
-			// 诚实化：计划句（"让我…"）也是模型真实输出，作为部分结果
-			// 直接返回（带超时前缀），不再假装找到更实质的结论。
-			return "(analysis timed out, partial result)\n" + content
+			return "(analysis timed out, partial result)\n" + history[i].Content
 		}
 	}
 	// Fallback: no substantive assistant text was produced (per-call timeout,
@@ -733,7 +691,9 @@ func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
 	}
 	base := prompts.System + "\n\n" + prompts.Examples
 	if langPack != "" {
-		base += "\n\n" + pickPrompt(userLang == "中文", "# Language Pack\n", "# 语言包\n") + langPack
+		// Same header as the main system prompt (see ContextAssembler.Build) so
+		// one strip rule covers both.
+		base += "\n\n# Language Pack\n" + langPack
 	}
 	return base + "\n\n" + prompts.SubAgent
 }
@@ -803,23 +763,15 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []Mode
 	return result
 }
 
-// buildResult extracts conclusions from the agent's final text response.
+// buildResult builds the handoff result from the agent's final text response.
+// Conclusions are carried only by the structured submit_result tool (see the
+// params.Conclusions path in runLoop) — the free-text path has no reliable
+// structural signal, so nothing is inferred from line prefixes.
 func (r *SubAgentRunner) buildResult(content string, goal string) *HandoffResult {
 	result := &HandoffResult{
 		Summary:      content,
 		Conclusions:  make([]string, 0),
 		FinishReason: HandoffReasonCompleted,
-	}
-
-	// Try to extract conclusions from bullet points in the final text
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			conclusion := strings.TrimPrefix(trimmed, "- ")
-			conclusion = strings.TrimPrefix(conclusion, "* ")
-			result.Conclusions = append(result.Conclusions, conclusion)
-		}
 	}
 
 	// If goal is short (< 80 chars), include it as artifact reference

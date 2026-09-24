@@ -76,35 +76,56 @@ func (t *FetchTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Too
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
 	}
 
-	// Check content type — reject binary/non-HTML
+	// Check content type — binary types are rejected: extracting text from them
+	// yields garbage. Everything textual is allowed, including JSON/XML API
+	// responses and plain-text files.
 	ct := resp.Header.Get("Content-Type")
-	if ct != "" && !isHTMLContentType(ct) {
+	if ct != "" && !isTextContentType(ct) {
 		err := fmt.Errorf("unsupported content type: %s", ct)
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: err.Error()}, err
 	}
 
-	// Read body with limit
-	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBody))
+	// Read body with limit. One byte past the cap so truncation is detectable
+	// and can be reported instead of silently returning a partial body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBody+1))
 	if err != nil {
 		return tools.ToolResultEnvelope{Status: tools.StatusError, Digest: fmt.Sprintf("read body: %v", err)}, err
 	}
+	bodyTruncated := len(body) > fetchMaxBody
+	if bodyTruncated {
+		body = body[:fetchMaxBody]
+	}
 
-	// Extract text from HTML
-	text := extractText(string(body))
+	// HTML-like content goes through the parser; other textual types (JSON,
+	// XML, plain text) are returned as-is.
+	var text string
+	if isHTMLContentType(ct) {
+		text = extractText(string(body))
+	} else {
+		text = strings.TrimSpace(string(body))
+	}
 	if text == "" {
 		text = "(empty content)"
 	}
 
 	// Build metadata header
-	header := fmt.Sprintf("URL: %s\nStatus: %d\nContent-Length: %d bytes (extracted %d)\n\n",
+	header := fmt.Sprintf("URL: %s\nStatus: %d\nContent-Length: %d bytes (extracted %d)\n",
 		payload.URL, resp.StatusCode, len(body), len(text))
+	if bodyTruncated {
+		header += fmt.Sprintf("[body truncated at %d bytes — only the leading part was read]\n", fetchMaxBody)
+	}
+	header += "\n"
 
-	// Preserve original body in artifact for large fetches
+	// Preserve the body in artifact for large fetches
 	if len(body) > fetchDigestBytes && ctx.ArtifactDir != "" {
 		store, err := artifact.New(ctx.ArtifactDir)
 		if err == nil {
 			ref, _, _ := store.StoreWithRedaction(body)
-			header += fmt.Sprintf("[Full HTML source: %s]\n\n", ref)
+			label := "Full source"
+			if bodyTruncated {
+				label = fmt.Sprintf("Partial source (first %d bytes)", fetchMaxBody)
+			}
+			header += fmt.Sprintf("[%s: %s]\n\n", label, ref)
 		}
 	}
 
@@ -118,8 +139,30 @@ func (t *FetchTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Too
 func isHTMLContentType(ct string) bool {
 	lower := strings.ToLower(ct)
 	return strings.Contains(lower, "text/html") ||
-		strings.Contains(lower, "application/xhtml+xml") ||
-		strings.Contains(lower, "text/plain")
+		strings.Contains(lower, "application/xhtml+xml")
+}
+
+// isTextContentType reports whether a Content-Type can be turned into readable
+// text. Binary types are rejected: text extraction from them yields garbage.
+// All textual types are allowed, including JSON/XML API responses and
+// plain-text files.
+func isTextContentType(ct string) bool {
+	lower := strings.ToLower(ct)
+	if strings.HasPrefix(lower, "text/") {
+		return true
+	}
+	for _, t := range []string{
+		"application/xhtml+xml",
+		"application/json",
+		"application/xml",
+		"application/javascript",
+		"application/x-ndjson",
+	} {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractText parses HTML and extracts readable text content.

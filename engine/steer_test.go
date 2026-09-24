@@ -162,15 +162,13 @@ func TestRun_SteerInterruptsMidStream(t *testing.T) {
 	model := &steerBlockingModel{release: make(chan struct{})}
 	tools := &recordingToolExecutor{}
 	e := &Engine{
-		model:     model,
-		tools:     tools,
-		context:   steerContextBuilder{},
-		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
-		history:   []Message{{Role: "user", Content: "读A", Timestamp: time.Now()}},
-		config:    EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
-		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopTracker(0, 6, false)},
-		readLoop:  NewLoopTracker(3, 4, false),
-		errorLoop: NewLoopTracker(0, 3, true),
+		model:   model,
+		tools:   tools,
+		context: steerContextBuilder{},
+		state:   &TaskState{TaskID: "test"},
+		history: []Message{{Role: "user", Content: "读A", Timestamp: time.Now()}},
+		config:  EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 
 	// Run in a goroutine; it blocks on the first stream until we release.
@@ -248,7 +246,6 @@ func TestRun_SteerInterruptsMidStream(t *testing.T) {
 	}
 }
 
-
 // multiTurnModel returns pre-configured chunk sets for each Stream call.
 type multiTurnModel struct {
 	turns   [][]ModelChunk
@@ -306,19 +303,19 @@ func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 	}
 	model := &multiTurnModel{turns: [][]ModelChunk{turn1Chunks, turn2Chunks}}
 	e := &Engine{
-		model:     model,
-		tools:     stubToolExecutor{},
-		context:   steerContextBuilder{},
-		state:     &TaskState{TaskID: "test", ConfirmedScope: true},
-		history:   []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
-		config:    EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
-		guards:    &GuardSystem{scope: NewScopeGuard(true), loop: NewLoopTracker(0, 6, false)},
-		readLoop:  NewLoopTracker(3, 4, false),
-		errorLoop: NewLoopTracker(0, 3, true),
+		model:   model,
+		tools:   stubToolExecutor{},
+		context: steerContextBuilder{},
+		state:   &TaskState{TaskID: "test"},
+		history: []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
+		config:  EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 
-	// Steer before Run - simulates UI calling Steer during a prior Blocked run.
-	e.Steer("补充：也检查测试文件")
+	// A steer queued before Run() is drained up front, before the first turn
+	// (loop.go:295) — it never reaches the Done branch and therefore cannot
+	// exercise auto-continue. Queue it during turn 1's post-processing instead.
+	e.SetStopHooks([]StopHook{&steerOnceHook{steer: func() { e.Steer("补充：也检查测试文件") }}})
 
 	resp, err := e.Run(context.Background(), "do something")
 	if err != nil {
@@ -340,8 +337,26 @@ func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 		t.Error("steer message was not injected into history")
 	}
 
-	// The final summary should be from turn 2, not turn 1
-	if resp.Summary == "任务完成" {
-		t.Error("summary should be from the continued turn, not the initial Done turn")
+	// Auto-continue must actually have run a second turn, and the final summary
+	// must be turn 2's text — not turn 1's "任务完成".
+	if model.callIdx != 2 {
+		t.Errorf("expected 2 turns (Done-branch auto-continue), got %d", model.callIdx)
 	}
+	if resp.Summary != "处理了补充信息" {
+		t.Errorf("summary = %q, want the continued turn's text %q", resp.Summary, "处理了补充信息")
+	}
+}
+
+// steerOnceHook queues a steer message exactly once, at the end of a turn's
+// post-processing (after the stream has been fully consumed). That is the seam
+// where the Run loop's Done branch picks the message up and continues with a
+// fresh turn.
+type steerOnceHook struct {
+	once  sync.Once
+	steer func()
+}
+
+func (h *steerOnceHook) Check(_ context.Context, _ StopHookContext) StopHookResult {
+	h.once.Do(h.steer)
+	return StopHookResult{}
 }

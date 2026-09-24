@@ -157,7 +157,7 @@ func TestPlanTaskNotInRegularCalls(t *testing.T) {
 		state:   &TaskState{TurnNumber: 1, Goal: "规划并执行"},
 		history: []Message{{Role: "user", Content: "规划并执行"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		guards:  &GuardSystem{loop: NewLoopTracker(0, 6, false), scope: NewScopeGuard(false)},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 
 	result, err := e.executeTurn(context.Background())

@@ -239,8 +239,8 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	// Pre-compute language packs for sub-agent system prompt (zh + en).
 	// User language is detected per-session, so both variants are cached here.
-	projLang := deeplogcontext.DetectLanguage(workDir)
-	runner.SetLangPacks(deeplogcontext.GetLangPack(projLang, "中文"), deeplogcontext.GetLangPack(projLang, ""))
+	projLangs := deeplogcontext.DetectLanguages(workDir)
+	runner.SetLangPacks(deeplogcontext.GetLangPacks(projLangs, "中文"), deeplogcontext.GetLangPacks(projLangs, ""))
 
 	contextAssembler := deeplogcontext.NewContextAssembler(workDir, estimator)
 
@@ -438,6 +438,7 @@ func registerBuiltinTools(registry *tools.Registry, lspOverrides map[string]buil
 	registry.Register(builtin.NewGlobTool())
 	registry.Register(builtin.NewBashTool())
 	registry.Register(builtin.NewRevertTool())
+	registry.Register(builtin.NewArtifactTool())
 	registry.Register(builtin.NewFetchTool())
 	registry.Register(builtin.NewWebSearchTool(searchCfg))
 	registry.Register(builtin.NewLSPToolWithOverrides(lspOverrides))
@@ -490,7 +491,6 @@ func defaultEngineConfig() engine.EngineConfig {
 			MaxContextTokens:       1048576,
 			PlanningEnabled:        true,
 			PlanningThresholdChars: 120,
-			AutoConfirmScope:       false,
 			// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
 			RiskThreshold: 0.55,
 			Pricing: engine.PricingConfig{
@@ -520,7 +520,6 @@ func defaultEngineConfig() engine.EngineConfig {
 		MaxContextTokens:       1048576,
 		PlanningEnabled:        true,
 		PlanningThresholdChars: 120,
-		AutoConfirmScope:       false,
 		// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
 		RiskThreshold: 0.55,
 		Pricing: engine.PricingConfig{

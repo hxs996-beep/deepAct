@@ -25,9 +25,6 @@ type ContextAssembler struct {
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
 	// systemPrompt is built lazily once userLang is known (see Build).
-	// We still detect the project language for langPack selection.
-	_ = DetectLanguage(projectRoot)
-
 	if estimator == nil {
 		estimator = llm.NewTokenEstimator()
 	}
@@ -80,10 +77,9 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	// turns. The prompt instructs the model to respond in the user's language,
 	// so one set suffices regardless of session language.
 	if a.userLangSet && a.userLang != "" && a.systemPromptWithLang == "" {
-		lang := DetectLanguage(a.projectRoot)
-		langPack := GetLangPack(lang, a.userLang)
+		langPacks := GetLangPacks(DetectLanguages(a.projectRoot), a.userLang)
 		prompts := promptset.Get()
-		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPack + "\n\n" + prompts.Examples
+		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPacks + "\n\n" + prompts.Examples
 	}
 	if a.stableSessionBlock == "" && a.userLangSet {
 		a.stableSessionBlock = BuildStableSessionContext(a.envInfo, a.userLang)
