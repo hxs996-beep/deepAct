@@ -45,6 +45,9 @@ type agentRoleConfig struct {
 	Model            string   `toml:"model"`
 	MaxIterations    int      `toml:"max_iterations"`
 	StructuredResult *bool    `toml:"structured_result"`
+	// TokenBudget caps this role's runs (cache-miss + completion tokens).
+	// 0 = inherit the runner default, -1 = unlimited, >0 = explicit cap.
+	TokenBudget int `toml:"token_budget"`
 }
 
 // searchConfig configures the native web_search tool.
@@ -104,6 +107,19 @@ type contextConfig struct {
 	// completions; a generous budget lets the model emit full code edits in one
 	// turn instead of being cut off and forced to continue piecemeal.
 	MaxOutputTokens int `toml:"max_output_tokens"`
+	// SubAgentTokenBudget caps a sub-agent run's billable tokens (cache-miss +
+	// completion; cache hits are free). 0 = default (2× the sub-agent context
+	// window), -1 = unlimited, >0 = explicit cap. Values below -1 fail loud
+	// at startup — giving up the protection must be written down deliberately.
+	SubAgentTokenBudget int `toml:"sub_agent_token_budget"`
+	// MaxOutstandingAsyncSubAgents caps dispatched-but-uncollected async
+	// sub-agent jobs (a slot frees when agent_poll consumes a done result).
+	// 0 = default 8.
+	MaxOutstandingAsyncSubAgents int `toml:"max_outstanding_async_subagents"`
+	// MaxSuspendedSubAgents caps how many suspended (awaiting_user) sub-agent
+	// jobs are kept at once — each retains a whole history, so the table must
+	// stay small. 0 = default 4; negative fails loud at startup.
+	MaxSuspendedSubAgents int `toml:"max_suspended_subagents"`
 }
 
 // conferenceConfig struct removed — ConferenceEnabled was dead code (never read by engine).
@@ -247,6 +263,23 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 	if f.Context.MaxOutputTokens > 0 {
 		cfg.MaxOutputTokens = f.Context.MaxOutputTokens
 	}
+	// Token budget: -1 (unlimited) and >0 (explicit) both apply; 0 keeps the
+	// runner default. Below -1 is a typo — fail loud rather than guess.
+	if f.Context.SubAgentTokenBudget != 0 {
+		if f.Context.SubAgentTokenBudget < -1 {
+			return fmt.Errorf("[context] sub_agent_token_budget must be -1 (unlimited), 0 (default), or positive, got %d", f.Context.SubAgentTokenBudget)
+		}
+		cfg.SubAgentTokenBudget = f.Context.SubAgentTokenBudget
+	}
+	if f.Context.MaxOutstandingAsyncSubAgents > 0 {
+		cfg.MaxOutstandingAsyncSubAgents = f.Context.MaxOutstandingAsyncSubAgents
+	}
+	if f.Context.MaxSuspendedSubAgents != 0 {
+		if f.Context.MaxSuspendedSubAgents < 0 {
+			return fmt.Errorf("[context] max_suspended_subagents must be 0 (default) or positive, got %d", f.Context.MaxSuspendedSubAgents)
+		}
+		cfg.MaxSuspendedSubAgents = f.Context.MaxSuspendedSubAgents
+	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
 	}
@@ -263,6 +296,12 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 			Persona:     rc.Persona,
 			ModelName:   rc.Model,
 			MaxIterations: rc.MaxIterations,
+			TokenBudget:  rc.TokenBudget,
+		}
+		// Same three-state semantics as [context].sub_agent_token_budget;
+		// below -1 fails loud (a typo must not silently become a cap).
+		if rc.TokenBudget < -1 {
+			return fmt.Errorf("[agents.%s] token_budget must be -1 (unlimited), 0 (default), or positive, got %d", name, rc.TokenBudget)
 		}
 		tools := make([]string, 0, len(rc.Tools))
 		for _, t := range rc.Tools {

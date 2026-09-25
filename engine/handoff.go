@@ -28,6 +28,12 @@ type handoffOptions struct {
 	depth int
 	// userLang is the session language ("中文" or "").
 	userLang string
+	// register hands a suspended run to the engine's job table and returns its
+	// handle ("" = not registered: no registrar injected, or the cap is full).
+	// Called BEFORE the digest is formatted so the handle can appear in it.
+	// nil (bare runner, tests) = suspensions are not registered, so the run
+	// behaves exactly as it does today.
+	register func(*SuspendedRun, AgentID, string) string
 }
 
 func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) ToolResult {
@@ -86,6 +92,20 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		}
 	}
 
+	// Register a suspension BEFORE formatting the digest: the handle has to be
+	// rendered into it so the parent knows what to resume. Registration happens
+	// here (not at depth 0) because the nested backend has no Engine reference.
+	runID := ""
+	if result.Suspended != nil && opts.register != nil {
+		runID = opts.register(result.Suspended, AgentID(params.Agent), params.Goal)
+	}
+	// Only the top-level delegation exposes its handle: deeper handles must never
+	// reach the model (a nested digest is inlined into its parent's Summary, so
+	// rendering one there would leak the whole chain).
+	if opts.depth == 0 {
+		result.RunID = runID
+	}
+
 	status := "ok"
 	if result.BlockedBy == "cancelled" {
 		status = "cancelled"
@@ -97,6 +117,7 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		Digest:       formatHandoffResult(result, opts.zh),
 		FinishReason: result.FinishReason,
 		Questions:    result.Questions,
+		RunID:        runID,
 	}
 }
 
@@ -129,15 +150,104 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		zh:       e.isChinese,
 		depth:    depth,
 		userLang: userLang,
+		register: e.RegisterSuspended,
 	})
 	// Bubble up sub-agent questions into the pending ask_user seam so the
-	// existing awaiting_user / Options UI path presents them.
+	// existing awaiting_user / Options UI path presents them. RunID ties the
+	// question to the job that must be resumed with the answer; empty means the
+	// run was not registered (cap full), i.e. the parent re-delegates instead.
 	if len(res.Questions) > 0 {
-		e.askUserMu.Lock()
-		e.pendingAskUser = &AskUserRequest{Question: res.Questions[0]}
-		e.askUserMu.Unlock()
+		e.pushAskUser(&AskUserRequest{Question: res.Questions[0], RunID: res.RunID})
 	}
 	return res, nil
+}
+
+// defaultMaxOutstandingAsyncSubAgents caps dispatched-but-uncollected async
+// sub-agent jobs when [context].max_outstanding_async_subagents is unset.
+const defaultMaxOutstandingAsyncSubAgents = 8
+
+// maxOutstandingAsyncSubAgents resolves the effective outstanding cap; 0 or
+// negative config means the default. Resolved engine-side so a bare Engine
+// (tests, embeddings) gets the cap without wiring defaults.
+func (e *Engine) maxOutstandingAsyncSubAgents() int {
+	if n := e.config.MaxOutstandingAsyncSubAgents; n > 0 {
+		return n
+	}
+	return defaultMaxOutstandingAsyncSubAgents
+}
+
+// maxSuspendedSubAgentsEff resolves the effective suspension cap from
+// [context].max_suspended_subagents; 0 or negative means the default. Read from
+// the config (like the async outstanding cap) so there is a single source of
+// truth and a bare Engine still gets a cap.
+func (e *Engine) maxSuspendedSubAgentsEff() int {
+	if e.config.MaxSuspendedSubAgents > 0 {
+		return e.config.MaxSuspendedSubAgents
+	}
+	return defaultMaxSuspendedSubAgents
+}
+
+// RegisterSuspended registers a suspended run as an awaiting_user job and
+// returns its handle. "" means NOT registered — the suspension cap is full — and
+// the caller then falls back to today's behaviour: the question still bubbles up
+// and the parent re-delegates instead of resuming.
+//
+// Exported because it is the wiring seam for SubAgentRunner.SetSuspendedRegistrar:
+// the nested backend lives in the same package but is assembled in cmd/run.go,
+// where an unexported method is not reachable.
+//
+// The result channel is created here on purpose: a suspended entry holds no
+// goroutine, and a nil channel always takes the default branch of a select, so
+// without it the resumed run's final result would be dropped and agent_poll
+// would report "still running" forever.
+func (e *Engine) RegisterSuspended(s *SuspendedRun, agent AgentID, goal string) string {
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	defer e.bgMu.Unlock()
+	if e.countByStateLocked(bgStateAwaitingUser) >= e.maxSuspendedSubAgentsEff() {
+		loopLog.Printf("suspend cap (%d) reached; run %s ends without a resumable entry", e.maxSuspendedSubAgentsEff(), agent)
+		return ""
+	}
+	e.bgSeq++
+	id := fmt.Sprintf("bg-%d", e.bgSeq)
+	// ctx/cancel stay nil: a suspended entry holds no goroutine and no request.
+	// They are set at RESUME time from the ctx of the Run that calls
+	// agent_resume, so the resumed run is cancellable and — like every async
+	// job — never outlives that Run.
+	e.bgTasks[id] = &bgTask{
+		id:         id,
+		agent:      agent,
+		goal:       goal,
+		state:      bgStateAwaitingUser,
+		suspended:  s,
+		childRunID: s.ChildRunID,
+		startAt:    time.Now(),
+		result:     make(chan *HandoffResult, 1),
+	}
+	return id
+}
+
+// suspendExistingJob flips an in-flight (async) job into a suspended one. It
+// keeps the SAME job id — the dispatcher already handed that handle to the
+// model, so allocating a second one would strand the original entry. Reports
+// false when the suspension cap is full or the entry is gone; the caller then
+// delivers the question as a final result rather than losing it.
+func (e *Engine) suspendExistingJob(jobID string, s *SuspendedRun) bool {
+	e.bgMu.Lock()
+	defer e.bgMu.Unlock()
+	if e.countByStateLocked(bgStateAwaitingUser) >= e.maxSuspendedSubAgentsEff() {
+		return false
+	}
+	t, ok := e.bgTasks[jobID]
+	if !ok {
+		return false
+	}
+	t.state = bgStateAwaitingUser
+	t.suspended = s
+	t.childRunID = s.ChildRunID
+	t.startAt = time.Now() // TTL counts from the suspension, not from dispatch
+	t.ctx, t.cancel = nil, nil
+	return true
 }
 
 // dispatchAsync starts the sub-agent in the background and returns
@@ -167,6 +277,20 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
+	// Outstanding cap: async jobs hold a slot until agent_poll consumes their
+	// done result (turn.go deletes on poll). fail-loud, not blocking — async
+	// semantics require an immediate return; the digest points the model at
+	// collecting existing results first.
+	// Count only jobs with work in flight: suspended (awaiting_user) entries hold
+	// no goroutine and no LLM request, so they must not consume an async slot.
+	if n := e.maxOutstandingAsyncSubAgents(); e.countByStateLocked(bgStateRunning) >= n {
+		e.bgMu.Unlock()
+		return ToolResult{
+			ToolName: HandoffToolName,
+			Status:   "error",
+			Digest:   fmt.Sprintf("background sub-agent limit reached (%d outstanding). Poll existing results with agent_poll first.", n),
+		}, nil
+	}
 	e.bgSeq++
 	jobID := fmt.Sprintf("bg-%d", e.bgSeq)
 	bgCtx, cancel := context.WithCancel(ctx)
@@ -178,6 +302,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		cancel:  cancel,
 		result:  make(chan *HandoffResult, 1),
 		startAt: time.Now(),
+		state:   bgStateRunning,
 	}
 	e.bgTasks[jobID] = task
 	e.bgMu.Unlock()
@@ -208,6 +333,19 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		}
 		if result.Usage != nil {
 			e.accumulateUsage(result.Usage)
+		}
+		// A background run that stopped to ask the user SUSPENDS: the job stays
+		// in the table as awaiting_user and is answered later with
+		// agent_resume. The channel only ever carries a FINAL result — pushing
+		// the question here would make agent_poll report the job as done and the
+		// resumed run's real result would then be dropped by select/default.
+		// agent_done is withheld for the same reason: the job is not done, it is
+		// waiting. The question reaches the model via the pinned job summary and
+		// agent_poll instead of the ask_user UI path, because this Run may
+		// already be over.
+		if result.Suspended != nil && e.suspendExistingJob(task.id, result.Suspended) {
+			loopLog.Printf("async job %s suspended on a question; answer with agent_resume(%s, ...)", task.id, task.id)
+			return
 		}
 		select {
 		case task.result <- result:
@@ -243,6 +381,7 @@ func (r *SubAgentRunner) RunSubAgent(ctx context.Context, params HandoffToAgentP
 		zh:         zhFromLang(userLang),
 		depth:      depth,
 		userLang:   userLang,
+		register:   r.register,
 	})
 	return res, nil
 }

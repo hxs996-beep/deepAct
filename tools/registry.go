@@ -34,6 +34,9 @@ type ToolResultEnvelope struct {
 	ExitCode     *int     `json:"exit_code,omitempty"`
 	FinishReason string   `json:"finish_reason,omitempty"`
 	Questions    []string `json:"questions,omitempty"`
+	// RunID carries a suspended sub-agent's job id down the nested path (see
+	// engine.ToolResult.RunID).
+	RunID string `json:"run_id,omitempty"`
 }
 
 const (

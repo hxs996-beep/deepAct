@@ -235,6 +235,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetMaxOutputTokens(config.MaxOutputTokens)
+	runner.SetSubAgentTokenBudget(config.SubAgentTokenBudget)
 	runner.SetReasoningEffort(config.ReasoningEffort)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
@@ -351,6 +352,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	// backends can capture the live Engine (main) and SubAgentRunner (nested)
 	// references. handoff_to_agent is then served by e.tools.Specs().
 	deps.AfterEngine = func(e *engine.Engine) {
+		// Suspended (awaiting_user) runs are registered by whichever layer ran
+		// them; the nested backend holds no Engine reference, so it receives the
+		// registrar here. Without it a nested suspension could never be resumed.
+		runner.SetSuspendedRegistrar(e.RegisterSuspended)
 		registry.Register(tools.NewSubAgentTool(
 			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
 				return e.RunSubAgent(ctx, p, depth, lang)

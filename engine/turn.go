@@ -529,6 +529,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingPlanMsgs := e.processPlanTaskCalls(calls)
 	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
+	pendingAskUserMsgs = append(pendingAskUserMsgs, e.processAgentResumeCalls(ctx, calls)...)
 	pendingPollMsgs := e.processAgentPollCalls(calls)
 
 	e.history = append(e.history, assistant)
@@ -570,6 +571,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == PlanTaskToolName {
 			continue
 		} else if call.Name == AgentPollToolName {
+			continue
+		} else if call.Name == AgentResumeToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -690,16 +693,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// 立即结束 Run 并将报告全文作为 CompletionSummary。UI 收到干净的报告 +
 	// Options（弹窗选择）。无 options → 同时置 Blocked + awaiting_user，经
 	// loop.go 的 Blocked 分支（优先于 Done）呈现问题，用户自由输入。
-	if e.pendingAskUser != nil {
+	if req := e.peekAskUser(); req != nil {
 		result.Done = true
 		result.CompletionSummary = content
 		// No options → present the question via the awaiting_user Blocked path
 		// (loop.go processes Blocked before Done). The engine must never decide
 		// on the user's behalf; use the structured Question, not narration text.
-		if len(e.pendingAskUser.Options) == 0 {
+		if len(req.Options) == 0 {
 			result.Blocked = true
 			result.BlockedBy = "awaiting_user"
-			result.Questions = []string{e.pendingAskUser.Question}
+			result.Questions = []string{req.Question}
 		}
 	}
 	// Progress signal for the progressLoop breaker: a successful destructive
@@ -800,6 +803,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, todoWriteToolSpec())
 	specs = append(specs, askUserToolSpec(e.isChinese))
 	specs = append(specs, agentPollToolSpec(e.isChinese))
+	specs = append(specs, agentResumeToolSpec(e.isChinese))
 	return specs
 }
 
@@ -1460,6 +1464,29 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			})
 			continue
 		}
+		if e.suspendedJobExpiredLocked(task) {
+			delete(e.bgTasks, params.JobID)
+			e.bgMu.Unlock()
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Job %s has expired (suspended for over %s) and can no longer be resumed. Re-delegate the task if you still need it.", params.JobID, suspendedJobTTL),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+		if task.state == bgStateAwaitingUser {
+			// Suspended: nothing is running, so the channel would always read as
+			// "still running". Report the question and how to answer it.
+			e.bgMu.Unlock()
+			msgs = append(msgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    formatSuspendedPoll(params.JobID, task),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
 		e.bgMu.Unlock()
 
 		select {
@@ -1511,7 +1538,14 @@ func (e *Engine) injectBackgroundJobsSummary() {
 			b.WriteString("; ")
 		}
 		first = false
-		fmt.Fprintf(&b, "%s (%s): %s — running", id, t.agent, t.goal)
+		switch {
+		case t.state == bgStateAwaitingUser && t.suspended != nil && t.suspended.Question != "":
+			fmt.Fprintf(&b, "%s (%s): %s — waiting for user input (answer with agent_resume(%s, …))", id, t.agent, t.goal, id)
+		case t.state == bgStateAwaitingUser:
+			fmt.Fprintf(&b, "%s (%s): %s — waiting for a sub-agent result", id, t.agent, t.goal)
+		default:
+			fmt.Fprintf(&b, "%s (%s): %s — running", id, t.agent, t.goal)
+		}
 	}
 	e.bgMu.Unlock()
 	b.WriteString(". Continue your work; use agent_poll(job_id) to fetch results.")
@@ -1578,10 +1612,10 @@ func (e *Engine) processAskUserCalls(calls []ToolCallRequest) []Message {
 				continue
 			}
 		}
-		e.pendingAskUser = &AskUserRequest{
+		e.pushAskUser(&AskUserRequest{
 			Question: params.Question,
 			Options:  append([]string(nil), params.Options...),
-		}
+		})
 		msgs = append(msgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
@@ -1615,7 +1649,7 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 		// the parent auto-continues within the same Run: it reads the partial
 		// result, fills gaps, and either completes or re-delegates.
 		if isHandoffFollowUpReason(result.FinishReason) {
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(e.isChinese))
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(result.FinishReason, e.isChinese))
 		}
 	}
 	return messages
@@ -1635,7 +1669,13 @@ func isHandoffFollowUpReason(reason string) bool {
 
 // buildHandoffFollowUp returns the pinned instruction that tells the parent
 // to continue after a sub-agent failed to deliver a complete result.
-func buildHandoffFollowUp(zh bool) string {
+func buildHandoffFollowUp(reason string, zh bool) string {
+	if reason == HandoffReasonAwaitingUser {
+		if zh {
+			return "以上子代理需要用户输入。若用户这条消息正是在回答它，请用 agent_resume(<句柄>, 回答) 让它带着原有上下文继续；否则基于它的部分结果自行继续或重新委派。"
+		}
+		return "The sub-agent above is waiting for user input. If the user's latest message answers it, call agent_resume(<handle>, <answer>) so it continues with its original context; otherwise continue from its partial findings or re-delegate."
+	}
 	if zh {
 		return "以上子代理未给出完整结论。请基于其部分结果继续处理：补充缺失信息后给出最终结论，或重新委派合适的子代理。不要停在这里等待用户输入。"
 	}

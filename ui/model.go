@@ -858,6 +858,14 @@ func (m Model) View() string {
 	// are counted at their real terminal width — ansi/lipgloss underestimate
 	// them, producing lines that overflow and wrap, corrupting the renderer.
 	for i := range lines {
+		// Expand TABs before measuring. A TAB is not a fixed-width glyph — the
+		// terminal advances it to the next tab stop, while runeWidth('\t') is 0 —
+		// so a TAB-containing line clears truncateToWidth/contentWidth and then
+		// overflows the terminal. Every body line passes through here, including
+		// the renderers that bypass both sanitizeForTerminal and wrapLines (the
+		// sub-agent panel, todo list, popups), so this is the backstop for the
+		// width contract.
+		lines[i] = expandTabs(lines[i])
 		lines[i] = truncateToWidth(lines[i], contentWidth)
 		if w := displayWidth(lines[i]); w < contentWidth {
 			lines[i] += strings.Repeat(" ", contentWidth-w)
@@ -905,7 +913,9 @@ func (m Model) View() string {
 
 	// ---- Step 11: Final width truncation ----
 	for i := range finalLines {
-		finalLines[i] = truncateToWidth(finalLines[i], m.width)
+		// Same TAB backstop for the footer (input box, status line) and anything
+		// that did not pass through Step 7.
+		finalLines[i] = truncateToWidth(expandTabs(finalLines[i]), m.width)
 	}
 
 	return strings.Join(finalLines, "\n")
@@ -3497,6 +3507,15 @@ func wrapLines(lines []string, width int) []string {
 	}
 	result := []string{}
 	for _, line := range lines {
+		// Expand TABs before measuring. displayWidth counts '\t' as 0 columns
+		// (runeWidth('\t') == 0) while the terminal advances it to the next tab
+		// stop, so a TAB-containing line would clear this gate unexpanded and then
+		// overflow the terminal — soft-wrapping and drifting the renderer's line
+		// counter. This is the measure-before-wrap boundary: it must not assume an
+		// upstream renderer already normalised TABs (lipgloss does so for its own
+		// width-constrained blocks, but wrapLines also receives lines from
+		// renderers that do not).
+		line = expandTabs(line)
 		if displayWidth(line) <= width {
 			result = append(result, line)
 		} else {

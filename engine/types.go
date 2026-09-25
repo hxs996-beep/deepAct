@@ -84,6 +84,20 @@ type EngineConfig struct {
 	MaxOutputTokens        int
 	PlanningEnabled        bool
 	PlanningThresholdChars int
+	// SubAgentTokenBudget caps a sub-agent run's billable tokens (cache-miss
+	// + completion; cache hits are free). Three-state: 0 = default (2× the
+	// sub-agent context window), -1 = unlimited, >0 = explicit cap. Wired via
+	// [context].sub_agent_token_budget.
+	SubAgentTokenBudget int
+	// MaxOutstandingAsyncSubAgents caps dispatched-but-uncollected async
+	// sub-agent jobs (a slot frees when agent_poll consumes a done result).
+	// 0 = default 8. Wired via [context].max_outstanding_async_subagents.
+	MaxOutstandingAsyncSubAgents int
+	// MaxSuspendedSubAgents caps how many suspended (awaiting_user) sub-agent
+	// jobs are kept at once. Each entry retains a whole history, so the table
+	// must stay small. 0 = default 4. Wired via
+	// [context].max_suspended_subagents.
+	MaxSuspendedSubAgents int
 	ShowThinking           bool    // stream model reasoning/thinking to UI
 	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
 	WorkDir                string
@@ -111,6 +125,9 @@ type EngineResponse struct {
 type AskUserRequest struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options,omitempty"`
+	// RunID is the job handle of the sub-agent that asked (empty when the main
+	// agent asked itself). The answer goes back through agent_resume(RunID, …).
+	RunID string `json:"run_id,omitempty"`
 }
 
 type ModelRequest struct {
@@ -222,6 +239,10 @@ type ToolResult struct {
 	// Questions carries ask_user questions bubbled up from a sub-agent so the
 	// parent engine can present them via the awaiting_user path.
 	Questions []string `json:"questions,omitempty"`
+	// RunID is the job handle of a sub-agent that suspended on a question, so
+	// the parent run can stitch the resume cascade without parsing digest text.
+	// Empty on every other path.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // EventTypeMessage records conversation messages (user/assistant in full,

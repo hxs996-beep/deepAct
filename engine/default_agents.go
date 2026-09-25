@@ -94,11 +94,30 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 	if input.MaxIterations == 0 {
 		input.MaxIterations = spec.MaxIterations
 	}
+	// Token budget merge: 0 means "harness did not set one" — take the role's.
+	// A spec-level -1 (explicit unlimited) flows into input unchanged, so an
+	// explicit opt-out can never be silently replaced by a default.
+	if input.TokenBudget == 0 {
+		input.TokenBudget = spec.TokenBudget
+	}
 	input.StructuredResult = spec.StructuredResult
 	return a.runner.Run(ctx, input)
 }
 
 func (a *specSubAgent) SetOnProgress(fn ProgressFunc) { a.runner.SetOnProgress(fn) }
+
+// RunSuspended continues a suspended run of this role. The runner is held as a
+// narrow interface, so a runner without resume support fails loud instead of
+// silently dropping the answer.
+func (a *specSubAgent) RunSuspended(ctx context.Context, s *SuspendedRun, answer string) (*HandoffResult, error) {
+	r, ok := a.runner.(interface {
+		RunSuspended(context.Context, *SuspendedRun, string) (*HandoffResult, error)
+	})
+	if !ok {
+		return nil, errors.New("this agent's runner does not support resuming")
+	}
+	return r.RunSuspended(ctx, s, answer)
+}
 
 // intersectToolSets returns the intersection of a and b, preserving a's
 // order. A role-restricted agent can only have its tool set narrowed.

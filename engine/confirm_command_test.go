@@ -43,8 +43,8 @@ func TestHandleConfirmCommand_NoPending_Noop(t *testing.T) {
 	if last != "/confirm 1" {
 		t.Errorf("history should be unchanged with no pending ask_user, got %q", last)
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should stay nil, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should stay nil, got %+v", e.peekAskUser())
 	}
 }
 
@@ -54,10 +54,10 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
 		isChinese: true,
-		pendingAskUser: &AskUserRequest{
+		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
-		},
+		}},
 	}
 
 	if !e.handleConfirmCommand("/confirm 1") {
@@ -67,8 +67,8 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	if !strings.Contains(last, "用 Redis 缓存") {
 		t.Errorf("history should mention 用 Redis 缓存, got %q", last)
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should be cleared after selecting the option, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should be cleared after selecting the option, got %+v", e.peekAskUser())
 	}
 }
 

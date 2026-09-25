@@ -55,6 +55,7 @@ func (e *EngineExecutor) Execute(ctx engine.ToolExecContext, calls []engine.Tool
 			ExitCode:     result.ExitCode,
 			FinishReason: result.FinishReason,
 			Questions:    result.Questions,
+			RunID:        result.RunID,
 		})
 	}
 	return engineResults

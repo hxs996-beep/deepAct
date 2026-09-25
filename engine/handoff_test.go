@@ -92,8 +92,8 @@ func TestRunSubAgent_EngineBackend_BubblesQuestions(t *testing.T) {
 	if len(res.Questions) != 1 || res.Questions[0] != "数据库连接串是什么？" {
 		t.Errorf("Questions = %v", res.Questions)
 	}
-	if e.pendingAskUser == nil || e.pendingAskUser.Question != "数据库连接串是什么？" {
-		t.Errorf("pendingAskUser = %+v, want question set", e.pendingAskUser)
+	if req := e.peekAskUser(); req == nil || req.Question != "数据库连接串是什么？" {
+		t.Errorf("pendingAskUser = %+v, want question set", e.peekAskUser())
 	}
 }
 

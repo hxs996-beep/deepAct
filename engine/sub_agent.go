@@ -80,6 +80,9 @@ type SubAgentRunner struct {
 	reasoningEffort  string // DeepSeek thinking effort for sub-agent calls; "" = engine default (high)
 	onProgress       ProgressFunc
 	compressor       *CompressionOrchestrator
+	// register hands a suspended run back to the engine's job table (see
+	// SetSuspendedRegistrar). nil = suspensions are not registered.
+	register func(*SuspendedRun, AgentID, string) string
 	// partitionURL derives a per-sub-agent prefix-cache partition URL from a
 	// partition name. Injected by cmd/run.go (which can import llm) so engine stays
 	// llm-free. nil = sub-agents share the main agent's endpoint (no isolation).
@@ -91,6 +94,10 @@ type SubAgentRunner struct {
 	langPackZh   string // Chinese language pack (Go/Python rules in zh)
 	langPackEn   string // English language pack (Go/Python rules in en)
 	maxDepth     int    // absolute delegation-depth cap; 0 = default 2
+	// tokenBudget caps a run's billable tokens (cache-miss + completion).
+	// Three-state: 0 = default (2× the context window), -1 = explicit
+	// unlimited, >0 = explicit cap. Set from [context].sub_agent_token_budget.
+	tokenBudget int
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -158,6 +165,14 @@ func (r *SubAgentRunner) SetCompressor(c *CompressionOrchestrator) {
 	r.compressor = c
 }
 
+// SetSuspendedRegistrar injects the engine's suspension registry, so nested
+// runs (depth >= 1) can hand their suspended state back to the job table —
+// SubAgentRunner deliberately holds no *Engine reference. nil = nested runs do
+// not suspend (they behave exactly as they do today).
+func (r *SubAgentRunner) SetSuspendedRegistrar(fn func(*SuspendedRun, AgentID, string) string) {
+	r.register = fn
+}
+
 // SetSubAgentPartitionURL injects a function that derives a per-sub-agent prefix-cache
 // partition URL from a partition name (e.g. "sub-0-3"). The injected function closes over
 // the base URL and API key; it lives in cmd/run.go so engine stays free of the llm package.
@@ -172,6 +187,14 @@ func (r *SubAgentRunner) SetMaxDepth(d int) {
 		d = 2
 	}
 	r.maxDepth = d
+}
+
+// SetSubAgentTokenBudget sets the runner-level token budget for sub-agent
+// runs. Three-state: 0 = default (2× the effective context window), -1 =
+// unlimited, >0 = explicit cap. A Handoff/AgentSpec value takes precedence
+// over this runner default (see tokenBudgetFor).
+func (r *SubAgentRunner) SetSubAgentTokenBudget(b int) {
+	r.tokenBudget = b
 }
 
 // MaxDepth returns the current nesting cap.
@@ -231,7 +254,33 @@ func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content
 	s.streamed = true
 }
 
+// runLoop is the fresh-run entry point: it builds the run's state from scratch.
 func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
+	return r.runLoopFrom(ctx, input, extraPrompt, maxIterations, nil, modelOverride...)
+}
+
+// runLoopResume continues a SUSPENDED run from its breakpoint (agent_resume).
+// `answer` fills the pending tool call: the user's answer for a leaf, or the
+// child's result digest for an intermediate layer. The pending response is
+// written BEFORE the loop body runs — the body injects nudges at the top of an
+// iteration, so an unfilled response would leave them sitting between
+// assistant(tool_calls) and its tool response (an API-contract violation).
+func (r *SubAgentRunner) runLoopResume(ctx context.Context, s *SuspendedRun, answer string) (*HandoffResult, error) {
+	rs := *s
+	rs.History = fillPendingToolResponse(s, answer)
+	return r.runLoopFrom(ctx, rs.Input, rs.Input.Persona, rs.Input.MaxIterations, &rs)
+}
+
+// RunSuspended continues a suspended run on behalf of the engine (which reaches
+// it through the role that owns the run). See runLoopResume.
+func (r *SubAgentRunner) RunSuspended(ctx context.Context, s *SuspendedRun, answer string) (*HandoffResult, error) {
+	return r.runLoopResume(ctx, s, answer)
+}
+
+// runLoopFrom is the shared loop. resume == nil builds a fresh run; otherwise
+// the run continues from the breakpoint, and everything derivable from it is
+// reused instead of re-derived (see the prologue).
+func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, resume *SuspendedRun, modelOverride ...string) (*HandoffResult, error) {
 	if input.Depth > r.MaxDepth() {
 		return &HandoffResult{
 			Summary:      fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", r.MaxDepth()),
@@ -241,51 +290,90 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}, nil
 	}
 
-	// Fork model client for an isolated client instance (no shared state with
-	// the parent agent).
+	// ---- Prologue: per-RUN state, derived exactly once ----------------------
+	// A resumed run takes it from the breakpoint instead: re-deriving the model
+	// and partition would throw away the prefix cache (and bump partitionSeq),
+	// rebuilding the history would drop everything the run had established, and
+	// zeroing the counters would hand back budget that was already spent.
+	structured := input.StructuredResult
 	model := r.model
-	if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
-		model = f.Fork()
-	}
-	// Derive a per-run prefix-cache partition so this sub-agent's calls get their
-	// own DeepSeek cache partition keyed by the URL query param. The partition name
-	// combines the agent name, nesting depth, and a unique session-global sequence
-	// number — parallel sub-agents therefore never overwrite each other's cached
-	// system prefix (their volatile prompts differ, but their shared system prefix
-	// stays hot within each partition). No partitionURL = no isolation.
-	if r.partitionURL != nil {
-		seq := r.partitionSeq.Add(1)
-		agentName := string(input.Agent)
-		if agentName == "" {
-			agentName = "sub"
+	partitionName := ""
+	var history []ModelMessage
+	var totalUsage ModelUsage
+	modelName := r.modelName
+	iter := 0
+	budgetNudgedTokens := false
+	if resume != nil {
+		model = resume.Model
+		partitionName = resume.Partition
+		history = resume.History
+		totalUsage = resume.Spent
+		modelName = resume.ModelName
+		iter = resume.Iter
+		budgetNudgedTokens = resume.BudgetNudgedTokens
+	} else {
+		// Fork model client for an isolated client instance (no shared state with
+		// the parent agent).
+		if f, ok := r.model.(interface{ Fork() ModelClient }); ok {
+			model = f.Fork()
 		}
-		partition := fmt.Sprintf("%s-%d-%d", agentName, input.Depth, seq)
-		if f, ok := model.(interface{ ForkWithBaseURL(string) ModelClient }); ok {
-			model = f.ForkWithBaseURL(r.partitionURL(partition))
+		// Derive a per-run prefix-cache partition so this sub-agent's calls get their
+		// own DeepSeek cache partition keyed by the URL query param. The partition name
+		// combines the agent name, nesting depth, and a unique session-global sequence
+		// number — parallel sub-agents therefore never overwrite each other's cached
+		// system prefix (their volatile prompts differ, but their shared system prefix
+		// stays hot within each partition). No partitionURL = no isolation.
+		if r.partitionURL != nil {
+			seq := r.partitionSeq.Add(1)
+			pName := string(input.Agent)
+			if pName == "" {
+				pName = "sub"
+			}
+			partitionName = fmt.Sprintf("%s-%d-%d", pName, input.Depth, seq)
+			if f, ok := model.(interface{ ForkWithBaseURL(string) ModelClient }); ok {
+				model = f.ForkWithBaseURL(r.partitionURL(partitionName))
+			}
+		}
+
+		// Stable system message — identical across all sub-agent calls → prefix cache hit
+		// Role persona (extraPrompt) — appended to the system prefix so it stays
+		// constant across the sub-agent's turns → prefix cache hit per role.
+		// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
+		system := r.stableSystemPrompt(input.UserLanguage)
+		if extraPrompt != "" {
+			system += "\n\n" + extraPrompt
+		}
+		history = []ModelMessage{
+			{Role: "system", Content: system},
+		}
+		if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
+			history = append(history, ModelMessage{Role: "user", Content: volatileContent})
+		}
+		// Structured run: attach the scoped submit_result tool and its requirement
+		// as the trailing (highest-recency) instruction. From here on the loop
+		// only completes through a valid submission — termination never depends
+		// on an LLM judgment call (mirrors the harness structured_output).
+		if structured {
+			history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
 		}
 	}
 
-	// Stable system message — identical across all sub-agent calls → prefix cache hit
-	// Role persona (extraPrompt) — appended to the system prefix so it stays
-	// constant across the sub-agent's turns → prefix cache hit per role.
-	// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
-	system := r.stableSystemPrompt(input.UserLanguage)
-	if extraPrompt != "" {
-		system += "\n\n" + extraPrompt
-	}
-	history := []ModelMessage{
-		{Role: "system", Content: system},
-	}
-	if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
-		history = append(history, ModelMessage{Role: "user", Content: volatileContent})
-	}
-	// Structured run: attach the scoped submit_result tool and its requirement
-	// as the trailing (highest-recency) instruction. From here on the loop
-	// only completes through a valid submission — termination never depends
-	// on an LLM judgment call (mirrors the harness structured_output).
-	structured := input.StructuredResult
-	if structured {
-		history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
+	// Model resolution. A fresh run derives it from the role's override; a
+	// resumed run keeps the effective model it had at the breakpoint (it may
+	// already have escalated flash→Pro), and re-derives only isFlashAgent from
+	// that model so the escalation path still knows the run started on flash.
+	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
+	if resume == nil {
+		if len(modelOverride) > 0 && modelOverride[0] != "" {
+			if modelOverride[0] == "flash" && r.flashModelName != "" {
+				modelName = r.flashModelName
+				isFlashAgent = true
+			} else {
+				modelName = modelOverride[0]
+			}
+		}
+	} else {
+		isFlashAgent = r.flashModelName != "" && modelName == r.flashModelName
 	}
 
 	// Deterministic completion (C5): no LLM ConclusionClassifier probe.
@@ -311,24 +399,15 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		effectiveNames = append(effectiveNames, spec.Function.Name)
 	}
 
-	modelName := r.modelName
-	isFlashAgent := false // 标记 agent 是否被分配为 Flash（用于失败升级回退）
-	if len(modelOverride) > 0 && modelOverride[0] != "" {
-		if modelOverride[0] == "flash" && r.flashModelName != "" {
-			modelName = r.flashModelName
-			isFlashAgent = true
-		} else {
-			modelName = modelOverride[0]
-		}
-	}
-
 	agentName := string(input.Agent)
 	if agentName == "" {
 		agentName = "sub"
 	}
 	limit := r.contextLimit()
 	compressThreshold := limit * 95 / 100
-	var totalUsage ModelUsage
+	// Reset on resume (deliberate): the narration/truncation/blocked streaks and
+	// the per-run streamer are not part of the breakpoint — a resumed run may
+	// take up to 3 fresh strikes and may re-emit one stream_delta.
 	consecutiveIntermediate := 0
 	consecutiveTruncation := 0
 	// consecutiveBlocked counts gate-refused calls with no real dispatch in
@@ -337,8 +416,14 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 	consecutiveBlocked := 0
 	streamer := subAgentStreamer{}
 	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
+	// tokenNudgePending 标记 80% 已越线，提示延迟到下一轮迭代顶部注入：累加
+	// 点位于 assistant(tool_calls) 与其 tool 结果之间，在那里插入 user 消息会
+	// 破坏"tool 响应紧跟其请求消息"的相邻性。
+	tokenNudgePending := false
 	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
-	for iter := 0; maxIterations <= 0 || iter < maxIterations; iter++ {
+	// A resumed run continues from the breakpoint's iteration count, so a capped
+	// run does NOT get a fresh MaxIterations budget.
+	for ; maxIterations <= 0 || iter < maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
 			return &HandoffResult{
@@ -385,6 +470,23 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				Content: budgetTailNudge(zhFromLang(input.UserLanguage), maxIterations-iter, structured),
 			})
 			budgetNudged = true
+		}
+
+		// Token-budget wrap-up nudge: armed at the 80% crossing below and
+		// injected here, at the top of the next iteration. It must NOT be
+		// appended at the accumulation point — that sits between an
+		// assistant(tool_calls) message and its tool results, and the API
+		// requires tool responses to follow the message that requested them.
+		// Injected at most once.
+		if tokenNudgePending {
+			budget := tokenBudgetFor(input, r)
+			spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
+			history = append(history, ModelMessage{
+				Role:    "user",
+				Content: tokenBudgetNudge(zhFromLang(input.UserLanguage), budget-spent, structured),
+			})
+			budgetNudgedTokens = true
+			tokenNudgePending = false
 		}
 
 		req := ModelRequest{
@@ -455,6 +557,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 		totalUsage.TotalTokens += resp.Usage.TotalTokens
 		totalUsage.CacheHitTokens += resp.Usage.CacheHitTokens
+		totalUsage.CacheMissTokens += resp.Usage.CacheMissTokens
 
 		msg := resp.Message
 
@@ -470,6 +573,27 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		}
 
 		history = append(history, msg)
+
+		// Token budget: checked every turn right after usage accumulation,
+		// before any branch — a run can neither spend nor loop past it. The
+		// check is soft at the call boundary (at most one LLM call of
+		// overshoot); the partial history is already in place, so the
+		// summarizeHistory below carries the run's findings so far.
+		if budget := tokenBudgetFor(input, r); budget > 0 {
+			spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
+			if spent >= budget {
+				return &HandoffResult{
+					Summary:      r.summarizeHistory(history, input.Goal),
+					FinishReason: HandoffReasonBudgetExceeded,
+					Usage:        &totalUsage,
+				}, nil
+			}
+			if !budgetNudgedTokens && spent >= budget*80/100 {
+				// Arm only; the message is injected at the top of the next
+				// iteration so tool responses stay adjacent to their request.
+				tokenNudgePending = true
+			}
+		}
 
 		// No tool calls → agent may be done
 		if len(msg.ToolCalls) == 0 {
@@ -661,11 +785,30 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 					Role: "tool", ToolCallID: call.ID,
 					Content: "✓ 已记录问题，等待用户回答。",
 				})
+				// Carry what the run established so far alongside the question:
+				// nothing persists this run's history, and the parent
+				// re-delegates after the user answers — without the findings it
+				// would restart from zero.
 				return &HandoffResult{
-					Summary:      q.Question,
+					Summary:      awaitingUserSummary(zhFromLang(input.UserLanguage), q.Question, lastAssistantText(history)),
 					Questions:    []string{q.Question},
 					FinishReason: HandoffReasonAwaitingUser,
 					Usage:        &totalUsage,
+					// Leaf path: the ask_user placeholder is already in history, so
+					// resume REPLACES its content with the user's answer.
+					Suspended: &SuspendedRun{
+						History:            history,
+						Question:           q.Question,
+						PendingToolID:      call.ID,
+						PendingToolMissing: false,
+						Input:              input,
+						Partition:          partitionName,
+						Model:              model,
+						Spent:              totalUsage,
+						Iter:               iter,
+						BudgetNudgedTokens: budgetNudgedTokens,
+						ModelName:          modelName,
+					},
 				}, nil
 			}
 			env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID, Ctx: ctx, Depth: input.Depth + 1, UserLang: input.UserLanguage}
@@ -678,11 +821,29 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 				// Nested bubble: a child's handoff result carried questions →
 				// stop and bubble them up.
 				if len(res.Questions) > 0 {
+					// Intermediate path: this run is waiting for its CHILD, not
+					// for the user. The tool response for the handoff call was
+					// never written (we return above the append below), so resume
+					// APPENDS it once the child delivers. Only the leaf may be
+					// answered by the user — see SuspendedRun and I8.
 					return &HandoffResult{
 						Summary:      res.Digest,
 						Questions:    res.Questions,
 						FinishReason: HandoffReasonAwaitingUser,
 						Usage:        &totalUsage,
+						Suspended: &SuspendedRun{
+							History:            history,
+							PendingToolID:      res.ToolCallID,
+							PendingToolMissing: true,
+							ChildRunID:         res.RunID,
+							Input:              input,
+							Partition:          partitionName,
+							Model:              model,
+							Spent:              totalUsage,
+							Iter:               iter,
+							BudgetNudgedTokens: budgetNudgedTokens,
+							ModelName:          modelName,
+						},
 					}, nil
 				}
 				// cancelled results are not written to history: the run is
@@ -711,6 +872,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 		Summary:      summary,
 		TimedOut:     true,
 		FinishReason: reason,
+		Usage:        &totalUsage,
 	}, nil
 }
 
@@ -746,15 +908,12 @@ func firstLine(s string, max int) string {
 }
 
 func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) string {
-	// Walk backward to the last assistant message that has text. On an
-	// interruption (per-call timeout, loop guard, or iteration cap) that text
-	// is the model's real output, so it is returned verbatim as the partial
-	// result — no length or shape heuristic decides what counts as a
+	// On an interruption (per-call timeout, loop guard, or iteration cap) the
+	// model's last real text is its output, so it is returned verbatim as the
+	// partial result — no length or shape heuristic decides what counts as a
 	// conclusion.
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && history[i].Content != "" {
-			return "(analysis timed out, partial result)\n" + history[i].Content
-		}
+	if text := lastAssistantText(history); text != "" {
+		return "(analysis timed out, partial result)\n" + text
 	}
 	// Fallback: no substantive assistant text was produced (per-call timeout,
 	// loop guard, or iteration cap). Return a concise readable failure instead
@@ -771,6 +930,100 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 		return fmt.Sprintf("子代理未产出最终结论（已执行 %d 次工具调用后中断）。请重试或缩小任务范围。", count)
 	}
 	return fmt.Sprintf("Sub-agent produced no final conclusion (interrupted after %d tool calls). Retry or narrow the task.", count)
+}
+
+// fillPendingToolResponse returns the breakpoint history with the pending tool
+// call answered. ONE implementation for both paths, because the API contract is
+// one rule: a tool response must follow the assistant(tool_calls) that
+// requested it, with nothing in between.
+//   - placeholder present (leaf ask_user): replace its content in place;
+//   - placeholder missing (the nested-bubble path returns before writing it):
+//     append at the end — where it still follows the requesting message, even
+//     when the tail is a sibling's response (e.g. one assistant emitting
+//     [read, handoff_to_agent]).
+//
+// A history that does not actually contain the pending call is returned
+// unchanged: never fabricate a tool response (that would violate the contract).
+func fillPendingToolResponse(s *SuspendedRun, answer string) []ModelMessage {
+	hist := s.History
+	if s.PendingToolID == "" {
+		return hist
+	}
+	if !s.PendingToolMissing {
+		for i := len(hist) - 1; i >= 0; i-- {
+			if hist[i].Role == "tool" && hist[i].ToolCallID == s.PendingToolID {
+				out := append([]ModelMessage(nil), hist...)
+				out[i].Content = answer
+				return out
+			}
+		}
+		return hist
+	}
+	if !hasPendingCall(hist, s.PendingToolID) {
+		return hist
+	}
+	return append(append([]ModelMessage(nil), hist...), ModelMessage{
+		Role: "tool", ToolCallID: s.PendingToolID, Content: answer,
+	})
+}
+
+// hasPendingCall reports whether an assistant message requested toolCallID and
+// no tool response for it has been written yet.
+func hasPendingCall(history []ModelMessage, toolCallID string) bool {
+	req := -1
+	for i, m := range history {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.ID == toolCallID {
+				req = i
+			}
+		}
+	}
+	if req < 0 {
+		return false
+	}
+	for i := req + 1; i < len(history); i++ {
+		if history[i].Role == "tool" && history[i].ToolCallID == toolCallID {
+			return false
+		}
+	}
+	return true
+}
+
+// lastAssistantText returns the model's most recent non-empty text, or "" when
+// the run produced none (e.g. it stopped to ask the user as its first action).
+// This is the single definition of "what the run established so far", shared by
+// summarizeHistory and the awaiting-user path.
+func lastAssistantText(history []ModelMessage) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && history[i].Content != "" {
+			return history[i].Content
+		}
+	}
+	return ""
+}
+
+// awaitingUserSummary composes the summary of a run that stopped to ask the
+// user. That channel stores no history and the parent re-delegates once the
+// user answers, so whatever the run established must travel with the result —
+// otherwise the re-delegated run restarts from zero. The question stays
+// separate in HandoffResult.Questions (the UI presents it); this text is what
+// the parent reads in the handoff digest. The findings section is omitted when
+// the run had not established anything yet.
+func awaitingUserSummary(zh bool, question, findings string) string {
+	findings = strings.TrimSpace(findings)
+	if findings == "" {
+		if zh {
+			return fmt.Sprintf("问题：%s", question)
+		}
+		return fmt.Sprintf("Question: %s", question)
+	}
+	if zh {
+		return fmt.Sprintf("问题：%s\n\n已有发现：\n%s", question, findings)
+	}
+	return fmt.Sprintf("Question: %s\n\nFindings so far:\n%s", question, findings)
 }
 
 // stableSystemPrompt returns the full system prompt shared by all sub-agents.
@@ -1010,6 +1263,47 @@ func budgetTailNudge(zh bool, remaining int, structured bool) string {
 		return fmt.Sprintf("You have only %d iterations left. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
 	}
 	return fmt.Sprintf("You have only %d iterations left. Stop exploring now and produce your final conclusion from what you have found.", remaining)
+}
+
+// tokenBudgetFor resolves the run's token budget: cache-miss + completion
+// tokens. Three-state at every level — 0 = inherit from the next level down,
+// -1 = explicit unlimited, >0 = explicit cap — so an explicit unlimited
+// (-1) can never silently fall through to a default (the fail-loud intent
+// behind "giving up the protection must be written down deliberately").
+// Returns 0 for unlimited; the caller treats 0 as "no check".
+func tokenBudgetFor(input Handoff, r *SubAgentRunner) int {
+	if input.TokenBudget != 0 {
+		if input.TokenBudget < 0 {
+			return 0
+		}
+		return input.TokenBudget
+	}
+	switch {
+	case r.tokenBudget < 0:
+		return 0
+	case r.tokenBudget > 0:
+		return r.tokenBudget
+	default:
+		return 2 * r.contextLimit()
+	}
+}
+
+// tokenBudgetNudge tells the model how much budget remains and to converge —
+// information the model can act on, mirroring budgetTailNudge for iterations.
+// The structured variant directs the model to submit_result: a plain text reply
+// never completes a structured run, so a nudge that only says "deliver your
+// conclusion" would cost the run a turn it may not have.
+func tokenBudgetNudge(zh bool, remaining int, structured bool) string {
+	if zh {
+		if structured {
+			return fmt.Sprintf("注意：本 run 的 token 预算只剩约 %d。请立即停止新的探索，基于已有发现总结最终结论，并调用 submit_result 提交（summary 必填）。", remaining)
+		}
+		return fmt.Sprintf("注意：本 run 的 token 预算只剩约 %d。请停止新的探索，基于已有发现直接产出最终结论并交付。", remaining)
+	}
+	if structured {
+		return fmt.Sprintf("Note: only about %d tokens remain in this run's budget. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
+	}
+	return fmt.Sprintf("Note: only about %d tokens remain in this run's budget. Stop exploring, produce your final conclusion from what you have found, and deliver it now.", remaining)
 }
 
 // getNudgeMessage returns a language-appropriate nudge when the sub-agent

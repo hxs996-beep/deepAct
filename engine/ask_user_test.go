@@ -65,14 +65,15 @@ func TestProcessAskUserCalls_CapturesValid(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool response, got %d", len(msgs))
 	}
-	if e.pendingAskUser == nil {
+	req := e.peekAskUser()
+	if req == nil {
 		t.Fatal("pendingAskUser should be set")
 	}
-	if e.pendingAskUser.Question != "缓存方案选哪个？" {
-		t.Errorf("question = %q", e.pendingAskUser.Question)
+	if req.Question != "缓存方案选哪个？" {
+		t.Errorf("question = %q", req.Question)
 	}
-	if len(e.pendingAskUser.Options) != 2 || e.pendingAskUser.Options[1] != "改用 MySQL" {
-		t.Errorf("options = %v", e.pendingAskUser.Options)
+	if len(req.Options) != 2 || req.Options[1] != "改用 MySQL" {
+		t.Errorf("options = %v", req.Options)
 	}
 }
 
@@ -85,11 +86,12 @@ func TestProcessAskUserCalls_CapturesNoOptions(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 tool response, got %d", len(msgs))
 	}
-	if e.pendingAskUser == nil || e.pendingAskUser.Question != "数据库连接字符串是什么？" {
-		t.Fatalf("pendingAskUser = %+v", e.pendingAskUser)
+	req := e.peekAskUser()
+	if req == nil || req.Question != "数据库连接字符串是什么？" {
+		t.Fatalf("pendingAskUser = %+v", req)
 	}
-	if len(e.pendingAskUser.Options) != 0 {
-		t.Errorf("options should be empty, got %v", e.pendingAskUser.Options)
+	if len(req.Options) != 0 {
+		t.Errorf("options should be empty, got %v", req.Options)
 	}
 }
 
@@ -117,8 +119,8 @@ func TestProcessAskUserCalls_RejectsInvalid(t *testing.T) {
 			if len(msgs[0].Content) < 6 || msgs[0].Content[:6] != "Error:" {
 				t.Errorf("expected Error response, got %q", msgs[0].Content)
 			}
-			if e.pendingAskUser != nil {
-				t.Errorf("pendingAskUser should stay nil, got %+v", e.pendingAskUser)
+			if e.peekAskUser() != nil {
+				t.Errorf("pendingAskUser should stay nil, got %+v", e.peekAskUser())
 			}
 		})
 	}
@@ -132,8 +134,8 @@ func TestProcessAskUserCalls_IgnoresOtherTools(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Errorf("expected no responses for non-ask_user, got %d", len(msgs))
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should stay nil, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should stay nil, got %+v", e.peekAskUser())
 	}
 }
 
@@ -162,10 +164,10 @@ func TestAskUserOptions_NoPending_Nil(t *testing.T) {
 }
 
 func TestAskUserOptions_PendingWithOptions_ABCPrefixed(t *testing.T) {
-	e := &Engine{pendingAskUser: &AskUserRequest{
+	e := &Engine{pendingAskUser: []*AskUserRequest{{
 		Question: "缓存方案选哪个？",
 		Options:  []string{"用 Redis 缓存", "改用 MySQL"},
-	}}
+	}}}
 	got := e.askUserOptions()
 	want := []string{"用 Redis 缓存", "改用 MySQL", "输入你的意见"}
 	if len(got) != len(want) {
@@ -179,7 +181,7 @@ func TestAskUserOptions_PendingWithOptions_ABCPrefixed(t *testing.T) {
 }
 
 func TestAskUserOptions_PendingNoOptions_Nil(t *testing.T) {
-	e := &Engine{pendingAskUser: &AskUserRequest{Question: "数据库连接字符串是什么？"}}
+	e := &Engine{pendingAskUser: []*AskUserRequest{{Question: "数据库连接字符串是什么？"}}}
 	got := e.askUserOptions()
 	if got != nil {
 		t.Errorf("expected nil options without options, got %v", got)
@@ -192,10 +194,10 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 2"}},
 		isChinese: true,
-		pendingAskUser: &AskUserRequest{
+		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
-		},
+		}},
 	}
 
 	if !e.handleConfirmCommand("/confirm 2") {
@@ -205,8 +207,8 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	if !strings.Contains(last, "改用 MySQL") {
 		t.Errorf("history should mention the selected plan 改用 MySQL, got %q", last)
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should be cleared after selection, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should be cleared after selection, got %+v", e.peekAskUser())
 	}
 }
 
@@ -216,10 +218,10 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 5"}},
 		isChinese: true,
-		pendingAskUser: &AskUserRequest{
+		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
-		},
+		}},
 	}
 
 	if !e.handleConfirmCommand("/confirm 5") {
@@ -232,8 +234,8 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	if strings.Contains(last, "按报告执行") {
 		t.Errorf("out-of-range N must NOT degrade to 按报告执行, got %q", last)
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should be cleared after out-of-range confirm, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should be cleared after out-of-range confirm, got %+v", e.peekAskUser())
 	}
 }
 
@@ -262,15 +264,15 @@ func TestAskUser_ClearedOnFreeInputRun(t *testing.T) {
 		state:   &TaskState{TurnNumber: 0},
 		history: []Message{{Role: "user", Content: "连接字符串是 mysql://root@localhost/db"}},
 		config:  EngineConfig{ModelName: "test-model"},
-		pendingAskUser: &AskUserRequest{
+		pendingAskUser: []*AskUserRequest{{
 			Question: "数据库连接字符串是什么？",
-		},
+		}},
 	}
 
 	if _, err := e.Run(context.Background(), "连接字符串是 mysql://root@localhost/db"); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if e.pendingAskUser != nil {
-		t.Errorf("pendingAskUser should be cleared after a free-input Run, got %+v", e.pendingAskUser)
+	if e.peekAskUser() != nil {
+		t.Errorf("pendingAskUser should be cleared after a free-input Run, got %+v", e.peekAskUser())
 	}
 }

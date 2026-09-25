@@ -151,6 +151,10 @@ max_results = 5
 
 子代理是**只读的**：可以读、搜、分析（`read`、`read_multi`、`grep`、`glob`、`lsp`、`web_search`、`fetch`），不能修改文件或运行命令——`bash`/`write`/`edit`/`revert`、`skill_install` 与 MCP 工具在任何委派深度都被排除，per-call 的 `tools` 覆盖只能收窄角色工具集、不能放宽。修改属于主代理（其 bash 仍经过危险命令守卫）。`config.toml` 里 `[agents]` 角色声明写类工具会在启动时报错并给出迁移指引。
 
+子代理 run 同时受**花费护栏**约束：每个 run 的计费 token（cache-miss + completion，cache hit 免费）默认上限为 2× 上下文窗（`[context].sub_agent_token_budget`，`-1` 表示显式关闭），80% 时注入收尾提示、100% 时带部分结果终止。后台（`async`）handoff 同时最多 8 个未取回任务——用 `agent_poll` 收结果释放名额。
+
+子代理遇到需要你决定的问题时会**停下提问**，而不是自行猜：问题会呈现给你，你回答后模型可调用 `agent_resume` 让**同一个 run** 带着已经建立的上下文继续——原 history、前缀缓存分区与预算都延续，不会把已经读过的内容重读一遍。挂起 run 上限 4 个（`[context].max_suspended_subagents`）、30 分钟后过期；挂起态只在进程内，退出 TUI 后回落为普通重新委派。
+
 ### 可回退
 
 每步操作写入不可变 JSONL：可回退到任意步骤、分叉新分支；工具输出内容寻址存储，落盘前自动脱敏密钥。

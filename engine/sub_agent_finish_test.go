@@ -341,6 +341,7 @@ func TestFormatHandoffResult_ReasonAwareHeading(t *testing.T) {
 		{"max_iterations", HandoffReasonMaxIterations, "turn limit"},
 		{"loop_detected", HandoffReasonLoopDetected, "repeating"},
 		{"cancelled", HandoffReasonCancelled, "cancelled"},
+		{"awaiting_user", HandoffReasonAwaitingUser, "needs user input"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

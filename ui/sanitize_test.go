@@ -13,9 +13,11 @@ func TestSanitizeForTerminal_ControlChars(t *testing.T) {
 	if got := sanitizeForTerminal("a\r\nb"); got != "a\nb" {
 		t.Errorf("CRLF should collapse to a newline, got %q", got)
 	}
-	// Newline and tab are preserved.
-	if got := sanitizeForTerminal("a\nb\tc"); got != "a\nb\tc" {
-		t.Errorf("newline/tab should be kept, got %q", got)
+	// Newline is preserved; TAB is expanded to spaces (see expandTabs) so it can
+	// never overflow the width the renderer measured. Here 'b' sits in column 1,
+	// so the tab advances to column 8 — 7 spaces.
+	if got := sanitizeForTerminal("a\nb\tc"); got != "a\nb"+strings.Repeat(" ", 7)+"c" {
+		t.Errorf("newline kept / tab expanded to the next tab stop, got %q", got)
 	}
 	// Other control chars (BEL, NUL, backspace) dropped.
 	if got := sanitizeForTerminal("a\x07b\x00c\x08d"); got != "abcd" {

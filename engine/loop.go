@@ -93,7 +93,11 @@ type Engine struct {
 	// NOT reset at Run start — it must survive until the next Run's
 	// handleConfirmCommand (with options) or the free-input path reads it.
 	// Cleared once consumed.
-	pendingAskUser *AskUserRequest
+	// pendingAskUser is a QUEUE of questions awaiting the user: parallel
+	// sub-agents can ask at the same time and a single slot made them overwrite
+	// each other. The head is the one currently presented; each entry carries
+	// the job handle its answer goes back to (RunID).
+	pendingAskUser []*AskUserRequest
 	// askUserMu guards pendingAskUser: parallel sub-agent handoffs can
 	// bubble up questions concurrently, so the write must be serialized.
 	askUserMu sync.Mutex
@@ -143,21 +147,49 @@ type Engine struct {
 	memoryLoaded bool
 }
 
-// bgTask is one background (async) sub-agent run started via
-// handoff_to_agent(async:true). It lives only for the current Run(): the
-// Run's exit path cancels it and drops any un-polled result.
+// Job states. A job is either running (a goroutine + an LLM request in flight)
+// or suspended on ask_user (no goroutine, no in-flight work — it is waiting for
+// the user's answer). Suspended entries are the only ones that survive the end
+// of a Run: dropping them would lose a question the user still owes an answer.
+const (
+	bgStateRunning      = "running"
+	bgStateAwaitingUser = "awaiting_user"
+)
+
+// defaultMaxSuspendedSubAgents caps suspended jobs when
+// [context].max_suspended_subagents is unset. Suspended entries each retain a
+// whole history (worst case ~1M tokens), so the table must stay small.
+const defaultMaxSuspendedSubAgents = 4
+
+// bgTask is one background sub-agent job: an async run started via
+// handoff_to_agent(async:true), or a run suspended on ask_user.
+// A running entry lives only for the current Run() — the Run's exit path
+// cancels it and drops any un-polled result. A suspended entry outlives the Run
+// (it holds no goroutine and no request) until its answer arrives.
 type bgTask struct {
-	id      string            // "bg-<seq>"
+	id      string // "bg-<seq>"
 	agent   AgentID
 	goal    string
 	ctx     context.Context
 	cancel  context.CancelFunc
-	result  chan *HandoffResult // 容量1：完成/错误/等待中
+	result  chan *HandoffResult // 容量1：完成/错误；挂起条目在登记时即创建（I9）
 	startAt time.Time
+	// state is bgStateRunning or bgStateAwaitingUser. Every real construction
+	// site sets it explicitly. Checks that must recognise a suspended entry
+	// compare against bgStateAwaitingUser (never against "not running"), so an
+	// entry built without a state behaves exactly as it does today.
+	state string
+	// suspended holds the resumable state while state == bgStateAwaitingUser.
+	suspended *SuspendedRun
+	// childRunID is the job id of the child whose question caused this
+	// suspension (empty when this run asked the user itself). The parent entry
+	// is found by reverse lookup on it — no parent field is needed.
+	childRunID string
 }
 
-// initBackgroundTasks initializes the background task map. Safe to call
-// multiple times (idempotent).
+// initBackgroundTasks lazily creates the background task map. Safe to call
+// multiple times. It must NOT clear entries: suspended jobs outlive the Run
+// that created them.
 func (e *Engine) initBackgroundTasks() {
 	e.bgMu.Lock()
 	defer e.bgMu.Unlock()
@@ -166,19 +198,60 @@ func (e *Engine) initBackgroundTasks() {
 	}
 }
 
-// cancelBackgroundTasks cancels every outstanding background task and clears
-// the table. Called at the end of every Run() so no sub-agent goroutine or
-// LLM request outlives the Run. Un-polled results are dropped (the UI already
+// cancelBackgroundTasks drops the Run's in-flight background work: every
+// running task is cancelled and removed, so no sub-agent goroutine or LLM
+// request outlives the Run. Un-polled results are dropped (the UI already
 // showed their progress via agent_done events).
+//
+// Suspended (awaiting_user) entries are KEPT: they hold no goroutine and no
+// in-flight request — they are a question the user still owes an answer to, and
+// that answer arrives in a later Run. Dropping them would silently lose it.
 func (e *Engine) cancelBackgroundTasks() {
 	e.bgMu.Lock()
-	tasks := e.bgTasks
-	e.bgTasks = nil
-	e.bgMu.Unlock()
-	for id, t := range tasks {
-		t.cancel()
-		loopLog.Printf("background task %s (%s) cancelled at run end; result dropped", id, t.agent)
+	var running []*bgTask
+	for id, t := range e.bgTasks {
+		if t.state == bgStateAwaitingUser {
+			continue
+		}
+		running = append(running, t)
+		delete(e.bgTasks, id)
 	}
+	e.bgMu.Unlock()
+	for _, t := range running {
+		if t.cancel != nil {
+			t.cancel()
+		}
+		loopLog.Printf("background task %s (%s) cancelled at run end; result dropped", t.id, t.agent)
+	}
+}
+
+// countByStateLocked counts entries in one state. Callers must hold bgMu —
+// the registration path already does, and a self-locking wrapper there would
+// deadlock.
+func (e *Engine) countByStateLocked(state string) int {
+	n := 0
+	for _, t := range e.bgTasks {
+		if t.state == state {
+			n++
+		}
+	}
+	return n
+}
+
+// inFlightCount counts jobs with work in flight (async outstanding). Suspended
+// entries are excluded — they hold no goroutine and no LLM request, so counting
+// them would let a waiting run consume an async slot.
+func (e *Engine) inFlightCount() int {
+	e.bgMu.Lock()
+	defer e.bgMu.Unlock()
+	return e.countByStateLocked(bgStateRunning)
+}
+
+// suspendedCount counts jobs waiting for the user's answer.
+func (e *Engine) suspendedCount() int {
+	e.bgMu.Lock()
+	defer e.bgMu.Unlock()
+	return e.countByStateLocked(bgStateAwaitingUser)
 }
 
 func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
@@ -252,6 +325,10 @@ func (e *Engine) SetSessionID(id string) {
 func (e *Engine) SetHistory(h []Message) {
 	e.history = append([]Message(nil), h...)
 	e.persistedCount = len(e.history)
+	// The history is being replaced (/resume continues another session), so
+	// every suspended run points at a history that no longer exists — drop
+	// them rather than leave a dangling, unanswerable question behind.
+	e.dropSuspendedTasks()
 	// /resume path: only a manual resume restores the project's persistent
 	// memory. Lazy here so a fresh session starts with an empty memory slice
 	// (no stale cross-task markers/decisions in Block B). loadPersistentMemory
@@ -397,12 +474,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.handleConfirmCommand(userMsg)
 
 	// 自由输入路径：用户未通过 /confirm N 响应弹出框（走"输入你的意见"
-	// 回输入框，或无 options 的 ask_user 直接输入），本组待决问题作废，
-	// 避免残留到下一轮再次弹出。危险命令同理：用户没有用 /confirm 1/2
-	// 确认就输入了别的消息，pending 状态作废，防止残留导致后续误确认。
-	if e.pendingAskUser != nil {
-		e.pendingAskUser = nil
-	}
+	// 回输入框，或无 options 的 ask_user 直接输入），当前呈现的这条作废，
+	// 避免残留到下一轮再次弹出；队列里其余问题各自仍绑定着自己的 handle
+	// （pinned 摘要会继续列出它们），因此只消费队首、不整体清空。
+	// 危险命令同理：用户没有用 /confirm 1/2 确认就输入了别的消息，
+	// pending 状态作废，防止残留导致后续误确认。
+	e.consumeAskUser()
 	if e.state.PendingDangerousCmd != "" && !isConfirmCommand(userMsg) {
 		e.state.PendingDangerousCmd = ""
 	}
@@ -550,7 +627,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// ask_user with options: the agent asked a question and declared candidate
 	// answers — present them as selectable options (raw options + 输入你的意见).
 	// 无 options 已由 awaiting_user Blocked 分支（loop.go:823）处理，不走此处。
-	if e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 {
+	if req := e.peekAskUser(); req != nil && len(req.Options) > 0 {
 		return &EngineResponse{
 			Summary: summary,
 			Options: e.askUserOptions(),
@@ -566,16 +643,73 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 // awaiting_user Blocked path, user answers freely). No pending ask_user →
 // nil (no options popup; the model decides whether to ask via ask_user).
 func (e *Engine) askUserOptions() []string {
-	if e.pendingAskUser == nil {
+	req := e.peekAskUser()
+	if req == nil || len(req.Options) == 0 {
 		return nil
 	}
-	if len(e.pendingAskUser.Options) == 0 {
-		return nil
-	}
-	opts := make([]string, 0, len(e.pendingAskUser.Options)+1)
-	opts = append(opts, e.pendingAskUser.Options...)
+	opts := make([]string, 0, len(req.Options)+1)
+	opts = append(opts, req.Options...)
 	opts = append(opts, "输入你的意见")
 	return opts
+}
+
+// pushAskUser appends a question to the presentation queue.
+func (e *Engine) pushAskUser(req *AskUserRequest) {
+	if req == nil {
+		return
+	}
+	e.askUserMu.Lock()
+	e.pendingAskUser = append(e.pendingAskUser, req)
+	e.askUserMu.Unlock()
+}
+
+// peekAskUser returns the question currently presented (the queue head), or nil.
+func (e *Engine) peekAskUser() *AskUserRequest {
+	e.askUserMu.Lock()
+	defer e.askUserMu.Unlock()
+	if len(e.pendingAskUser) == 0 {
+		return nil
+	}
+	return e.pendingAskUser[0]
+}
+
+// clearAskUser drops every pending question. Used only when the runs behind
+// them are gone too (e.g. the conversation history is replaced).
+func (e *Engine) clearAskUser() {
+	e.askUserMu.Lock()
+	e.pendingAskUser = nil
+	e.askUserMu.Unlock()
+}
+
+// dropSuspendedTasks removes every suspended (awaiting_user) entry — nothing to
+// cancel, they hold no work — together with the questions they were waiting on.
+// Used when those runs' histories stop being valid (e.g. /resume replaces the
+// conversation), so no dangling question survives.
+func (e *Engine) dropSuspendedTasks() {
+	e.bgMu.Lock()
+	n := 0
+	for id, t := range e.bgTasks {
+		if t.state == bgStateAwaitingUser {
+			delete(e.bgTasks, id)
+			n++
+		}
+	}
+	e.bgMu.Unlock()
+	if n > 0 {
+		loopLog.Printf("dropped %d suspended sub-agent job(s): their history was replaced", n)
+	}
+	e.clearAskUser()
+}
+
+// consumeAskUser drops the queue head — the question that was just answered or
+// invalidated. The remaining questions keep their own job handles, so they must
+// NOT be dropped with it.
+func (e *Engine) consumeAskUser() {
+	e.askUserMu.Lock()
+	if len(e.pendingAskUser) > 0 {
+		e.pendingAskUser = e.pendingAskUser[1:]
+	}
+	e.askUserMu.Unlock()
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the
@@ -898,29 +1032,31 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 			}
 			e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 		}
-		// /confirm 2 (or any other N) cancels: clear pending, no Confirm.
+		// /confirm 2 (or any other N) cancels: consume the presented question,
+		// no Confirm.
 		e.state.PendingDangerousCmd = ""
-		e.pendingAskUser = nil
+		e.consumeAskUser()
 		loopLog.Printf("handleConfirmCommand: dangerous command confirmed=%v (n=%d)", n == 1, n)
 		return true
 	}
 
 	if len(e.history) > 0 && e.history[len(e.history)-1].Role == "user" {
+		head := e.peekAskUser()
 		switch {
-		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0 && n >= 1 && n <= len(e.pendingAskUser.Options):
-			label := e.pendingAskUser.Options[n-1]
+		case head != nil && len(head.Options) > 0 && n >= 1 && n <= len(head.Options):
+			label := head.Options[n-1]
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了：%s，请按该方案执行修改。", label)
-		case e.pendingAskUser != nil && len(e.pendingAskUser.Options) > 0:
+		case head != nil && len(head.Options) > 0:
 			// 有声明方案但编号越界（n < 1 或 n > len(options)）：明确告知
 			// agent 用户选择无效，由其决定下一步。
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
 				"用户选择了无效的方案编号 %d，请重新选择。", n)
-			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(e.pendingAskUser.Options))
+			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(head.Options))
 		}
 	}
-	// 本组问题已消费（用户已选择、越界或确认），清除避免残留到无关 Run。
-	e.pendingAskUser = nil
+	// 队首问题已被消费（用户已选择、越界或确认），其余问题保留。
+	e.consumeAskUser()
 	loopLog.Printf("handleConfirmCommand: /confirm %d processed", n)
 	return true
 }

@@ -206,6 +206,57 @@ func TestApply_AgentToolsUniverseValidation(t *testing.T) {
 	}
 }
 
+// TestApply_TokenBudgetThreeState: [context].sub_agent_token_budget and
+// [agents.X].token_budget accept -1 (unlimited), 0 (default/inherit), and
+// positive caps; anything below -1 is a typo and must fail loud at startup.
+func TestApply_TokenBudgetThreeState(t *testing.T) {
+	if err := Apply(&engine.EngineConfig{}, &File{Context: contextConfig{SubAgentTokenBudget: -2}}); err == nil {
+		t.Fatal("[context].sub_agent_token_budget=-2 must fail loud")
+	} else if !strings.Contains(err.Error(), "sub_agent_token_budget") {
+		t.Errorf("error must name the knob, got %q", err)
+	}
+
+	if err := Apply(&engine.EngineConfig{}, &File{Agents: map[string]agentRoleConfig{
+		"scout": {TokenBudget: -2},
+	}}); err == nil {
+		t.Fatal("[agents.scout].token_budget=-2 must fail loud")
+	} else if !strings.Contains(err.Error(), "agents.scout") {
+		t.Errorf("error must name the role, got %q", err)
+	}
+
+	cfg := &engine.EngineConfig{}
+	if err := Apply(cfg, &File{Context: contextConfig{SubAgentTokenBudget: -1}}); err != nil {
+		t.Fatalf("-1 must apply, got %v", err)
+	}
+	if cfg.SubAgentTokenBudget != -1 {
+		t.Errorf("explicit unlimited must be preserved, got %d", cfg.SubAgentTokenBudget)
+	}
+	if err := Apply(cfg, &File{Context: contextConfig{SubAgentTokenBudget: 500}}); err != nil {
+		t.Fatalf("positive cap must apply, got %v", err)
+	}
+	if cfg.SubAgentTokenBudget != 500 {
+		t.Errorf("explicit cap must be preserved, got %d", cfg.SubAgentTokenBudget)
+	}
+
+	cfg2 := &engine.EngineConfig{}
+	if err := Apply(cfg2, &File{Agents: map[string]agentRoleConfig{
+		"scout": {Description: "d", TokenBudget: 300},
+	}}); err != nil {
+		t.Fatalf("role budget must apply, got %v", err)
+	}
+	if len(cfg2.AgentSpecs) != 1 || cfg2.AgentSpecs[0].TokenBudget != 300 {
+		t.Errorf("role budget must reach the spec, got %+v", cfg2.AgentSpecs)
+	}
+
+	cfg3 := &engine.EngineConfig{}
+	if err := Apply(cfg3, &File{Context: contextConfig{MaxOutstandingAsyncSubAgents: 5}}); err != nil {
+		t.Fatalf("outstanding cap must apply, got %v", err)
+	}
+	if cfg3.MaxOutstandingAsyncSubAgents != 5 {
+		t.Errorf("outstanding cap must apply, got %d", cfg3.MaxOutstandingAsyncSubAgents)
+	}
+}
+
 func TestApply_BaseURL(t *testing.T) {
 	cfg := &engine.EngineConfig{}
 	f := &File{
@@ -482,5 +533,27 @@ structured_result = true
 	fx := f.Agents["fixer"]
 	if fx.StructuredResult == nil || !*fx.StructuredResult {
 		t.Errorf("fixer.StructuredResult not set true: %+v", fx)
+	}
+}
+
+// TestApply_MaxSuspendedSubAgents: the suspension cap follows the same shape as
+// the async outstanding cap — positive applies, negative fails loud at startup.
+func TestApply_MaxSuspendedSubAgents(t *testing.T) {
+	cfg := &engine.EngineConfig{}
+	if err := Apply(cfg, &File{Context: contextConfig{MaxSuspendedSubAgents: 3}}); err != nil {
+		t.Fatalf("max_suspended_subagents must apply, got %v", err)
+	}
+	if cfg.MaxSuspendedSubAgents != 3 {
+		t.Errorf("MaxSuspendedSubAgents = %d, want 3", cfg.MaxSuspendedSubAgents)
+	}
+	if err := Apply(&engine.EngineConfig{}, &File{Context: contextConfig{MaxSuspendedSubAgents: 2}}); err != nil {
+		t.Fatalf("positive cap must apply, got %v", err)
+	}
+	err := Apply(&engine.EngineConfig{}, &File{Context: contextConfig{MaxSuspendedSubAgents: -1}})
+	if err == nil {
+		t.Fatal("negative max_suspended_subagents must fail loud")
+	}
+	if !strings.Contains(err.Error(), "max_suspended_subagents") {
+		t.Errorf("error must name the knob, got %q", err)
 	}
 }

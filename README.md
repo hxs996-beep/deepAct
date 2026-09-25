@@ -151,6 +151,10 @@ max_results = 5
 
 Sub-agents are **read-only**: they can read, search, and analyze (`read`, `read_multi`, `grep`, `glob`, `lsp`, `web_search`, `fetch`) but cannot modify files or run commands — `bash`/`write`/`edit`/`revert`, `skill_install`, and MCP tools are excluded at every delegation depth, and the per-call `tools` override can only narrow a role's set, never widen it. Modification work belongs to the main agent, whose bash calls still pass the danger guard. A `[agents]` role in `config.toml` naming a write-class tool fails at startup with migration guidance.
 
+Sub-agent runs are also **budget-bounded**: each run caps its billable tokens (cache-miss + completion; cache hits are free) at 2× the context window by default (`[context].sub_agent_token_budget`; `-1` disables the cap deliberately), with a wrap-up nudge at 80% and a partial-result termination at 100%. Background (`async`) handoffs are capped at 8 outstanding jobs — poll results with `agent_poll` to free slots.
+
+A sub-agent that needs a decision **stops and asks** instead of guessing: the question reaches you, and once you answer, the model can call `agent_resume` so the *same* run continues with the context it had already built — its history, prefix-cache partition and budgets all carry over, so it does not re-read what it had already read. Suspended runs are capped at 4 (`[context].max_suspended_subagents`) and expire after 30 minutes; they live in-process only, so quitting the TUI falls back to plain re-delegation.
+
 ### Rewindable Sessions
 
 Every step is written to an immutable JSONL log: rewind to any step, fork a new branch; tool output is content-addressed and secrets are auto-redacted before hitting disk.

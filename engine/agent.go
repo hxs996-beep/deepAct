@@ -21,6 +21,7 @@ const (
 	AskUserToolName      = "ask_user"
 	PlanTaskToolName     = "plan_task"
 	AgentPollToolName    = "agent_poll"
+	AgentResumeToolName  = "agent_resume"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
@@ -37,6 +38,7 @@ const (
 	HandoffReasonNoResult         = "no_result"         // structured run ended without submitting a result
 	HandoffReasonMaxDepth         = "max_depth"         // nesting depth exceeded
 	HandoffReasonAwaitingUser     = "awaiting_user"     // sub-agent asked the user; parent must present the question
+	HandoffReasonBudgetExceeded   = "budget_exceeded"   // sub-agent exhausted its token budget (cache-miss + completion)
 	// HandoffReasonAsyncRunning is the FinishReason on the immediate dispatch
 	// result of an async handoff (handoff_to_agent async:true). It is NOT a
 	// failure: the sub-agent is still running in the background and the
@@ -67,6 +69,13 @@ type Handoff struct {
 	NoNudge        bool   `json:"no_nudge,omitempty"`
 	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
 	MaxIterations int `json:"max_iterations,omitempty"`
+	// TokenBudget caps this run's billable tokens (cache-miss + completion;
+	// cache hits are free). Three-state, identical at every level: 0 = inherit
+	// from the next level down (spec → runner default), -1 = explicit
+	// unlimited, >0 = explicit cap. Never in the tool schema: the model can
+	// neither set nor widen it. The 80% wrap-up nudge may tell the model the
+	// remaining amount — information, not a setting.
+	TokenBudget int `json:"token_budget,omitempty"`
 	// StructuredResult turns this run into a structured run: the loop injects
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
@@ -93,6 +102,60 @@ type HandoffResult struct {
 	// Questions holds ask_user questions a sub-agent asked before ending.
 	// Bubbles up through the tool result to the parent engine.
 	Questions []string `json:"questions,omitempty"`
+	// Suspended carries the resumable state of a run that ended on
+	// awaiting_user. Internal: never serialized, never model-visible. The engine
+	// registers it as an awaiting_user job so the SAME run can continue once the
+	// user answers (agent_resume) instead of re-delegating from zero.
+	Suspended *SuspendedRun `json:"-"`
+	// RunID is the handle this suspension was registered under (internal). Only
+	// the top-level delegation (depth 0) sets it, so a deeper handle never
+	// reaches the model through a nested digest — see the plan's I8.
+	RunID string `json:"-"`
+}
+
+// SuspendedRun is the resumable state of a sub-agent run that stopped on
+// ask_user. Only the LEAF of a delegation chain may be resumed by the model:
+// an intermediate entry is waiting for its child's result, not for the user, so
+// filling it with the user's answer would write that answer into a handoff tool
+// slot (see the plan's I8).
+type SuspendedRun struct {
+	// History is the breakpoint history, verbatim.
+	History []ModelMessage
+	// Question is what the user must answer. Set on the LEAF only: an
+	// intermediate entry is waiting for its child's result, not for the user
+	// (that distinction is what keeps agent_resume pointed at the leaf).
+	Question string
+	// PendingToolID is the tool_call_id awaiting its response: the ask_user call
+	// on the leaf path, or the handoff call whose result never got written on
+	// the nested-bubble path.
+	PendingToolID string
+	// PendingToolMissing is true when no tool message exists yet for
+	// PendingToolID (the nested-bubble path returns before writing it) — resume
+	// must APPEND; otherwise the placeholder's content is replaced in place.
+	PendingToolMissing bool
+	// Input is the original handoff (goal/context/tools/depth/lang).
+	Input Handoff
+	// Partition and Model are the run's prefix-cache partition and its forked
+	// client, reused verbatim on resume — rebuilding either would turn the whole
+	// history back into cache misses and defeat the point.
+	Partition string
+	Model     ModelClient
+	// Spent is the usage accumulated so far; the budget continues from here.
+	Spent ModelUsage
+	// Iter is the loop counter at suspension. Resume restarts the loop from here
+	// so a capped run does NOT get a fresh MaxIterations budget.
+	Iter int
+	// BudgetNudgedTokens carries the token-budget 80% nudge flag so resume does
+	// not inject the wrap-up nudge a second time.
+	BudgetNudgedTokens bool
+	// ModelName is the *effective* model at suspension. NOT recomputable from
+	// Input: the loop mutates it on the flash→Pro escalation path, so a resumed
+	// flash agent would silently fall back to flash without this.
+	ModelName string
+	// ChildRunID is the job id of the child whose question caused this
+	// suspension (empty when this run asked the user itself). Used to stitch the
+	// resume cascade bottom-up.
+	ChildRunID string
 }
 
 // AgentSpec describes an agent's identity and capabilities.
@@ -102,6 +165,10 @@ type AgentSpec struct {
 	ToolNames     []string // default tool allowlist (empty = all tools)
 	ModelName     string   // if set, overrides runner's default model for this agent
 	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. critic: 15).
+	// TokenBudget is the role-level token budget merged into Handoff when the
+	// delegating harness does not set one. Same three-state semantics as
+	// Handoff.TokenBudget (0 = inherit, -1 = unlimited, >0 = explicit cap).
+	TokenBudget int
 	// Persona is the role's stable system instruction (codex-style developer
 	// instructions). Injected as part of the sub-agent's stable system prefix
 	// when this agent runs, keeping the shared prefix cache hot across turns.
@@ -413,6 +480,36 @@ func agentPollToolSpec(zh bool) ModelTool {
 	}
 }
 
+// agentResumeToolSpec returns the tool definition for resuming a sub-agent that
+// stopped to ask the user. The engine intercepts the call, drills down to the
+// leaf of that delegation chain and continues it with the answer.
+func agentResumeToolSpec(zh bool) ModelTool {
+	desc := "Resume a sub-agent that stopped to ask the user (see agent_poll: waiting for user input). Non-blocking: the run continues in the background, fetch its result later with agent_poll(run_id). Use it only when the user's latest message is answering that question."
+	runDesc := "The job handle shown in the sub-agent's digest, e.g. bg-3"
+	answerDesc := "The user's answer, verbatim"
+	if zh {
+		desc = "让停下提问的子代理继续（见 agent_poll 的 waiting for user input）。非阻塞：run 在后台继续，之后用 agent_poll(run_id) 取结果。仅当用户这条消息正是在回答该问题时使用。"
+		runDesc = "子代理 digest 里显示的句柄，例如 bg-3"
+		answerDesc = "用户的回答原文"
+	}
+	params := fmt.Sprintf(`{
+				"type": "object",
+				"properties": {
+					"run_id": {"type": "string", "description": %q},
+					"answer": {"type": "string", "description": %q}
+				},
+				"required": ["run_id", "answer"]
+			}`, runDesc, answerDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        AgentResumeToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
 // submitResultToolSpec returns the scoped tool definition for a structured
 // sub-agent run. The model must report its final result through this call —
 // plain text never completes a structured run (mirrors the harness
@@ -474,7 +571,7 @@ func formatHandoffResult(result *HandoffResult, zh bool) string {
 	case HandoffReasonCancelled:
 		sb.WriteString(cancelled + "\n")
 	default:
-		sb.WriteString(handoffReasonHeading(result.FinishReason, zh))
+		sb.WriteString(handoffReasonHeading(result.FinishReason, result.RunID, zh))
 		sb.WriteString("\n")
 		if result.Summary != "" {
 			sb.WriteString(result.Summary + "\n")
@@ -500,7 +597,7 @@ func formatHandoffResult(result *HandoffResult, zh bool) string {
 
 // handoffReasonHeading renders the reason-specific heading line for a run
 // that did not deliver a result. Must not contain "completed" wording.
-func handoffReasonHeading(reason string, zh bool) string {
+func handoffReasonHeading(reason string, runID string, zh bool) string {
 	switch reason {
 	case HandoffReasonMaxTokens:
 		return pickPrompt(zh, "Agent hit the response token limit (partial result):", "子代理达到输出上限（部分结果）：")
@@ -516,6 +613,18 @@ func handoffReasonHeading(reason string, zh bool) string {
 		return pickPrompt(zh, "Sub-agent ended without submitting a result (partial answer below):", "子代理未提交结果（下方为部分答案）：")
 	case HandoffReasonMaxDepth:
 		return pickPrompt(zh, "Sub-agent stopped: max nesting depth reached.", "子代理停止：达到最大嵌套深度。")
+	case HandoffReasonBudgetExceeded:
+		return pickPrompt(zh, "Sub-agent exceeded its token budget (partial result):", "子代理超出 token 预算（部分结果）：")
+	case HandoffReasonAwaitingUser:
+		// Not a failure: the run stopped because it needs input the user must
+		// give. The handle is appended when the suspension was registered (top
+		// level only), so the parent knows which job to resume.
+		if runID != "" {
+			return pickPrompt(zh,
+				fmt.Sprintf("Sub-agent needs user input (%s):", runID),
+				fmt.Sprintf("子代理需要用户输入（%s）：", runID))
+		}
+		return pickPrompt(zh, "Sub-agent needs user input:", "子代理需要用户输入：")
 	default:
 		return pickPrompt(zh, "Sub-agent ended abnormally:", "子代理异常结束：")
 	}

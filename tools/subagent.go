@@ -70,7 +70,7 @@ func (t *SubAgentTool) Spec() ToolSpec {
 	}`, enumJSON)
 	return ToolSpec{
 		Name:        engine.HandoffToolName,
-		Description: "Delegate a sub-task to a specialized agent (role). Sub-agents can research code, brainstorm solutions, or critically review decisions.",
+		Description: "Delegate a sub-task to a specialized agent (role). Sub-agents are read-only: they research code, brainstorm solutions, and critically review decisions, but cannot modify files or run commands; the main agent applies changes itself.",
 		Parameters:  json.RawMessage(params),
 	}
 }
@@ -108,5 +108,6 @@ func (t *SubAgentTool) Run(ctx ToolContext, input json.RawMessage) (ToolResultEn
 		ExitCode:     res.ExitCode,
 		FinishReason: res.FinishReason,
 		Questions:    res.Questions,
+		RunID:        res.RunID,
 	}, nil
 }
