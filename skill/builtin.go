@@ -4,7 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"path/filepath"
+	"path"
 )
 
 //go:embed builtin/*/SKILL.md
@@ -23,7 +23,7 @@ func BuiltinSkills() ([]*Skill, error) {
 			continue
 		}
 		name := entry.Name()
-		data, err := builtinSkillFS.ReadFile(filepath.Join("builtin", name, "SKILL.md"))
+		data, err := builtinSkillFS.ReadFile(path.Join("builtin", name, "SKILL.md"))
 		if err != nil {
 			return nil, fmt.Errorf("read builtin skill %s: %w", name, err)
 		}
@@ -34,7 +34,7 @@ func BuiltinSkills() ([]*Skill, error) {
 		if sf.Name == "" {
 			sf.Name = name
 		}
-		sf.BaseDir = filepath.Join("builtin", name)
+		sf.BaseDir = path.Join("builtin", name)
 		skills = append(skills, SkillFromSkillFile(sf))
 	}
 	return skills, nil
