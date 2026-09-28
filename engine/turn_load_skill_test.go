@@ -16,6 +16,7 @@ func (s *stubContextBuilder) Build(_ *TaskState, _ []Message, _ []ToolResult) []
 	return nil
 }
 func (s *stubContextBuilder) EstimateTokens(_ []ModelMessage) int { return 0 }
+func (s *stubContextBuilder) InjectedBlocks() []string            { return nil }
 
 // TestProcessLoadSkillCalls_NoOrphanedToolCalls verifies that every
 // load_skill call receives a tool response message — even when the

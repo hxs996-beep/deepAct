@@ -26,8 +26,8 @@ type handoffOptions struct {
 	onUsage func(*ModelUsage)
 	// depth is the depth of the new sub-agent run (0 = first level).
 	depth int
-	// userLang is the session language ("中文" or "").
-	userLang string
+	// userLang is the session language (see UserLanguage).
+	userLang UserLanguage
 	// register hands a suspended run to the engine's job table and returns its
 	// handle ("" = not registered: no registrar injected, or the cap is full).
 	// Called BEFORE the digest is formatted so the handle can appear in it.
@@ -122,7 +122,7 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 }
 
 // RunSubAgent implements the main-agent backend for SubAgentTool: depth 0.
-func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, depth int, userLang string) (ToolResult, error) {
+func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, depth int, userLang UserLanguage) (ToolResult, error) {
 	if e.agents == nil {
 		return ToolResult{Status: "error", Digest: "no agent registry configured"}, nil
 	}
@@ -130,10 +130,9 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		return e.dispatchAsync(ctx, params, userLang)
 	}
 	call := ToolCallRequest{Name: HandoffToolName, Input: mustJSON(params)}
-	userLang = ""
-	if e.isChinese {
-		userLang = "中文"
-	}
+	// The engine's session-locked language is authoritative for the sync path;
+	// the caller-supplied userLang only feeds the async dispatch above.
+	userLang = UserLanguageFor(e.isChinese)
 	res := runHandoff(ctx, call, handoffOptions{
 		resolve: func(id AgentID) (Agent, error) { return e.agents.Get(id) },
 		injectParentCtx: func(p *HandoffToAgentParams) {
@@ -254,7 +253,7 @@ func (e *Engine) suspendExistingJob(jobID string, s *SuspendedRun) bool {
 // immediately with a job_id. The delegating agent polls the result later via
 // agent_poll(job_id). The background task is cancelled at Run exit — it never
 // outlives the Run that started it.
-func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams, userLang string) (ToolResult, error) {
+func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams, userLang UserLanguage) (ToolResult, error) {
 	agent, err := e.agents.Get(AgentID(params.Agent))
 	if err != nil {
 		return ToolResult{Status: "error", Digest: fmt.Sprintf("agent not found: %s - %v", params.Agent, err)}, nil
@@ -370,7 +369,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 }
 
 // RunSubAgent implements the nested-agent backend for SubAgentTool: depth > 0.
-func (r *SubAgentRunner) RunSubAgent(ctx context.Context, params HandoffToAgentParams, depth int, userLang string) (ToolResult, error) {
+func (r *SubAgentRunner) RunSubAgent(ctx context.Context, params HandoffToAgentParams, depth int, userLang UserLanguage) (ToolResult, error) {
 	if r.registry == nil {
 		return ToolResult{Status: "error", Digest: "no agent registry configured"}, nil
 	}

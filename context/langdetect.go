@@ -111,16 +111,19 @@ func packageHasTypeScript(path string) bool {
 // short English confirmations ("ok", "yes", "确认") or English-heavy tool
 // output cannot flip the language away from what the user originally wrote.
 // The result is locked for the whole session (see ContextAssembler.userLang).
-func detectUserLanguage(history []engine.Message) string {
+//
+// Callers only invoke this once history holds a non-empty user message
+// (see hasFirstUserMessage), so LangUnset is unreachable in practice.
+func detectUserLanguage(history []engine.Message) engine.UserLanguage {
 	for i := 0; i < len(history); i++ {
 		if history[i].Role == "user" && strings.TrimSpace(history[i].Content) != "" {
 			return classifyTextLanguage(history[i].Content)
 		}
 	}
-	return ""
+	return engine.LangUnset
 }
 
-func classifyTextLanguage(text string) string {
+func classifyTextLanguage(text string) engine.UserLanguage {
 	// Strip markdown code fences (```...```) and inline code (`...`) before
 	// counting, so that pasted code snippets don't skew language detection.
 	text = stripMarkdownCode(text)
@@ -138,15 +141,15 @@ func classifyTextLanguage(text string) string {
 	// preventing mixed-language output when the user's message contains both
 	// Chinese and English (e.g., "帮我 fix the bug").
 	if cjk > 0 {
-		return "中文"
+		return engine.LangChinese
 	}
 	runes := []rune(text)
 	if len(runes) > 0 {
 		if unicode.Is(unicode.Hiragana, runes[0]) || unicode.Is(unicode.Katakana, runes[0]) {
-			return "日本語"
+			return engine.LangJapanese
 		}
 	}
-	return ""
+	return engine.LangEnglish
 }
 
 // stripMarkdownCode removes markdown fenced code blocks (```...```) and inline

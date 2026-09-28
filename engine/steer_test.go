@@ -292,6 +292,8 @@ func (steerContextBuilder) EstimateTokens(msgs []ModelMessage) int {
 	return total
 }
 
+func (steerContextBuilder) InjectedBlocks() []string { return nil }
+
 func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 	// Turn 1: model returns text-only (Done=true) -> steer queue has msg -> drain -> continue
 	// Turn 2: model returns text-only (Done=true) -> steer queue empty -> break

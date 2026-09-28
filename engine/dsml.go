@@ -84,72 +84,62 @@ func hasDSMLToolCalls(content string) bool {
 	return dsmlDetectRe.MatchString(content)
 }
 
-// internalPromptBlockPrefixes lists the leading markers of context/prompt blocks
-// that DeepAct injects into the model's input (Block B, Block S, TASK REMINDER,
-// read-history hint, language pack, ...). DeepSeek sometimes echoes these back
-// in its content. Such echoes must never reach the user or be written back into
-// history (they pollute subsequent turns and surface as a fake "完成" summary).
+// internalEchoHeaders returns the lines that identify an echoed internal block,
+// derived from the blocks DeepAct actually injected into this turn's model
+// input. Deriving instead of hand-listing keeps the stripper in sync with what
+// is sent: the previous fixed list had accumulated dead entries (headers no
+// longer produced, which silently deleted legitimate answer sections) and
+// missed live blocks (codebase tree, AGENTS.md, skills, system-prompt sections).
 //
-// These markers are structural and unambiguous — prefix matching is safe because
-// they don't appear in natural conversation (e.g. "# Block S:", "[TASK REMINDER]").
-var internalPromptBlockPrefixes = []string{
-	"# Block S: Session Context",
-	"# Block S：会话上下文",
-	"# Language Pack",
-	"[TASK REMINDER]",
-	"<TASK REMINDER>",
-	"</TASK REMINDER>",
-	"## Recent Actions",
-	"## Reminder on tool usage",
-}
-
-// internalPromptExactHeaders lists natural-language section headers that are
-// common enough to appear in the model's legitimate answers. These MUST match
-// the entire trimmed line (or line followed by "：" / ":") — prefix matching
-// would strip real answers like "已读文件显示代码结构如下…".
-var internalPromptExactHeaders = []string{
-	"Files already read",
-	"已读文件",
-	// Generic section titles the model may legitimately reuse as subheadings
-	// in an answer: match the whole line (or the line followed by "：" / ":")
-	// rather than any prefix, so a real heading is not deleted with its body.
-	"## Task State",
-	"## 任务状态",
-	"## Environment",
-	"## 环境",
-}
-
-func isInternalPromptHeader(line string) bool {
-	trimmed := strings.TrimSpace(line)
-
-	// Exact-match headers: natural-language phrases that could appear in answers.
-	for _, p := range internalPromptExactHeaders {
-		if trimmed == p {
-			return true
-		}
-		if strings.HasPrefix(trimmed, p+"：") {
-			return true
-		}
-		if strings.HasPrefix(trimmed, p+":") {
-			return true
+// A line qualifies when it is structural: a markdown heading ("# ...") or a
+// standalone bracketed marker ("[SESSION ARCHIVE]", "[SKILL — x]"). Qualifying
+// lines are matched by whole-line equality, so a sentence that merely contains
+// such a phrase is never stripped.
+func internalEchoHeaders(injectedBlocks []string) map[string]bool {
+	headers := make(map[string]bool)
+	for _, block := range injectedBlocks {
+		for _, line := range strings.Split(block, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if isMarkdownHeading(trimmed) || isBracketedMarker(trimmed) {
+				headers[trimmed] = true
+			}
 		}
 	}
+	return headers
+}
 
-	// Prefix-match headers: structural markers safe to prefix-match.
-	for _, p := range internalPromptBlockPrefixes {
-		if strings.HasPrefix(trimmed, p) {
-			return true
-		}
+// isMarkdownHeading reports whether line is an ATX markdown heading: 1-6 '#'
+// followed by a space. The space is required so "#hashtag" is not a heading,
+// and the depth cap keeps "#######..." out.
+func isMarkdownHeading(line string) bool {
+	depth := 0
+	for depth < len(line) && line[depth] == '#' {
+		depth++
 	}
-	return false
+	if depth == 0 || depth > 6 {
+		return false
+	}
+	return depth < len(line) && line[depth] == ' '
+}
+
+// isBracketedMarker reports whether line is a standalone bracketed marker
+// ("[SESSION ARCHIVE]", "[SKILL — collab]"). Markers with trailing text are
+// excluded: the block body does not follow a blank line, so stripping "until
+// the next blank line" could remove real content.
+func isBracketedMarker(line string) bool {
+	return strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]")
 }
 
 // stripInternalPromptEcho removes echoed internal prompt/context blocks from
-// model content. A block is a header line (matching internalPromptBlockPrefixes)
-// plus all following lines up to and including the next blank line (or EOF).
-// Text outside these blocks is preserved verbatim.
-func stripInternalPromptEcho(content string) string {
+// model content. A block is a header line (one of the lines injected this
+// turn) plus all following lines up to and including the next blank line (or
+// EOF). Text outside these blocks is preserved verbatim.
+func stripInternalPromptEcho(content string, injectedBlocks []string) string {
 	if content == "" {
+		return content
+	}
+	headers := internalEchoHeaders(injectedBlocks)
+	if len(headers) == 0 {
 		return content
 	}
 	lines := strings.Split(content, "\n")
@@ -162,7 +152,7 @@ func stripInternalPromptEcho(content string) string {
 			}
 			continue
 		}
-		if isInternalPromptHeader(line) {
+		if headers[strings.TrimSpace(line)] {
 			skipping = true
 			continue
 		}

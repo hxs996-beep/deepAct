@@ -65,8 +65,8 @@ type Handoff struct {
 	// ModelOverride, if set, overrides the runner's default model for this run
 	// (e.g. a cheap role uses flash). "flash" selects the flash model.
 	ModelOverride string `json:"model_override,omitempty"`
-	Depth          int    `json:"depth"`
-	NoNudge        bool   `json:"no_nudge,omitempty"`
+	Depth         int    `json:"depth"`
+	NoNudge       bool   `json:"no_nudge,omitempty"`
 	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
 	MaxIterations int `json:"max_iterations,omitempty"`
 	// TokenBudget caps this run's billable tokens (cache-miss + completion;
@@ -80,9 +80,9 @@ type Handoff struct {
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
 	StructuredResult bool `json:"structured_result,omitempty"`
-	// UserLanguage is the detected user language ("中文" etc.), set by the engine
+	// UserLanguage is the session language (see UserLanguage), set by the engine
 	// before delegating. Used to inject language directives into sub-agent context.
-	UserLanguage string `json:"-"`
+	UserLanguage UserLanguage `json:"-"`
 }
 
 // HandoffResult is returned by a sub-agent after execution.

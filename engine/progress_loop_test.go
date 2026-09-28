@@ -169,6 +169,62 @@ func TestExecuteTurn_MadeProgress_RepeatedRead(t *testing.T) {
 	}
 }
 
+func TestExecuteTurn_MadeProgress_NovelWebSearch(t *testing.T) {
+	// 新 query 的联网检索与 novel read/grep/lsp 同理：获取新信息＝进展。
+	// 否则纯联网调研的会话会累积"无进展"轮次，被 progress guard 误终止。
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "联网检索",
+			ToolCalls: []ModelToolCall{{ID: "c1", Type: "function", Function: ModelFunctionCall{
+				Name: "web_search", Arguments: `{"query":"deepact loop guard"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "查"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.MadeProgress {
+		t.Error("expected MadeProgress=true for a novel web_search query")
+	}
+}
+
+func TestExecuteTurn_MadeProgress_RepeatedFetch(t *testing.T) {
+	// 同一 url 的重复取页不产生新进展——key 形式为 "fetch:<url>"。
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "取页",
+			ToolCalls: []ModelToolCall{{ID: "c1", Type: "function", Function: ModelFunctionCall{
+				Name: "fetch", Arguments: `{"url":"https://example.com/a"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "看"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
+		progressKeys: map[string]bool{
+			"fetch:https://example.com/a": true,
+		},
+	}
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.MadeProgress {
+		t.Error("expected MadeProgress=false for a repeated fetch of the same url")
+	}
+}
+
 func TestExecuteTurn_MadeProgress_NovelReadMulti(t *testing.T) {
 	// read_multi 的任一新 target 均视为进展。
 	e := &Engine{

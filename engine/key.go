@@ -197,6 +197,25 @@ func lspKey(call ToolCallRequest, workDir string) string {
 	return fmt.Sprintf("lsp:%s:%s:%s:%d", op, file, query, int(line))
 }
 
+// infoQueryKey builds a per-query key for the web information tools:
+// "web_search:<query>" / "fetch:<url>". A query or page not fetched before
+// yields new information, so it advances the task — the same principle the
+// guard applies to novel reads, searches and lsp queries. Repeating it does
+// not. Empty when the call carries no query/url.
+func infoQueryKey(call ToolCallRequest) string {
+	var m map[string]interface{}
+	if len(call.Input) == 0 || json.Unmarshal(call.Input, &m) != nil {
+		return ""
+	}
+	if query, _ := m["query"].(string); strings.TrimSpace(query) != "" {
+		return call.Name + ":" + strings.TrimSpace(query)
+	}
+	if url, _ := m["url"].(string); strings.TrimSpace(url) != "" {
+		return call.Name + ":" + strings.TrimSpace(url)
+	}
+	return ""
+}
+
 // annotateRepeats prefixes a tool result with an objective repeat count when the
 // same target has already been addressed in this Run. This is information for
 // the model to act on — it never blocks the call or ends the Run, unlike the

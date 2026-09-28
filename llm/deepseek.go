@@ -75,12 +75,12 @@ func chatCompletionsURL(base string) string {
 var errSSEDone = errors.New("sse done")
 
 type DeepSeekClient struct {
-	apiKey       string
-	endpoint     string
-	http         *http.Client
-	limiter      *AdaptiveLimiter
-	retry        RetryPolicy
-	estimator    *TokenEstimator
+	apiKey    string
+	endpoint  string
+	http      *http.Client
+	limiter   *AdaptiveLimiter
+	retry     RetryPolicy
+	estimator *TokenEstimator
 	// idleTimeout is the max time allowed between two SSE data lines during a
 	// streaming response. Streaming LLM output can legitimately pause between
 	// tokens, but a connection that goes silent for this long is almost
@@ -172,7 +172,7 @@ func NewDeepSeekClientWithEndpoint(baseURL, apiKey string, httpClient *http.Clie
 				// when parallel agents are in flight. Sized at
 				// 2× the limiter's max slots: 20 idle + live streams cannot
 				// exceed 10, so the pool never thrashes with TCP/TLS redials.
-				MaxIdleConns:       100,
+				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 20,
 			},
 		}
@@ -497,67 +497,71 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 }
 
 // validateToolCallResponses ensures every tool_call_id emitted by an assistant
-// message is answered by a subsequent tool message. DeepSeek/OpenAI APIs reject
-// requests where an assistant message with tool_calls is not followed by tool
-// messages responding to each tool_call_id (400 "insufficient tool messages
-// following tool_calls message").
+// message is answered by a tool message in that assistant message's own block.
+// DeepSeek/OpenAI APIs reject requests where an assistant message with
+// tool_calls is not immediately followed by tool messages responding to each
+// tool_call_id (400 "insufficient tool messages following tool_calls message").
 //
-// This is a defensive backfill: it scans the message list and, for any assistant
-// message whose tool_call_ids are not all answered before the next assistant or
-// user message, inserts placeholder tool messages with the missing ids. This
-// guarantees the request is always schema-valid regardless of how upstream code
-// assembled the history (e.g. read-only calls skipped during plan replay).
+// This is a defensive normalizer: it guarantees a schema-valid request no matter
+// how upstream code assembled the history. Concretely it repairs two failure
+// modes that a global "id has a response somewhere" check cannot see:
+//
+//   - an assistant block whose tool responses sit far away in the list (e.g. a
+//     cancelled run appending its late tool results after a newer run's
+//     messages) — the responses are re-emitted inside the right block;
+//   - an id with no response anywhere — a placeholder is backfilled.
+//
+// Tool messages encountered outside their assistant's block are dropped: they
+// would otherwise be rejected as stray responses, and their slot is already
+// covered by the assistant's block above.
 func validateToolCallResponses(msgs []Message) []Message {
-	// First pass: collect the set of tool_call_ids that already have a response.
-	answered := make(map[string]bool, len(msgs))
-	for _, m := range msgs {
-		if m.Role == "tool" && m.ToolCallID != "" {
-			answered[m.ToolCallID] = true
-		}
-	}
-
-	// Second pass: walk forward and backfill unanswered ids in place. We must
-	// insert placeholders immediately after the assistant message that emitted
-	// them (and after any tool messages that already follow it), to preserve the
-	// required ordering.
 	result := make([]Message, 0, len(msgs)+4)
 	for i := 0; i < len(msgs); i++ {
-		result = append(result, msgs[i])
-		if msgs[i].Role != "assistant" || len(msgs[i].ToolCalls) == 0 {
+		m := msgs[i]
+		// A tool response is only valid immediately after the assistant call it
+		// answers; that block is normalized below. Anything else is a stray.
+		if m.Role == "tool" {
 			continue
 		}
-		// Collect this assistant message's tool_call_ids.
-		var ids []string
-		for _, tc := range msgs[i].ToolCalls {
+		result = append(result, m)
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+
+		// want holds this assistant's ids that still need a response in-block.
+		want := make(map[string]bool, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
 			if tc.ID != "" {
-				ids = append(ids, tc.ID)
+				want[tc.ID] = true
 			}
 		}
-		if len(ids) == 0 {
-			continue
-		}
-		// Carry forward any tool messages that already follow this assistant msg
-		// (they answer some of the ids). We append them as-is, then backfill the
-		// rest. Stop at the next non-tool message.
+
+		// Carry forward the contiguous tool messages that answer THIS assistant,
+		// preserving their original order. A tool message whose id this
+		// assistant never requested belongs to another (out-of-order) block and
+		// is dropped — emitting it here would be a stray response.
 		for i+1 < len(msgs) && msgs[i+1].Role == "tool" {
-			result = append(result, msgs[i+1])
 			i++
-		}
-		// Backfill any ids that still have no response.
-		var missing []string
-		for _, id := range ids {
-			if !answered[id] {
-				missing = append(missing, id)
+			t := msgs[i]
+			if want[t.ToolCallID] {
+				result = append(result, t)
+				delete(want, t.ToolCallID)
 			}
 		}
-		for _, id := range missing {
-			debugLog.Printf("pre-flight fix: backfilling missing tool response for tool_call_id=%s", id)
+
+		// Backfill a placeholder for any id this assistant requested but that is
+		// still unanswered. Emit in tool_calls order for determinism.
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "" || !want[tc.ID] {
+				continue
+			}
+			debugLog.Printf("pre-flight fix: backfilling missing tool response for tool_call_id=%s", tc.ID)
 			result = append(result, Message{
 				Role:       "tool",
-				ToolCallID: id,
+				ToolCallID: tc.ID,
 				Content:    "Skipped: no tool result was produced for this call.",
 			})
-			answered[id] = true
+			delete(want, tc.ID)
 		}
 	}
 	return result

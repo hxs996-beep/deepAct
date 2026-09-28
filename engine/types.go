@@ -61,11 +61,11 @@ type PricingConfig struct {
 }
 
 type EngineConfig struct {
-	SessionID            string
-	ModelName            string // default (Pro) model name
-	FlashModelName       string // Flash model name for cheaper agents
-	BaseURL              string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
-	MaxConcurrentRequests int // cap on concurrent in-flight LLM requests; 0 = default 8
+	SessionID             string
+	ModelName             string // default (Pro) model name
+	FlashModelName        string // Flash model name for cheaper agents
+	BaseURL               string // API base URL (e.g. https://api.deepseek.com or https://openrouter.ai/api/v1)
+	MaxConcurrentRequests int    // cap on concurrent in-flight LLM requests; 0 = default 8
 	// ReasoningEffort sets the DeepSeek thinking effort for all model calls
 	// (main loop + sub-agents). Empty = engine default (high). Values: none |
 	// low | high | max.
@@ -98,13 +98,13 @@ type EngineConfig struct {
 	// must stay small. 0 = default 4. Wired via
 	// [context].max_suspended_subagents.
 	MaxSuspendedSubAgents int
-	ShowThinking           bool    // stream model reasoning/thinking to UI
-	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
-	WorkDir                string
-	OnProgress             ProgressFunc
-	Pricing                PricingConfig
-	EvalStoreDir           string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
-	PromptVersion          string // SHA256 hash of the system prompt for tracking
+	ShowThinking          bool    // stream model reasoning/thinking to UI
+	RiskThreshold         float64 // router risk threshold for Pro/Flash escalation
+	WorkDir               string
+	OnProgress            ProgressFunc
+	Pricing               PricingConfig
+	EvalStoreDir          string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
+	PromptVersion         string // SHA256 hash of the system prompt for tracking
 }
 
 type EngineResponse struct {
@@ -216,8 +216,9 @@ type ToolExecContext struct {
 	// Depth is the depth of the NEW sub-agent this handoff produces:
 	// 0 = main agent delegating the first level; d+1 = a sub-agent at depth d.
 	Depth int
-	// UserLang is the session language ("中文" or "") for localized tool output.
-	UserLang string
+	// UserLang is the session language for localized tool output (see
+	// UserLanguage); LangUnset before the first user message is processed.
+	UserLang UserLanguage
 }
 
 type ToolCallRequest struct {

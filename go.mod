@@ -2,12 +2,6 @@ module github.com/deepact/deepact
 
 go 1.24.0
 
-// Fork bubbletea to patch the standard renderer's line-skip (canSkip)
-// optimization. Incremental diff mis-tracks CJK wide characters on terminals,
-// causing swapped/stale characters during active streaming. The patch forces
-// full rewrite of lines containing wide (CJK) runes.
-replace github.com/charmbracelet/bubbletea => ./third_party/bubbletea
-
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/bubbletea v1.3.4

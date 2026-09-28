@@ -18,13 +18,13 @@ type CompressionOrchestrator struct {
 	estimator      TokenEstimator
 	modelName      string
 	flashModelName string
-	userLang       string // session-locked user language, used to pick prompt language
+	userLang       UserLanguage // session-locked user language, used to pick prompt language
 
 	// degradedUntil suppresses compression until this time after an archive
 	// summary fails (e.g. flash model timeout). Without the cooldown, an
 	// over-threshold context retries the failing compression every turn,
 	// burning a wasted flash round-trip (and a cold cache) each time.
-	mu           sync.Mutex
+	mu            sync.Mutex
 	degradedUntil time.Time
 }
 
@@ -44,7 +44,7 @@ func (c *CompressionOrchestrator) SetFlashModelName(name string) {
 // SetUserLang sets the session-locked user language used for prompt selection.
 // The same CompressionOrchestrator instance is shared by the engine and the
 // sub-agent runner, so setting it once covers both compression paths.
-func (c *CompressionOrchestrator) SetUserLang(lang string) {
+func (c *CompressionOrchestrator) SetUserLang(lang UserLanguage) {
 	c.userLang = lang
 }
 

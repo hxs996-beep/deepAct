@@ -26,9 +26,15 @@ type dangerVerdict struct {
 	reason string
 }
 
+// maxNestedShellDepth caps how deep judgeDanger follows a shell payload
+// (`bash -c '<cmd>'`). One level covers the realistic form; deeper nesting
+// remains a known gap (see the shell case in judgeCall).
+const maxNestedShellDepth = 1
+
 // judgeDanger parses a shell command and returns the most severe danger found
 // across every command it would execute — including commands inside pipelines,
-// `&&` / `||` / `;` lists, subshells and command substitutions.
+// `&&` / `||` / `;` lists, subshells, command substitutions and shell payloads
+// (`bash -c '<cmd>'`).
 //
 // Judgment is structural, not textual: it reads the parsed argument vectors, so
 // a dangerous string appearing inside a quoted argument (`echo "rm -rf"`) or as
@@ -36,6 +42,12 @@ type dangerVerdict struct {
 // order/spelling variants (`rm -r -f`, `rm --recursive --force`) are not
 // bypasses.
 func judgeDanger(cmd string) dangerVerdict {
+	return judgeDangerDepth(cmd, 0)
+}
+
+// judgeDangerDepth carries the shell-payload nesting depth (see
+// maxNestedShellDepth).
+func judgeDangerDepth(cmd string, depth int) dangerVerdict {
 	if strings.TrimSpace(cmd) == "" {
 		return dangerVerdict{}
 	}
@@ -67,7 +79,7 @@ func judgeDanger(cmd string) dangerVerdict {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.CallExpr:
-			consider(judgeCall(n))
+			consider(judgeCall(n, depth))
 		case *syntax.Stmt:
 			if ce, ok := n.Cmd.(*syntax.CallExpr); ok {
 				consider(judgeTruncateNoop(ce, n.Redirs))
@@ -100,7 +112,9 @@ func judgeUnparsable(cmd string) dangerVerdict {
 }
 
 // judgeCall judges one simple command by its resolved name and arguments.
-func judgeCall(call *syntax.CallExpr) dangerVerdict {
+// depth is the shell-payload nesting depth already followed (see
+// maxNestedShellDepth).
+func judgeCall(call *syntax.CallExpr, depth int) dangerVerdict {
 	args := literalArgs(call)
 	name, args := unwrap(args)
 	if name == "" {
@@ -115,6 +129,20 @@ func judgeCall(call *syntax.CallExpr) dangerVerdict {
 		return judgeDd(args)
 	case "chmod":
 		return judgeChmod(args)
+	case "sh", "bash", "zsh", "dash", "ksh", "ash", "fish":
+		// A shell payload is a command the shell would execute, so judge it the
+		// same way. Without this, `bash -c "rm -rf /"` bypassed the judge
+		// entirely (no `sh`/`bash` case existed).
+		// Known gaps: nesting deeper than maxNestedShellDepth, and running a
+		// script file (`bash script.sh`) whose contents are not visible here.
+		if depth >= maxNestedShellDepth {
+			return dangerVerdict{}
+		}
+		payload, ok := shellCommandString(args)
+		if !ok {
+			return dangerVerdict{}
+		}
+		return judgeDangerDepth(payload, depth+1)
 	case "shred":
 		return dangerVerdict{dangerProject, "secure file deletion — irreversible"}
 	case "truncate":
@@ -141,6 +169,42 @@ func judgeCall(call *syntax.CallExpr) dangerVerdict {
 		return dangerVerdict{dangerSystem, "filesystem creation — data loss"}
 	}
 	return dangerVerdict{}
+}
+
+// shellCommandString extracts the command string of a shell payload
+// invocation (`sh -c '<cmd>'`, `bash --noprofile -c '<cmd>'`,
+// `bash -lc '<cmd>'`). ok is false when there is no -c flag or its argument is
+// not a literal (`bash -c "$CMD"`), in which case the payload cannot be judged
+// without running a shell.
+func shellCommandString(args []string) (string, bool) {
+	for i, a := range args {
+		if !isShellCommandFlag(a) {
+			continue
+		}
+		if i+1 >= len(args) || args[i+1] == "" {
+			return "", false
+		}
+		return args[i+1], true
+	}
+	return "", false
+}
+
+// isShellCommandFlag reports whether one argument selects the shell's command
+// string: either `-c` itself or a bundled short-option cluster containing `c`
+// (`-lc`, `-ec`, `-xc` — the spellings scripts and CI actually use, which a
+// plain `== "-c"` comparison missed).
+//
+// Long options are excluded on purpose: `--norc` / `--noprofile` also contain a
+// "c" but never carry the payload, so treating them as the flag would swallow
+// the real `-c` that follows.
+func isShellCommandFlag(a string) bool {
+	if a == "-c" {
+		return true
+	}
+	if len(a) < 2 || a[0] != '-' || a[1] == '-' {
+		return false
+	}
+	return strings.ContainsRune(a[1:], 'c')
 }
 
 // judgeRm judges an rm invocation from its parsed flags and targets, so any
@@ -384,16 +448,51 @@ func unwrap(args []string) (string, []string) {
 			}
 			continue
 		case "env", "nohup", "command", "builtin", "time":
+			wrapper := base
 			args = args[1:]
-			// env VAR=value cmd — skip the environment assignments.
-			for len(args) > 0 && !strings.HasPrefix(args[0], "-") && strings.Contains(args[0], "=") {
-				args = args[1:]
+			// Skip the wrapper's own options (and env's VAR=value assignments)
+			// before the real command. Without this the wrapper's first flag was
+			// taken as the command name: `env -i bash -c '<cmd>'` resolved to
+			// "-i", so the payload was never judged.
+			for len(args) > 0 {
+				a := args[0]
+				if strings.HasPrefix(a, "-") && len(a) > 1 {
+					args = args[1:]
+					if wrapperFlagTakesValue(wrapper, a) && len(args) > 0 {
+						args = args[1:]
+					}
+					continue
+				}
+				if strings.Contains(a, "=") {
+					args = args[1:]
+					continue
+				}
+				break
 			}
 			continue
 		}
 		return args[0], args[1:]
 	}
 	return "", nil
+}
+
+// wrapperFlagTakesValue reports whether a wrapper's option consumes the next
+// argument (`env -u NAME`, `env -C DIR`, `env -S STRING`), so that value is not
+// mistaken for the wrapped command.
+func wrapperFlagTakesValue(wrapper, flag string) bool {
+	switch wrapper {
+	case "env":
+		switch flag {
+		case "-u", "--unset", "-C", "--chdir", "-S", "--split-string":
+			return true
+		}
+	case "time":
+		switch flag {
+		case "-o", "--output", "-f", "--format":
+			return true
+		}
+	}
+	return false
 }
 
 func sudoFlagTakesValue(flag string) bool {

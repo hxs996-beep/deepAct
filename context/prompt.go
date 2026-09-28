@@ -3,6 +3,8 @@ package context
 import (
 	"fmt"
 	"strings"
+
+	"github.com/deepact/deepact/engine"
 )
 
 type EnvironmentInfo struct {
@@ -18,8 +20,8 @@ type EnvironmentInfo struct {
 // system prompt) and stays identical across turns, enabling prefix cache hits.
 // Headers are rendered in the user's language — English structural text in a
 // Chinese session pulls the model toward mixed-language responses.
-func BuildStableSessionContext(envInfo EnvironmentInfo, userLang string) string {
-	isZH := userLang == "中文"
+func BuildStableSessionContext(envInfo EnvironmentInfo, userLang engine.UserLanguage) string {
+	isZH := userLang.IsChinese()
 	var builder strings.Builder
 	if isZH {
 		builder.WriteString("# Block S：会话上下文（固定）\n\n")

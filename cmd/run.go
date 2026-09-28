@@ -243,7 +243,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	// Pre-compute language packs for sub-agent system prompt (zh + en).
 	// User language is detected per-session, so both variants are cached here.
 	projLangs := deeplogcontext.DetectLanguages(workDir)
-	runner.SetLangPacks(deeplogcontext.GetLangPacks(projLangs, "中文"), deeplogcontext.GetLangPacks(projLangs, ""))
+	runner.SetLangPacks(
+		deeplogcontext.GetLangPacks(projLangs, engine.LangChinese),
+		deeplogcontext.GetLangPacks(projLangs, engine.LangEnglish),
+	)
 
 	contextAssembler := deeplogcontext.NewContextAssembler(workDir, estimator)
 
@@ -357,10 +360,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		// registrar here. Without it a nested suspension could never be resumed.
 		runner.SetSuspendedRegistrar(e.RegisterSuspended)
 		registry.Register(tools.NewSubAgentTool(
-			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang engine.UserLanguage) (engine.ToolResult, error) {
 				return e.RunSubAgent(ctx, p, depth, lang)
 			},
-			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang string) (engine.ToolResult, error) {
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang engine.UserLanguage) (engine.ToolResult, error) {
 				return runner.RunSubAgent(ctx, p, depth, lang)
 			},
 			func() []tools.AgentInfo {

@@ -77,8 +77,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// turns within the same Run() call don't repeat them.
 	// Remind the model about outstanding background async sub-agent tasks.
 	e.injectBackgroundJobsSummary()
+	// injectedBlocks collects every block this turn injects besides history
+	// (system prompt, stable session context, skills, pinned messages). The
+	// echoed-block stripper derives its headers from them, so it always
+	// reflects what was actually sent.
+	injectedBlocks := e.context.InjectedBlocks()
 	for _, pm := range e.pendingPinnedMessages {
 		messages = append(messages, ModelMessage{Role: "user", Content: pm})
+		injectedBlocks = append(injectedBlocks, pm)
 	}
 	e.pendingPinnedMessages = nil
 
@@ -337,10 +343,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Even if structured tool_calls exist, DSML must never reach the user.
 	content = stripDSMLTokens(content)
 
-	// Layer 2b: Strip echoed internal prompt/context blocks (Block B, TASK
-	// REMINDER, Environment, read-history hint, ...). DeepSeek sometimes echoes
-	// these back; they must never reach the user or be written into history.
-	content = stripInternalPromptEcho(content)
+	// Layer 2b: Strip echoed internal prompt/context blocks (Block S, codebase
+	// tree, AGENTS.md, skills, language pack, pinned messages, ...). DeepSeek
+	// sometimes echoes these back; they must never reach the user or be written
+	// into history.
+	content = stripInternalPromptEcho(content, injectedBlocks)
 
 	// Layer 4 (max-token truncation): when the output cap cut the stream
 	// (finish_reason == "length"), the response may end with a partially
@@ -581,10 +588,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	// Execute handoff calls through the registered SubAgentTool.
 	if len(handoffCalls) > 0 {
-		userLang := ""
-		if e.isChinese {
-			userLang = "中文"
-		}
+		userLang := UserLanguageFor(e.isChinese)
 		// agent_start events for UI.
 		for _, call := range handoffCalls {
 			var params HandoffToAgentParams
@@ -649,7 +653,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 					e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 				}
 			}
-			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, readOnlyCalls)
+			roResults := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber, Ctx: ctx}, readOnlyCalls)
 			for _, result := range roResults {
 				if e.config.OnProgress != nil {
 					e.config.OnProgress(ProgressEvent{Type: "tool_done", Name: result.ToolName, Detail: briefDigest(result.Digest), FullDetail: result.Digest})
@@ -666,7 +670,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			if e.config.OnProgress != nil {
 				e.config.OnProgress(ProgressEvent{Type: "tool_start", Name: call.Name, Detail: summarizeArgs(call.Name, call.Input, e.config.WorkDir)})
 			}
-			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber}, []ToolCallRequest{call})
+			results := e.tools.Execute(ToolExecContext{WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber, Ctx: ctx}, []ToolCallRequest{call})
 			if len(results) > 0 {
 				result := results[0]
 				if e.config.OnProgress != nil {
@@ -751,6 +755,15 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			// 同理：新的 lsp 查询（新 operation/文件/符号/位置）＝获取新信息＝
 			// 进展；重复同一查询不算。
 			key := lspKey(c, e.config.WorkDir)
+			if key != "" && !e.progressKeys[key] {
+				e.progressKeys[key] = true
+				result.MadeProgress = true
+			}
+		case "web_search", "fetch":
+			// 同理：新 query 的联网检索/新 url 的取页＝获取新信息＝进展。
+			// 否则纯联网调研的会话会累积"无进展"轮次，被 progress guard
+			// （4 nudge / 6 block）误终止。
+			key := infoQueryKey(c)
 			if key != "" && !e.progressKeys[key] {
 				e.progressKeys[key] = true
 				result.MadeProgress = true

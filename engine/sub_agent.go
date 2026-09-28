@@ -1029,10 +1029,10 @@ func awaitingUserSummary(zh bool, question, findings string) string {
 // stableSystemPrompt returns the full system prompt shared by all sub-agents.
 // Combines the main system prompt (rules, examples, language pack) with the sub-agent role suffix.
 // Identical across every sub-agent call in the session → enables prefix cache hits.
-func (r *SubAgentRunner) stableSystemPrompt(userLang string) string {
+func (r *SubAgentRunner) stableSystemPrompt(userLang UserLanguage) string {
 	prompts := promptset.Get()
 	langPack := r.langPackEn
-	if userLang == "中文" {
+	if userLang.IsChinese() {
 		langPack = r.langPackZh
 	}
 	base := prompts.System + "\n\n" + prompts.Examples
@@ -1070,7 +1070,7 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // Non-channel specs are additionally restricted to the read-only universe:
 // an allowList can only narrow, never widen. The constructed specs are used
 // for both so the registry copy (if present) is not duplicated.
-func (r *SubAgentRunner) filterTools(allowList []string, userLang string) []ModelTool {
+func (r *SubAgentRunner) filterTools(allowList []string, userLang UserLanguage) []ModelTool {
 	all := r.tools.Specs()
 	// Prefer the registered SubAgentTool spec (dynamic role enum) so sub-agents
 	// see the same roles as the main agent when they delegate further. Fall back

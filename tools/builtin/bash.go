@@ -86,7 +86,15 @@ func (t *BashTool) Run(ctx tools.ToolContext, input json.RawMessage) (tools.Tool
 	if payload.Timeout > 0 {
 		timeout = time.Duration(payload.Timeout) * time.Second
 	}
-	execCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Bind the command to the run's context when one is propagated, so a
+	// cancelled run (ESC) terminates an in-flight command instead of letting it
+	// outlive the Run and append a stale result into a later run's history.
+	// Callers that do not propagate a run context keep the old behavior.
+	baseCtx := ctx.Ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	execCtx, cancel := context.WithTimeout(baseCtx, timeout)
 	defer cancel()
 
 	command, args := shellCommand(payload.Command)

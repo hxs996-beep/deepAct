@@ -355,10 +355,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		e.langDetected = true
 		// Broadcast the session-locked language to the shared compressor and
 		// guard instances so their LLM prompts / messages pick the right variant.
-		userLang := ""
-		if e.isChinese {
-			userLang = "中文"
-		}
+		userLang := UserLanguageFor(e.isChinese)
 		if e.compressor != nil {
 			e.compressor.SetUserLang(userLang)
 		}

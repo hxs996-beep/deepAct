@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deepact/deepact/context/promptset"
 	"github.com/deepact/deepact/engine"
 )
 
@@ -136,5 +137,64 @@ func TestBuild_AgentsBlockInStableZone(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Build() should include AGENTS.md content in stable zone")
+	}
+}
+
+// TestBuild_EnglishSessionGetsSystemPrompt is the regression test for the
+// `userLang != ""` gate: English was encoded as the empty string, so every
+// non-Chinese session kept the "(loading...)" placeholder as its system prompt.
+//
+// Build is called twice because executeTurn always builds once for the
+// compression token estimate before building the messages it actually sends;
+// the second build is the one the model receives.
+func TestBuild_EnglishSessionGetsSystemPrompt(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	state := &engine.TaskState{}
+	history := []engine.Message{{Role: "user", Content: "fix the flaky test in engine/loop_test.go"}}
+
+	assembler.Build(state, history, nil)
+	msgs := assembler.Build(state, history, nil)
+	if len(msgs) < 2 {
+		t.Fatalf("Build() returned %d messages, want at least 2", len(msgs))
+	}
+	if msgs[0].Role != "system" {
+		t.Fatalf("messages[0].Role = %q, want %q", msgs[0].Role, "system")
+	}
+	if msgs[0].Content == "" || msgs[0].Content == "(loading...)" {
+		t.Fatalf("English session must get the real system prompt, got %q", msgs[0].Content)
+	}
+	if !strings.HasPrefix(msgs[0].Content, promptset.Get().System) {
+		t.Error("system message does not start with the canonical prompt set")
+	}
+	if !strings.Contains(msgs[0].Content, "Detected project languages") {
+		t.Error("English session should get the English language-pack header")
+	}
+	if !strings.Contains(msgs[1].Content, "# Block S: Session Context (Stable)") {
+		t.Error("English session should get the English Block S header")
+	}
+}
+
+// TestBuild_SystemPromptDeferredUntilFirstUserMessage keeps the placeholder's
+// intended meaning: it is only for the window before the first user message,
+// after which the prompt must be built from the locked language.
+func TestBuild_SystemPromptDeferredUntilFirstUserMessage(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	state := &engine.TaskState{}
+
+	if msgs := assembler.Build(state, nil, nil); msgs[0].Content != "(loading...)" {
+		t.Fatalf("before the first user message system content = %q, want %q", msgs[0].Content, "(loading...)")
+	}
+
+	history := []engine.Message{{Role: "user", Content: "修复这个 bug"}}
+	assembler.Build(state, history, nil) // warm-up build, mirrors executeTurn's estimation build
+	msgs := assembler.Build(state, history, nil)
+	if msgs[0].Content == "(loading...)" {
+		t.Fatal("system prompt must be built once the first user message arrives")
+	}
+	if !strings.Contains(msgs[0].Content, "检测到的项目语言") {
+		t.Error("Chinese session should get the Chinese language-pack header")
+	}
+	if !strings.Contains(msgs[1].Content, "# Block S：会话上下文（固定）") {
+		t.Error("Chinese session should get the Chinese Block S header")
 	}
 }

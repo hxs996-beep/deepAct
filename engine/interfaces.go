@@ -15,12 +15,17 @@ type ToolExecutor interface {
 type ContextBuilder interface {
 	Build(state *TaskState, history []Message, toolResults []ToolResult) []ModelMessage
 	EstimateTokens(messages []ModelMessage) int
+	// InjectedBlocks returns the prompt blocks this builder injects into the
+	// model input (system prompt, stable session context, skills list). The
+	// engine derives its echoed-block stripping headers from them, so the
+	// stripper always reflects what was actually sent.
+	InjectedBlocks() []string
 }
 
 type Compressor interface {
 	ShouldCompress(currentTokens int, maxTokens int) (CompressionLayer, bool)
 	Compress(ctx context.Context, layer CompressionLayer, state *TaskState, history []Message) ([]Message, error)
-	SetUserLang(lang string)
+	SetUserLang(lang UserLanguage)
 }
 
 type SessionStore interface {

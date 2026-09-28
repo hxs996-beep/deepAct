@@ -593,6 +593,65 @@ func TestValidateToolCallResponses_NoToolCalls(t *testing.T) {
 	}
 }
 
+// TestValidateToolCallResponses_OutOfOrderResponses reproduces the malformed
+// history that triggered a DeepSeek 400 in session-1790386837117714000: a
+// cancelled run's late tool results were appended after a newer run's messages,
+// leaving assistant(A,B) immediately followed by a user message while tool(A)
+// and tool(B) only appeared much later.
+//
+// A global "id has a response somewhere" check cannot repair this (both ids
+// exist, just out of order). The normalizer must move the responses into the
+// assistant's own block and drop the out-of-order strays.
+func TestValidateToolCallResponses_OutOfOrderResponses(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "A"}, {ID: "B"}}},
+		{Role: "user", Content: "steer"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "C"}}},
+		{Role: "tool", ToolCallID: "C", Content: "rc"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "E"}}},
+		{Role: "tool", ToolCallID: "A", Content: "ra"},
+		{Role: "tool", ToolCallID: "B", Content: "rb"},
+		{Role: "tool", ToolCallID: "E", Content: "re"},
+	}
+	out := validateToolCallResponses(msgs)
+	assertAssistantBlocksComplete(t, out)
+}
+
+// assertAssistantBlocksComplete asserts the DeepSeek schema invariant: every
+// assistant message carrying tool_calls is immediately followed by tool
+// messages covering all of its ids, and no tool message is a stray response
+// that no preceding assistant requested.
+func assertAssistantBlocksComplete(t *testing.T, out []Message) {
+	t.Helper()
+	for i := 0; i < len(out); i++ {
+		if out[i].Role == "tool" {
+			t.Errorf("stray tool message at %d: %+v", i, out[i])
+			continue
+		}
+		if out[i].Role != "assistant" || len(out[i].ToolCalls) == 0 {
+			continue
+		}
+		want := map[string]bool{}
+		for _, tc := range out[i].ToolCalls {
+			want[tc.ID] = true
+		}
+		j := i + 1
+		for ; j < len(out) && out[j].Role == "tool"; j++ {
+			if !want[out[j].ToolCallID] {
+				t.Errorf("stray tool response %q at %d (not requested by assistant at %d)", out[j].ToolCallID, j, i)
+			}
+			delete(want, out[j].ToolCallID)
+		}
+		if len(want) > 0 {
+			t.Errorf("assistant at %d left unanswered ids %v (next non-tool at %d)", i, want, j)
+		}
+		// Skip the block's tool messages so the outer loop does not re-visit
+		// them as standalone strays.
+		i = j - 1
+	}
+}
+
 func TestBuildRequestBody_BackfillsOrphanedToolCallID(t *testing.T) {
 	// End-to-end: buildRequestBody must produce a valid message sequence even
 	// when an assistant tool_call has no matching tool response.
@@ -742,7 +801,6 @@ func TestChatCompletionsURL(t *testing.T) {
 		})
 	}
 }
-
 
 func TestSubAgentEndpointFor_Partition(t *testing.T) {
 	tests := []struct {

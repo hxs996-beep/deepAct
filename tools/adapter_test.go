@@ -19,7 +19,7 @@ const passthroughCtxKey ctxKey = "k"
 type passthroughTool struct {
 	receivedCtx      context.Context
 	receivedDepth    int
-	receivedUserLang string
+	receivedUserLang engine.UserLanguage
 }
 
 func (t *passthroughTool) Spec() ToolSpec {

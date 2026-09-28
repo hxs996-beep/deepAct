@@ -4,6 +4,8 @@ import (
 	"embed"
 	"fmt"
 	"strings"
+
+	"github.com/deepact/deepact/engine"
 )
 
 //go:embed langpacks/*.md langpacks/zh/*.md
@@ -21,8 +23,8 @@ var langpackFS embed.FS
 // Detection is a heuristic, so the marker is stated explicitly: the model can
 // see the basis and trust the code over the list when the guess is wrong (e.g.
 // a Go repository whose task is actually in its TypeScript frontend).
-func GetLangPacks(hits []LanguageHit, userLang string) string {
-	zh := userLang == "中文"
+func GetLangPacks(hits []LanguageHit, userLang engine.UserLanguage) string {
+	zh := userLang.IsChinese()
 	var b strings.Builder
 	if zh {
 		b.WriteString("检测到的项目语言（启发式判定，括号内为触发文件；如与实际不符，以代码为准）：\n")
@@ -66,8 +68,8 @@ func GetLangPacks(hits []LanguageHit, userLang string) string {
 // langPack reads the pack for one language, preferring the user's language
 // variant and falling back to English when that variant does not exist (only
 // generic and go have a Chinese translation).
-func langPack(lang Language, userLang string) string {
-	if userLang == "中文" {
+func langPack(lang Language, userLang engine.UserLanguage) string {
+	if userLang.IsChinese() {
 		if data, err := langpackFS.ReadFile("langpacks/zh/" + string(lang) + ".md"); err == nil {
 			return string(data)
 		}

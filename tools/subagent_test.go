@@ -11,10 +11,10 @@ import (
 
 func TestSubAgentTool_Spec_DynamicEnum(t *testing.T) {
 	tool := NewSubAgentTool(
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
 		func() []AgentInfo {
@@ -44,10 +44,10 @@ func TestSubAgentTool_Spec_DynamicEnum(t *testing.T) {
 func TestSubAgentTool_Spec_FallbackEnum(t *testing.T) {
 	// nil agents callback → fallback single "sub"
 	tool := NewSubAgentTool(
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
 		nil,
@@ -72,11 +72,11 @@ func TestSubAgentTool_Spec_FallbackEnum(t *testing.T) {
 func TestSubAgentTool_Run_DepthDispatch(t *testing.T) {
 	var mainCalled, nestedCalled bool
 	tool := NewSubAgentTool(
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			mainCalled = true
 			return engine.ToolResult{Status: "ok", Digest: "main"}, nil
 		},
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			nestedCalled = true
 			return engine.ToolResult{Status: "ok", Digest: "nested"}, nil
 		},
@@ -103,10 +103,10 @@ func TestSubAgentTool_Run_DepthDispatch(t *testing.T) {
 
 func TestSubAgentTool_Run_QuestionsPassthrough(t *testing.T) {
 	tool := NewSubAgentTool(
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{Status: "ok", Digest: "d", FinishReason: engine.HandoffReasonAwaitingUser, Questions: []string{"Q?"}}, nil
 		},
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{}, nil
 		},
 		func() []AgentInfo { return []AgentInfo{{ID: "sub"}} },
@@ -127,11 +127,11 @@ func TestSubAgentTool_Run_QuestionsPassthrough(t *testing.T) {
 
 func TestSubAgentTool_Run_MaxDepthRejected(t *testing.T) {
 	tool := NewSubAgentTool(
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			t.Fatal("main backend must not be called at depth > 0")
 			return engine.ToolResult{}, nil
 		},
-		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l string) (engine.ToolResult, error) {
+		func(ctx context.Context, p engine.HandoffToAgentParams, d int, l engine.UserLanguage) (engine.ToolResult, error) {
 			return engine.ToolResult{Status: "ok", Digest: "nested"}, nil
 		},
 		func() []AgentInfo { return []AgentInfo{{ID: "sub"}} },

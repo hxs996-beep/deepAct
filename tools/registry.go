@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/deepact/deepact/engine"
 )
 
 type ToolSpec struct {
@@ -22,7 +24,7 @@ type ToolContext struct {
 	// Ctx/Depth/UserLang mirror engine.ToolExecContext — see engine/types.go.
 	Ctx      context.Context
 	Depth    int
-	UserLang string
+	UserLang engine.UserLanguage
 }
 
 type ToolResultEnvelope struct {

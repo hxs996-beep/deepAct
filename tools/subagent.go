@@ -9,8 +9,9 @@ import (
 )
 
 // SubAgentBackend runs one handoff delegation. depth is the depth of the NEW
-// sub-agent (0 = first level). userLang is the session language ("中文" or "").
-type SubAgentBackend func(ctx context.Context, params engine.HandoffToAgentParams, depth int, userLang string) (engine.ToolResult, error)
+// sub-agent (0 = first level). userLang is the session language (see
+// engine.UserLanguage).
+type SubAgentBackend func(ctx context.Context, params engine.HandoffToAgentParams, depth int, userLang engine.UserLanguage) (engine.ToolResult, error)
 
 // AgentInfo describes a registered sub-agent for the handoff tool's dynamic
 // enum: the ID is the selectable value, Description tells the delegating model

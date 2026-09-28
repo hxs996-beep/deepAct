@@ -15,12 +15,12 @@ type ContextAssembler struct {
 	systemPromptWithLang string // system prompt in the detected user language, built once and cached
 	projectRoot          string
 	estimator            *llm.TokenEstimator
-	envInfo              EnvironmentInfo // session-stable env info, built once at startup
-	userLang             string          // detected once from first user message, locked for the whole session
-	userLangSet          bool            // true once first-user-message language has been determined (even if "")
-	stableSessionBlock   string          // built once from envInfo + userLang, cached for cache stability
-	skillsBlock          string          // built once from skill registry, cached for cache stability
-	agentsBlock          string          // rendered AGENTS.md content in the stable zone; built once at startup, cached
+	envInfo              EnvironmentInfo     // session-stable env info, built once at startup
+	userLang             engine.UserLanguage // detected once from first user message, locked for the whole session
+	userLangSet          bool                // true once first-user-message language has been determined (LangUnset means "no user message yet")
+	stableSessionBlock   string              // built once from envInfo + userLang, cached for cache stability
+	skillsBlock          string              // built once from skill registry, cached for cache stability
+	agentsBlock          string              // rendered AGENTS.md content in the stable zone; built once at startup, cached
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
@@ -50,6 +50,22 @@ func (a *ContextAssembler) SetAgentsBlock(rendered string) {
 	a.agentsBlock = rendered
 }
 
+// InjectedBlocks returns the prompt blocks this assembler injects into the
+// model input: the system prompt, the stable session context (Block S +
+// AGENTS.md) and the skills list. The engine derives its echo-stripping
+// headers from these blocks, so the set cannot desync from what is sent —
+// unlike the previous hand-maintained header list it replaces.
+// Blocks not built yet (no user message / no skills) are omitted.
+func (a *ContextAssembler) InjectedBlocks() []string {
+	blocks := make([]string, 0, 3)
+	for _, b := range []string{a.systemPromptWithLang, a.stableSessionBlock, a.skillsBlock} {
+		if b != "" {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
+}
+
 func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Message, toolResults []engine.ToolResult) []engine.ModelMessage {
 	messages := make([]engine.ModelMessage, 0, len(history)+6)
 
@@ -75,8 +91,9 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	// Once userLang is known, build the system prompt from the single canonical
 	// prompt set. This is done once and cached, keeping the prefix stable across
 	// turns. The prompt instructs the model to respond in the user's language,
-	// so one set suffices regardless of session language.
-	if a.userLangSet && a.userLang != "" && a.systemPromptWithLang == "" {
+	// so one set suffices regardless of session language — including English,
+	// whose language value is explicit (engine.LangEnglish) rather than empty.
+	if a.userLangSet && a.systemPromptWithLang == "" {
 		langPacks := GetLangPacks(DetectLanguages(a.projectRoot), a.userLang)
 		prompts := promptset.Get()
 		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPacks + "\n\n" + prompts.Examples
