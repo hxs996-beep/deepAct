@@ -15,15 +15,19 @@ if ($Arch -eq "x86") {
 Write-Host "📡 Looking up latest release..." -ForegroundColor Cyan
 try {
     $Release = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "Accept" = "application/vnd.github.v3+json" }
-    $Version = $Release.tag_name
+    $Tag = $Release.tag_name
+    # goreleaser names the archives without the tag's leading "v" (tag v1.2.1 ->
+    # deepact_1.2.1_windows_amd64.zip), while the download path uses the tag
+    # as-is. Derive both separately so each matches what GitHub serves.
+    $Version = $Tag -replace '^v', ''
 } catch {
     Write-Host "❌ Failed to get latest version: $_" -ForegroundColor Red
     exit 1
 }
-Write-Host "   Latest: $Version"
+Write-Host "   Latest: $Tag"
 
-$ArchiveName = "deepact_$Version`_windows_$Arch.zip"
-$DownloadUrl = "https://github.com/$Repo/releases/download/$Version/$ArchiveName"
+$ArchiveName = "deepact_${Version}_windows_${Arch}.zip"
+$DownloadUrl = "https://github.com/$Repo/releases/download/$Tag/$ArchiveName"
 
 Write-Host "📥 Downloading $ArchiveName ..." -ForegroundColor Cyan
 $TmpZip = Join-Path $env:TEMP $ArchiveName

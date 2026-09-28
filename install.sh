@@ -27,6 +27,12 @@ if [ -z "$LATEST" ]; then
 fi
 echo "   Latest: $LATEST"
 
+# The release tag keeps its "v" (v1.2.1), but goreleaser names the archives
+# without it (deepact_1.2.1_<os>_<arch>.tar.gz). Derive both separately so the
+# download path and the asset name each match what GitHub actually serves.
+TAG="$LATEST"
+VERSION="${LATEST#v}"
+
 # ---- Choose install dir ----
 # Prefer /usr/local/bin (already on macOS PATH); fall back to ~/.local/bin
 # and auto-add it to the shell rc so `deepact` just works.
@@ -43,8 +49,8 @@ fi
 echo "📍 Install dir: $INSTALL_DIR"
 
 # ---- Download ----
-ARCHIVE_NAME="${BIN}_${LATEST}_${OS}_${ARCH}.tar.gz"
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST/$ARCHIVE_NAME"
+ARCHIVE_NAME="${BIN}_${VERSION}_${OS}_${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$ARCHIVE_NAME"
 echo "📥 Downloading $ARCHIVE_NAME ..."
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
