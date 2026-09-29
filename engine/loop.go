@@ -279,6 +279,7 @@ func (e *Engine) inFlightCount() int {
 // cancellation racing a normal return) can never panic.
 func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
 	if t == nil || result == nil {
+		loopLog.Printf("finishBackgroundJob: ignoring nil job or result (job=%v)", t)
 		return
 	}
 	e.bgMu.Lock()
@@ -289,15 +290,22 @@ func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
 			return // already finished
 		default:
 		}
-		close(t.done)
 	}
-	t.resultBrief = briefDigest(result.Summary)
-	e.bgMu.Unlock()
-
+	// Delivery, brief and the done signal are published under ONE lock and in
+	// the order consumers rely on: the result is in the channel before done
+	// closes, so a waiter woken by done always finds the result readable. The
+	// send cannot block — result has capacity 1 and this runs at most once per
+	// job (the closed-check above).
 	select {
 	case t.result <- result:
 	default:
 	}
+	t.resultBrief = briefDigest(result.Summary)
+	if t.done != nil {
+		close(t.done)
+	}
+	e.bgMu.Unlock()
+
 	if e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: string(t.agent), Detail: result.Summary})
 	}

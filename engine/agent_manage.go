@@ -1,10 +1,5 @@
 package engine
 
-import (
-	"fmt"
-	"time"
-)
-
 // This file implements the Run-scoped sub-agent management surface: the main
 // agent's ability to observe, wait for, message, interrupt and close the
 // background jobs it dispatched. All of them are ENGINE built-ins intercepted
@@ -34,36 +29,13 @@ func channelClosed(ch <-chan struct{}) bool {
 
 // agentJobSettled reports whether waiting on a job is pointless: it published a
 // result, or it is suspended waiting for the user.
+//
+// Callers MUST hold bgMu: t.state is rewritten by background goroutines under
+// that lock (suspendExistingJob / takeLeafForResume / takeParentForCascade /
+// finishResumedJob).
 func agentJobSettled(t *bgTask) bool {
 	if t == nil {
 		return true
 	}
 	return t.state == bgStateAwaitingUser || channelClosed(t.done)
-}
-
-// agentJobState renders the job's model-facing state.
-func agentJobState(t *bgTask) string {
-	switch {
-	case t.state == bgStateAwaitingUser:
-		return "awaiting_user"
-	case channelClosed(t.done):
-		return "done (collect with agent_poll)"
-	default:
-		return "running"
-	}
-}
-
-// agentJobLineLocked renders one job as a single line. Callers must hold bgMu.
-func agentJobLineLocked(t *bgTask, now time.Time) string {
-	elapsed := now.Sub(t.startAt).Round(time.Second)
-	line := fmt.Sprintf("%s | %s | %s | %s | %s", t.id, t.agent, agentJobState(t), elapsed, t.goal)
-	if t.resultBrief != "" {
-		line += " | result: " + t.resultBrief
-	}
-	return line
-}
-
-// agentsToolMessage builds the tool-role Message answering one intercepted call.
-func agentsToolMessage(callID, content string) Message {
-	return Message{Role: "tool", ToolCallID: callID, Content: content, Timestamp: time.Now()}
 }
