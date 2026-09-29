@@ -1367,6 +1367,10 @@ func parseAskUserInput(input json.RawMessage) (struct{ Question string }, bool) 
 // the same reason tokenBudgetNudge is armed and injected here.
 //
 // Non-blocking by design: an empty inbox (the common case) costs one select.
+//
+// Each queued message becomes its OWN user message even when several are
+// drained in one go: consecutive user messages are already produced elsewhere
+// (e.g. the /confirm path appends two in a row), and the provider accepts them.
 func drainInbox(inbox <-chan string, history []ModelMessage) []ModelMessage {
 	if inbox == nil {
 		return history

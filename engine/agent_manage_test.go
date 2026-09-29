@@ -596,3 +596,33 @@ func TestSendMessage_ReachesTheSubAgentRun(t *testing.T) {
 	}
 	close(a.release)
 }
+
+// TestRunLoopFrom_DrainsInboxIntoTheRequest pins the drainInbox CALL SITE: the
+// sub-agent loop reads the inbox at the top of an iteration, so the message
+// reaches the model. Without that call every unit test above still passes.
+func TestRunLoopFrom_DrainsInboxIntoTheRequest(t *testing.T) {
+	model := &stubCompleteModel{resp: "done"}
+	r := NewSubAgentRunner(model, stubToolExecutor{}, nil, "deepact-chat")
+	r.workDir = t.TempDir()
+
+	inbox := make(chan string, 1)
+	inbox <- "运行中补充的信息"
+
+	if _, err := r.runLoop(context.Background(), Handoff{
+		Agent: AgentSub, Goal: "g", NoNudge: true, Inbox: inbox,
+	}, "", 3); err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	found := false
+	for _, m := range model.last.Messages {
+		if m.Role == "user" && strings.Contains(m.Content, "运行中补充的信息") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the inbox message never reached the model request: %+v", model.last.Messages)
+	}
+	if got := len(inbox); got != 0 {
+		t.Errorf("inbox depth = %d after the run, want 0 (it must be drained)", got)
+	}
+}
