@@ -53,6 +53,11 @@ func TestFinishBackgroundJob_ClosesDoneAndSetsBrief(t *testing.T) {
 	if !settled {
 		t.Fatal("done channel must be closed once the result is published")
 	}
+	// done closing must imply the result is already readable (publish order:
+	// result → brief → close(done), all under one lock).
+	if got := len(task.result); got != 1 {
+		t.Errorf("result depth = %d after done closed, want 1 (a waiter must find it)", got)
+	}
 	if brief == "" {
 		t.Error("resultBrief must be set so list/wait can show a short result")
 	}

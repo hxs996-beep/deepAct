@@ -278,8 +278,12 @@ func (e *Engine) inFlightCount() int {
 // done is closed under bgMu with a closed-check so a double finish (e.g. a
 // cancellation racing a normal return) can never panic.
 func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
-	if t == nil || result == nil {
-		loopLog.Printf("finishBackgroundJob: ignoring nil job or result (job=%v)", t)
+	if t == nil {
+		loopLog.Printf("finishBackgroundJob: ignoring a nil job")
+		return
+	}
+	if result == nil {
+		loopLog.Printf("finishBackgroundJob: ignoring a nil result for job %s", t.id)
 		return
 	}
 	e.bgMu.Lock()
