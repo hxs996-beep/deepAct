@@ -359,3 +359,41 @@ func TestWaitAgent_EmptyTable(t *testing.T) {
 		t.Fatalf("wait output = %+v, want the no-jobs sentence", msgs)
 	}
 }
+
+// TestWaitAgent_SkipsRemovedJob: a job removed while the wait is blocking (here
+// polled away from another goroutine) must not be reported — its handle is dead.
+func TestWaitAgent_SkipsRemovedJob(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	defer close(a.released)
+	jobID := firstJobID(t, e)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		e.bgMu.Lock()
+		delete(e.bgTasks, jobID)
+		e.bgMu.Unlock()
+	}()
+
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"job_ids": []string{jobID}, "timeout_ms": 600}),
+	}})
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	for _, line := range strings.Split(msgs[0].Content, "\n") {
+		if strings.Contains(line, jobID+" |") {
+			t.Errorf("wait reported a job that was removed while waiting: %q", line)
+		}
+	}
+}

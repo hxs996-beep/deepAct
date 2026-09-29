@@ -258,7 +258,14 @@ func (e *Engine) waitForAgents(ctx context.Context, params WaitAgentParams) stri
 		select {
 		case <-ticker.C:
 		case <-deadline.C:
-			reason = "timeout"
+			// Re-check before calling it a timeout: a target may have settled
+			// between the last poll and the deadline, and a "timeout" header
+			// above a done line would contradict itself.
+			if e.anyTargetSettled(targets) {
+				reason = "activity"
+			} else {
+				reason = "timeout"
+			}
 		case <-ctx.Done():
 			reason = "cancelled"
 		}
@@ -269,6 +276,11 @@ func (e *Engine) waitForAgents(ctx context.Context, params WaitAgentParams) stri
 	fmt.Fprintf(&b, "wait_agent (%s):\n", reason)
 	now := time.Now()
 	for _, t := range targets {
+		// Removed while we waited (polled, cancelled, TTL-dropped): reporting a
+		// handle the model can no longer act on is worse than reporting nothing.
+		if e.bgTasks[t.id] != t {
+			continue
+		}
 		b.WriteString(agentJobLine(t, now))
 		b.WriteByte('\n')
 	}
