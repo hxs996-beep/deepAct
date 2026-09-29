@@ -1856,6 +1856,21 @@ git commit -m "test(engine): end-to-end coverage for the sub-agent management su
 3. **类型一致性**：`bgTask.done chan struct{}` / `inbox chan string` / `resultBrief string` 在任务 0 定义，任务 1-4 一致使用；`Handoff.Inbox <-chan string` 与 `bgTask.inbox chan string` 赋值兼容（`chan T` → `<-chan T`）；`Handoff.ForkedHistory []ModelMessage` 与 `forkHistoryFor` 返回类型一致；`AgentJobParams` 被 interrupt/close 共用；`agentsToolMessage` 全文件唯一定义。已 grep 确认 25 个新标识符全仓零冲突。
 4. **既有语义保持**：`finishBackgroundJob` 不改变 `state`（done 任务在表中仍为 `bgStateRunning`），因此 `max_outstanding_async_subagents` 的"slot 在 poll 时才释放"语义与既有测试（`engine/sub_agent_outstanding_test.go`）不变。
 
+## 执行记录与计划修正（任务 0 实施时回填）
+
+执行任务 0 时发现并修正了计划中的两处任务排序缺陷，以及质量审查提出的改进项。后续任务按修正后的边界执行：
+
+1. **`Handoff.Inbox` 字段提前到任务 0**（原排在任务 3）。任务 0 的 `dispatchAsync` 接线立即需要它，否则无法编译。
+2. **作业视图原语 `channelClosed` / `agentJobSettled` 提前到任务 0**（原排在任务 1）。任务 0 的测试需要 `agentJobSettled`，否则任务 0 无法独立通过。为避开 golangci-lint 的 `unused`（`Makefile:22-23` 的 lint 门禁），同批的 `agentJobState` / `agentJobLineLocked` / `agentsToolMessage` **推迟到任务 1 随其调用者一起引入**；引入时采用修正后的形态：状态函数只返回纯 token（`running`/`done`/`awaiting_user`），操作提示（"collect with agent_poll"）留给渲染器。
+3. **`finishBackgroundJob` 的发布顺序**（质量审查 N2）：改为在**同一把 bgMu 内**按 `result 投递 → resultBrief → close(done)` 顺序发布。这样被 done 唤醒的 waiter 一定能立刻读到 result，且测试的 `waitJobPublished` 不会因 `resultBrief` 尚未写入而 flake。
+4. **`agentJobSettled` 的锁契约**（质量审查 N1）：文档明确要求调用方持 bgMu（`t.state` 由后台 goroutine 在锁下改写）。
+5. **nil 分支加日志**（质量审查 N3）：`finishBackgroundJob` 收到 nil 时 `loopLog.Printf`，不再静默 no-op。
+6. **测试补强**：新增"finish 不得改动 `state`"（outstanding cap 硬约束）与"双重 finish 幂等（不 panic、不重复投递）"两条断言。
+
+**已知既有问题（非本次引入，记录待后续单独处理）**：`finishResumedJob` 的"再次挂起"分支仍直接发 `agent_done`（`engine/suspend.go:202-204`），与 `dispatchAsync` 的"挂起时不发 `agent_done`"约定不一致——一个作业一生可能出现两次 `agent_done`。本计划范围不含该修复。
+
+---
+
 ## 执行交接
 
 **计划已完成并保存到 `docs/superpowers/plans/2026-09-29-subagent-run-scoped-management.md`。两种执行方式：**
