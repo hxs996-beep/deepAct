@@ -412,3 +412,178 @@ func (e *Engine) processSendMessageCalls(calls []ToolCallRequest) []Message {
 	}
 	return msgs
 }
+
+// --- interrupt_agent / close_agent -------------------------------------------
+
+// AgentJobParams is the argument schema shared by interrupt_agent and
+// close_agent: both name a single job handle.
+type AgentJobParams struct {
+	JobID string `json:"job_id"`
+}
+
+// interruptAgentToolSpec returns the tool definition for soft-stopping a job.
+func interruptAgentToolSpec(zh bool) ModelTool {
+	desc := "Interrupt a running background sub-agent. It stops at its next safe point with finish_reason=cancelled; the job stays collectable, so fetch the partial result with agent_poll(job_id). Use it when the sub-agent has gone off track and letting it run would waste budget."
+	jobDesc := "The job handle, e.g. bg-3"
+	if zh {
+		desc = "中断正在运行的后台子代理。它会在下一个安全点停下（finish_reason=cancelled），任务仍可收集——用 agent_poll(job_id) 取部分结果。当子代理跑偏、继续运行会浪费预算时使用。"
+		jobDesc = "任务句柄，例如 bg-3"
+	}
+	params := fmt.Sprintf(`{
+		"type": "object",
+		"properties": {"job_id": {"type": "string", "description": %q}},
+		"required": ["job_id"]
+	}`, jobDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        InterruptAgentToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// closeAgentToolSpec returns the tool definition for permanently dropping a job.
+func closeAgentToolSpec(zh bool) ModelTool {
+	desc := "Close a background sub-agent and every job below it, permanently. Unlike interrupt_agent, the job is removed and its result can no longer be collected — use it when the work is no longer wanted."
+	jobDesc := "The job handle, e.g. bg-3"
+	if zh {
+		desc = "彻底关闭一个后台子代理及其下级所有任务。与 interrupt_agent 不同，任务会被移除，结果不再可取——当这项工作已经不需要时使用。"
+		jobDesc = "任务句柄，例如 bg-3"
+	}
+	params := fmt.Sprintf(`{
+		"type": "object",
+		"properties": {"job_id": {"type": "string", "description": %q}},
+		"required": ["job_id"]
+	}`, jobDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        CloseAgentToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// processInterruptAgentCalls answers every interrupt_agent call.
+func (e *Engine) processInterruptAgentCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != InterruptAgentToolName {
+			continue
+		}
+		var params AgentJobParams
+		if err := json.Unmarshal(call.Input, &params); err != nil || strings.TrimSpace(params.JobID) == "" {
+			msgs = append(msgs, agentToolMessage(call.ID, "Error: interrupt_agent requires a non-empty job_id"))
+			continue
+		}
+		msgs = append(msgs, agentToolMessage(call.ID, e.interruptJob(params.JobID)))
+	}
+	return msgs
+}
+
+// interruptJob cancels a running job's context. The entry STAYS in the table so
+// the partial result is still collectable — that is the difference from
+// closeAgentJob.
+func (e *Engine) interruptJob(jobID string) string {
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	task, ok := e.bgTasks[jobID]
+	if !ok {
+		e.bgMu.Unlock()
+		return fmt.Sprintf("Error: interrupt_agent job %q not found.", jobID)
+	}
+	if task.state != bgStateRunning || channelClosed(task.done) {
+		state := agentJobState(task)
+		e.bgMu.Unlock()
+		return fmt.Sprintf("Job %s is not running (%s) — nothing to interrupt.", jobID, state)
+	}
+	cancel := task.cancel
+	e.bgMu.Unlock()
+	if cancel == nil {
+		return fmt.Sprintf("Job %s has no in-flight request to interrupt.", jobID)
+	}
+	cancel()
+	return fmt.Sprintf("Job %s interrupted; it stops at its next safe point. Collect the partial result with agent_poll(%s).", jobID, jobID)
+}
+
+// processCloseAgentCalls answers every close_agent call.
+func (e *Engine) processCloseAgentCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != CloseAgentToolName {
+			continue
+		}
+		var params AgentJobParams
+		if err := json.Unmarshal(call.Input, &params); err != nil || strings.TrimSpace(params.JobID) == "" {
+			msgs = append(msgs, agentToolMessage(call.ID, "Error: close_agent requires a non-empty job_id"))
+			continue
+		}
+		msgs = append(msgs, agentToolMessage(call.ID, e.closeAgentJob(params.JobID)))
+	}
+	return msgs
+}
+
+// closeAgentJob cancels and forgets a job and every job below it. Cancellation
+// happens AFTER the table edit (cancel funcs are captured first) so a run
+// finishing during the edit cannot resurrect an entry that was just dropped.
+func (e *Engine) closeAgentJob(jobID string) string {
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	if _, ok := e.bgTasks[jobID]; !ok {
+		e.bgMu.Unlock()
+		return fmt.Sprintf("Error: close_agent job %q not found.", jobID)
+	}
+	ids := e.descendantJobIDsLocked(jobID)
+	cancels := make([]context.CancelFunc, 0, len(ids))
+	suspended := 0
+	for _, id := range ids {
+		t := e.bgTasks[id]
+		if t == nil {
+			continue
+		}
+		if t.state == bgStateAwaitingUser {
+			suspended++
+		}
+		if t.cancel != nil {
+			cancels = append(cancels, t.cancel)
+		}
+		if t.done != nil && !channelClosed(t.done) {
+			close(t.done) // release any waiter
+		}
+		delete(e.bgTasks, id)
+	}
+	e.bgMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	msg := fmt.Sprintf("Closed %d job(s): %s.", len(ids), strings.Join(ids, ", "))
+	if suspended > 0 {
+		msg += fmt.Sprintf(" %d suspended job(s) were dropped — their pending questions can no longer be answered.", suspended)
+	}
+	return msg
+}
+
+// descendantJobIDsLocked returns id plus every job below it. The delegation
+// link is stored on the PARENT — childRunID names the pending child (that is
+// what finishResumedJob reverse-looks-up to find a parent) — so the walk follows
+// the chain downward by map lookup. Bounded by the chain length.
+//
+// Callers must hold bgMu.
+func (e *Engine) descendantJobIDsLocked(id string) []string {
+	out := []string{id}
+	for i := 0; i < len(out); i++ {
+		t := e.bgTasks[out[i]]
+		if t == nil || t.childRunID == "" {
+			continue
+		}
+		if _, ok := e.bgTasks[t.childRunID]; !ok || containsString(out, t.childRunID) {
+			continue
+		}
+		out = append(out, t.childRunID)
+	}
+	return out
+}

@@ -626,3 +626,175 @@ func TestRunLoopFrom_DrainsInboxIntoTheRequest(t *testing.T) {
 		t.Errorf("inbox depth = %d after the run, want 0 (it must be drained)", got)
 	}
 }
+
+// --- interrupt_agent / close_agent -------------------------------------------
+
+// ctxWaitAgent blocks until its context is cancelled, then reports a cancelled
+// run — the shape a real sub-agent takes when interrupt_agent fires.
+type ctxWaitAgent struct {
+	id     AgentID
+	start  chan struct{}
+	cancel chan struct{}
+}
+
+func (a *ctxWaitAgent) ID() AgentID     { return a.id }
+func (a *ctxWaitAgent) Spec() AgentSpec { return AgentSpec{ID: a.id} }
+func (a *ctxWaitAgent) Run(ctx context.Context, _ Handoff) (*HandoffResult, error) {
+	close(a.start)
+	<-ctx.Done()
+	close(a.cancel)
+	return &HandoffResult{
+		Summary: "(cancelled)", Blocked: true, BlockedBy: "cancelled",
+		FinishReason: HandoffReasonCancelled,
+	}, nil
+}
+
+func TestLifecycleTools_Registered(t *testing.T) {
+	specs := (&Engine{tools: stubToolExecutor{}}).toolSpecsWithHandoff()
+	want := map[string]bool{InterruptAgentToolName: false, CloseAgentToolName: false}
+	for _, s := range specs {
+		if _, ok := want[s.Function.Name]; ok {
+			want[s.Function.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("toolSpecsWithHandoff must include %s", name)
+		}
+	}
+}
+
+func TestInterruptAgent_StopsRunningJob(t *testing.T) {
+	a := &ctxWaitAgent{id: "one", start: make(chan struct{}), cancel: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	jobID := firstJobID(t, e)
+
+	msgs := e.processInterruptAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: InterruptAgentToolName,
+		Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "interrupted") {
+		t.Fatalf("interrupt output = %+v, want interrupted", msgs)
+	}
+	select {
+	case <-a.cancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt must cancel the running sub-agent's context")
+	}
+	waitJobPublished(t, e, jobID)
+
+	// The job STAYS collectable: interrupt keeps the partial result.
+	poll := e.processAgentPollCalls([]ToolCallRequest{{
+		ID: "tc2", Name: AgentPollToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(poll) != 1 || !strings.Contains(poll[0].Content, "done") {
+		t.Fatalf("poll after interrupt = %+v, want done", poll)
+	}
+}
+
+func TestInterruptAgent_UnknownJob(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processInterruptAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: InterruptAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-999"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not found") {
+		t.Fatalf("interrupt output = %+v, want not found", msgs)
+	}
+}
+
+func TestInterruptAgent_SuspendedJobIsNotRunning(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}),
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processInterruptAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: InterruptAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not running") {
+		t.Fatalf("interrupt output = %+v, want a not-running refusal", msgs)
+	}
+}
+
+// TestCloseAgent_RemovesJobAndDescendants pins the subtree walk: childRunID
+// points from a waiting parent DOWN to its pending child, so closing a job must
+// follow that chain and leave unrelated jobs alone.
+func TestCloseAgent_RemovesJobAndDescendants(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "one", goal: "父", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), childRunID: "bg-2",
+	}
+	e.bgTasks["bg-2"] = &bgTask{
+		id: "bg-2", agent: "one", goal: "子", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), cancel: func() {},
+	}
+	e.bgTasks["bg-3"] = &bgTask{
+		id: "bg-3", agent: "one", goal: "无关", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}),
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "Closed 2 job") {
+		t.Fatalf("close output = %+v, want 2 jobs closed", msgs)
+	}
+	e.bgMu.Lock()
+	_, has1 := e.bgTasks["bg-1"]
+	_, has2 := e.bgTasks["bg-2"]
+	_, has3 := e.bgTasks["bg-3"]
+	e.bgMu.Unlock()
+	if has1 || has2 {
+		t.Errorf("close_agent must remove the job and its descendants (bg-1=%v bg-2=%v)", has1, has2)
+	}
+	if !has3 {
+		t.Error("close_agent must NOT touch an unrelated job")
+	}
+}
+
+func TestCloseAgent_DropsSuspendedWithWarning(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), suspended: &SuspendedRun{Question: "q"},
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "suspended") {
+		t.Fatalf("close output = %+v, want a suspended-dropped warning", msgs)
+	}
+}
+
+func TestCloseAgent_UnknownJob(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-999"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not found") {
+		t.Fatalf("close output = %+v, want not found", msgs)
+	}
+}

@@ -566,6 +566,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingListMsgs := e.processListAgentsCalls(calls)
 	pendingWaitMsgs := e.processWaitAgentCalls(ctx, calls)
 	pendingSendMsgs := e.processSendMessageCalls(calls)
+	pendingInterruptMsgs := e.processInterruptAgentCalls(calls)
+	pendingCloseMsgs := e.processCloseAgentCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -593,6 +595,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingSendMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingInterruptMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingCloseMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -623,6 +631,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == WaitAgentToolName {
 			continue
 		} else if call.Name == SendMessageToolName {
+			continue
+		} else if call.Name == InterruptAgentToolName {
+			continue
+		} else if call.Name == CloseAgentToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -863,6 +875,8 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, listAgentsToolSpec(e.isChinese))
 	specs = append(specs, waitAgentToolSpec(e.isChinese))
 	specs = append(specs, sendMessageToolSpec(e.isChinese))
+	specs = append(specs, interruptAgentToolSpec(e.isChinese))
+	specs = append(specs, closeAgentToolSpec(e.isChinese))
 	return specs
 }
 
