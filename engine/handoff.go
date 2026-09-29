@@ -34,6 +34,9 @@ type handoffOptions struct {
 	// nil (bare runner, tests) = suspensions are not registered, so the run
 	// behaves exactly as it does today.
 	register func(*SuspendedRun, AgentID, string) string
+	// fork materializes params.ForkTurns into the copied conversation prefix.
+	// nil (nested backend, tests) = fork_turns is ignored.
+	fork func(spec string) []ModelMessage
 }
 
 func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) ToolResult {
@@ -71,6 +74,9 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		Persona:        params.Persona,
 		Depth:          opts.depth,
 		UserLanguage:   opts.userLang,
+	}
+	if opts.fork != nil {
+		handoff.ForkedHistory = opts.fork(params.ForkTurns)
 	}
 
 	result, err := agent.Run(ctx, handoff)
@@ -150,6 +156,7 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		depth:    depth,
 		userLang: userLang,
 		register: e.RegisterSuspended,
+		fork:     e.forkHistoryFor,
 	})
 	// Bubble up sub-agent questions into the pending ask_user seam so the
 	// existing awaiting_user / Options UI path presents them. RunID ties the
@@ -270,6 +277,9 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		Depth:          0,
 		UserLanguage:   userLang,
 	}
+	// The async path does not go through runHandoff, so the fork is materialized
+	// here too — otherwise fork_turns would be silently ignored on async:true.
+	handoff.ForkedHistory = e.forkHistoryFor(params.ForkTurns)
 	if e.state != nil {
 		params = injectMainAgentContext(params, e.state)
 		handoff.Context = params.Context

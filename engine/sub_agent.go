@@ -347,6 +347,9 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		history = []ModelMessage{
 			{Role: "system", Content: system},
 		}
+		// Forked parent context sits between the stable system prefix and the
+		// volatile goal, so the goal stays at the highest-recency position.
+		history = append(history, input.ForkedHistory...)
 		if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
 			history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 		}
