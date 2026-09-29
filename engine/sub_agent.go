@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -416,6 +417,8 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 	consecutiveBlocked := 0
 	streamer := subAgentStreamer{}
 	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
+	// contextRetried caps the reactive context-length retry to once per run.
+	contextRetried := false
 	// tokenNudgePending 标记 80% 已越线，提示延迟到下一轮迭代顶部注入：累加
 	// 点位于 assistant(tool_calls) 与其 tool 结果之间，在那里插入 user 消息会
 	// 破坏"tool 响应紧跟其请求消息"的相邻性。
@@ -449,6 +452,15 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			}
 		} else if estimatedTokens(history) > compressThreshold {
 			history = compressSubHistory(history)
+		}
+
+		// Last-resort pre-send guard (mirrors the main agent): compression runs
+		// first; if it could not bring the history under budget, drop the oldest
+		// messages now so the request cannot exceed the model window.
+		if r.compressor != nil {
+			if budget := r.historyTokenBudget(filteredTools); budget > 0 && estimateModelHistoryTokens(history) > budget {
+				history = trimModelHistoryToBudget(history, budget)
+			}
 		}
 
 		if r.onProgress != nil {
@@ -523,6 +535,14 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// (DefaultIdleTimeout=60s, aborts only when no data line arrives),
 		// ResponseHeaderTimeout, and DialTimeout.
 		resp, err := model.Complete(ctx, req)
+		if err != nil && errors.Is(err, ErrModelContextLength) && !contextRetried {
+			// Provider says the request is over the context window: the pre-send
+			// estimate was too low, so trim harder and retry once.
+			contextRetried = true
+			history = trimModelHistoryToBudget(history, r.historyTokenBudget(filteredTools)/2)
+			req.Messages = history
+			resp, err = model.Complete(ctx, req)
+		}
 		close(heartbeatDone)
 		if err != nil {
 			// Don't crash the parent session — return a graceful degradation.

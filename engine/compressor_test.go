@@ -417,21 +417,34 @@ var _ = time.Nanosecond
 // --- C8 回归测试：sub-agent 压缩必须裁剪旧历史 ---
 
 // TestCompressModelMessages_TrimsOldHistory 回归 C8 缺陷：compressModelArchive
-// 把 [SESSION ARCHIVE] 摘要拼在全量历史之前而不裁剪，导致压缩后上下文反而
-// 变长，下一轮 ShouldCompress 估算更大 → sub-agent 上下文无界膨胀。
+// 必须裁剪旧历史，把上下文压到 tailBudget 量级，而不是把 [SESSION ARCHIVE]
+// 拼在全量历史之前。历史必须大到超过 tailBudget，否则压缩本就不该发生。
 func TestCompressModelMessages_TrimsOldHistory(t *testing.T) {
 	mock := &stubCompleteModel{resp: `{"goal":"g","decisions":[],"key_findings":["k1"]}`}
 	c := NewCompressionOrchestrator(mock, nil, "pro")
-	history := make([]ModelMessage, 0, 40)
-	for i := 0; i < 40; i++ {
-		history = append(history, ModelMessage{Role: "user", Content: fmt.Sprintf("message-%d", i)})
+	// 60 条 × 3000 字符 ≈ 60K tokens，远超 tailBudget(16384)。
+	history := make([]ModelMessage, 0, 60)
+	for i := 0; i < 60; i++ {
+		history = append(history, ModelMessage{Role: "user", Content: strings.Repeat("m", 3000)})
+	}
+	beforeChars := 0
+	for _, m := range history {
+		beforeChars += len(m.Content)
 	}
 	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(result) >= len(history) {
-		t.Errorf("compression must shrink history: len(result)=%d, len(history)=%d", len(result), len(history))
+		t.Fatalf("compression must shrink history: len(result)=%d, len(history)=%d", len(result), len(history))
+	}
+	afterChars := 0
+	for _, m := range result {
+		afterChars += len(m.Content)
+	}
+	if afterChars > beforeChars/2 {
+		t.Errorf("compression must keep only the tailBudget tail: kept %d/%d chars (%.1f%%)",
+			afterChars, beforeChars, 100*float64(afterChars)/float64(beforeChars))
 	}
 	// 摘要必须保留在头部
 	if !strings.HasPrefix(result[0].Content, "[SESSION ARCHIVE]") {
@@ -457,9 +470,10 @@ func TestCompressModelMessages_ShortHistoryNoOp(t *testing.T) {
 func TestCompressModelMessages_ModelErrorKeepsHistory(t *testing.T) {
 	mock := &stubCompleteModel{err: fmt.Errorf("flash down")}
 	c := NewCompressionOrchestrator(mock, nil, "pro")
-	history := make([]ModelMessage, 0, 40)
-	for i := 0; i < 40; i++ {
-		history = append(history, ModelMessage{Role: "user", Content: "x"})
+	// Large enough that compression actually runs and the model is consulted.
+	history := make([]ModelMessage, 0, 60)
+	for i := 0; i < 60; i++ {
+		history = append(history, ModelMessage{Role: "user", Content: strings.Repeat("x", 3000)})
 	}
 	result, err := c.CompressModelMessages(context.Background(), LayerFullCompact, "goal", history)
 	if err != nil {
@@ -513,5 +527,186 @@ func TestFindSafeSplitPoint_MinFreshExceedsLen(t *testing.T) {
 	history := []Message{{Role: "user", Content: "hi"}}
 	if got := findSafeSplitPoint(history, 100); got != 0 {
 		t.Errorf("findSafeSplitPoint(history, 100) = %d, want 0", got)
+	}
+}
+
+// --- A: 切分点按 token 预算（回归 len(history)-10 语义反转）---
+
+// TestCompressArchive_ShrinksToTailBudget 锁定修复后的核心行为：压缩必须把
+// 上下文裁到 tailBudget 量级，而不是保留约 96%（旧 len(history)-10 的行为）。
+func TestCompressArchive_ShrinksToTailBudget(t *testing.T) {
+	mock := &stubCompleteModel{resp: `{"goal":"g","key_findings":["k"]}`}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+
+	// 300 条 × 4000 字符 = 1.2M 字符（约 400K token），远超 tailBudget。
+	history := make([]Message, 0, 300)
+	for i := 0; i < 300; i++ {
+		role := "assistant"
+		if i%2 == 0 {
+			role = "user"
+		}
+		history = append(history, Message{Role: role, Content: strings.Repeat("x", 4000)})
+	}
+	beforeChars := 0
+	for _, m := range history {
+		beforeChars += len(m.Content)
+	}
+
+	result, err := c.Compress(context.Background(), LayerFullCompact, &TaskState{}, history)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	afterChars := 0
+	for _, m := range result {
+		afterChars += len(m.Content)
+	}
+	if afterChars > beforeChars*15/100 {
+		t.Fatalf("compression kept %d/%d chars (%.1f%%), want <15%%",
+			afterChars, beforeChars, 100*float64(afterChars)/float64(beforeChars))
+	}
+	if len(result) >= len(history) {
+		t.Fatalf("len(result)=%d must be < len(history)=%d", len(result), len(history))
+	}
+	if !strings.HasPrefix(result[0].Content, "[SESSION ARCHIVE]") {
+		t.Fatalf("result[0] must be the archive summary, got %q", result[0].Content)
+	}
+}
+
+// TestCompressArchive_NoOpWhenHistoryFitsTail 验证整段历史本就装得下 tailBudget
+// 时不做无意义压缩（避免以空摘要替换完整历史）。
+func TestCompressArchive_NoOpWhenHistoryFitsTail(t *testing.T) {
+	mock := &stubCompleteModel{resp: `{"goal":"g"}`}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+	history := make([]Message, 0, 20)
+	for i := 0; i < 20; i++ {
+		history = append(history, Message{Role: "user", Content: "hi"})
+	}
+	result, err := c.Compress(context.Background(), LayerFullCompact, &TaskState{}, history)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if len(result) != len(history) {
+		t.Fatalf("history within tailBudget must be returned unchanged: got %d, want %d", len(result), len(history))
+	}
+}
+
+func TestTailFreshCount(t *testing.T) {
+	// 每条 3000 字符 ≈ 1001 token；预算 4000 token → 3 条。
+	history := make([]Message, 0, 10)
+	for i := 0; i < 10; i++ {
+		history = append(history, Message{Role: "user", Content: strings.Repeat("x", 3000)})
+	}
+	if got := tailFreshCount(history, 4000); got != 3 {
+		t.Errorf("tailFreshCount = %d, want 3", got)
+	}
+	// 单条就超预算时至少保留一条，避免切分点越界。
+	if got := tailFreshCount(history, 1); got != 1 {
+		t.Errorf("tailFreshCount with tiny budget = %d, want 1", got)
+	}
+}
+
+// --- C: 摘要请求输入上限（分块渐进摘要）---
+
+// countingCompleteModel counts Complete calls and records the largest request.
+type countingCompleteModel struct {
+	resp     string
+	calls    int
+	maxChars int
+}
+
+func (m *countingCompleteModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
+	return nil, nil
+}
+
+func (m *countingCompleteModel) Complete(_ context.Context, req ModelRequest) (*ModelResponse, error) {
+	m.calls++
+	chars := 0
+	for _, msg := range req.Messages {
+		chars += modelMessageChars(msg)
+	}
+	if chars > m.maxChars {
+		m.maxChars = chars
+	}
+	return &ModelResponse{Message: ModelMessage{Content: m.resp}}, nil
+}
+
+func TestSummarizeInChunks_BoundsEachRequest(t *testing.T) {
+	mock := &countingCompleteModel{resp: `{"goal":"g"}`}
+	c := NewCompressionOrchestrator(mock, nil, "pro")
+	// 100 条 × 9000 字符 ≈ 300K token：单次摘要会吞下整段，必须分块。
+	old := make([]Message, 0, 100)
+	for i := 0; i < 100; i++ {
+		old = append(old, Message{Role: "user", Content: strings.Repeat("x", 9000)})
+	}
+	summary, err := c.summarizeInChunks(context.Background(), &TaskState{}, old)
+	if err != nil {
+		t.Fatalf("summarizeInChunks: %v", err)
+	}
+	if summary == "" {
+		t.Fatal("expected a summary")
+	}
+	if mock.calls < 2 {
+		t.Fatalf("expected the segment to be split into multiple chunks, got %d call(s)", mock.calls)
+	}
+	// 单次请求 = 分块上限 + 单条消息上限 + 模板余量，远小于整段。
+	if limit := summaryChunkTokens*3 + archiveMessageCharCap + 20000; mock.maxChars > limit {
+		t.Errorf("a summary request was too large: %d chars (limit %d)", mock.maxChars, limit)
+	}
+}
+
+// --- B: 发送前硬预算裁剪 ---
+
+func TestTrimHistoryToBudget_DropsOldestKeepsSystemAndPairing(t *testing.T) {
+	history := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: strings.Repeat("a", 3000)},
+		{Role: "assistant", ToolCalls: []MessageToolCall{{ID: "c1", Name: "read"}}},
+		{Role: "tool", ToolCallID: "c1", Content: strings.Repeat("b", 3000)},
+		{Role: "user", Content: strings.Repeat("c", 3000)},
+	}
+	got := trimHistoryToBudget(history, 1200)
+	if len(got) == 0 {
+		t.Fatal("must keep something")
+	}
+	if got[0].Role != "system" {
+		t.Fatalf("leading system message must be preserved, got role %q", got[0].Role)
+	}
+	if got[1].Role == "tool" {
+		t.Fatalf("trimmed tail must not begin with an orphaned tool response")
+	}
+	if estimateHistoryTokens(got) > 1200 {
+		t.Fatalf("trim did not reach the budget: %d tokens", estimateHistoryTokens(got))
+	}
+}
+
+func TestTrimHistoryToBudget_TruncatesOversizedBody(t *testing.T) {
+	// 一条巨大的 tool 消息：丢掉其它消息后仍超预算，只能截断正文（保留配对）。
+	history := []Message{
+		{Role: "user", Content: "q"},
+		{Role: "assistant", ToolCalls: []MessageToolCall{{ID: "c1", Name: "read"}}},
+		{Role: "tool", ToolCallID: "c1", Content: strings.Repeat("z", 60000)},
+	}
+	got := trimHistoryToBudget(history, 3000)
+	if estimateHistoryTokens(got) > 3000 {
+		t.Fatalf("trim did not reach the budget: %d tokens", estimateHistoryTokens(got))
+	}
+	if len(got) == 0 || got[len(got)-1].Role != "tool" {
+		t.Fatalf("the tool message (and its pairing) must survive truncation, got %d messages", len(got))
+	}
+}
+
+func TestTrimModelHistoryToBudget_KeepsSystemHead(t *testing.T) {
+	history := []ModelMessage{
+		{Role: "system", Content: "persona"},
+		{Role: "user", Content: strings.Repeat("a", 3000)},
+		{Role: "assistant", ToolCalls: []ModelToolCall{{ID: "c1", Function: ModelFunctionCall{Name: "read"}}}},
+		{Role: "tool", ToolCallID: "c1", Content: strings.Repeat("b", 3000)},
+	}
+	got := trimModelHistoryToBudget(history, 1200)
+	if len(got) == 0 || got[0].Role != "system" {
+		t.Fatalf("system head must be preserved, got %d messages", len(got))
+	}
+	if len(got) > 1 && got[1].Role == "tool" {
+		t.Fatalf("trimmed tail must not begin with an orphaned tool response")
 	}
 }

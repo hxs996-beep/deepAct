@@ -20,4 +20,10 @@ var (
 	// connection is almost certainly half-open or the server stalled, so a
 	// fresh request is likely to succeed.
 	ErrStreamIdle = errors.New("stream idle timeout")
+	// ErrContextLength signals the provider rejected the request because it
+	// exceeded the model's context window (HTTP 400). It is surfaced as a
+	// distinct sentinel so the engine can react by shrinking the history and
+	// retrying once, instead of failing the run. Not retried by the llm layer:
+	// the same request would fail identically.
+	ErrContextLength = errors.New("context length exceeded")
 )

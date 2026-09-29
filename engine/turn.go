@@ -68,6 +68,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
+	// Tool schemas are sent with every request but are not part of e.history;
+	// build them once so the budget guard and the request share one list.
+	tools := e.toolSpecsWithHandoff()
+	// Last-resort pre-send guard: if compression could not bring the request
+	// under the window (failure cooldown, or a single turn's tool batch grew
+	// faster than the per-turn check), drop the oldest history now.
+	e.guardContextBudget(tools)
+
 	ctxBuildStart := time.Now()
 	messages := e.context.Build(e.state, e.history, nil)
 	ctxBuildDur := time.Since(ctxBuildStart)
@@ -94,7 +102,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	req := ModelRequest{
 		Model:           modelName,
 		Messages:        messages,
-		Tools:           e.toolSpecsWithHandoff(),
+		Tools:           tools,
 		MaxTokens:       e.maxOutputTokens(),
 		ReasoningEffort: e.config.ReasoningEffort,
 	}
@@ -104,6 +112,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if err != nil {
 		turnLog.Printf("stream model err: %v", err)
 		e.state.ConsecutiveFailures++
+		// Provider says the request is over the context window: the pre-send
+		// estimate was too low, so force a deeper trim and retry the turn once.
+		if errors.Is(err, ErrModelContextLength) && !e.contextRetryDone {
+			e.contextRetryDone = true
+			e.forceTrimHistory(tools)
+			turnLog.Printf("context-length 400: trimmed history, retrying turn")
+			return e.executeTurn(ctx)
+		}
 		// Rate limits: the llm layer already retried with Retry-After backoff.
 		// If it still failed, wait one more quiet window and re-attempt once —
 		// the user should not be forced to type "continue" for a transient 429.
@@ -238,6 +254,15 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if chunk.Err != nil {
 			turnLog.Printf("stream chunk err: %v", chunk.Err)
 			e.state.ConsecutiveFailures++
+			// Context-length overflow surfaces here (the HTTP status is seen by
+			// the streaming goroutine, before any content). Retry once with a
+			// forced trim, but only when nothing was emitted yet.
+			if errors.Is(chunk.Err, ErrModelContextLength) && !e.contextRetryDone && contentBuilder.Len() == 0 && len(toolCalls) == 0 {
+				e.contextRetryDone = true
+				e.forceTrimHistory(tools)
+				turnLog.Printf("context-length 400: trimmed history, retrying turn")
+				return e.executeTurn(ctx)
+			}
 			// 透传底层真实错误：HTTP 状态码/响应体、超时类型、重试日志。
 			// 429 限流、5xx、网络波动都各归其位，不再一律提示"断网"。
 			// 402 余额不足：持久性错误，明确提示充值。

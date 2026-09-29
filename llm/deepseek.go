@@ -448,7 +448,13 @@ func (c *DeepSeekClient) streamOnce(ctx context.Context, req ChatRequest, ch cha
 		if resp.StatusCode == http.StatusTooManyRequests {
 			c.recordRetryAfter(resp.Header)
 		}
-		return resp.StatusCode, fmt.Errorf("status %d: %s: %w", resp.StatusCode, string(body), classifyStatusError(resp.StatusCode))
+		cause := classifyStatusError(resp.StatusCode)
+		// A 400 whose body names a context-length overflow is actionable: the
+		// engine can shrink the history and retry rather than fail the run.
+		if resp.StatusCode == http.StatusBadRequest && isContextLengthError(body) {
+			cause = ErrContextLength
+		}
+		return resp.StatusCode, fmt.Errorf("status %d: %s: %w", resp.StatusCode, string(body), cause)
 	}
 	reader := bufio.NewReader(resp.Body)
 	assembler := newStreamAssembler()
@@ -616,6 +622,24 @@ func classifyStatusError(status int) error {
 		return fmt.Errorf("server error (%d): %w", status, ErrInvalidResponse)
 	}
 	return fmt.Errorf("unexpected status %d: %w", status, ErrInvalidResponse)
+}
+
+// isContextLengthError reports whether a 400 response body says the request
+// exceeded the model's context window. Providers word this differently, so
+// match the stable fragments rather than a full sentence.
+func isContextLengthError(body []byte) bool {
+	s := strings.ToLower(string(body))
+	for _, frag := range []string{
+		"maximum context length",
+		"context_length_exceeded",
+		"context length",
+		"reduce the length",
+	} {
+		if strings.Contains(s, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyContextError(err error) error {

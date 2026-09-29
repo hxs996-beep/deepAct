@@ -62,6 +62,18 @@ const (
 	// compressionCooldown is how long compression stays suppressed after an
 	// archive-summary failure, preventing per-turn retry loops.
 	compressionCooldown = 5 * time.Minute
+
+	// summaryChunkTokens bounds the conversation content of a single archive
+	// summary request. Compression fires at 80% of the window, so the segment
+	// being collapsed can be ~800K tokens; one 30s flash request over that would
+	// time out (or overflow) every time. The segment is summarized in chunks
+	// instead, threading the previous archive forward (progressive
+	// summarization), so each request stays small.
+	summaryChunkTokens = 40000
+
+	// archiveMessageCharCap bounds a single message's contribution to the
+	// archive prompt, so one giant tool result cannot blow up a chunk.
+	archiveMessageCharCap = 8192
 )
 
 func (c *CompressionOrchestrator) ShouldCompress(currentTokens, maxTokens int) (CompressionLayer, bool) {
@@ -108,19 +120,25 @@ func (c *CompressionOrchestrator) Compress(ctx context.Context, layer Compressio
 }
 
 func (c *CompressionOrchestrator) compressArchive(ctx context.Context, state *TaskState, history []Message) ([]Message, error) {
-	if c.model == nil || len(history) <= tailBudget/1000 {
+	if c.model == nil || len(history) == 0 {
 		return history, nil
 	}
 
-	freshStart := findSafeSplitPoint(history, len(history)-10)
-	if freshStart < 0 {
+	// Keep only a token-bounded verbatim tail (≈ tailBudget) and collapse
+	// everything older into the archive. findSafeSplitPoint's minFresh is
+	// "messages to keep fresh", so it must be the tail COUNT for tailBudget —
+	// not len(history)-10, which kept almost the whole history and made
+	// compression a no-op. When no safe split exists (freshStart <= 0) there is
+	// nothing to collapse, so leave the history untouched.
+	freshStart := findSafeSplitPoint(history, tailFreshCount(history, tailBudget))
+	if freshStart <= 0 {
 		return history, nil
 	}
 
 	oldHistory := history[:freshStart]
 	freshHistory := history[freshStart:]
 
-	summary, err := c.generateArchiveSummary(ctx, state, oldHistory)
+	summary, err := c.summarizeInChunks(ctx, state, oldHistory)
 	if err != nil {
 		return history, nil
 	}
@@ -148,13 +166,143 @@ func (c *CompressionOrchestrator) compressArchive(ctx context.Context, state *Ta
 	}
 
 	result := make([]Message, 0, len(freshHistory)+1)
-	result = append(result, Message{
+	result = append(result, archiveMessage(summary))
+	result = append(result, freshHistory...)
+
+	// Compression must prove it shrank the context: otherwise the archive is
+	// longer than what it replaced and every later estimate grows without bound
+	// (the C8 regression). Keep the original history when it did not.
+	if estimateHistoryTokens(result) >= estimateHistoryTokens(history) {
+		return history, nil
+	}
+	return result, nil
+}
+
+// tailFreshCount returns how many trailing messages fit within budget tokens.
+// This is the value findSafeSplitPoint expects as minFresh ("messages to keep
+// fresh"), the inverse of the old len(history)-10 call.
+func tailFreshCount(history []Message, budget int) int {
+	used, n := 0, 0
+	for i := len(history) - 1; i >= 0; i-- {
+		used += messageTokens(history[i])
+		if used > budget {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return 1 // keep at least the newest message so the split stays in range
+	}
+	return n
+}
+
+// tailFreshModelCount is the ModelMessage variant of tailFreshCount.
+func tailFreshModelCount(history []ModelMessage, budget int) int {
+	used, n := 0, 0
+	for i := len(history) - 1; i >= 0; i-- {
+		used += modelMessageTokens(history[i])
+		if used > budget {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+// archiveMessage wraps a summary in the [SESSION ARCHIVE] shape used across the
+// engine (and recognized by buildArchivePrompt's progressive extraction).
+func archiveMessage(summary string) Message {
+	return Message{
 		Role:      "system",
 		Content:   "[SESSION ARCHIVE]\n" + summary,
 		Timestamp: time.Now(),
-	})
-	result = append(result, freshHistory...)
-	return result, nil
+	}
+}
+
+// summarizeInChunks collapses oldHistory into one archive summary. The segment
+// is split into chunks bounded by summaryChunkTokens so no single flash request
+// is big enough to time out; each chunk carries the previous chunk's summary
+// forward, so the final summary covers the whole segment.
+func (c *CompressionOrchestrator) summarizeInChunks(ctx context.Context, state *TaskState, oldHistory []Message) (string, error) {
+	summary := ""
+	for i, chunk := range chunkMessages(oldHistory, summaryChunkTokens) {
+		input := chunk
+		if i > 0 {
+			// Seed the chunk with the running summary so buildArchivePrompt's
+			// "extend this, do NOT repeat" branch is populated, exactly as it is
+			// when a prior [SESSION ARCHIVE] sits at the head of history.
+			input = append([]Message{archiveMessage(summary)}, chunk...)
+		}
+		s, err := c.generateArchiveSummary(ctx, state, input)
+		if err != nil {
+			return "", err
+		}
+		summary = s
+	}
+	return summary, nil
+}
+
+// chunkMessages splits history into chunks whose capped character size stays
+// within maxTokens (1 token ≈ 3 chars). Messages are never split; an oversized
+// message forms its own chunk and is truncated by the prompt builder.
+func chunkMessages(history []Message, maxTokens int) [][]Message {
+	maxChars := maxTokens * 3
+	var chunks [][]Message
+	var cur []Message
+	used := 0
+	for _, m := range history {
+		c := messageChars(m)
+		if c > archiveMessageCharCap {
+			c = archiveMessageCharCap
+		}
+		if len(cur) > 0 && used+c > maxChars {
+			chunks = append(chunks, cur)
+			cur = nil
+			used = 0
+		}
+		cur = append(cur, m)
+		used += c
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
+}
+
+// chunkModelMessages is the ModelMessage variant of chunkMessages.
+func chunkModelMessages(history []ModelMessage, maxTokens int) [][]ModelMessage {
+	maxChars := maxTokens * 3
+	var chunks [][]ModelMessage
+	var cur []ModelMessage
+	used := 0
+	for _, m := range history {
+		c := modelMessageChars(m)
+		if c > archiveMessageCharCap {
+			c = archiveMessageCharCap
+		}
+		if len(cur) > 0 && used+c > maxChars {
+			chunks = append(chunks, cur)
+			cur = nil
+			used = 0
+		}
+		cur = append(cur, m)
+		used += c
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
+}
+
+// truncateForArchive bounds one message's contribution to the archive prompt.
+func truncateForArchive(content string) string {
+	if len(content) <= archiveMessageCharCap {
+		return content
+	}
+	return truncateRunes(content, archiveMessageCharCap) + "\n…[truncated]"
 }
 
 func containsDecisionText(decisions []Decision, text string) bool {
@@ -265,7 +413,7 @@ func buildArchivePrompt(state *TaskState, history []Message, zh bool) string {
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, truncateForArchive(msg.Content)))
 	}
 
 	if state != nil && len(state.Decisions) > 0 {
@@ -294,6 +442,9 @@ func findSafeSplitPoint(history []Message, minFresh int) int {
 	if start < 0 {
 		start = 0
 	}
+	if start >= len(history) {
+		start = len(history) - 1
+	}
 	for i := start; i >= 0; i-- {
 		msg := history[i]
 		if msg.Role == "user" || msg.Role == "system" {
@@ -321,6 +472,9 @@ func findSafeModelSplitPoint(history []ModelMessage, minFresh int) int {
 	start := len(history) - minFresh
 	if start < 0 {
 		start = 0
+	}
+	if start >= len(history) {
+		start = len(history) - 1
 	}
 	for i := start; i >= 0; i-- {
 		msg := history[i]
@@ -396,29 +550,53 @@ func (c *CompressionOrchestrator) CompressModelMessages(ctx context.Context, lay
 }
 
 func (c *CompressionOrchestrator) compressModelArchive(ctx context.Context, goal string, history []ModelMessage) ([]ModelMessage, error) {
-	if c.model == nil || len(history) <= tailBudget/1000 {
+	if c.model == nil || len(history) == 0 {
 		return history, nil
 	}
-	summary, err := c.generateModelArchiveSummary(ctx, goal, history)
+
+	// Same split rule as the main agent: keep a token-bounded verbatim tail and
+	// collapse the rest. Computing the split before the summary avoids paying
+	// for an archive that would then be discarded (or worse, prepended without
+	// trimming — the C8 regression).
+	freshStart := findSafeModelSplitPoint(history, tailFreshModelCount(history, tailBudget))
+	if freshStart <= 0 {
+		return history, nil
+	}
+
+	oldHistory := history[:freshStart]
+	freshHistory := history[freshStart:]
+
+	summary, err := c.summarizeModelInChunks(ctx, goal, oldHistory)
 	if err != nil {
 		return history, nil
 	}
-	// Mirror the main-agent compressArchive semantics: keep a fresh tail of the
-	// conversation verbatim and collapse the rest into the archive summary.
-	// Without the trim, [SESSION ARCHIVE] + full history is longer than the
-	// input, so every subsequent ShouldCompress estimate grows and the sub-agent
-	// context expands without bound (C8 regression — see compressor_test.go).
-	freshStart := findSafeModelSplitPoint(history, len(history)-10)
-	if freshStart < 0 {
-		freshStart = 0
+
+	result := make([]ModelMessage, 0, len(freshHistory)+1)
+	result = append(result, ModelMessage{Role: "system", Content: "[SESSION ARCHIVE]\n" + summary})
+	result = append(result, freshHistory...)
+
+	// Only accept compression that actually shrinks the context.
+	if estimateModelHistoryTokens(result) >= estimateModelHistoryTokens(history) {
+		return history, nil
 	}
-	result := make([]ModelMessage, 0, len(history)-freshStart+1)
-	result = append(result, ModelMessage{
-		Role:    "system",
-		Content: "[SESSION ARCHIVE]\n" + summary,
-	})
-	result = append(result, history[freshStart:]...)
 	return result, nil
+}
+
+// summarizeModelInChunks is the ModelMessage variant of summarizeInChunks.
+func (c *CompressionOrchestrator) summarizeModelInChunks(ctx context.Context, goal string, oldHistory []ModelMessage) (string, error) {
+	summary := ""
+	for i, chunk := range chunkModelMessages(oldHistory, summaryChunkTokens) {
+		input := chunk
+		if i > 0 {
+			input = append([]ModelMessage{{Role: "system", Content: "[SESSION ARCHIVE]\n" + summary}}, chunk...)
+		}
+		s, err := c.generateModelArchiveSummary(ctx, goal, input)
+		if err != nil {
+			return "", err
+		}
+		summary = s
+	}
+	return summary, nil
 }
 
 func (c *CompressionOrchestrator) generateModelArchiveSummary(ctx context.Context, goal string, history []ModelMessage) (string, error) {
@@ -467,7 +645,7 @@ func buildModelArchivePrompt(goal string, history []ModelMessage, zh bool) strin
 		if strings.HasPrefix(msg.Content, "[SESSION ARCHIVE]") {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
+		b.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, truncateForArchive(msg.Content)))
 	}
 	return b.String()
 }

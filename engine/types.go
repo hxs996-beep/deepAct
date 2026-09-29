@@ -204,6 +204,9 @@ type ModelChunk struct {
 var (
 	ErrModelRateLimit       = errors.New("model rate limit")
 	ErrModelInsufficientBal = errors.New("model insufficient balance")
+	// ErrModelContextLength surfaces a provider context-window overflow (HTTP
+	// 400). The engine reacts by shrinking the history and retrying once.
+	ErrModelContextLength = errors.New("model context length exceeded")
 )
 
 type ToolExecContext struct {

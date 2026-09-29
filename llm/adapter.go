@@ -118,6 +118,8 @@ func mapModelError(err error) error {
 		return fmt.Errorf("%w: %v", engine.ErrModelInsufficientBal, err)
 	case errors.Is(err, ErrRateLimit):
 		return fmt.Errorf("%w: %v", engine.ErrModelRateLimit, err)
+	case errors.Is(err, ErrContextLength):
+		return fmt.Errorf("%w: %v", engine.ErrModelContextLength, err)
 	default:
 		return err
 	}

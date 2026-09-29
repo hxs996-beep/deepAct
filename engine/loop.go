@@ -59,7 +59,11 @@ type Engine struct {
 	config     EngineConfig
 	state      *TaskState
 	history    []Message
-	steerMu    sync.Mutex
+	// contextRetryDone caps the reactive context-length retry to once per Run:
+	// a 400 after the pre-send estimate is rare, and retrying forever would just
+	// re-trim and re-fail (see executeTurn).
+	contextRetryDone bool
+	steerMu          sync.Mutex
 	steerQueue []string
 	guards     *GuardSystem
 	// progressLoop is the single no-progress breaker — the only loop guard that
@@ -386,6 +390,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.runErrorCount = 0
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
+	e.contextRetryDone = false
 
 	// Skill command handling — /skills (list) and /skill <name> (load)
 	if sc := parseSkillCommand(userMsg); sc != nil {
