@@ -80,6 +80,11 @@ type Handoff struct {
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
 	StructuredResult bool `json:"structured_result,omitempty"`
+	// Inbox delivers mid-run messages injected by send_message. Internal: it is
+	// never model-settable (the model writes only through the send_message tool,
+	// which the engine routes here) and never serialized. nil for sync/nested
+	// runs, which have no job handle to address.
+	Inbox <-chan string `json:"-"`
 	// UserLanguage is the session language (see UserLanguage), set by the engine
 	// before delegating. Used to inject language directives into sub-agent context.
 	UserLanguage UserLanguage `json:"-"`

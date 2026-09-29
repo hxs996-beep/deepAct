@@ -165,6 +165,11 @@ const (
 // whole history (worst case ~1M tokens), so the table must stay small.
 const defaultMaxSuspendedSubAgents = 4
 
+// inboxBufferSize bounds how many send_message calls may queue for one running
+// sub-agent before the sender is told to back off. Small on purpose: messages
+// are steered into the next iteration, not accumulated.
+const inboxBufferSize = 8
+
 // bgTask is one background sub-agent job: an async run started via
 // handoff_to_agent(async:true), or a run suspended on ask_user.
 // A running entry lives only for the current Run() — the Run's exit path
@@ -189,6 +194,19 @@ type bgTask struct {
 	// suspension (empty when this run asked the user itself). The parent entry
 	// is found by reverse lookup on it — no parent field is needed.
 	childRunID string
+	// done is closed exactly once when the job publishes a terminal result.
+	// It is a SIGNAL, not a channel to consume: several waiters and the
+	// list/wait renderers can all observe completion without stealing the
+	// result, which stays in `result` for agent_poll to collect.
+	done chan struct{}
+	// inbox carries mid-run messages injected by send_message. The sub-agent
+	// run drains it at the top of each iteration (see drainInbox). nil for
+	// sync/nested runs, which have no job handle to address.
+	inbox chan string
+	// resultBrief is a one-line digest of the terminal result, set when the job
+	// finishes, so list_agents / wait_agent can show what a done job produced
+	// without consuming its result channel.
+	resultBrief string
 }
 
 // initBackgroundTasks lazily creates the background task map. Safe to call
@@ -249,6 +267,40 @@ func (e *Engine) inFlightCount() int {
 	e.bgMu.Lock()
 	defer e.bgMu.Unlock()
 	return e.countByStateLocked(bgStateRunning)
+}
+
+// finishBackgroundJob publishes a terminal result for a background job: it
+// marks the result available (done closed) and records a short brief, then
+// notifies the UI. The entry STAYS in the table until agent_poll consumes it —
+// that preserves the outstanding-cap semantics (a slot frees on collection, not
+// on completion) and lets list/wait still observe the finished job.
+//
+// done is closed under bgMu with a closed-check so a double finish (e.g. a
+// cancellation racing a normal return) can never panic.
+func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
+	if t == nil || result == nil {
+		return
+	}
+	e.bgMu.Lock()
+	if t.done != nil {
+		select {
+		case <-t.done:
+			e.bgMu.Unlock()
+			return // already finished
+		default:
+		}
+		close(t.done)
+	}
+	t.resultBrief = briefDigest(result.Summary)
+	e.bgMu.Unlock()
+
+	select {
+	case t.result <- result:
+	default:
+	}
+	if e.config.OnProgress != nil {
+		e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: string(t.agent), Detail: result.Summary})
+	}
 }
 
 // suspendedCount counts jobs waiting for the user's answer.

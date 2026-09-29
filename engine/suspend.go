@@ -127,6 +127,10 @@ func (e *Engine) takeLeafForResume(ctx context.Context, runID string) (string, *
 	leafTask.state = bgStateRunning
 	leafTask.suspended = nil
 	leafTask.startAt = time.Now()
+	// A resumed run is running again: give it a fresh inbox and hand it to the
+	// run through the breakpoint's Input (runLoopResume copies Input forward).
+	leafTask.inbox = make(chan string, inboxBufferSize)
+	leaf.Input.Inbox = leafTask.inbox
 	leafTask.ctx, leafTask.cancel = context.WithCancel(ctx)
 	return leafID, leaf, nil
 }
@@ -211,14 +215,8 @@ func (e *Engine) finishResumedJob(ctx context.Context, id string, result *Handof
 	e.bgMu.Unlock()
 
 	if parentID == "" {
-		// Top of the chain: deliver on its own channel for agent_poll.
-		select {
-		case task.result <- result:
-		default:
-		}
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: string(task.agent), Detail: result.Summary})
-		}
+		// Top of the chain: publish for agent_poll / wait_agent.
+		e.finishBackgroundJob(task, result)
 		return
 	}
 
@@ -247,6 +245,8 @@ func (e *Engine) takeParentForCascade(ctx context.Context, parentID string) (str
 	p.state = bgStateRunning
 	p.suspended = nil
 	p.startAt = time.Now()
+	p.inbox = make(chan string, inboxBufferSize)
+	suspended.Input.Inbox = p.inbox
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	return parentID, suspended, nil
 }

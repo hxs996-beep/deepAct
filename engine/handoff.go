@@ -222,6 +222,7 @@ func (e *Engine) RegisterSuspended(s *SuspendedRun, agent AgentID, goal string) 
 		childRunID: s.ChildRunID,
 		startAt:    time.Now(),
 		result:     make(chan *HandoffResult, 1),
+		done:       make(chan struct{}),
 	}
 	return id
 }
@@ -293,6 +294,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 	e.bgSeq++
 	jobID := fmt.Sprintf("bg-%d", e.bgSeq)
 	bgCtx, cancel := context.WithCancel(ctx)
+	inbox := make(chan string, inboxBufferSize)
 	task := &bgTask{
 		id:      jobID,
 		agent:   AgentID(params.Agent),
@@ -300,11 +302,15 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		ctx:     bgCtx,
 		cancel:  cancel,
 		result:  make(chan *HandoffResult, 1),
+		done:    make(chan struct{}),
+		inbox:   inbox,
 		startAt: time.Now(),
 		state:   bgStateRunning,
 	}
 	e.bgTasks[jobID] = task
 	e.bgMu.Unlock()
+	// The run reads this inbox at each iteration boundary (send_message).
+	handoff.Inbox = inbox
 
 	// agent_start event for UI (same as synchronous handoff).
 	if e.config.OnProgress != nil {
@@ -346,17 +352,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 			loopLog.Printf("async job %s suspended on a question; answer with agent_resume(%s, ...)", task.id, task.id)
 			return
 		}
-		select {
-		case task.result <- result:
-		default:
-		}
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{
-				Type:   "agent_done",
-				Name:   string(task.agent),
-				Detail: result.Summary,
-			})
-		}
+		e.finishBackgroundJob(task, result)
 	}()
 
 	return ToolResult{
