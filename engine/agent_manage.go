@@ -526,9 +526,16 @@ func (e *Engine) processCloseAgentCalls(calls []ToolCallRequest) []Message {
 	return msgs
 }
 
-// closeAgentJob cancels and forgets a job and every job below it. Cancellation
-// happens AFTER the table edit (cancel funcs are captured first) so a run
-// finishing during the edit cannot resurrect an entry that was just dropped.
+// closeAgentJob cancels and forgets a job and every job below it.
+//
+// Two things must not be silent:
+//   - cancellation happens AFTER the table edit (cancel funcs are captured
+//     first), so a run finishing during the edit cannot resurrect an entry that
+//     was just dropped;
+//   - every removed job gets a terminal ProgressEvent unless its result was
+//     already published. agent_start is emitted at dispatch and only agent_done
+//     closes that node in the UI — without this, closing a running or suspended
+//     job would leave a node that never finishes.
 func (e *Engine) closeAgentJob(jobID string) string {
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
@@ -538,14 +545,24 @@ func (e *Engine) closeAgentJob(jobID string) string {
 	}
 	ids := e.descendantJobIDsLocked(jobID)
 	cancels := make([]context.CancelFunc, 0, len(ids))
-	suspended := 0
+	terminal := make([]string, 0, len(ids)) // agent names needing an agent_done
+	closed := 0
+	suspended, uncollected := 0, 0
 	for _, id := range ids {
 		t := e.bgTasks[id]
 		if t == nil {
 			continue
 		}
-		if t.state == bgStateAwaitingUser {
+		finished := t.state == bgStateRunning && channelClosed(t.done)
+		switch {
+		case finished:
+			// Result published but never collected: closing now discards it.
+			uncollected++
+		case t.state == bgStateAwaitingUser:
 			suspended++
+			terminal = append(terminal, string(t.agent))
+		default:
+			terminal = append(terminal, string(t.agent))
 		}
 		if t.cancel != nil {
 			cancels = append(cancels, t.cancel)
@@ -554,15 +571,25 @@ func (e *Engine) closeAgentJob(jobID string) string {
 			close(t.done) // release any waiter
 		}
 		delete(e.bgTasks, id)
+		closed++
 	}
 	e.bgMu.Unlock()
 
 	for _, cancel := range cancels {
 		cancel()
 	}
-	msg := fmt.Sprintf("Closed %d job(s): %s.", len(ids), strings.Join(ids, ", "))
+	if e.config.OnProgress != nil {
+		for _, name := range terminal {
+			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: "closed"})
+		}
+	}
+
+	msg := fmt.Sprintf("Closed %d job(s): %s.", closed, strings.Join(ids, ", "))
 	if suspended > 0 {
 		msg += fmt.Sprintf(" %d suspended job(s) were dropped — their pending questions can no longer be answered.", suspended)
+	}
+	if uncollected > 0 {
+		msg += fmt.Sprintf(" %d finished result(s) were discarded uncollected — poll a finished job with agent_poll before closing it.", uncollected)
 	}
 	return msg
 }

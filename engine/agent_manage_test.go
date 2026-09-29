@@ -798,3 +798,78 @@ func TestCloseAgent_UnknownJob(t *testing.T) {
 		t.Fatalf("close output = %+v, want not found", msgs)
 	}
 }
+
+// TestCloseAgent_CancelsRunningJob pins the cancellation propagation (a test
+// with a no-op cancel func would still pass if the whole cancel loop were
+// removed) and the terminal event that closes the UI's agent node.
+func TestCloseAgent_CancelsRunningJob(t *testing.T) {
+	a := &ctxWaitAgent{id: "one", start: make(chan struct{}), cancel: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	var events []ProgressEvent
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{},
+		config: EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	jobID := firstJobID(t, e)
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "Closed 1 job") {
+		t.Fatalf("close output = %+v, want 1 job closed", msgs)
+	}
+	select {
+	case <-a.cancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("close_agent must cancel a running job's context")
+	}
+	e.bgMu.Lock()
+	_, still := e.bgTasks[jobID]
+	e.bgMu.Unlock()
+	if still {
+		t.Error("the job must be removed from the table")
+	}
+	closed := false
+	for _, ev := range events {
+		if ev.Type == "agent_done" && ev.Name == "one" {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Errorf("close_agent must emit a terminal agent_done for a running job, got %+v", events)
+	}
+}
+
+// TestCloseAgent_WarnsAboutDiscardedResult: closing a job whose result was
+// published but never collected silently loses that result, so the tool must
+// say so — and must NOT emit a second agent_done (the job already got one).
+func TestCloseAgent_WarnsAboutDiscardedResult(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{isChinese: true, state: &TaskState{},
+		config: EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }}}
+	e.initBackgroundTasks()
+	finished := &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), resultBrief: "结论",
+	}
+	close(finished.done)
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = finished
+	e.bgMu.Unlock()
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "discarded uncollected") {
+		t.Fatalf("close output = %+v, want an uncollected-result warning", msgs)
+	}
+	if len(events) != 0 {
+		t.Errorf("a finished job already got agent_done; close must not emit it twice, got %+v", events)
+	}
+}
