@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,5 +90,51 @@ func TestFinishBackgroundJob_DoubleFinishIsIdempotent(t *testing.T) {
 	}
 	if got := len(task.result); got != 1 {
 		t.Fatalf("result depth = %d, want 1 (a second finish must not deliver again)", got)
+	}
+}
+
+// --- list_agents -------------------------------------------------------------
+
+func TestListAgentsToolSpec_Registered(t *testing.T) {
+	specs := (&Engine{tools: stubToolExecutor{}}).toolSpecsWithHandoff()
+	for _, s := range specs {
+		if s.Function.Name == ListAgentsToolName {
+			return
+		}
+	}
+	t.Fatal("toolSpecsWithHandoff must include list_agents")
+}
+
+func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "researcher", goal: "调研缓存",
+		state: bgStateRunning, startAt: time.Now(), done: make(chan struct{}),
+	}
+	e.bgTasks["bg-2"] = &bgTask{
+		id: "bg-2", agent: "critic", goal: "审查方案",
+		state: bgStateAwaitingUser, startAt: time.Now(), done: make(chan struct{}),
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processListAgentsCalls([]ToolCallRequest{{ID: "tc1", Name: ListAgentsToolName}})
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	for _, want := range []string{"bg-1", "researcher", "bg-2", "critic", "awaiting_user"} {
+		if !strings.Contains(msgs[0].Content, want) {
+			t.Errorf("list output %q missing %q", msgs[0].Content, want)
+		}
+	}
+}
+
+func TestProcessListAgentsCalls_Empty(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processListAgentsCalls([]ToolCallRequest{{ID: "tc1", Name: ListAgentsToolName}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "No background sub-agent jobs") {
+		t.Fatalf("empty list = %+v, want the no-jobs sentence", msgs)
 	}
 }

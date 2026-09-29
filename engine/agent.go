@@ -13,15 +13,20 @@ type AgentID string
 const (
 	AgentSub AgentID = "sub"
 
-	HandoffToolName      = "handoff_to_agent"
-	LoadSkillToolName    = "load_skill"
-	TaskCompleteToolName = "task_complete"
-	TodoWriteToolName    = "todo_write"
-	SubmitResultToolName = "submit_result"
-	AskUserToolName      = "ask_user"
-	PlanTaskToolName     = "plan_task"
-	AgentPollToolName    = "agent_poll"
-	AgentResumeToolName  = "agent_resume"
+	HandoffToolName        = "handoff_to_agent"
+	LoadSkillToolName      = "load_skill"
+	TaskCompleteToolName   = "task_complete"
+	TodoWriteToolName      = "todo_write"
+	SubmitResultToolName   = "submit_result"
+	AskUserToolName        = "ask_user"
+	PlanTaskToolName       = "plan_task"
+	AgentPollToolName      = "agent_poll"
+	AgentResumeToolName    = "agent_resume"
+	ListAgentsToolName     = "list_agents"
+	WaitAgentToolName      = "wait_agent"
+	SendMessageToolName    = "send_message"
+	InterruptAgentToolName = "interrupt_agent"
+	CloseAgentToolName     = "close_agent"
 )
 
 // HandoffResult.FinishReason vocabulary — the structured reason a sub-agent
