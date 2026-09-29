@@ -207,3 +207,143 @@ func TestRenderAgentList_DoneJobLine(t *testing.T) {
 		}
 	}
 }
+
+// --- wait_agent --------------------------------------------------------------
+
+func TestWaitAgent_ReturnsImmediatelyWhenDone(t *testing.T) {
+	reg := NewAgentRegistry()
+	reg.Register(&mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
+		Summary: "结果A", FinishReason: HandoffReasonCompleted,
+	}})
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "g", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	jobID := firstJobID(t, e)
+	waitJobPublished(t, e, jobID)
+
+	start := time.Now()
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"job_ids": []string{jobID}, "timeout_ms": 5000}),
+	}})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("wait on a finished job took %v, want immediate", elapsed)
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "activity") {
+		t.Fatalf("wait output = %+v, want an activity report", msgs)
+	}
+	if !strings.Contains(msgs[0].Content, "done") {
+		t.Errorf("wait output = %q, want the finished job reported as done", msgs[0].Content)
+	}
+	// wait_agent OBSERVES: it must not consume the result, or a later
+	// agent_poll would report the job as gone.
+	e.bgMu.Lock()
+	task, still := e.bgTasks[jobID]
+	depth := 0
+	if task != nil {
+		depth = len(task.result)
+	}
+	e.bgMu.Unlock()
+	if !still {
+		t.Fatal("wait_agent must not remove the job")
+	}
+	if depth != 1 {
+		t.Errorf("result depth = %d after wait, want 1 (wait must not consume it)", depth)
+	}
+}
+
+func TestWaitAgent_TimesOutOnRunningJob(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	defer close(a.released)
+
+	start := time.Now()
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"timeout_ms": 200}),
+	}})
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Errorf("wait returned after %v, want it to block until the timeout", elapsed)
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "timeout") {
+		t.Fatalf("wait output = %+v, want a timeout report", msgs)
+	}
+}
+
+func TestWaitAgent_WakesOnCompletion(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		close(a.released)
+	}()
+
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"timeout_ms": 5000}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "activity") {
+		t.Fatalf("wait output = %+v, want an activity wake", msgs)
+	}
+}
+
+func TestWaitAgent_CancelledContext(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	defer close(a.released)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	msgs := e.processWaitAgentCalls(ctx, []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"timeout_ms": 10000}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "cancelled") {
+		t.Fatalf("wait output = %+v, want a cancelled report", msgs)
+	}
+}
+
+func TestWaitAgent_EmptyTable(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName, Input: mustJSON(map[string]any{}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "No matching background jobs") {
+		t.Fatalf("wait output = %+v, want the no-jobs sentence", msgs)
+	}
+}

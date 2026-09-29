@@ -564,6 +564,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingAskUserMsgs = append(pendingAskUserMsgs, e.processAgentResumeCalls(ctx, calls)...)
 	pendingPollMsgs := e.processAgentPollCalls(calls)
 	pendingListMsgs := e.processListAgentsCalls(calls)
+	pendingWaitMsgs := e.processWaitAgentCalls(ctx, calls)
 
 	e.history = append(e.history, assistant)
 
@@ -585,6 +586,9 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingListMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingWaitMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -611,6 +615,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		} else if call.Name == AgentResumeToolName {
 			continue
 		} else if call.Name == ListAgentsToolName {
+			continue
+		} else if call.Name == WaitAgentToolName {
 			continue
 		} else {
 			regularCalls = append(regularCalls, call)
@@ -849,6 +855,7 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, agentPollToolSpec(e.isChinese))
 	specs = append(specs, agentResumeToolSpec(e.isChinese))
 	specs = append(specs, listAgentsToolSpec(e.isChinese))
+	specs = append(specs, waitAgentToolSpec(e.isChinese))
 	return specs
 }
 
