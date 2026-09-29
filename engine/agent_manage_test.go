@@ -397,3 +397,202 @@ func TestWaitAgent_SkipsRemovedJob(t *testing.T) {
 		}
 	}
 }
+
+// --- send_message ------------------------------------------------------------
+
+func TestDrainInbox_AppendsUserMessages(t *testing.T) {
+	inbox := make(chan string, 3)
+	inbox <- "先看 P0 那几项"
+	inbox <- "  "
+	inbox <- "顺便看下测试"
+
+	history := drainInbox(inbox, nil)
+	if len(history) != 2 {
+		t.Fatalf("drained %d messages, want 2 (blank skipped)", len(history))
+	}
+	for _, m := range history {
+		if m.Role != "user" {
+			t.Errorf("drained message role = %q, want user", m.Role)
+		}
+	}
+	if got := drainInbox(inbox, nil); len(got) != 0 {
+		t.Error("a drained inbox must be empty")
+	}
+	if got := drainInbox(nil, nil); len(got) != 0 {
+		t.Error("a nil inbox (sync/nested run) must be a no-op")
+	}
+}
+
+func TestDrainInbox_AppendsToExistingHistory(t *testing.T) {
+	inbox := make(chan string, 1)
+	inbox <- "补充一点"
+	history := []ModelMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "goal"}}
+	got := drainInbox(inbox, history)
+	if len(got) != 3 || got[2].Content != "补充一点" {
+		t.Fatalf("history = %+v, want the message appended at the end", got)
+	}
+}
+
+func TestSendMessageToolSpec_Registered(t *testing.T) {
+	specs := (&Engine{tools: stubToolExecutor{}}).toolSpecsWithHandoff()
+	for _, s := range specs {
+		if s.Function.Name == SendMessageToolName {
+			return
+		}
+	}
+	t.Fatal("toolSpecsWithHandoff must include send_message")
+}
+
+func TestProcessSendMessageCalls_DeliversToRunningJob(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	defer close(a.released)
+	jobID := firstJobID(t, e)
+
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": jobID, "message": "换个方向"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "delivered") {
+		t.Fatalf("send_message output = %+v, want delivered", msgs)
+	}
+	e.bgMu.Lock()
+	task := e.bgTasks[jobID]
+	e.bgMu.Unlock()
+	if task == nil || len(task.inbox) != 1 {
+		t.Fatalf("inbox depth = %d, want 1", len(task.inbox))
+	}
+	if got := <-task.inbox; got != "换个方向" {
+		t.Errorf("inbox message = %q, want the sent text", got)
+	}
+}
+
+func TestProcessSendMessageCalls_UnknownJob(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": "bg-999", "message": "hi"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not found") {
+		t.Fatalf("send_message output = %+v, want not found", msgs)
+	}
+}
+
+func TestProcessSendMessageCalls_RejectsSuspendedJob(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), inbox: make(chan string, inboxBufferSize),
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": "bg-1", "message": "hi"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not running") {
+		t.Fatalf("send_message output = %+v, want a not-running refusal", msgs)
+	}
+	if !strings.Contains(msgs[0].Content, AgentResumeToolName) {
+		t.Errorf("refusal must point at %s, got %q", AgentResumeToolName, msgs[0].Content)
+	}
+}
+
+func TestProcessSendMessageCalls_RejectsFullInbox(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	full := make(chan string, 1)
+	full <- "占位"
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), inbox: full,
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": "bg-1", "message": "hi"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "inbox is full") {
+		t.Fatalf("send_message output = %+v, want an inbox-full refusal", msgs)
+	}
+}
+
+func TestProcessSendMessageCalls_RequiresBothFields(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "non-empty job_id and message") {
+		t.Fatalf("send_message output = %+v, want a validation error", msgs)
+	}
+}
+
+// inboxCaptureAgent records the Handoff it was given (and blocks until
+// released), so a test can prove the engine actually handed the run an inbox —
+// without that wiring drainInbox would never see anything.
+type inboxCaptureAgent struct {
+	id      AgentID
+	got     chan Handoff
+	release chan struct{}
+}
+
+func (a *inboxCaptureAgent) ID() AgentID     { return a.id }
+func (a *inboxCaptureAgent) Spec() AgentSpec { return AgentSpec{ID: a.id} }
+func (a *inboxCaptureAgent) Run(_ context.Context, in Handoff) (*HandoffResult, error) {
+	a.got <- in
+	<-a.release
+	return &HandoffResult{Summary: "ok", FinishReason: HandoffReasonCompleted}, nil
+}
+
+// TestSendMessage_ReachesTheSubAgentRun proves the end-to-end wiring: an async
+// dispatch hands the run the very channel send_message writes to, so a message
+// sent through the tool is what drainInbox would read inside the sub-agent loop.
+func TestSendMessage_ReachesTheSubAgentRun(t *testing.T) {
+	a := &inboxCaptureAgent{id: "cap", got: make(chan Handoff, 1), release: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "cap", Goal: "g", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	runInput := <-a.got
+	if runInput.Inbox == nil {
+		t.Fatal("dispatchAsync must hand the run an inbox")
+	}
+
+	msgs := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "tc1", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": firstJobID(t, e), "message": "改方向"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "delivered") {
+		t.Fatalf("send_message output = %+v, want delivered", msgs)
+	}
+	select {
+	case got := <-runInput.Inbox:
+		if got != "改方向" {
+			t.Errorf("run inbox received %q, want the sent text", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the sent message never reached the run's inbox")
+	}
+	close(a.release)
+}

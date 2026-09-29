@@ -322,3 +322,93 @@ func (e *Engine) waitTargetsLocked(ids []string) []*bgTask {
 	}
 	return out
 }
+
+// --- send_message ------------------------------------------------------------
+
+// SendMessageParams is the argument schema of the send_message tool call.
+type SendMessageParams struct {
+	JobID   string `json:"job_id"`
+	Message string `json:"message"`
+}
+
+// sendMessageToolSpec returns the tool definition for messaging a running job.
+func sendMessageToolSpec(zh bool) ModelTool {
+	desc := "Send a message to a RUNNING background sub-agent. It reads the message at its next step and can act on it (redirect the work, add a constraint, answer its question). Check its state with agent_poll first; for a job that is waiting for the user, use agent_resume instead."
+	jobDesc := "The job handle, e.g. bg-3"
+	msgDesc := "The message, phrased as an instruction or fact for the sub-agent"
+	if zh {
+		desc = "向正在运行的后台子代理发送一条消息。它会在下一步读到并据此行动（改方向、加约束、回答它的疑问）。先用 agent_poll 看状态；等待用户输入的任务请改用 agent_resume。"
+		jobDesc = "任务句柄，例如 bg-3"
+		msgDesc = "消息内容，写成给子代理的指令或事实"
+	}
+	params := fmt.Sprintf(`{
+		"type": "object",
+		"properties": {
+			"job_id": {"type": "string", "description": %q},
+			"message": {"type": "string", "description": %q}
+		},
+		"required": ["job_id", "message"]
+	}`, jobDesc, msgDesc)
+	return ModelTool{
+		Type: "function",
+		Function: ModelToolFunction{
+			Name:        SendMessageToolName,
+			Description: desc,
+			Parameters:  json.RawMessage(params),
+		},
+	}
+}
+
+// processSendMessageCalls delivers every send_message call into its target's
+// inbox. A non-running or unknown job is refused with a pointer to the right
+// tool, so the model can self-correct in one turn.
+func (e *Engine) processSendMessageCalls(calls []ToolCallRequest) []Message {
+	var msgs []Message
+	for _, call := range calls {
+		if call.Name != SendMessageToolName {
+			continue
+		}
+		var params SendMessageParams
+		if err := json.Unmarshal(call.Input, &params); err != nil ||
+			strings.TrimSpace(params.JobID) == "" || strings.TrimSpace(params.Message) == "" {
+			msgs = append(msgs, agentToolMessage(call.ID,
+				"Error: send_message requires a non-empty job_id and message"))
+			continue
+		}
+
+		e.initBackgroundTasks()
+		e.bgMu.Lock()
+		task := e.bgTasks[params.JobID]
+		if task == nil {
+			e.bgMu.Unlock()
+			msgs = append(msgs, agentToolMessage(call.ID, fmt.Sprintf(
+				"Error: send_message job %q not found (already consumed or run ended).", params.JobID)))
+			continue
+		}
+		if task.state != bgStateRunning || channelClosed(task.done) {
+			state := agentJobState(task)
+			e.bgMu.Unlock()
+			msgs = append(msgs, agentToolMessage(call.ID, fmt.Sprintf(
+				"Error: job %s is not running (%s). Use agent_poll(%s) to collect it, or agent_resume(%s, <answer>) if it is waiting for the user.",
+				params.JobID, state, params.JobID, params.JobID)))
+			continue
+		}
+		inbox := task.inbox
+		e.bgMu.Unlock()
+
+		if inbox == nil {
+			msgs = append(msgs, agentToolMessage(call.ID, fmt.Sprintf(
+				"Error: job %s has no message inbox (it was not started as an async job).", params.JobID)))
+			continue
+		}
+		select {
+		case inbox <- params.Message:
+			msgs = append(msgs, agentToolMessage(call.ID, fmt.Sprintf(
+				"Message delivered to %s; it reads it at its next step.", params.JobID)))
+		default:
+			msgs = append(msgs, agentToolMessage(call.ID, fmt.Sprintf(
+				"Error: job %s's inbox is full — it has not consumed the previous messages yet. Poll it before sending more.", params.JobID)))
+		}
+	}
+	return msgs
+}

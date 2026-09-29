@@ -501,6 +501,10 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			tokenNudgePending = false
 		}
 
+		// Mid-run messages from send_message. Drained at the top of the turn so
+		// the injected user message never splits a tool-call/tool-response pair.
+		history = drainInbox(input.Inbox, history)
+
 		req := ModelRequest{
 			Model:           modelName,
 			Messages:        history,
@@ -1355,4 +1359,30 @@ func parseAskUserInput(input json.RawMessage) (struct{ Question string }, bool) 
 		}
 	}
 	return struct{ Question string }{Question: p.Question}, true
+}
+
+// drainInbox moves every pending send_message into history as a user message,
+// at the top of an iteration. Appending mid-iteration would land between an
+// assistant(tool_calls) message and its tool responses, which the API rejects —
+// the same reason tokenBudgetNudge is armed and injected here.
+//
+// Non-blocking by design: an empty inbox (the common case) costs one select.
+func drainInbox(inbox <-chan string, history []ModelMessage) []ModelMessage {
+	if inbox == nil {
+		return history
+	}
+	for {
+		select {
+		case msg, ok := <-inbox:
+			if !ok {
+				return history
+			}
+			if strings.TrimSpace(msg) == "" {
+				continue
+			}
+			history = append(history, ModelMessage{Role: "user", Content: msg})
+		default:
+			return history
+		}
+	}
 }
