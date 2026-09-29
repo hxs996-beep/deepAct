@@ -67,14 +67,17 @@ func agentJobState(t *bgTask) string {
 	}
 }
 
-// agentJobLineLocked renders one job as a single line. Callers must hold bgMu.
-func agentJobLineLocked(t *bgTask, now time.Time) string {
+// agentJobLine renders one job as a single line. Callers must hold bgMu.
+func agentJobLine(t *bgTask, now time.Time) string {
 	if t == nil {
 		return "unknown"
 	}
 	state := agentJobState(t)
 	elapsed := now.Sub(t.startAt).Round(time.Second)
-	line := fmt.Sprintf("%s | %s | %s | %s | %s", t.id, t.agent, state, elapsed, t.goal)
+	// goal is model-supplied: collapse newlines so the one-job-per-line
+	// contract holds (a raw \n would split one job into two lines).
+	goal := strings.ReplaceAll(strings.TrimSpace(t.goal), "\n", " ")
+	line := fmt.Sprintf("%s | %s | %s | %s | %s", t.id, t.agent, state, elapsed, goal)
 	if t.resultBrief != "" {
 		line += " | result: " + t.resultBrief
 	}
@@ -101,7 +104,7 @@ func (e *Engine) renderAgentList() string {
 	now := time.Now()
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
-		lines = append(lines, agentJobLineLocked(e.bgTasks[id], now))
+		lines = append(lines, agentJobLine(e.bgTasks[id], now))
 	}
 	e.bgMu.Unlock()
 	if len(lines) == 0 {

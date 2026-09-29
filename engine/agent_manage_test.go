@@ -177,3 +177,33 @@ func TestBackgroundJobsPinnedInjection_ReportsDone(t *testing.T) {
 		t.Errorf("pinned summary = %q, want the job handle", e.pendingPinnedMessages[0])
 	}
 }
+
+// TestRenderAgentList_DoneJobLine covers the two branches the other list tests
+// miss — the done marker and the result brief — and pins the one-line contract
+// for a model-supplied goal that contains newlines.
+func TestRenderAgentList_DoneJobLine(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	done := &bgTask{
+		id: "bg-3", agent: "sub", goal: "总结\n要点", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), resultBrief: "结论A",
+	}
+	close(done.done)
+	e.bgMu.Lock()
+	e.bgTasks["bg-3"] = done
+	e.bgMu.Unlock()
+
+	out := e.renderAgentList()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1 {
+		t.Fatalf("renderAgentList = %q, want exactly one line (goal newline must be collapsed)", out)
+	}
+	if !strings.HasPrefix(lines[0], "bg-3 | sub | done") {
+		t.Errorf("done line = %q, want prefix %q", lines[0], "bg-3 | sub | done")
+	}
+	for _, want := range []string{"collect with agent_poll", "result: 结论A", "总结 要点"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("done line %q missing %q", lines[0], want)
+		}
+	}
+}
