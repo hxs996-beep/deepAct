@@ -236,8 +236,16 @@ func TestWaitAgent_ReturnsImmediatelyWhenDone(t *testing.T) {
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "activity") {
 		t.Fatalf("wait output = %+v, want an activity report", msgs)
 	}
-	if !strings.Contains(msgs[0].Content, "done") {
-		t.Errorf("wait output = %q, want the finished job reported as done", msgs[0].Content)
+	// Assert the job's OWN line, not the fixed closing sentence (which
+	// contains the word "done" unconditionally).
+	doneLine := false
+	for _, line := range strings.Split(msgs[0].Content, "\n") {
+		if strings.HasPrefix(line, jobID+" | sub | done") {
+			doneLine = true
+		}
+	}
+	if !doneLine {
+		t.Errorf("wait output = %q, want a %q line", msgs[0].Content, jobID+" | sub | done")
 	}
 	// wait_agent OBSERVES: it must not consume the result, or a later
 	// agent_poll would report the job as gone.
@@ -300,10 +308,14 @@ func TestWaitAgent_WakesOnCompletion(t *testing.T) {
 		close(a.released)
 	}()
 
+	start := time.Now()
 	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
 		ID: "tc1", Name: WaitAgentToolName,
 		Input: mustJSON(map[string]any{"timeout_ms": 5000}),
 	}})
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Errorf("wait returned after %v, want it to block until the job finished", elapsed)
+	}
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "activity") {
 		t.Fatalf("wait output = %+v, want an activity wake", msgs)
 	}
