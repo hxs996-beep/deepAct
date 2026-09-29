@@ -123,10 +123,21 @@ func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages, want 1", len(msgs))
 	}
-	for _, want := range []string{"bg-1", "researcher", "bg-2", "critic", "awaiting_user"} {
-		if !strings.Contains(msgs[0].Content, want) {
-			t.Errorf("list output %q missing %q", msgs[0].Content, want)
-		}
+	lines := strings.Split(strings.TrimSpace(msgs[0].Content), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("list has %d lines, want 2:\n%s", len(lines), msgs[0].Content)
+	}
+	// Ordering is part of the contract (id-sorted, stable output), and each
+	// job's own state must be right — a substring check could not tell a
+	// swapped running/awaiting_user mapping from a correct one.
+	if !strings.HasPrefix(lines[0], "bg-1 | researcher | running") {
+		t.Errorf("line 0 = %q, want the running researcher job first", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "bg-2 | critic | awaiting_user") {
+		t.Errorf("line 1 = %q, want the awaiting_user critic job second", lines[1])
+	}
+	if !strings.Contains(lines[0], "调研缓存") || !strings.Contains(lines[1], "审查方案") {
+		t.Errorf("each line must carry its own goal:\n%s", msgs[0].Content)
 	}
 }
 
@@ -134,7 +145,35 @@ func TestProcessListAgentsCalls_Empty(t *testing.T) {
 	e := &Engine{isChinese: true, state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processListAgentsCalls([]ToolCallRequest{{ID: "tc1", Name: ListAgentsToolName}})
-	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "No background sub-agent jobs") {
-		t.Fatalf("empty list = %+v, want the no-jobs sentence", msgs)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Content != "No background sub-agent jobs." {
+		t.Fatalf("empty list = %q, want the exact no-jobs sentence", msgs[0].Content)
+	}
+}
+
+// TestBackgroundJobsPinnedInjection_ReportsDone pins the consistency fix: a
+// finished-but-uncollected job (state still bgStateRunning, done closed) must
+// be reported as done in the pinned summary, exactly as list_agents does.
+func TestBackgroundJobsPinnedInjection_ReportsDone(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	done := &bgTask{
+		id: "bg-1", agent: "researcher", goal: "调研", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}),
+	}
+	close(done.done)
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = done
+	e.bgMu.Unlock()
+
+	e.pendingPinnedMessages = nil
+	e.injectBackgroundJobsSummary()
+	if len(e.pendingPinnedMessages) != 1 || !strings.Contains(e.pendingPinnedMessages[0], "done") {
+		t.Fatalf("pinned summary = %v, want a done report", e.pendingPinnedMessages)
+	}
+	if !strings.Contains(e.pendingPinnedMessages[0], "bg-1") {
+		t.Errorf("pinned summary = %q, want the job handle", e.pendingPinnedMessages[0])
 	}
 }

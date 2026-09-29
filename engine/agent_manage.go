@@ -69,6 +69,9 @@ func agentJobState(t *bgTask) string {
 
 // agentJobLineLocked renders one job as a single line. Callers must hold bgMu.
 func agentJobLineLocked(t *bgTask, now time.Time) string {
+	if t == nil {
+		return "unknown"
+	}
 	state := agentJobState(t)
 	elapsed := now.Sub(t.startAt).Round(time.Second)
 	line := fmt.Sprintf("%s | %s | %s | %s | %s", t.id, t.agent, state, elapsed, t.goal)

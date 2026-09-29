@@ -1588,6 +1588,12 @@ func (e *Engine) injectBackgroundJobsSummary() {
 			fmt.Fprintf(&b, "%s (%s): %s — waiting for user input (answer with agent_resume(%s, …))", id, t.agent, t.goal, id)
 		case t.state == bgStateAwaitingUser:
 			fmt.Fprintf(&b, "%s (%s): %s — waiting for a sub-agent result", id, t.agent, t.goal)
+		case channelClosed(t.done):
+			// A finished-but-uncollected job keeps state == bgStateRunning, so
+			// the done signal — not the state field — is what makes this a
+			// "done" report. Same rule as agentJobState, so the pinned summary
+			// and list_agents never disagree.
+			fmt.Fprintf(&b, "%s (%s): %s — done (collect with agent_poll(%s))", id, t.agent, t.goal, id)
 		default:
 			fmt.Fprintf(&b, "%s (%s): %s — running", id, t.agent, t.goal)
 		}
