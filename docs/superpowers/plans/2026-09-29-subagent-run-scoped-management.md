@@ -1869,6 +1869,39 @@ git commit -m "test(engine): end-to-end coverage for the sub-agent management su
 
 **已知既有问题（非本次引入，记录待后续单独处理）**：`finishResumedJob` 的"再次挂起"分支仍直接发 `agent_done`（`engine/suspend.go:202-204`），与 `dispatchAsync` 的"挂起时不发 `agent_done`"约定不一致——一个作业一生可能出现两次 `agent_done`。本计划范围不含该修复。
 
+### 任务 4 修正：`descendantJobIDsLocked` 的方向（**上方任务 4 代码块以本节为准**）
+
+计划里该函数的草稿沿 `pt.childRunID == out[i]` 扫描，算出来的其实是**祖先**。委托链存在**父节点**上（父的 `childRunID` 指向它等待的子任务；`finishResumedJob` 正是用 `pt.childRunID == id` 反查父节点），所以关闭子树必须沿 `childRunID` **正向链**向下走，并用 `containsString` 去重保证终止。实现与配套测试均已按正向链修正（测试用 `bg-1.childRunID = "bg-2"` 表达"bg-2 是 bg-1 的下级"）。
+
+### 任务 5 修正一：fork **不做**尾随 user 合并
+
+原计划在 fork 前缀与 volatile goal 之间做"合并尾随 user 消息"。实施时取消：fork 前缀里的历史 user 请求与当前 goal 是**两条独立 user 消息**——合并会把"历史"与"当前指令"混成一条，反而更差；而生产代码本就有连续 user 消息的先例（`engine/loop.go` 的 `/confirm` 路径连发两条），任务 3 实施时已核实。**上方任务 5 节的合并代码与"不得产生相邻 user 消息"的断言作废**，改为断言"fork 消息紧跟 system、goal 是最后一条 user 消息"。
+
+### 任务 5 修正二：async 路径必须单独 materialize fork
+
+`dispatchAsync` **不走** `runHandoff`，它自己构造 `Handoff`。因此 `fork_turns` 必须在两条路径都赋值（`runHandoff` 经 `handoffOptions.fork`；`dispatchAsync` 直接调 `e.forkHistoryFor`），否则 `async:true` 会静默忽略 fork。已由 `TestForkTurns_ReachTheRun` 钉住。
+
+### 已知限制（评审记录，未修）
+
+- **恢复会丢弃挂起前未消费的在队消息**：`takeLeafForResume` 重建 inbox，挂起前已入队但未被 drain 的 send_message 消息随之丢弃（best-effort 语义，规格未要求持久化）。
+- **send_message 存在 TOCTOU 窗口**：状态检查与投递之间作业可能已结束，消息会落进不再被读取的缓冲区（≤ `inboxBufferSize`）。
+- **`close` 会把已完成但未收集的下级一并移除**：`childRunID` 从不清空，故已完成的下级仍会被子树遍历命中；它们是真实下级，符合"连同下级一起移除"的语义，属轻微过度包含。
+- **计划文档已同步的既有问题**：`finishResumedJob` 的 re-suspend 分支重复发 `agent_done`（见上）。
+
+## 任务完成状态
+
+| 任务 | 状态 | 提交 |
+|---|---|---|
+| 0 基础设施 | ✅ 规格 + 质量双审通过 | `f51a60f` `0172747` `51f004d` |
+| 1 `list_agents` | ✅ 双审通过 | `ea865c1` `a1cc19f` `3109611` |
+| 2 `wait_agent` | ✅ 双审通过 | `d6c08a0` `5cdce5a` `f36f494` |
+| 3 `send_message` | ✅ 双审通过（含变异验证） | `3af15be` `761427c` |
+| 4 `interrupt_agent` + `close_agent` | ✅ 双审通过（2 个阻塞项已修） | `db964da` `0ad1ab7` |
+| 5 `fork` 父历史 | ⚠️ 实现 + 自查完成；**子代理两阶段复查待补**（评审子代理账号配额 429，2026-09-30 00:29 重置） | `9aebea6` |
+| 6 端到端 + 全量验证 | ✅ 完成 | 见下 |
+
+**最终验证证据**：`go build ./...` 通过；`go test ./... -count=1` 全绿（15 个包）；`go test ./engine/ ./tools/ -count=1 -race` 全绿。
+
 ---
 
 ## 执行交接
