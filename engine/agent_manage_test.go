@@ -136,6 +136,11 @@ func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
 	if !strings.HasPrefix(lines[1], "bg-2 | critic | awaiting_user") {
 		t.Errorf("line 1 = %q, want the awaiting_user critic job second", lines[1])
 	}
+	// A waiting job must point somewhere useful; agent_poll knows whether the
+	// leaf or an intermediate node is the answerable one.
+	if !strings.Contains(lines[1], AgentPollToolName) {
+		t.Errorf("a waiting job's line must point at %s, got %q", AgentPollToolName, lines[1])
+	}
 	if !strings.Contains(lines[0], "调研缓存") || !strings.Contains(lines[1], "审查方案") {
 		t.Errorf("each line must carry its own goal:\n%s", msgs[0].Content)
 	}
@@ -357,6 +362,31 @@ func TestWaitAgent_EmptyTable(t *testing.T) {
 	}})
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "No matching background jobs") {
 		t.Fatalf("wait output = %+v, want the no-jobs sentence", msgs)
+	}
+}
+
+// TestWaitAgent_ReportsWaitingJob: a job waiting for the user is already
+// settled, so wait returns at once — and its closing line must point at
+// agent_resume, not agent_poll.
+func TestWaitAgent_ReportsWaitingJob(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), suspended: &SuspendedRun{Question: "q"},
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "tc1", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"job_ids": []string{"bg-1"}, "timeout_ms": 5000}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "activity") {
+		t.Fatalf("wait output = %+v, want an immediate activity report", msgs)
+	}
+	if !strings.Contains(msgs[0].Content, AgentResumeToolName) {
+		t.Errorf("waiting for the user must point at %s, got %q", AgentResumeToolName, msgs[0].Content)
 	}
 }
 
@@ -728,6 +758,32 @@ func TestInterruptAgent_SuspendedJobIsNotRunning(t *testing.T) {
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "not running") {
 		t.Fatalf("interrupt output = %+v, want a not-running refusal", msgs)
 	}
+	if !strings.Contains(msgs[0].Content, AgentResumeToolName) {
+		t.Errorf("a waiting job's refusal must point at %s, got %q", AgentResumeToolName, msgs[0].Content)
+	}
+}
+
+// TestInterruptAgent_FinishedJobPointsAtPoll: a finished-but-uncollected job
+// still holds an async slot, so interrupting it must send the model to
+// agent_poll (which frees it) instead of just saying "nothing to interrupt".
+func TestInterruptAgent_FinishedJobPointsAtPoll(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	fin := &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), resultBrief: "结论",
+	}
+	close(fin.done)
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = fin
+	e.bgMu.Unlock()
+
+	msgs := e.processInterruptAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: InterruptAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, AgentPollToolName) {
+		t.Fatalf("interrupt on a finished job = %+v, want a pointer to %s", msgs, AgentPollToolName)
+	}
 }
 
 // TestCloseAgent_RemovesJobAndDescendants pins the subtree walk: childRunID
@@ -785,6 +841,62 @@ func TestCloseAgent_DropsSuspendedWithWarning(t *testing.T) {
 	}})
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "suspended") {
 		t.Fatalf("close output = %+v, want a suspended-dropped warning", msgs)
+	}
+}
+
+// TestCloseAgent_DropsPendingQuestion: the question a closed job was waiting on
+// must stop being presented — otherwise the user answers a handle that is gone.
+func TestCloseAgent_DropsPendingQuestion(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.pushAskUser(&AskUserRequest{Question: "选哪个？", RunID: "bg-1"})
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "sub", goal: "g", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), suspended: &SuspendedRun{Question: "选哪个？"},
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-1"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "suspended") {
+		t.Fatalf("close output = %+v, want a suspended-dropped warning", msgs)
+	}
+	if q := e.peekAskUser(); q != nil {
+		t.Errorf("the closed job's question must be dropped, still pending: %+v", q)
+	}
+}
+
+// TestCloseAgent_ClosesWaitingParent pins the upward half of the chain walk: a
+// parent waiting on a child that no longer exists can never be resumed, so
+// closing the child must take the parent too.
+func TestCloseAgent_ClosesWaitingParent(t *testing.T) {
+	e := &Engine{isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{
+		id: "bg-1", agent: "one", goal: "父", state: bgStateAwaitingUser,
+		startAt: time.Now(), done: make(chan struct{}), childRunID: "bg-2",
+	}
+	e.bgTasks["bg-2"] = &bgTask{
+		id: "bg-2", agent: "one", goal: "子", state: bgStateRunning,
+		startAt: time.Now(), done: make(chan struct{}), cancel: func() {},
+	}
+	e.bgMu.Unlock()
+
+	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-2"}),
+	}})
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "Closed 2 job") {
+		t.Fatalf("close output = %+v, want the waiting parent closed too", msgs)
+	}
+	e.bgMu.Lock()
+	_, has1 := e.bgTasks["bg-1"]
+	_, has2 := e.bgTasks["bg-2"]
+	e.bgMu.Unlock()
+	if has1 || has2 {
+		t.Errorf("both the child and its waiting parent must be gone (bg-1=%v bg-2=%v)", has1, has2)
 	}
 }
 

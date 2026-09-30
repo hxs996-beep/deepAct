@@ -84,6 +84,10 @@ func agentJobLine(t *bgTask, now time.Time) string {
 	}
 	if state == "done" {
 		line += " | collect with agent_poll"
+	} else if state == "awaiting_user" {
+		// Whether the leaf or an intermediate node is answerable is agent_poll's
+		// call (it knows the chain), so pointing there is always correct.
+		line += " | use agent_poll for the pending question"
 	}
 	return line
 }
@@ -178,9 +182,9 @@ func clampAgentWaitMS(ms int) int {
 
 // waitAgentToolSpec returns the tool definition for waiting on background jobs.
 func waitAgentToolSpec(zh bool) ModelTool {
-	desc := "Block until one of the given background sub-agent jobs finishes, the timeout elapses, or the turn is cancelled — then report each job's status. OBSERVES only: it never consumes a result, so collect it afterwards with agent_poll(job_id). Omit job_ids to wait on every running job."
+	desc := "Block until one of the given background sub-agent jobs finishes or starts waiting for the user, the timeout elapses, or the turn is cancelled — then report each job's status. OBSERVES only: it never consumes a result, so collect a finished job with agent_poll(job_id) (and answer a waiting one with agent_resume). Omit job_ids to wait on every running job."
 	if zh {
-		desc = "阻塞等待，直到指定的后台子代理任务之一完成、超时或本轮被取消，然后报告各任务状态。只观测、不消费结果——之后仍要用 agent_poll(job_id) 取结果。省略 job_ids 表示等待所有运行中的任务。"
+		desc = "阻塞等待，直到指定的后台子代理任务之一完成或进入等待用户输入、超时或本轮被取消，然后报告各任务状态。只观测、不消费结果——完成的任务之后仍要用 agent_poll(job_id) 取结果（等待用户输入的任务用 agent_resume 回答）。省略 job_ids 表示等待所有运行中的任务。"
 	}
 	return ModelTool{
 		Type: "function",
@@ -275,17 +279,25 @@ func (e *Engine) waitForAgents(ctx context.Context, params WaitAgentParams) stri
 	var b strings.Builder
 	fmt.Fprintf(&b, "wait_agent (%s):\n", reason)
 	now := time.Now()
+	waiting := false
 	for _, t := range targets {
 		// Removed while we waited (polled, cancelled, TTL-dropped): reporting a
 		// handle the model can no longer act on is worse than reporting nothing.
 		if e.bgTasks[t.id] != t {
 			continue
 		}
+		if agentJobState(t) == "awaiting_user" {
+			waiting = true
+		}
 		b.WriteString(agentJobLine(t, now))
 		b.WriteByte('\n')
 	}
 	e.bgMu.Unlock()
-	b.WriteString("Collect a done job's result with agent_poll(job_id).")
+	if waiting {
+		b.WriteString("A job above is waiting for user input: answer it with agent_resume(job_id).")
+	} else {
+		b.WriteString("Collect a done job's result with agent_poll(job_id).")
+	}
 	return b.String()
 }
 
@@ -495,10 +507,12 @@ func (e *Engine) interruptJob(jobID string) string {
 		e.bgMu.Unlock()
 		return fmt.Sprintf("Error: interrupt_agent job %q not found.", jobID)
 	}
-	if task.state != bgStateRunning || channelClosed(task.done) {
-		state := agentJobState(task)
+	if state := agentJobState(task); state != "running" {
 		e.bgMu.Unlock()
-		return fmt.Sprintf("Job %s is not running (%s) — nothing to interrupt.", jobID, state)
+		if state == "awaiting_user" {
+			return fmt.Sprintf("Job %s is not running — it is waiting for the user. Answer it with agent_resume(%s, <answer>), or drop it with close_agent(%s).", jobID, jobID, jobID)
+		}
+		return fmt.Sprintf("Job %s is not running — it already finished. Collect its result with agent_poll(%s); that also frees its async slot.", jobID, jobID)
 	}
 	cancel := task.cancel
 	e.bgMu.Unlock()
@@ -543,9 +557,10 @@ func (e *Engine) closeAgentJob(jobID string) string {
 		e.bgMu.Unlock()
 		return fmt.Sprintf("Error: close_agent job %q not found.", jobID)
 	}
-	ids := e.descendantJobIDsLocked(jobID)
+	ids := e.closureJobIDsLocked(jobID)
 	cancels := make([]context.CancelFunc, 0, len(ids))
 	terminal := make([]string, 0, len(ids)) // agent names needing an agent_done
+	removed := make(map[string]bool, len(ids))
 	closed := 0
 	suspended, uncollected := 0, 0
 	for _, id := range ids {
@@ -571,9 +586,15 @@ func (e *Engine) closeAgentJob(jobID string) string {
 			close(t.done) // release any waiter
 		}
 		delete(e.bgTasks, id)
+		removed[id] = true
 		closed++
 	}
 	e.bgMu.Unlock()
+
+	// A removed suspended entry may still own a question the user is looking at:
+	// drop it, or the UI keeps presenting a handle that no longer exists (and
+	// the answer would hit "not found").
+	e.dropAskUserFor(removed)
 
 	for _, cancel := range cancels {
 		cancel()
@@ -594,23 +615,37 @@ func (e *Engine) closeAgentJob(jobID string) string {
 	return msg
 }
 
-// descendantJobIDsLocked returns id plus every job below it. The delegation
-// link is stored on the PARENT — childRunID names the pending child (that is
-// what finishResumedJob reverse-looks-up to find a parent) — so the walk follows
-// the chain downward by map lookup. Bounded by the chain length.
+// closureJobIDsLocked returns the full delegation chain to close for id: the
+// job, every job below it, and every job ABOVE it that is still waiting on the
+// chain.
+//
+// Downward: the link is stored on the PARENT — childRunID names the pending
+// child (that is what finishResumedJob reverse-looks-up to find a parent) — so
+// following childRunID walks toward the leaves.
+//
+// Upward: a parent waiting on a child that no longer exists can never be
+// resumed (agent_resume would report "state is gone"), so leaving it behind
+// would strand it until the 30-minute TTL. Closing takes it too.
+//
+// containsString dedupes, so cycles and diamonds terminate.
 //
 // Callers must hold bgMu.
-func (e *Engine) descendantJobIDsLocked(id string) []string {
+func (e *Engine) closureJobIDsLocked(id string) []string {
 	out := []string{id}
 	for i := 0; i < len(out); i++ {
-		t := e.bgTasks[out[i]]
-		if t == nil || t.childRunID == "" {
-			continue
+		cur := out[i]
+		// Down: the child this job is waiting for.
+		if t := e.bgTasks[cur]; t != nil && t.childRunID != "" {
+			if _, ok := e.bgTasks[t.childRunID]; ok && !containsString(out, t.childRunID) {
+				out = append(out, t.childRunID)
+			}
 		}
-		if _, ok := e.bgTasks[t.childRunID]; !ok || containsString(out, t.childRunID) {
-			continue
+		// Up: a still-waiting parent of this job.
+		for pid, pt := range e.bgTasks {
+			if pt.childRunID == cur && pt.state == bgStateAwaitingUser && !containsString(out, pid) {
+				out = append(out, pid)
+			}
 		}
-		out = append(out, t.childRunID)
 	}
 	return out
 }

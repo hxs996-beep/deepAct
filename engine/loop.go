@@ -778,6 +778,26 @@ func (e *Engine) consumeAskUser() {
 	e.askUserMu.Unlock()
 }
 
+// dropAskUserFor removes the pending questions belonging to the given job
+// handles. Called when a suspended job is closed: the entry is gone, so its
+// question must not remain presented (the user's answer could never be
+// delivered — agent_resume would report "not found").
+func (e *Engine) dropAskUserFor(runIDs map[string]bool) {
+	if len(runIDs) == 0 {
+		return
+	}
+	e.askUserMu.Lock()
+	defer e.askUserMu.Unlock()
+	kept := e.pendingAskUser[:0]
+	for _, q := range e.pendingAskUser {
+		if q != nil && q.RunID != "" && runIDs[q.RunID] {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	e.pendingAskUser = kept
+}
+
 // buildRunSummary produces the user-facing summary for a Run() by walking the
 // history backwards. It falls back through three levels so that an agent which
 // never produced a visible text reply is never falsely reported as "Done/完成":
