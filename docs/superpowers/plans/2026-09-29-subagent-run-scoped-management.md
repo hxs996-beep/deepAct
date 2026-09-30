@@ -1902,6 +1902,27 @@ git commit -m "test(engine): end-to-end coverage for the sub-agent management su
 
 **最终验证证据**：`go build ./...` 通过；`go test ./... -count=1` 全绿（15 个包）；`go test ./engine/ ./tools/ -count=1 -race` 全绿。
 
+### 最终整体审查的后续修复（已实施）
+
+最终**整体（跨任务）审查**判定"可合并"，并列出 7 处"状态 × 文案"缺口。处理结果：
+
+1. `fork_turns` 并非作业管理工具，而是 `handoff_to_agent` 的参数 —— 矩阵实为 5 工具 × 3 状态，非缺陷。
+2. `list_agents` 的 `awaiting_user` 行现追加 `| use agent_poll for the pending question`（叶子还是中间节点由 `agent_poll` 判定，指引永远正确）。
+3. `wait_agent` 的收尾句按目标状态分流：有等待用户的任务时指向 `agent_resume`，否则指向 `agent_poll`；工具描述同步改准。
+4. `interrupt_agent` 对**已完成**的作业改为指引 `agent_poll`，并说明收集结果同时释放 async 名额（此前只回 "nothing to interrupt"，模型会莫名撞名额上限）。
+5. `interrupt_agent` 对**等待用户**的作业改为指引 `agent_resume` / `close_agent`。
+6. **（真实缺陷）** `close_agent` 现在清除被关闭挂起作业的待答问题（新增 `Engine.dropAskUserFor`，`engine/loop.go`）——否则 UI 会继续呈现一个句柄已消失的问题，用户回答后 `agent_resume` 报 not found。
+7. **（真实缺陷）** `close_agent` 的遍历由"仅向下"扩展为 `closureJobIDsLocked`：**同时向上**纳入仍在等待该链的父作业。此前单独关闭子作业会让父作业永久 `awaiting_user`（poll 恒回 "Poll again later"、resume 报 "state is gone"），直到 30 分钟 TTL 才自愈。
+
+新增/加强测试：`TestInterruptAgent_FinishedJobPointsAtPoll`、`TestCloseAgent_DropsPendingQuestion`、`TestCloseAgent_ClosesWaitingParent`、`TestWaitAgent_ReportsWaitingJob`，并强化 `TestProcessListAgentsCalls_ShowsJobs` 与 `TestInterruptAgent_SuspendedJobIsNotRunning`。
+
+### 评审门状态（如实记录）
+
+- **任务 0-4**：规格审查 + 代码质量审查**两阶段独立子代理审查均通过**（每轮发现的问题已修复并复审；任务 4 的 2 个阻塞项、任务 3 的测试假通过缺口均已闭环）。
+- **任务 5**：实现者自查完成；**子代理独立复查未完成**——评审子代理账号配额耗尽（429，2026-09-30 00:29 重置）。
+- **最终整体审查**：**已执行**并通过（结论"可合并"），其 7 项发现已按上节处理。
+- 因此合并前唯一遗留是"任务 5 的独立复查"，配额恢复后可补做（`git diff main...feat/subagent-run-management -- engine/fork.go engine/fork_test.go`）。
+
 ---
 
 ## 执行交接
