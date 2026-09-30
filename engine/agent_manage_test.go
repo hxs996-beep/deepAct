@@ -873,3 +873,107 @@ func TestCloseAgent_WarnsAboutDiscardedResult(t *testing.T) {
 		t.Errorf("a finished job already got agent_done; close must not emit it twice, got %+v", events)
 	}
 }
+
+// --- end-to-end --------------------------------------------------------------
+
+// TestAgentManagement_EndToEnd walks the intended model flow over one job:
+// dispatch async → list → wait → send_message → interrupt → poll.
+func TestAgentManagement_EndToEnd(t *testing.T) {
+	a := &ctxWaitAgent{id: "one", start: make(chan struct{}), cancel: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "长调研", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	jobID := firstJobID(t, e)
+
+	list := e.processListAgentsCalls([]ToolCallRequest{{ID: "t1", Name: ListAgentsToolName}})
+	if len(list) != 1 || !strings.Contains(list[0].Content, "running") {
+		t.Fatalf("list = %+v, want the job reported as running", list)
+	}
+
+	wait := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
+		ID: "t2", Name: WaitAgentToolName,
+		Input: mustJSON(map[string]any{"job_ids": []string{jobID}, "timeout_ms": 200}),
+	}})
+	if len(wait) != 1 || !strings.Contains(wait[0].Content, "timeout") {
+		t.Fatalf("wait = %+v, want a timeout while the job still runs", wait)
+	}
+
+	send := e.processSendMessageCalls([]ToolCallRequest{{
+		ID: "t3", Name: SendMessageToolName,
+		Input: mustJSON(map[string]string{"job_id": jobID, "message": "换个方向"}),
+	}})
+	if len(send) != 1 || !strings.Contains(send[0].Content, "delivered") {
+		t.Fatalf("send_message = %+v, want delivered", send)
+	}
+
+	interrupt := e.processInterruptAgentCalls([]ToolCallRequest{{
+		ID: "t4", Name: InterruptAgentToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(interrupt) != 1 || !strings.Contains(interrupt[0].Content, "interrupted") {
+		t.Fatalf("interrupt = %+v, want interrupted", interrupt)
+	}
+	select {
+	case <-a.cancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt must cancel the running job")
+	}
+	waitJobPublished(t, e, jobID)
+
+	poll := e.processAgentPollCalls([]ToolCallRequest{{
+		ID: "t5", Name: AgentPollToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(poll) != 1 || !strings.Contains(poll[0].Content, "done") {
+		t.Fatalf("poll = %+v, want the cancelled job collectable as done", poll)
+	}
+	e.bgMu.Lock()
+	_, still := e.bgTasks[jobID]
+	e.bgMu.Unlock()
+	if still {
+		t.Error("agent_poll must consume the job")
+	}
+}
+
+// TestAgentManagement_EndToEnd_CloseFlow: close removes the job for good — it
+// disappears from list_agents and agent_poll can no longer collect it.
+func TestAgentManagement_EndToEnd_CloseFlow(t *testing.T) {
+	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "one", Goal: "慢任务", Async: true,
+	}, 0, "中文"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-a.start
+	defer close(a.released)
+	jobID := firstJobID(t, e)
+
+	closed := e.processCloseAgentCalls([]ToolCallRequest{{
+		ID: "t1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(closed) != 1 || !strings.Contains(closed[0].Content, "Closed 1 job") {
+		t.Fatalf("close = %+v, want 1 job closed", closed)
+	}
+
+	list := e.processListAgentsCalls([]ToolCallRequest{{ID: "t2", Name: ListAgentsToolName}})
+	if len(list) != 1 || !strings.Contains(list[0].Content, "No background sub-agent jobs") {
+		t.Fatalf("list after close = %+v, want an empty table", list)
+	}
+
+	poll := e.processAgentPollCalls([]ToolCallRequest{{
+		ID: "t3", Name: AgentPollToolName, Input: mustJSON(map[string]string{"job_id": jobID}),
+	}})
+	if len(poll) != 1 || !strings.Contains(poll[0].Content, "not found") {
+		t.Fatalf("poll after close = %+v, want not found", poll)
+	}
+}
