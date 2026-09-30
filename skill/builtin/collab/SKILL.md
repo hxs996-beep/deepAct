@@ -23,7 +23,7 @@ argument-hint: "<研究目标>"
 3. **汇总**（不委派）：合并各 worker 报告，对照全局框架做交叉分析（找矛盾、验证证据、标注未验证假设），产出结构化研究报告。
 
 ## 说明
-- `researcher` 是引擎内置的具名角色（`AgentResearcher`）：稳定 persona（"你是研究员……"）、只读工具白名单（`read/grep/glob/lsp`）、轮次上限 30，goal 只需放研究方向。
+- `researcher` 是引擎内置的具名角色（`AgentResearcher`）：稳定 persona（"你是研究员……"）、只读工具白名单（`read/grep/glob/lsp`）、**轮次上限 15**、**结构化角色**（必须调用 `submit_result` 提交研究小结——纯文本不算完成），goal 只需放研究方向。
 - 所有方向调研完毕 → `task_complete`，交付研究报告：总体结论 + 各方向发现 + 跨方向综合分析 + 未验证假设。
 - 单方向失败：你自己决定重试/降级/标注，不隐藏失败。
 

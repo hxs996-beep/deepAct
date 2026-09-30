@@ -479,7 +479,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// stays in history for the remaining turns. The structured variant
 		// directs the model to submit_result (plain text never completes a
 		// structured run).
-		if maxIterations > 0 && iter >= maxIterations-2 && !budgetNudged {
+		if maxIterations > 0 && iter >= budgetNudgeAt(maxIterations) && !budgetNudged {
 			history = append(history, ModelMessage{
 				Role:    "user",
 				Content: budgetTailNudge(zhFromLang(input.UserLanguage), maxIterations-iter, structured),
@@ -1271,6 +1271,29 @@ func truncateToolResult(msg ModelMessage) ModelMessage {
 	}
 	msg.Content = msg.Content[:subAgentToolResultCap] + "\n…[truncated: full result was in earlier context]"
 	return msg
+}
+
+// budgetNudgeFraction is the share of the iteration budget that must be spent
+// before the wrap-up nudge fires (3/5 = 60%).
+const budgetNudgeFraction = 3
+
+// budgetNudgeAt returns the iteration at which the wrap-up nudge fires for a
+// given cap.
+//
+// It used to be maxIterations-2, which for the researcher's old 30-turn cap
+// meant turn 28: the warning arrived with nothing left to act on, and runaway
+// runs simply burned the whole cap. 60% leaves ~40% of the budget to converge.
+// Two bounds keep it honest: never later than cap-2 (a warning with no room to
+// act is useless) and never before iteration 1.
+func budgetNudgeAt(maxIterations int) int {
+	at := maxIterations * budgetNudgeFraction / 5
+	if at > maxIterations-2 {
+		at = maxIterations - 2
+	}
+	if at < 1 {
+		at = 1
+	}
+	return at
 }
 
 // budgetTailNudge returns a user message telling a research sub-agent to stop

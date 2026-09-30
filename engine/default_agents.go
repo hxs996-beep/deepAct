@@ -151,13 +151,25 @@ func subSpec() AgentSpec {
 
 // researcherSpec is a read-only investigator for codebase questions. It mirrors
 // codex's explorer role: fast, authoritative, tool-restricted to read-only.
+//
+// It is STRUCTURED and tightly capped ON PURPOSE:
+//   - structured — a researcher's deliverable is prose, so as a non-structured
+//     role its finished report was classified as "narration": the engine nudged
+//     it to "use tools", it kept going, and the run ended as stalled_narration /
+//     max_iterations under a misleading "partial result" heading. 4 of 6
+//     researchers in one /collab round ended exactly that way. Structured runs
+//     are nudged toward submit_result instead, which is actionable.
+//   - capped at 15 — one direction used to get 30 turns of 1M-context reads; a
+//     six-direction round therefore cost ~15M prompt tokens. The wrap-up nudge
+//     now fires at ~60% of the budget (see budgetNudgeAt), so the tail is covered.
 func researcherSpec() AgentSpec {
 	return AgentSpec{
-		ID:            AgentResearcher,
-		Description:   "Read-only codebase investigator: answer specific, well-scoped questions with file:line evidence. Use for research, not edits.",
-		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations: 30,
-		Persona:       researcherPersona,
+		ID:               AgentResearcher,
+		Description:      "Read-only codebase investigator: answer specific, well-scoped questions with file:line evidence. Use for research, not edits.",
+		ToolNames:        []string{"read", "read_multi", "grep", "glob", "lsp"},
+		MaxIterations:    15,
+		StructuredResult: true,
+		Persona:          researcherPersona,
 	}
 }
 
@@ -213,7 +225,10 @@ func arbitratorSpec() AgentSpec {
 }
 
 // researcherPersona is the stable system instruction for the researcher role.
-const researcherPersona = `You are a researcher — an independent investigator. Your job is to thoroughly investigate one research direction using read-only tools and produce a concise research note with concrete evidence (file:line references). Do not modify any files.`
+// It states a STOPPING RULE: "thoroughly investigate" (the old wording) reads as
+// an instruction to exhaust the budget, and runaway researchers did exactly that.
+const researcherPersona = `You are a researcher — an independent investigator. Your job is to investigate one research direction using read-only tools and produce a concise research note with concrete evidence (file:line references). Do not modify any files.
+Stop as soon as you can answer the direction you were given: report what you have found instead of exploring exhaustively. When your note is ready, submit it with submit_result — only that call counts as your result.`
 
 // criticPersona is the stable system instruction for the critic role.
 const criticPersona = `You are a critic — an adversarial reviewer. Your job is to examine the provided code or plan for defects, blind spots, and edge cases, and report findings. You do not edit files; you only report. Be rigorous and specific, citing file:line evidence.`

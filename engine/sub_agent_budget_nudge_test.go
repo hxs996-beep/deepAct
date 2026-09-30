@@ -68,6 +68,93 @@ func (m *deadlineProbeModel) Complete(ctx context.Context, _ ModelRequest) (*Mod
 	return &ModelResponse{Message: ModelMessage{Role: "assistant", Content: "结论"}, FinishReason: "stop"}, nil
 }
 
+// TestBudgetNudgeAt: the wrap-up nudge used to fire at maxIterations-2, which
+// for a 30-turn researcher meant turn 28 — by then the budget was already gone
+// (both observed runaway researchers burned all 30 turns). It must fire around
+// the 60% mark, while still leaving room to act and staying usable for tiny caps.
+func TestBudgetNudgeAt(t *testing.T) {
+	cases := []struct{ cap, want int }{
+		{1, 1}, {2, 1}, {3, 1},
+		{5, 3}, {6, 3}, {10, 6}, {15, 9}, {30, 18},
+	}
+	for _, c := range cases {
+		if got := budgetNudgeAt(c.cap); got != c.want {
+			t.Errorf("budgetNudgeAt(%d) = %d, want %d", c.cap, got, c.want)
+		}
+		if got := budgetNudgeAt(c.cap); got > c.cap-2 && c.cap > 2 {
+			t.Errorf("budgetNudgeAt(%d) = %d leaves too little room to act", c.cap, got)
+		}
+	}
+}
+
+// textAfterToolsModel answers once with a read call and then ALWAYS replies in
+// plain prose — a researcher's natural deliverable — without ever calling
+// submit_result.
+type textAfterToolsModel struct {
+	calls   int
+	lastReq ModelRequest
+}
+
+func (m *textAfterToolsModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
+	return nil, nil
+}
+
+func (m *textAfterToolsModel) Complete(_ context.Context, req ModelRequest) (*ModelResponse, error) {
+	m.calls++
+	m.lastReq = req
+	if m.calls == 1 {
+		return &ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+			ID: "c1", Type: "function",
+			Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
+		}}}, FinishReason: "tool_calls"}, nil
+	}
+	return &ModelResponse{Message: ModelMessage{
+		Role: "assistant", Content: "调研结论：这是散文形式的最终报告。",
+	}, FinishReason: "stop"}, nil
+}
+
+// TestResearcherRole_ProseAnswerIsRedirectedToSubmitResult locks fix #1 end to
+// end through the REAL built-in role: when the researcher replies with its
+// finished report as prose, the engine must nudge it toward submit_result (the
+// deterministic terminal) instead of "use tools" — the nudge that made collab
+// researchers keep exploring and end as "stalled narration (partial result)".
+func TestResearcherRole_ProseAnswerIsRedirectedToSubmitResult(t *testing.T) {
+	model := &textAfterToolsModel{}
+	runner := NewSubAgentRunner(model, &recordingToolExecutor{}, NewAgentRegistry(), "test")
+	a := &specSubAgent{runner: runner, spec: researcherSpec()}
+
+	result, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研某个方向", UserLanguage: "中文"})
+	if err != nil {
+		t.Fatalf("researcher run: %v", err)
+	}
+	// Without submit_result the run ends as no_result — NOT as a narration
+	// stall — and the prose it produced is still returned as the summary.
+	if result.FinishReason != HandoffReasonNoResult {
+		t.Errorf("FinishReason = %q, want %q (a dashed-off prose answer must be redirected, not treated as narration)", result.FinishReason, HandoffReasonNoResult)
+	}
+	if !strings.Contains(result.Summary, "调研结论") {
+		t.Errorf("the researcher's prose must still come back as the summary, got %q", result.Summary)
+	}
+	nudgedSubmit, nudgedTools := false, false
+	for _, msg := range model.lastReq.Messages {
+		if strings.Contains(msg.Content, SubmitResultToolName) {
+			nudgedSubmit = true
+		}
+		if strings.Contains(msg.Content, "Use tools to take the next action") {
+			nudgedTools = true
+		}
+	}
+	if !nudgedSubmit {
+		t.Error("the follow-up request must carry the submit_result nudge")
+	}
+	if nudgedTools {
+		t.Error("a structured researcher must NOT be nudged to keep using tools")
+	}
+	if !toolsContain(model.lastReq.Tools, "read") {
+		t.Error("the researcher must still be offered its read-only tools")
+	}
+}
+
 // TestSubAgent_NoSyntheticPerCallDeadline locks the "(sub-agent error: context
 // deadline exceeded)" failure: sub_agent.go wrapped each Complete call in
 // context.WithTimeout(ctx, 120s), a TOTAL-duration limit. A streaming model
