@@ -100,11 +100,20 @@ type EngineConfig struct {
 	MaxSuspendedSubAgents int
 	ShowThinking          bool    // stream model reasoning/thinking to UI
 	RiskThreshold         float64 // router risk threshold for Pro/Flash escalation
-	WorkDir               string
-	OnProgress            ProgressFunc
-	Pricing               PricingConfig
-	EvalStoreDir          string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
-	PromptVersion         string // SHA256 hash of the system prompt for tracking
+	// Approval policy for bash commands (see engine/approval.go). ApprovalMode
+	// is on-request (default) or never; ApprovalRules are user-declared rules
+	// from [approval.rules]; LearnedApprovals are commands the user confirmed in
+	// earlier sessions; OnApprovalLearned persists a new confirmation (nil keeps
+	// it session-only). Wired in cmd/run.go from config plus the approvals store.
+	ApprovalMode      string
+	ApprovalRules     []ApprovalRule
+	LearnedApprovals  []string
+	OnApprovalLearned func(command string)
+	WorkDir           string
+	OnProgress        ProgressFunc
+	Pricing           PricingConfig
+	EvalStoreDir      string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
+	PromptVersion     string // SHA256 hash of the system prompt for tracking
 }
 
 type EngineResponse struct {

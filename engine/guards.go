@@ -3,7 +3,6 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -101,6 +100,13 @@ type ScopeGuard struct {
 	dangerousPending   string // normalized command pending user confirmation
 	dangerousConfirmed map[string]bool
 	isChinese          bool // session-locked language flag for bilingual prompts
+
+	// Approval policy (see engine/approval.go). Zero values reproduce the
+	// historical behaviour: no rules, nothing remembered, ask on project-level
+	// danger.
+	approvalMode  string
+	approvalRules []ApprovalRule
+	onLearned     func(command string)
 }
 
 func NewScopeGuard() *ScopeGuard {
@@ -114,12 +120,22 @@ func (g *ScopeGuard) SetLanguage(zh bool) {
 	g.isChinese = zh
 }
 
-// ConfirmDangerous marks a pending dangerous command as confirmed by the user.
+// ConfirmDangerous marks a pending dangerous command as confirmed by the user
+// and reports it to the host so the confirmation outlives this process. The
+// approval is recorded verbatim — nothing about it is widened automatically;
+// broadening is a deliberate act expressed as a declared rule.
 func (g *ScopeGuard) ConfirmDangerous(normalizedCmd string) {
-	if normalizedCmd != "" {
-		g.dangerousConfirmed[normalizedCmd] = true
+	if g.dangerousConfirmed == nil {
+		g.dangerousConfirmed = make(map[string]bool)
+	}
+	key := normalizeApprovalCommand(normalizedCmd)
+	if key != "" {
+		g.dangerousConfirmed[key] = true
 	}
 	g.dangerousPending = ""
+	if g.onLearned != nil && key != "" {
+		g.onLearned(key)
+	}
 }
 
 // DangerousPending returns the pending dangerous command, if any.
@@ -138,10 +154,21 @@ func (g *ScopeGuard) CheckTool(call ToolCallRequest) GuardAction {
 	return GuardAction{Type: GuardAllow}
 }
 
-// checkDangerousBash judges a bash command structurally (see judgeDanger) and
-// maps the verdict onto a guard action: GuardBlock for irreversible system-level
-// threats, GuardAskUser for project-level threats the user can confirm,
-// GuardAllow otherwise.
+// checkDangerousBash maps a bash command onto a guard action through a fixed
+// chain of judgement layers, most authoritative first:
+//
+//  1. judgeDanger's dangerSystem — irreversible, hard-blocked, and never
+//     overridable by user rules or remembered approvals.
+//  2. Declared rules with decision=forbidden — hard-blocked, with the rule's
+//     own reason surfaced.
+//  3. Declared rules with decision=allow, and commands the user approved
+//     earlier — pass without asking.
+//  4. judgeDanger's dangerProject, and declared rules with decision=prompt —
+//     ask the user, unless the approval mode is "never".
+//
+// The order is the safety contract: rules can silence a prompt, but they can
+// never unlock layer 1. (The bash tool's own blocklist is a fifth, lowest-reach
+// backstop that runs at execution time; see tools/builtin/bash.go.)
 func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 	var m map[string]interface{}
 	if err := json.Unmarshal(input, &m); err != nil {
@@ -153,27 +180,44 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 	}
 
 	verdict := judgeDanger(cmd)
-	switch verdict.kind {
-	case dangerSystem:
+	if verdict.kind == dangerSystem {
 		return GuardAction{
 			Type:    GuardBlock,
 			Message: fmt.Sprintf("✗ System-level dangerous command blocked (irreversible): %s\nFull command: %s", verdict.reason, cmd),
 		}
-	case dangerProject:
-		// Whitespace-collapsed form is the confirmation key, so re-issuing the
-		// same command with different spacing stays confirmed.
-		key := strings.Join(strings.Fields(cmd), " ")
-		if g.dangerousConfirmed[key] {
-			return GuardAction{Type: GuardAllow}
-		}
-		g.dangerousPending = key
-		return GuardAction{
-			Type: GuardAskUser,
-			Message: pickPrompt(g.isChinese,
-				fmt.Sprintf("⚠ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider", verdict.reason, cmd),
-				fmt.Sprintf("⚠ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理", verdict.reason, cmd),
-			),
-		}
 	}
-	return GuardAction{Type: GuardAllow}
+
+	decision, ruleReason := g.decideApproval(cmd)
+	switch decision {
+	case ApprovalForbidden:
+		return GuardAction{Type: GuardBlock, Message: approvalBlockMessage(ruleReason, cmd)}
+	case ApprovalAllow:
+		return GuardAction{Type: GuardAllow}
+	}
+
+	// Layer 4: something wants confirmation. A rule prompt asks on its own
+	// (that is the point of declaring it); otherwise only project-level danger
+	// does.
+	reason := ""
+	switch {
+	case decision == ApprovalPrompt:
+		reason = ruleReason
+		if reason == "" {
+			reason = "matched an approval rule"
+		}
+	case verdict.kind == dangerProject:
+		reason = verdict.reason
+	}
+	if reason == "" {
+		return GuardAction{Type: GuardAllow}
+	}
+	if g.approvalMode == ApprovalModeNever {
+		return GuardAction{Type: GuardAllow}
+	}
+
+	// Whitespace-collapsed form is the confirmation key, so re-issuing the same
+	// command with different spacing stays confirmed.
+	key := normalizeApprovalCommand(cmd)
+	g.dangerousPending = key
+	return GuardAction{Type: GuardAskUser, Message: approvalAskMessage(g.isChinese, reason, cmd)}
 }

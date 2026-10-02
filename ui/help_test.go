@@ -6,14 +6,16 @@ import (
 )
 
 func TestBuildHelpText_IncludesSections(t *testing.T) {
-	cmds := []Suggestion{{Command: "/ratd", Args: "<需求>", Description: "reverse-test-driven harness"}}
-	skills := []Suggestion{{Command: "brainstorming", Description: "explore intent"}}
+	commands := []Command{
+		{Name: "/ratd", Args: "<需求>", Description: "reverse-test-driven harness"},
+		{Name: "/brainstorming", Description: "explore intent", Source: commandSourceSkill},
+	}
 	tools := []Suggestion{
 		{Command: "read", Description: "read a file"},
 		{Command: "web_search", Description: "search the web"},
 		{Command: "handoff_to_agent", Description: "delegate"},
 	}
-	out := buildHelpText(cmds, skills, tools)
+	out := buildHelpText(commands, tools)
 
 	for _, header := range []string{"# DeepAct", "## Keyboard Shortcuts", "## Slash Commands", "## Skills", "## Available Tools"} {
 		if !strings.Contains(out, header) {
@@ -23,14 +25,17 @@ func TestBuildHelpText_IncludesSections(t *testing.T) {
 }
 
 func TestBuildHelpText_ListsCommandsSkillsAndTools(t *testing.T) {
-	cmds := []Suggestion{{Command: "/ratd", Args: "<需求>", Description: "x"}, {Command: "/clear", Description: "y"}}
-	skills := []Suggestion{{Command: "brainstorming", Description: "explore intent"}}
+	commands := []Command{
+		{Name: "/ratd", Args: "<需求>", Description: "x"},
+		{Name: "/clear", Description: "y"},
+		{Name: "/brainstorming", Description: "explore intent", Source: commandSourceSkill},
+	}
 	tools := []Suggestion{
 		{Command: "read", Description: "read"},
 		{Command: "web_search", Description: "search"},
 		{Command: "handoff_to_agent", Description: "delegate"},
 	}
-	out := buildHelpText(cmds, skills, tools)
+	out := buildHelpText(commands, tools)
 
 	for _, want := range []string{"/ratd", "/clear", "/brainstorming", "web_search", "handoff_to_agent", "read"} {
 		if !strings.Contains(out, want) {
@@ -44,7 +49,7 @@ func TestBuildHelpText_ListsCommandsSkillsAndTools(t *testing.T) {
 }
 
 func TestBuildHelpText_HandlesEmptyInputs(t *testing.T) {
-	out := buildHelpText(nil, nil, nil)
+	out := buildHelpText(nil, nil)
 	if !strings.Contains(out, "## Slash Commands") || !strings.Contains(out, "(none)") {
 		t.Errorf("empty commands should render '(none)':\n%s", out)
 	}

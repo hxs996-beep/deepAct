@@ -79,14 +79,6 @@ type SubAgentStatus struct {
 	Summary string // result summary when done
 }
 
-var slashCommands = []Suggestion{
-	{Command: "/help", Args: "", Description: "Show this help screen"},
-	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/ratd", Args: "<需求>", Description: "反向测试驱动：内置技能（红队写对抗测试驱动实现）"},
-	{Command: "/collab", Args: "<需求>", Description: "并行研究：内置技能（拆解→并行委派调研→汇总）"},
-	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
-}
-
 // helpTools is the curated capability surface shown in the /help screen. It
 // mirrors the tools wired into the model by the engine (builtin tools, engine
 // tools, plus any MCP servers' tools which are appended at runtime). Kept as a
@@ -96,6 +88,7 @@ var helpTools = []Suggestion{
 	{Command: "read_multi", Description: "Read up to 8 files in parallel"},
 	{Command: "write", Description: "Create or overwrite a file"},
 	{Command: "edit", Description: "Search-and-replace text in a file"},
+	{Command: "apply_patch", Description: "Batch edits (multi-file, add/delete/move)"},
 	{Command: "grep", Description: "Search file contents (regex or literal)"},
 	{Command: "glob", Description: "Find files by path pattern"},
 	{Command: "bash", Description: "Run shell commands (timeout, blocked-command list)"},
@@ -1207,14 +1200,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// 非末项（方案）→ 发内部 /confirm N 命令确定性确认；
 				// 末项"输入你的意见"→ 关闭弹出框回输入框自由输入。
 				n := m.selectedOption + 1
-				total := len(m.activeOptions)
+				opts := m.activeOptions
+				total := len(opts)
 				m.activeOptions = nil
 				if n == total {
 					// Last item closes the popup back to free input → repaint
 					// so the popup background doesn't linger.
 					return m, m.repaintCmd()
 				}
-				return m.submitConfirm(n)
+				return m.submitConfirm(n, opts)
 			}
 			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
@@ -1276,6 +1270,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text := m.inputBuf.Value()
 			m.inputBuf.SetValue("")
 			if strings.TrimSpace(text) != "" {
+				// Commands that stay available during a run (e.g. /help) are
+				// answered here; everything else is queued to the running agent
+				// as a steer message.
+				if cmd, args, ok := m.localCommandFor(text, true); ok {
+					m.messages = append(m.messages, DisplayMessage{Role: "user", Content: text})
+					updated, teaCmd, handled := cmd.Handle(&m, args)
+					if handled {
+						return updated, teaCmd
+					}
+					m.messages = m.messages[:len(m.messages)-1]
+				}
 				if m.engine != nil {
 					m.engine.Steer(text)
 				}
@@ -1326,21 +1331,17 @@ func (m *Model) updateSuggestions() {
 		return
 	}
 
-	// Filter matching commands
+	// Filter matching commands. Built-ins and skill shortcuts come from the one
+	// registry (ui/commands.go), so a new command shows up here for free.
 	prefix := strings.ToLower(val)
-	var matches []Suggestion
-	for _, cmd := range slashCommands {
-		if strings.HasPrefix(strings.ToLower(cmd.Command), prefix) {
-			matches = append(matches, cmd)
-		}
-	}
-	// Also match external skill names as /-shortcuts
-	for _, skill := range m.skillSuggestions {
-		short := "/" + skill.Command
-		if strings.HasPrefix(short, prefix) {
+	commands := m.allCommands()
+	matches := make([]Suggestion, 0, len(commands))
+	for _, cmd := range commands {
+		if strings.HasPrefix(strings.ToLower(cmd.Name), prefix) {
 			matches = append(matches, Suggestion{
-				Command:     "/" + skill.Command,
-				Description: skill.Description,
+				Command:     cmd.Name,
+				Args:        cmd.Args,
+				Description: cmd.Description,
 			})
 		}
 	}
@@ -1445,28 +1446,14 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.narration = ""
 	m.narrationPending = ""
 
-	// Handle local slash commands without invoking the engine
-	if strings.TrimSpace(content) == "/help" {
-		m.state = stateReady
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: buildHelpText(slashCommands, m.skillSuggestions, helpTools)})
-		return m, nil
-	}
-
-	// Handle /resume: show session picker without invoking the engine
-	if strings.TrimSpace(content) == "/resume" {
-		if m.engine == nil {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "API key required. Restart and enter key."})
-			return m, nil
+	// Local slash commands are answered without invoking the engine. Everything
+	// the registry does not claim locally (unknown input, engine-owned commands
+	// such as /clear and /<skill>) falls through to the engine below.
+	if cmd, args, ok := m.localCommandFor(content, false); ok {
+		updated, teaCmd, handled := cmd.Handle(&m, args)
+		if handled {
+			return updated, teaCmd
 		}
-		sessions := m.engine.ListSessions()
-		if len(sessions) == 0 {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "没有可恢复的会话。"})
-			return m, nil
-		}
-		m.resumeSessions = sessions
-		m.selectedResume = 0
-		m.state = stateResume
-		return m, nil
 	}
 
 	if m.engine == nil {
@@ -1484,10 +1471,32 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	)
 }
 
+// newChoiceRecord builds the conversation record appended after the user picks
+// an option from an ask_user / confirmation popup: it lists every candidate and
+// marks the chosen one, so the decision stays visible after the popup closes.
+func newChoiceRecord(opts []string, n int) DisplayMessage {
+	header := fmt.Sprintf("✓ 已选择 [%d]", n)
+	if n >= 1 && n <= len(opts) {
+		header = fmt.Sprintf("✓ 已选择 [%d] %s", n, opts[n-1])
+	}
+	numbered := make([]string, len(opts))
+	for i, o := range opts {
+		numbered[i] = fmt.Sprintf("[%d] %s", i+1, o)
+	}
+	content := header
+	if len(numbered) > 0 {
+		content += "\n候选：" + strings.Join(numbered, "  ")
+	}
+	return DisplayMessage{Role: "choice", Content: content}
+}
+
 // submitConfirm sends an internal "/confirm N" command for the selected option.
 // It drives the same Run startup path as submitInput (state→running, spinner,
-// engine.Run) but never writes to the input buffer.
-func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
+// engine.Run) but never writes to the input buffer. opts is the candidate list
+// as shown in the popup (captured before activeOptions was cleared); a "choice"
+// record is appended so the user can still see which option they picked.
+func (m Model) submitConfirm(n int, opts []string) (tea.Model, tea.Cmd) {
+	m.messages = append(m.messages, newChoiceRecord(opts, n))
 	m.state = stateRunning
 	m.cancelled = false
 	m.runSeq++
@@ -2060,6 +2069,19 @@ func renderMessage(msg DisplayMessage, width int) []string {
 	switch msg.Role {
 	case "user":
 		return wrapText(UserMsgStyle.Render("> ")+content, width)
+	case "choice":
+		// ask_user selection record: the header (chosen option) stands out,
+		// the candidate list stays dim. See newChoiceRecord.
+		lines := strings.Split(content, "\n")
+		styled := make([]string, len(lines))
+		for i, l := range lines {
+			if i == 0 {
+				styled[i] = ChoiceMsgStyle.Render(l)
+			} else {
+				styled[i] = DimStyle.Render(l)
+			}
+		}
+		return wrapLines(styled, width)
 	case "system":
 		return wrapText(SystemMsgStyle.Render(content), width)
 	case "toolsummary":
@@ -2976,7 +2998,7 @@ func renderedHeight(s string) int {
 	return len(strings.Split(s, "\n"))
 }
 
-func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestion) string {
+func buildHelpText(commands []Command, tools []Suggestion) string {
 	var b strings.Builder
 	b.WriteString("# DeepAct — CLI Coding Agent\n\n")
 	b.WriteString("## Keyboard Shortcuts\n\n")
@@ -3001,19 +3023,30 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 	default:
 		b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
 	}
+	// One registry, two sections: skill shortcuts are entries with
+	// Source == commandSourceSkill rather than a separate list.
+	var builtins, skills []Command
+	for _, c := range commands {
+		if c.Source == commandSourceSkill {
+			skills = append(skills, c)
+			continue
+		}
+		builtins = append(builtins, c)
+	}
+
 	b.WriteString("\n## Slash Commands\n\n")
-	if len(commands) == 0 {
+	if len(builtins) == 0 {
 		b.WriteString("(none)\n\n")
 	} else {
-		for _, c := range commands {
-			b.WriteString(fmt.Sprintf("- %s %s — %s\n", c.Command, c.Args, c.Description))
+		for _, c := range builtins {
+			b.WriteString(fmt.Sprintf("- %s %s — %s\n", c.Name, c.Args, c.Description))
 		}
 		b.WriteString("\n")
 	}
 	if len(skills) > 0 {
 		b.WriteString("## Skills (/<name>)\n\n")
 		for _, s := range skills {
-			b.WriteString(fmt.Sprintf("- /%s — %s\n", s.Command, s.Description))
+			b.WriteString(fmt.Sprintf("- %s — %s\n", s.Name, s.Description))
 		}
 		b.WriteString("\n")
 	}

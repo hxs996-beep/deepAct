@@ -117,6 +117,22 @@ func TestSummarizeArgs(t *testing.T) {
 			wantContains: "b.go",
 		},
 		{
+			name:     "apply_patch shows edit count and touched files",
+			toolName: "apply_patch",
+			input: map[string]interface{}{"edits": []interface{}{
+				map[string]interface{}{"path": "a/b.go"},
+				map[string]interface{}{"path": "a/b.go", "old_string": "x"},
+				map[string]interface{}{"path": "c/d.go"},
+			}},
+			want: "3 edit(s) in 2 file(s): a/b.go, c/d.go",
+		},
+		{
+			name:         "apply_patch without edits falls back to a labeled field",
+			toolName:     "apply_patch",
+			input:        map[string]interface{}{"path": "a/b.go"},
+			wantContains: "a/b.go",
+		},
+		{
 			name:         "unknown MCP tool falls back to a labeled string field",
 			toolName:     "mcp_github_create_issue",
 			input:        map[string]interface{}{"title": "Fix bug", "body": "..."},
@@ -170,7 +186,7 @@ func TestSummarizeArgs(t *testing.T) {
 func TestSummarizeArgsNeverEmpty(t *testing.T) {
 	tools := []string{
 		"load_skill", "skill_install", "handoff_to_agent",
-		"bash", "read", "read_multi", "grep", "glob", "edit", "write", "lsp",
+		"bash", "read", "read_multi", "grep", "glob", "edit", "apply_patch", "write", "lsp",
 		"mcp_unknown_tool", "custom_tool", "",
 	}
 	inputs := []map[string]interface{}{

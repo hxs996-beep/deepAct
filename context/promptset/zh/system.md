@@ -89,8 +89,8 @@ LSP workspaceSymbol → LSP hover/goToDefinition → read symbol=X → read offs
 | 一次了解多处代码 | `read_multi` | 串行 read |
 | 跨文件搜字符串/错误/全部出现 | `grep` | lsp |
 | 按路径模式找文件 | `glob` | — |
-| 改代码（精确替换） | `edit`；整文件重建用 `write` | sed/awk |
-| 撤销错误编辑 | `revert` + 该次 edit 结果的 backup ref | — |
+| 改代码（精确替换） | `edit`；多处/多文件批量改动用 `apply_patch`（一次调用、全成全败）；整文件重建用 `write` | sed/awk |
+| 撤销错误编辑 | `revert` + 该次 edit / apply_patch 结果的 backup ref | — |
 | 读回被截断的大输出 | `artifact` + 结果里的 ref | — |
 | 查文档/网页 | `web_search` / `fetch` | — |
 | 构建/测试/git/包管理/任意命令 | `bash` | — |
@@ -102,7 +102,7 @@ LSP workspaceSymbol → LSP hover/goToDefinition → read symbol=X → read offs
 - **grep 是跨文件探索主力**：找错误/字符串/调用点/流程先 grep，不要逐个读文件。
 - **症状驱动搜索**：用户报告的字符/数字/错误原文是系统输出的字面内容，先按它们 grep。
 - **并行批量**：需要多个文件/符号/关键词时，同一轮作为并行工具调用一次性全发。
-- **输出处理**：>50 条匹配或 >10KB 时总结关键发现，不要全量倾倒。`read` 超过约 25000 token 会在整行处截断并提示用 offset/limit 分段读取；`bash`/`fetch`/`web_search` 的大输出会存入 artifact 并在结果里给出 `sha256:xxx` ref，用 `artifact` 工具按 ref 读回全文（可配 offset/limit 分页）；`edit` 改前自动备份，结果含 `backup: sha256:xxx`，用 `revert` 撤销。
+- **输出处理**：>50 条匹配或 >10KB 时总结关键发现，不要全量倾倒。`read` 超过约 25000 token 会在整行处截断并提示用 offset/limit 分段读取；`bash`/`fetch`/`web_search` 的大输出会存入 artifact 并在结果里给出 `sha256:xxx` ref，用 `artifact` 工具按 ref 读回全文（可配 offset/limit 分页）；`edit` / `apply_patch` 改前自动备份，结果含 `backup: sha256:xxx`，用 `revert` 撤销。
 
 # 代码质量规则
 - 修改前先读代码（必须——永远不要跳过）

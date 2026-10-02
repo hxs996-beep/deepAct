@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -85,6 +86,95 @@ func TestOptionsEnter_LastItemReturnsToInput(t *testing.T) {
 		msg := cmd()
 		if _, isRepaint := msg.(tea.WindowSizeMsg); !isRepaint && msg != nil {
 			t.Errorf("expected no engine command on free-input last item; got %T", msg)
+		}
+	}
+}
+
+// 选择记录：列出全部候选并标出所选项。
+func TestNewChoiceRecord_ListsCandidatesAndChoice(t *testing.T) {
+	rec := newChoiceRecord([]string{"用 Redis 缓存", "改用 MySQL", "输入你的意见"}, 2)
+	if rec.Role != "choice" {
+		t.Fatalf("role = %q, want %q", rec.Role, "choice")
+	}
+	for _, want := range []string{"✓ 已选择 [2]", "改用 MySQL", "候选：", "[1] 用 Redis 缓存", "[3] 输入你的意见"} {
+		if !strings.Contains(rec.Content, want) {
+			t.Errorf("record missing %q; content=%q", want, rec.Content)
+		}
+	}
+}
+
+// 越界编号不得索引候选：只输出序号，不 panic（候选行仍按原样列出）。
+func TestNewChoiceRecord_OutOfRange(t *testing.T) {
+	rec := newChoiceRecord([]string{"a", "b"}, 5)
+	if !strings.Contains(rec.Content, "✓ 已选择 [5]") {
+		t.Errorf("out-of-range header missing, got %q", rec.Content)
+	}
+	if strings.Contains(rec.Content, "✓ 已选择 [5] ") {
+		t.Errorf("out-of-range must not append an option label, got %q", rec.Content)
+	}
+}
+
+// 渲染不 panic，且两行内容输出为两行。
+func TestRenderMessage_ChoiceRecord(t *testing.T) {
+	rec := newChoiceRecord([]string{"用 Redis 缓存", "改用 MySQL"}, 2)
+	lines := renderMessage(rec, 80)
+	if len(lines) != 2 {
+		t.Errorf("expected 2 rendered lines, got %d: %v", len(lines), lines)
+	}
+}
+
+// 选中方案后应在消息流追加一条 "choice" 记录，且候选来自清空前的 activeOptions。
+func TestOptionsEnter_AppendsChoiceRecord(t *testing.T) {
+	rr := &recordRunner{}
+	m := NewModel(rr, engine.PricingConfig{})
+	m.state = stateReady
+	m.activeOptions = []string{"用 Redis 缓存", "改用 MySQL", "输入你的意见"}
+	m.selectedOption = 0
+	m.progressChan = make(chan ProgressMsg, 1)
+	m.progressChan <- ProgressMsg{Type: "done"}
+
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, ok := got.(Model)
+	if !ok {
+		t.Fatalf("expected Model from Update, got %T", got)
+	}
+	if cmd == nil {
+		t.Fatal("expected a command for option selection")
+	}
+	cmd()
+
+	found := false
+	for _, msg := range gotModel.messages {
+		if msg.Role != "choice" {
+			continue
+		}
+		found = true
+		for _, want := range []string{"✓ 已选择 [1]", "用 Redis 缓存", "候选：", "[2] 改用 MySQL", "[3] 输入你的意见"} {
+			if !strings.Contains(msg.Content, want) {
+				t.Errorf("choice record missing %q; content=%q", want, msg.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a choice record in the message stream, got %+v", gotModel.messages)
+	}
+}
+
+// 末项"输入你的意见"是自由输入入口，不得追加选择记录（回归防护）。
+func TestOptionsEnter_LastItemNoChoiceRecord(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.activeOptions = []string{"按报告执行", "输入你的意见"}
+	m.selectedOption = 1
+
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	gotModel, ok := got.(Model)
+	if !ok {
+		t.Fatalf("expected Model from Update, got %T", got)
+	}
+	for _, msg := range gotModel.messages {
+		if msg.Role == "choice" {
+			t.Errorf("the free-input last item must not append a choice record, got %+v", msg)
 		}
 	}
 }

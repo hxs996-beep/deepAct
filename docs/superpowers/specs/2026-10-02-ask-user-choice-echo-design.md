@@ -30,7 +30,7 @@
 ## 展示格式（方案 A：专用角色 + 紧凑两行）
 
 ```
-✔ 已选择 [2] 改用 MySQL
+✓ 已选择 [2] 改用 MySQL
 候选：[1] 用 Redis 缓存  [2] 改用 MySQL  [3] 输入你的意见
 ```
 
@@ -48,7 +48,7 @@
 ## 记录构造
 
 - `DisplayMessage{Role: "choice", Content: <两行文本>}`。
-- 越界防护：`n < 1 || n > len(opts)` 时只输出 `✔ 已选择 [n]`，不索引候选、不 panic。
+- 越界防护：`n < 1 || n > len(opts)` 时 header 只输出 `✓ 已选择 [n]`、不拼接选项文本（不做索引、不 panic）；候选行仍按原样列出（与正常分支一致，记录始终可追溯全部候选）。该分支在生产路径不可达：Enter 分支保证 `1 <= n <= total-1` 且 `total == len(opts)`。
 
 ## 样式
 
@@ -57,7 +57,7 @@
 
 ## 测试
 
-- 扩展 `ui/confirm_test.go`：选中第 1 项后断言消息流新增一条 `Role:"choice"` 记录，内容含 `✔ 已选择 [1]` 与全部候选文本。
+- 扩展 `ui/confirm_test.go`：选中第 1 项后断言消息流新增一条 `Role:"choice"` 记录，内容含 `✓ 已选择 [1]` 与全部候选文本。
 - 末项（自由输入）路径不产生该记录。
 - `renderMessage` 对 `Role:"choice"` 的渲染不 panic，且输出行数正确。
 

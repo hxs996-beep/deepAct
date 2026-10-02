@@ -51,7 +51,7 @@ func TestNewChoiceRecord_ListsCandidatesAndChoice(t *testing.T) {
 	if rec.Role != "choice" {
 		t.Fatalf("role = %q, want %q", rec.Role, "choice")
 	}
-	for _, want := range []string{"✔ 已选择 [2]", "改用 MySQL", "候选：", "[1] 用 Redis 缓存", "[3] 输入你的意见"} {
+	for _, want := range []string{"✓ 已选择 [2]", "改用 MySQL", "候选：", "[1] 用 Redis 缓存", "[3] 输入你的意见"} {
 		if !strings.Contains(rec.Content, want) {
 			t.Errorf("record missing %q; content=%q", want, rec.Content)
 		}
@@ -61,10 +61,10 @@ func TestNewChoiceRecord_ListsCandidatesAndChoice(t *testing.T) {
 // 越界编号不得索引候选：只输出序号，不 panic（候选行仍按原样列出）。
 func TestNewChoiceRecord_OutOfRange(t *testing.T) {
 	rec := newChoiceRecord([]string{"a", "b"}, 5)
-	if !strings.Contains(rec.Content, "✔ 已选择 [5]") {
+	if !strings.Contains(rec.Content, "✓ 已选择 [5]") {
 		t.Errorf("out-of-range header missing, got %q", rec.Content)
 	}
-	if strings.Contains(rec.Content, "✔ 已选择 [5] ") {
+	if strings.Contains(rec.Content, "✓ 已选择 [5] ") {
 		t.Errorf("out-of-range must not append an option label, got %q", rec.Content)
 	}
 }
@@ -111,9 +111,9 @@ func TestRenderMessage_ChoiceRecord(t *testing.T) {
 // an option from an ask_user / confirmation popup: it lists every candidate and
 // marks the chosen one, so the decision stays visible after the popup closes.
 func newChoiceRecord(opts []string, n int) DisplayMessage {
-	header := fmt.Sprintf("✔ 已选择 [%d]", n)
+	header := fmt.Sprintf("✓ 已选择 [%d]", n)
 	if n >= 1 && n <= len(opts) {
-		header = fmt.Sprintf("✔ 已选择 [%d] %s", n, opts[n-1])
+		header = fmt.Sprintf("✓ 已选择 [%d] %s", n, opts[n-1])
 	}
 	numbered := make([]string, len(opts))
 	for i, o := range opts {
@@ -196,7 +196,7 @@ func TestOptionsEnter_AppendsChoiceRecord(t *testing.T) {
 			continue
 		}
 		found = true
-		for _, want := range []string{"✔ 已选择 [1]", "用 Redis 缓存", "候选：", "[2] 改用 MySQL", "[3] 输入你的意见"} {
+		for _, want := range []string{"✓ 已选择 [1]", "用 Redis 缓存", "候选：", "[2] 改用 MySQL", "[3] 输入你的意见"} {
 			if !strings.Contains(msg.Content, want) {
 				t.Errorf("choice record missing %q; content=%q", want, msg.Content)
 			}

@@ -77,6 +77,13 @@ type Engine struct {
 	// (progressLoop), so legitimate investigation — reading or searching new
 	// content — is not mistaken for a no-progress loop. Reset each Run.
 	progressKeys map[string]bool
+	// observedAgentStates collects the async sub-agent status observations made
+	// during the CURRENT turn as novel-info keys ("agent:<job>::<state>"), for
+	// the progress signal at the end of executeTurn. A job seen for the first
+	// time, or moving to a new state (running→done/awaiting_user), is new
+	// information = progress; re-observing the same unchanged state is not.
+	// Rebuilt every turn (see executeTurn).
+	observedAgentStates []string
 	// repeatCounts counts per-target tool invocations within the current Run
 	// ("read:path::scope", "edit:path#sig", "grep:pattern:path", ...). A repeat
 	// is reported to the model as a fact alongside the tool result — it never
@@ -326,6 +333,12 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(),
 	}
+	guard.scope.Configure(ApprovalSettings{
+		Mode:      cfg.ApprovalMode,
+		Rules:     cfg.ApprovalRules,
+		Learned:   cfg.LearnedApprovals,
+		OnLearned: cfg.OnApprovalLearned,
+	})
 	e := &Engine{
 		model:        deps.Model,
 		tools:        deps.Tools,

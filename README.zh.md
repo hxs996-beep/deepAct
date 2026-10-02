@@ -138,7 +138,19 @@ reasoning_effort = "high" # 思考强度：none | low | high | max（可选，�
 provider    = "tavily"    # 原生 web_search 工具
 api_key     = "tvly-..."
 max_results = 5
+
+[approval]
+mode = "on-request"       # 或 "never"：项目级危险命令不再询问（system 级仍硬拦）
+
+[[approval.rules]]        # 声明式命令规则，优先于内置判定
+program  = "terraform"
+args     = ["destroy"]    # token 前缀；"*" 匹配任意单个 token（留空 = 该程序的所有调用）
+decision = "forbidden"    # allow | prompt | forbidden
+reason   = "生产环境禁地"
 ```
+
+> [!NOTE]
+> 危险命令分四层判定，越靠前越权威：① 系统级不可逆操作（硬拦，规则无法放行）② `decision = "forbidden"` 规则 ③ `decision = "allow"` 规则与你在会话中确认过的命令 ④ 项目级危险与 `decision = "prompt"` 规则（按 `mode` 决定是否询问）。你在弹窗里确认过的命令会被**原样记住**并跨会话生效（存于 `~/.deepact/approvals.toml`）；要放行一整类命令，请显式声明 `[[approval.rules]]`，而不是指望确认一次就自动放宽。
 
 > [!TIP]
 > 完整字段见配置文件内注释。模型与路由、上下文预算、UI、LSP、MCP 服务器、自定义子代理角色均可在 TOML 中配置。
