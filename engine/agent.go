@@ -231,6 +231,10 @@ type HandoffToAgentParams struct {
 	// with a job_id; the delegating agent polls it later via agent_poll.
 	// Only honored at depth 0 (main agent); nested delegations ignore it.
 	Async bool `json:"async,omitempty"`
+	// Step optionally names the todo_write step (its "id" field) this
+	// sub-agent executes. It is echoed back on the sub-agent's progress events
+	// so the UI can nest the run under that step. Empty = no step linkage.
+	Step string `json:"step,omitempty"`
 }
 
 // TaskCompleteParams is the JSON schema for the task_complete tool call.
@@ -334,6 +338,7 @@ func handoffToolSpec(zh bool) ModelTool {
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
 	asyncDesc := "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent read-only tasks (large-scope research, parallel review)."
 	forkTurnsDesc := `How much of YOUR conversation to copy into the sub-agent as starting context: "none" (default, independent run), "all", or a number of preceding user turns as a string, e.g. "2". Only the first-level delegation can fork.`
+	stepDesc := `Optional id of the todo_write step this sub-agent executes (that step's "id" field). It is echoed back on the sub-agent's progress events, and the UI nests the sub-agent under that step. Omit it when this delegation does not correspond to a step.`
 	if zh {
 		desc = "将子任务委派给专门的代理。子代理是只读的：研究代码、头脑风暴方案、批判性审查；不能修改文件或运行命令，修改由主代理执行。"
 		agentDesc = "目标代理（角色）：sub（通用只读分析）、researcher（只读调研）、critic（对抗审查）、proposer/redteam/arbitrator（ratd 管道角色）"
@@ -344,6 +349,7 @@ func handoffToolSpec(zh bool) ModelTool {
 		expectedOutputDesc = "什么样的结果算完成——验收标准、输出结构或子代理必须交付的格式（可选）"
 		asyncDesc = "true = 后台运行子代理并立即返回 job_id；你可以继续其他工作，稍后用 agent_poll(job_id) 查询结果。false/省略 = 同步等待（默认）。长耗时的独立只读任务（大范围调研、并行审查）优先用 async。"
 		forkTurnsDesc = `把你自己对话的多少内容复制给子代理作为起始上下文："none"（默认，独立运行）、"all"，或前面 N 轮用户消息的数字字符串，如 "2"。只有第一层委派可以 fork。`
+		stepDesc = `（可选）本子代理执行的 todo_write 步骤 id（该步骤的 "id" 字段）。它会随进度事件回传，UI 据此把子代理嵌到该步骤下。若本次委派不对应任何步骤则省略。`
 	}
 	params := fmt.Sprintf(`{
 				"type": "object",
@@ -382,10 +388,14 @@ func handoffToolSpec(zh bool) ModelTool {
 					"async": {
 						"type": "boolean",
 						"description": %q
+					},
+					"step": {
+						"type": "string",
+						"description": %q
 					}
 				},
 				"required": ["agent", "goal"]
-			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc, forkTurnsDesc, asyncDesc)
+			}`, agentDesc, goalDesc, ctxDesc, toolsDesc, constraintsDesc, expectedOutputDesc, forkTurnsDesc, asyncDesc, stepDesc)
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
@@ -405,7 +415,7 @@ func todoWriteToolSpec() ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        TodoWriteToolName,
-			Description: "Report the current state of your step-by-step todo list. Call this whenever you start, complete, or change the status of a step. Pass the FULL list of steps each time (snapshot, not diff). The UI displays it as a plain-text todo list. Status must be one of: pending, in_progress, completed.",
+			Description: "Report the current state of your step-by-step todo list. Call this whenever you start, complete, or change the status of a step. Pass the FULL list of steps each time (snapshot, not diff). The UI displays it as a plain-text todo list. Status must be one of: pending, in_progress, completed. Give a step an \"id\" when you delegate work for it: handoff_to_agent(step=<id>) then nests that sub-agent under this step in the UI. Ids must be unique within the list when present.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -414,6 +424,10 @@ func todoWriteToolSpec() ModelTool {
 						"items": {
 							"type": "object",
 							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Optional stable key for this step, unique within the list. handoff_to_agent(step=<id>) links a sub-agent to it."
+								},
 								"content": {
 									"type": "string",
 									"description": "Step description (plain text)"
