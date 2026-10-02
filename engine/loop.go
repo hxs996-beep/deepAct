@@ -64,8 +64,8 @@ type Engine struct {
 	// re-trim and re-fail (see executeTurn).
 	contextRetryDone bool
 	steerMu          sync.Mutex
-	steerQueue []string
-	guards     *GuardSystem
+	steerQueue       []string
+	guards           *GuardSystem
 	// progressLoop is the single no-progress breaker — the only loop guard that
 	// can still end a Run. Per-target repetition is no longer blocked: it is
 	// reported to the model as a fact (see noteRepeats), so the model decides
@@ -183,9 +183,13 @@ const inboxBufferSize = 8
 // cancels it and drops any un-polled result. A suspended entry outlives the Run
 // (it holds no goroutine and no request) until its answer arrives.
 type bgTask struct {
-	id      string // "bg-<seq>"
-	agent   AgentID
-	goal    string
+	id    string // "bg-<seq>"
+	agent AgentID
+	goal  string
+	// step is the TodoItem.ID this job executes ("" = not linked to a step).
+	// Stored here so every terminal event can report the same link the
+	// dispatch reported, without re-parsing the original tool call.
+	step    string
 	ctx     context.Context
 	cancel  context.CancelFunc
 	result  chan *HandoffResult // 容量1：完成/错误；挂起条目在登记时即创建（I9）

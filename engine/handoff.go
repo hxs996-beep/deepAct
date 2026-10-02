@@ -309,6 +309,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		id:      jobID,
 		agent:   AgentID(params.Agent),
 		goal:    params.Goal,
+		step:    params.Step,
 		ctx:     bgCtx,
 		cancel:  cancel,
 		result:  make(chan *HandoffResult, 1),
@@ -322,13 +323,19 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 	// The run reads this inbox at each iteration boundary (send_message).
 	handoff.Inbox = inbox
 
-	// agent_start event for UI (same as synchronous handoff).
+	// agent_start event for UI. Emitted HERE, and not in turn.go, because only
+	// this point knows the job id the UI must pair the run's outcome with —
+	// turn.go cannot know it before the tool call runs, and emitting one there
+	// as well would show every async delegation twice.
 	if e.config.OnProgress != nil {
 		name := params.Agent
 		if name == "" {
 			name = "sub"
 		}
-		e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+		e.config.OnProgress(ProgressEvent{
+			Type: "agent_start", Name: name, Detail: params.Goal,
+			RunID: jobID, Step: params.Step,
+		})
 	}
 
 	go func() {
