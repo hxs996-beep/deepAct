@@ -89,12 +89,12 @@ func TestRenderHunkLines_TabIndentedDiff_NoOverflow(t *testing.T) {
 // soft-wraps, and drifts Bubble Tea's line counter (garbled rows, broken input
 // box / status line).
 //
-// The sub-agent panel and the todo overlay reach the frame via renderSubAgentPanel
-// / renderOverlayStatus (splitLipglossBlock), and the footer is assembled after
-// the body — none of them pass through sanitizeForTerminal or wrapLines. Today
-// lipgloss's width-constrained Render already expands TABs for those paths;
-// View's assembly (Step 7 body / Step 11 footer) is the backstop that keeps the
-// invariant true regardless of that behaviour.
+// The sub-agent / step panel and the footer reach the frame via renderStepsPanel
+// (splitLipglossBlock), and the footer is assembled after the body — neither of
+// them passes through sanitizeForTerminal or wrapLines. Today lipgloss's
+// width-constrained Render already expands TABs for those paths; View's assembly
+// (Step 7 body / Step 11 footer) is the backstop that keeps the invariant true
+// regardless of that behaviour.
 func TestView_TabInUncoveredPaths_NoOverflow(t *testing.T) {
 	m := Model{
 		width:    100,

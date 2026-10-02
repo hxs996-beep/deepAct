@@ -493,7 +493,7 @@ func TestWrapLineAnsi_WideChars(t *testing.T) {
 // Combined with the explicit "" separator this renders as two blank lines
 // between "Sub-Agents" and the agent row.
 func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
-	lines := renderSubAgentPanel([]SubAgentStatus{
+	lines := renderStepsPanel(nil, []SubAgentStatus{
 		{Agent: "sub", Goal: "批判性审查本次\"修复 narration 流式/快照渲染\"", Status: "running"},
 	}, 80)
 

@@ -1916,34 +1916,35 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
 	}
-	if len(m.subAgents) > 0 {
-		// Sub-agent parallel execution panel: shows which sub-agents are
-		// dispatched and their current status (running/done).
-		subAgentLines := renderSubAgentPanel(m.subAgents, width)
-		lines = append(lines, subAgentLines...)
-	}
 	if len(m.todoItems) > 0 {
-		// Overlay status area: render the step-progress todo list in a single
-		// status block above the input.
-		overlayLines := renderOverlayStatus(m.todoItems, width)
-		lines = append(lines, overlayLines...)
-	} else if m.narration != "" {
-		narrationLines := renderStreaming(m.narration, width)
-		lines = append(lines, narrationLines...)
-		// Message blocks (renderBody above) each end with a trailing blank line.
-		// The streamed narration is not yet a message, so append the same
-		// separator here. Without it, finalizing the narration into a message
-		// adds one line to totalLines, shifting scrollOffset / screenToLine
-		// mapping by one row — clicking a screen row would select the next
-		// line's text.
-		lines = append(lines, "")
-	} else if m.streaming != "" {
-		streamLines := renderStreaming(m.streaming, width)
-		lines = append(lines, streamLines...)
-		// Same trailing blank line as the narration branch above: finalizing
-		// streamed text into an assistant message adds a blank separator line,
-		// so the live block must match to keep scroll/click mapping stable.
-		lines = append(lines, "")
+		// Step backbone: every sub-agent nests under the step it executes.
+		// While a step list is active this panel stands in for the live
+		// narration (unchanged behaviour).
+		lines = append(lines, renderStepsPanel(m.todoItems, m.subAgents, width)...)
+	} else {
+		if len(m.subAgents) > 0 {
+			// No step list: sub-agents keep their own block, and the live
+			// narration/streaming still renders below it.
+			lines = append(lines, renderStepsPanel(nil, m.subAgents, width)...)
+		}
+		if m.narration != "" {
+			narrationLines := renderStreaming(m.narration, width)
+			lines = append(lines, narrationLines...)
+			// Message blocks (renderBody above) each end with a trailing blank line.
+			// The streamed narration is not yet a message, so append the same
+			// separator here. Without it, finalizing the narration into a message
+			// adds one line to totalLines, shifting scrollOffset / screenToLine
+			// mapping by one row — clicking a screen row would select the next
+			// line's text.
+			lines = append(lines, "")
+		} else if m.streaming != "" {
+			streamLines := renderStreaming(m.streaming, width)
+			lines = append(lines, streamLines...)
+			// Same trailing blank line as the narration branch above: finalizing
+			// streamed text into an assistant message adds a blank separator line,
+			// so the live block must match to keep scroll/click mapping stable.
+			lines = append(lines, "")
+		}
 	}
 	if len(m.spinners) > 0 {
 		spinnerLines := renderSpinners(m.spinners, width)
@@ -2724,41 +2725,93 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 	return wrapLines(lines, width)
 }
 
-// renderSubAgentPanel renders the sub-agent parallel execution panel above the input.
-// Shows each dispatched sub-agent with its type icon, goal, and status
-// (spinner for running, checkmark for done). This is the primary visual
-// indicator when multiple sub-agents are working in parallel.
-func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
-	if len(agents) == 0 {
+// renderStepsPanel renders the step backbone with every sub-agent nested under
+// the step it executes (SubAgentStatus.Step == TodoItem.ID). Sub-agents whose
+// Step is empty or no longer matches any step keep their own Sub-Agents block,
+// so a delegation that is not part of a step list — or one whose step the model
+// rewrote away — is still visible instead of silently dropped.
+func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width int) []string {
+	var children [][]SubAgentStatus
+	var orphans []SubAgentStatus
+	if len(items) > 0 {
+		index := make(map[string]int, len(items))
+		for i, it := range items {
+			if it.ID != "" {
+				index[it.ID] = i
+			}
+		}
+		children = make([][]SubAgentStatus, len(items))
+		for _, a := range agents {
+			if i, ok := index[a.Step]; ok && a.Step != "" {
+				children[i] = append(children[i], a)
+				continue
+			}
+			orphans = append(orphans, a)
+		}
+	} else {
+		orphans = agents
+	}
+	if len(items) == 0 && len(orphans) == 0 {
 		return nil
 	}
+
 	var content []string
-	content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
-	content = append(content, "")
-	for _, a := range agents {
-		goal := a.Goal
-		if len(goal) > 60 {
-			goal = goal[:60] + "..."
-		}
-		switch a.Status {
-		case "running":
-			frame := spinnerFrames[0]
-			line := fmt.Sprintf("  %s %s  %s", frame, agentIcon(a.Agent), SpinnerStyle.Render(goal))
-			content = append(content, line)
-		case "done":
-			summary := a.Summary
-			if len(summary) > 60 {
-				summary = summary[:60] + "..."
+	if len(items) > 0 {
+		content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
+		content = append(content, "")
+		for i, it := range items {
+			content = append(content, todoLine(it))
+			for _, a := range children[i] {
+				content = append(content, "      "+subAgentLine(a))
 			}
-			line := fmt.Sprintf("  ✓ %s  %s", agentIcon(a.Agent), SpinnerDoneStyle.Render(summary))
-			content = append(content, line)
-		case "error":
-			line := fmt.Sprintf("  ✗ %s  [err]", agentIcon(a.Agent))
-			content = append(content, ErrorStyle.Render(line))
+		}
+	}
+	if len(orphans) > 0 {
+		if len(content) > 0 {
+			content = append(content, "")
+		}
+		content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
+		content = append(content, "")
+		for _, a := range orphans {
+			content = append(content, "  "+subAgentLine(a))
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
 	return splitLipglossBlock(rendered, width)
+}
+
+// todoLine renders one step row. Plain-text markers: [ ] pending, [~] in_progress,
+// [✓] completed. [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
+// No emoji, no skill-specific theming — any skill drives it via todo_write.
+func todoLine(it engine.TodoItem) string {
+	switch it.Status {
+	case "in_progress":
+		return fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content))
+	case "completed":
+		return fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content))
+	default:
+		return fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content))
+	}
+}
+
+// subAgentLine renders one sub-agent row: status marker, stable run handle,
+// role tag, then the goal while running or the result once finished. The handle
+// is what makes concurrent same-role agents tellable apart.
+func subAgentLine(a SubAgentStatus) string {
+	trunc := func(s string) string {
+		if len(s) > 60 {
+			return s[:60] + "..."
+		}
+		return s
+	}
+	switch a.Status {
+	case "running":
+		return fmt.Sprintf("%s %s %s  %s", spinnerFrames[0], a.RunID, agentIcon(a.Agent), SpinnerStyle.Render(trunc(a.Goal)))
+	case "error", "cancelled":
+		return ErrorStyle.Render(fmt.Sprintf("✗ %s %s  %s", a.RunID, agentIcon(a.Agent), trunc(a.Summary)))
+	default:
+		return fmt.Sprintf("✓ %s %s  %s", a.RunID, agentIcon(a.Agent), SpinnerDoneStyle.Render(trunc(a.Summary)))
+	}
 }
 
 // splitLipglossBlock splits a lipgloss-rendered block into lines, wrapping any
@@ -2767,7 +2820,7 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 // U+2014/U+00B7) as 1 column. The gate here uses the same benchmark so already-
 // padded lines pass through unchanged. Using displayWidth (EastAsianWidth=true,
 // ambiguous counted as 2) would re-measure a padded header as 1 column over the
-// limit and split it, emitting a phantom blank line — see renderSubAgentPanel.
+// limit and split it, emitting a phantom blank line — see renderStepsPanel.
 func splitLipglossBlock(rendered string, width int) []string {
 	rawLines := strings.Split(rendered, "\n")
 	var result []string
@@ -2838,40 +2891,6 @@ func agentIcon(agent string) string {
 	default:
 		return "[a] " + agent
 	}
-}
-
-// renderTodoList renders the generic step-progress todo list above the input.
-// Plain-text markers: [ ] pending, [~] in_progress, [✓] completed.
-// [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
-// No emoji, no skill-specific theming — any skill drives it via todo_write.
-func renderTodoList(items []engine.TodoItem, width int) []string {
-	if len(items) == 0 {
-		return nil
-	}
-	var content []string
-	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
-	content = append(content, "")
-	for _, it := range items {
-		switch it.Status {
-		case "in_progress":
-			content = append(content, fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content)))
-		case "completed":
-			content = append(content, fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content)))
-		default:
-			content = append(content, fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content)))
-		}
-	}
-	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return splitLipglossBlock(rendered, width)
-}
-
-// renderOverlayStatus renders the step-progress todo list in a single overlay
-// block above the input.
-func renderOverlayStatus(todoItems []engine.TodoItem, width int) []string {
-	if len(todoItems) == 0 {
-		return nil
-	}
-	return renderTodoList(todoItems, width)
 }
 
 // truncateAnsi truncates a string containing ANSI escape codes to the given
