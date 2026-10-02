@@ -72,10 +72,15 @@ type Suggestion struct {
 
 // SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
 type SubAgentStatus struct {
-	ID      string // unique key for tracking (agent type + index)
+	// RunID is the stable handle pairing a start with its done: the handoff
+	// tool call id for a synchronous run, "bg-<seq>" for an async one. Never
+	// pair by Agent name — concurrent agents of the same role would close each
+	// other's rows.
+	RunID   string
 	Agent   string // agent type e.g. "sub", "critic", "searcher"
 	Goal    string // what the sub-agent is dispatched to do
-	Status  string // "running", "done", "error"
+	Step    string // TodoItem.ID this run executes; "" = not linked to a step
+	Status  string // "running", "done", "error", "cancelled"
 	Summary string // result summary when done
 }
 
@@ -193,6 +198,12 @@ type ProgressMsg struct {
 	CacheMiss  int
 	ModelName  string
 	Todos      []engine.TodoItem
+	// RunID/Step/Status mirror engine.ProgressEvent: RunID pairs a start with
+	// its done, Step links the run to a TodoItem.ID, Status carries the
+	// outcome of a done.
+	RunID  string
+	Step   string
+	Status string
 }
 
 const (
@@ -510,11 +521,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " running..."
 			}
-			// Track sub-agent in the dedicated panel
+			// Track sub-agent in the dedicated panel. RunID is the pairing key
+			// (handoff tool call id for sync runs, "bg-N" for async ones).
 			m.subAgents = append(m.subAgents, SubAgentStatus{
-				ID:     fmt.Sprintf("%s-%d", displayName, len(m.subAgents)),
+				RunID:  msg.RunID,
 				Agent:  displayName,
 				Goal:   msg.Detail,
+				Step:   msg.Step,
 				Status: "running",
 			})
 		case "agent_done":
@@ -533,14 +546,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " ✓"
 			}
-			// Update sub-agent panel status
-			for i := range m.subAgents {
-				if m.subAgents[i].Agent == displayName && m.subAgents[i].Status == "running" {
-					m.subAgents[i].Status = "done"
-					m.subAgents[i].Summary = msg.Detail
-					break
-				}
-			}
+			// Pair by RunID: concurrent sub-agents of the SAME role are
+			// indistinguishable by name, so a name match could close the wrong
+			// row. A done whose RunID was never started (an async dispatch that
+			// failed before the agent ran) still gets a row, already finished.
+			m.subAgents = applyAgentDone(m.subAgents, msg)
 		case "tool_start":
 			m.finalizeTurnBlocks(false)
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
@@ -2769,6 +2779,52 @@ func splitLipglossBlock(rendered string, width int) []string {
 		}
 	}
 	return result
+}
+
+// applyAgentDone folds an agent_done event into the sub-agent panel, pairing by
+// RunID. Falls back to the first running row of the same role only when the
+// event carries no handle at all (a handoff call without an id), which keeps
+// the panel usable if a producer ever emits an unpaired event.
+func applyAgentDone(agents []SubAgentStatus, msg ProgressMsg) []SubAgentStatus {
+	status := "done"
+	switch msg.Status {
+	case "error", "cancelled":
+		status = msg.Status
+	}
+	if i := subAgentIndexByRunID(agents, msg.RunID); i >= 0 {
+		agents[i].Status = status
+		agents[i].Summary = msg.Detail
+		return agents
+	}
+	if msg.RunID == "" {
+		for i := range agents {
+			if agents[i].Agent == msg.Name && agents[i].Status == "running" {
+				agents[i].Status = status
+				agents[i].Summary = msg.Detail
+				return agents
+			}
+		}
+		return agents
+	}
+	return append(agents, SubAgentStatus{
+		RunID: msg.RunID, Agent: msg.Name, Step: msg.Step,
+		Status: status, Summary: msg.Detail,
+	})
+}
+
+// subAgentIndexByRunID returns the row carrying runID, or -1. An empty runID
+// never matches: it is the "no handle" marker, and matching it would let an
+// unpaired event close an unpaired row.
+func subAgentIndexByRunID(agents []SubAgentStatus, runID string) int {
+	if runID == "" {
+		return -1
+	}
+	for i := range agents {
+		if agents[i].RunID == runID {
+			return i
+		}
+	}
+	return -1
 }
 
 // agentIcon returns a display tag for a known agent type. Unknown types keep

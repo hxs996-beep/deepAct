@@ -105,8 +105,8 @@ func TestView_TabInUncoveredPaths_NoOverflow(t *testing.T) {
 		inputBuf: NewInputBuffer(),
 		messages: []DisplayMessage{{Role: "assistant", Content: "done"}},
 		subAgents: []SubAgentStatus{
-			{ID: "1", Agent: "sub", Status: "running", Goal: "\t\tsearch the cache layer"},
-			{ID: "2", Agent: "sub", Status: "done", Summary: "\t\tfound it"},
+			{RunID: "bg-1", Agent: "sub", Status: "running", Goal: "\t\tsearch the cache layer"},
+			{RunID: "bg-2", Agent: "sub", Status: "done", Summary: "\t\tfound it"},
 		},
 		todoItems: []engine.TodoItem{
 			{Content: "\t\trewrite the compressor", Status: "in_progress"},

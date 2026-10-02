@@ -528,10 +528,10 @@ func TestAgentDoneUpdatesSubAgentPanel(t *testing.T) {
 	m.width = 80
 	m.height = 40
 	// agent_start 追加子代理
-	res, _ := m.Update(ProgressMsg{Type: "agent_start", Name: "researcher", Detail: "调研缓存方案"})
+	res, _ := m.Update(ProgressMsg{Type: "agent_start", Name: "researcher", Detail: "调研缓存方案", RunID: "bg-1"})
 	m = res.(Model)
 	// agent_done 标记完成
-	res, _ = m.Update(ProgressMsg{Type: "agent_done", Name: "researcher", Detail: "调研完成"})
+	res, _ = m.Update(ProgressMsg{Type: "agent_done", Name: "researcher", Detail: "调研完成", RunID: "bg-1", Status: "ok"})
 	m = res.(Model)
 	if len(m.subAgents) != 1 {
 		t.Fatalf("subAgents len = %d, want 1", len(m.subAgents))
@@ -541,5 +541,57 @@ func TestAgentDoneUpdatesSubAgentPanel(t *testing.T) {
 	}
 	if !strings.Contains(m.subAgents[0].Summary, "调研完成") {
 		t.Errorf("subAgent summary = %q, want contain 调研完成", m.subAgents[0].Summary)
+	}
+}
+
+// TestAgentDonePairsByRunID: 5 个同名 researcher 并发时，完成事件必须落在
+// 自己那一行。按角色名配到"第一个还在跑的同类"会让结果互相顶替。
+func TestAgentDonePairsByRunID(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateRunning
+	ids := []string{"bg-1", "bg-2", "bg-3", "bg-4", "bg-5"}
+	for _, id := range ids {
+		res, _ := m.Update(ProgressMsg{Type: "agent_start", Name: "researcher", Detail: "调研 " + id, RunID: id, Step: "dir"})
+		m = res.(Model)
+	}
+	res, _ := m.Update(ProgressMsg{Type: "agent_done", Name: "researcher", Detail: "bg-4 完成", RunID: "bg-4", Status: "ok"})
+	m = res.(Model)
+
+	if len(m.subAgents) != 5 {
+		t.Fatalf("subAgents len = %d, want 5", len(m.subAgents))
+	}
+	for _, a := range m.subAgents {
+		want := "running"
+		if a.RunID == "bg-4" {
+			want = "done"
+		}
+		if a.Status != want {
+			t.Errorf("%s status = %q, want %q", a.RunID, a.Status, want)
+		}
+	}
+	if got := m.subAgents[3].Summary; !strings.Contains(got, "bg-4 完成") {
+		t.Errorf("bg-4 summary = %q, want the bg-4 result", got)
+	}
+}
+
+// TestAgentDoneUnknownRunIDAppendsFinishedRow: 派发在子代理启动前就失败的
+// 异步任务不发 agent_start，只发一条 done。UI 必须把它显示成一行已结束的
+// 记录，不能静默丢掉，也不能让它顶替别的行。
+func TestAgentDoneUnknownRunIDAppendsFinishedRow(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateRunning
+	res, _ := m.Update(ProgressMsg{Type: "agent_start", Name: "researcher", Detail: "正常调研", RunID: "bg-1"})
+	m = res.(Model)
+	res, _ = m.Update(ProgressMsg{Type: "agent_done", Name: "researcher", Detail: "background sub-agent limit reached", RunID: "bg-9", Status: "error"})
+	m = res.(Model)
+
+	if len(m.subAgents) != 2 {
+		t.Fatalf("subAgents len = %d, want 2", len(m.subAgents))
+	}
+	if m.subAgents[0].Status != "running" {
+		t.Errorf("bg-1 status = %q, want running (must not be consumed by bg-9)", m.subAgents[0].Status)
+	}
+	if m.subAgents[1].RunID != "bg-9" || m.subAgents[1].Status != "error" {
+		t.Errorf("bg-9 row = %+v, want error", m.subAgents[1])
 	}
 }
