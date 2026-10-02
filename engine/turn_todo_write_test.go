@@ -131,3 +131,55 @@ func TestProcessTodoWriteCalls_Mixed(t *testing.T) {
 		t.Errorf("ToolCallID = %q, want call_todo", msgs[0].ToolCallID)
 	}
 }
+
+// TestProcessTodoWriteCalls_DuplicateIDRejected: id 是分组键，重复会让两个步骤
+// 争夺同一批子代理，必须在入口 fail loud。
+func TestProcessTodoWriteCalls_DuplicateIDRejected(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+		events = append(events, ev)
+	}}}
+
+	msgs := e.processTodoWriteCalls([]ToolCallRequest{{
+		ID: "call_dup", Name: TodoWriteToolName,
+		Input: json.RawMessage(`{"todos":[
+			{"id":"dir-1","content":"方向1","status":"in_progress"},
+			{"id":"dir-1","content":"方向2","status":"pending"}
+		]}`),
+	}})
+
+	if len(msgs) != 1 {
+		t.Fatalf("msgs len = %d, want 1", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Content, "duplicate") {
+		t.Errorf("message = %q, want a duplicate-id error", msgs[0].Content)
+	}
+	for _, ev := range events {
+		if ev.Type == "todo_update" {
+			t.Error("a rejected snapshot must not reach the UI")
+		}
+	}
+}
+
+// TestProcessTodoWriteCalls_UniqueIDsAccepted: 正常路径必须原样透传 id。
+func TestProcessTodoWriteCalls_UniqueIDsAccepted(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+		events = append(events, ev)
+	}}}
+
+	e.processTodoWriteCalls([]ToolCallRequest{{
+		ID: "call_ok", Name: TodoWriteToolName,
+		Input: json.RawMessage(`{"todos":[
+			{"id":"dir-1","content":"方向1","status":"in_progress"},
+			{"content":"汇总","status":"pending"}
+		]}`),
+	}})
+
+	if len(events) != 1 || events[0].Type != "todo_update" {
+		t.Fatalf("events = %+v, want one todo_update", events)
+	}
+	if got := events[0].Todos[0].ID; got != "dir-1" {
+		t.Errorf("Todos[0].ID = %q, want dir-1", got)
+	}
+}

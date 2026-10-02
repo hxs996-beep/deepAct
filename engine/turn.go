@@ -1559,6 +1559,7 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 			continue
 		}
 		valid := true
+		seenIDs := make(map[string]bool, len(params.Todos))
 		for _, t := range params.Todos {
 			if strings.TrimSpace(t.Content) == "" {
 				msgs = append(msgs, Message{
@@ -1579,6 +1580,19 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 				})
 				valid = false
 				break
+			}
+			if id := strings.TrimSpace(t.ID); id != "" {
+				if seenIDs[id] {
+					msgs = append(msgs, Message{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    fmt.Sprintf("Error: duplicate todo id %q — ids must be unique when present", id),
+						Timestamp:  time.Now(),
+					})
+					valid = false
+					break
+				}
+				seenIDs[id] = true
 			}
 		}
 		if !valid {
