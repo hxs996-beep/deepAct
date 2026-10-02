@@ -200,7 +200,10 @@ func (e *Engine) finishResumedJob(ctx context.Context, id string, result *Handof
 		task.ctx, task.cancel = nil, nil
 		e.bgMu.Unlock()
 		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: string(task.agent), Detail: result.Summary})
+			e.config.OnProgress(ProgressEvent{
+				Type: "agent_done", Name: string(task.agent), Detail: result.Summary,
+				RunID: task.id, Step: task.step,
+			})
 		}
 		return
 	}

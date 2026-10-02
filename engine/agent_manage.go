@@ -586,7 +586,7 @@ func (e *Engine) closeAgentJob(jobID string) string {
 	}
 	ids := e.closureJobIDsLocked(jobID)
 	cancels := make([]context.CancelFunc, 0, len(ids))
-	terminal := make([]string, 0, len(ids)) // agent names needing an agent_done
+	terminal := make([]*bgTask, 0, len(ids)) // removed jobs needing a terminal event
 	removed := make(map[string]bool, len(ids))
 	closed := 0
 	suspended, uncollected := 0, 0
@@ -602,9 +602,9 @@ func (e *Engine) closeAgentJob(jobID string) string {
 			uncollected++
 		case t.state == bgStateAwaitingUser:
 			suspended++
-			terminal = append(terminal, string(t.agent))
+			terminal = append(terminal, t)
 		default:
-			terminal = append(terminal, string(t.agent))
+			terminal = append(terminal, t)
 		}
 		if t.cancel != nil {
 			cancels = append(cancels, t.cancel)
@@ -627,8 +627,11 @@ func (e *Engine) closeAgentJob(jobID string) string {
 		cancel()
 	}
 	if e.config.OnProgress != nil {
-		for _, name := range terminal {
-			e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: "closed"})
+		for _, t := range terminal {
+			e.config.OnProgress(ProgressEvent{
+				Type: "agent_done", Name: string(t.agent), Detail: "closed",
+				RunID: t.id, Step: t.step, Status: "cancelled",
+			})
 		}
 	}
 

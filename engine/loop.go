@@ -322,7 +322,26 @@ func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
 	e.bgMu.Unlock()
 
 	if e.config.OnProgress != nil {
-		e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: string(t.agent), Detail: result.Summary})
+		e.config.OnProgress(ProgressEvent{
+			Type: "agent_done", Name: string(t.agent), Detail: result.Summary,
+			RunID: t.id, Step: t.step, Status: handoffResultStatus(result),
+		})
+	}
+}
+
+// handoffResultStatus maps a finished background result to the status the UI
+// shows. Cancellation wins over failure, and a blocked run is a failure — a
+// finished run must never render as a success when it did not deliver.
+func handoffResultStatus(r *HandoffResult) string {
+	switch {
+	case r == nil:
+		return "error"
+	case r.BlockedBy == "cancelled":
+		return "cancelled"
+	case r.Blocked || r.FinishReason == HandoffReasonError:
+		return "error"
+	default:
+		return "ok"
 	}
 }
 
