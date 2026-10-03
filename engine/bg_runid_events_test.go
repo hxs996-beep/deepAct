@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,12 +17,15 @@ func TestBackgroundDoneCarriesJobID(t *testing.T) {
 	reg := NewAgentRegistry()
 	reg.Register(a)
 	var events []ProgressEvent
+	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
 		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+			eventsMu.Lock()
 			events = append(events, ev)
+			eventsMu.Unlock()
 		}},
 	}
 	e.initBackgroundTasks()
@@ -34,7 +38,10 @@ func TestBackgroundDoneCarriesJobID(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, ev := range events {
+		eventsMu.Lock()
+		snapshot := append([]ProgressEvent(nil), events...)
+		eventsMu.Unlock()
+		for _, ev := range snapshot {
 			if ev.Type == "agent_done" && ev.RunID == "bg-1" {
 				if ev.Step != "dir-1" {
 					t.Errorf("agent_done Step = %q, want dir-1", ev.Step)
@@ -47,7 +54,10 @@ func TestBackgroundDoneCarriesJobID(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("no agent_done with RunID bg-1, got %+v", events)
+	eventsMu.Lock()
+	snapshot := append([]ProgressEvent(nil), events...)
+	eventsMu.Unlock()
+	t.Fatalf("no agent_done with RunID bg-1, got %+v", snapshot)
 }
 
 // TestCloseAgentEmitsTerminalEventWithRunID: 关闭任务必须用被关闭任务的 job id
