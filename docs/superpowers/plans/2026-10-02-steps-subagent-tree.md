@@ -1139,11 +1139,11 @@ func TestRenderStepsPanel_NestsByStepID(t *testing.T) {
 		return -1
 	}
 	// bg-1 挂在方向1 之下：顺序必须是 方向1 → bg-1 → 汇总。
-	if !(idx("方向1 调研") < idx("bg-1") < idx("汇总交叉分析")) {
+	if !(idx("方向1 调研") < idx("bg-1") && idx("bg-1") < idx("汇总交叉分析")) {
 		t.Errorf("bg-1 must nest between its step and the next step:\n%s", joined)
 	}
 	// 游离组在步骤列表之后，且保留独立标题。
-	if !(idx("汇总交叉分析") < idx("Sub-Agents") < idx("bg-2") < idx("bg-3")) {
+	if !(idx("汇总交叉分析") < idx("Sub-Agents") && idx("Sub-Agents") < idx("bg-2") && idx("bg-2") < idx("bg-3")) {
 		t.Errorf("unlinked agents must follow the steps under the Sub-Agents heading:\n%s", joined)
 	}
 	if !strings.Contains(joined, "[::] Steps") {
