@@ -120,3 +120,97 @@ func TestBackgroundDoneReportsFailure(t *testing.T) {
 		t.Errorf("completed result status = %q, want ok", got)
 	}
 }
+
+// TestSyncSuspensionEmitsStartForTheParkedJob: 同步委派挂起后会注册一个新 handle
+// （bg-N）交给模型去 agent_resume，但 UI 从没见过这个 handle 的 start。必须在
+// 注册处补一条 agent_start，否则恢复完成时的 agent_done 会因 RunID 不匹配而
+// 在面板里多出一行。
+func TestSyncSuspensionEmitsStartForTheParkedJob(t *testing.T) {
+	a := &mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
+		Summary:      "子代理在等你回答",
+		FinishReason: HandoffReasonAwaitingUser,
+		Suspended:    &SuspendedRun{Question: "选哪个？"},
+	}}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	var events []ProgressEvent
+	var eventsMu sync.Mutex
+	e := &Engine{
+		agents:    reg,
+		isChinese: true,
+		state:     &TaskState{},
+		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+			eventsMu.Lock()
+			events = append(events, ev)
+			eventsMu.Unlock()
+		}},
+	}
+	e.initBackgroundTasks()
+
+	// 同步：不传 Async
+	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "调研", Step: "dir-7",
+	}, 0, "中文")
+	if err != nil {
+		t.Fatalf("RunSubAgent error: %v", err)
+	}
+	if res.RunID == "" {
+		t.Fatal("a registered suspension must expose its handle")
+	}
+
+	eventsMu.Lock()
+	snapshot := append([]ProgressEvent(nil), events...)
+	eventsMu.Unlock()
+
+	found := false
+	for _, ev := range snapshot {
+		if ev.Type != "agent_start" || ev.RunID != res.RunID {
+			continue
+		}
+		found = true
+		if ev.Step != "dir-7" {
+			t.Errorf("parked agent_start Step = %q, want dir-7", ev.Step)
+		}
+	}
+	if !found {
+		t.Fatalf("no agent_start for the parked handle %q, got %+v", res.RunID, snapshot)
+	}
+}
+
+// TestBlockedSyncHandoffReportsError: 被阻塞的同步子代理不能报成 ok —— 否则
+// 面板用 ✓ 渲染失败，而同样结局的异步子代理渲染成 ✗。挂起（等用户回答）不是
+// 失败，必须保持 ok。
+func TestBlockedSyncHandoffReportsError(t *testing.T) {
+	a := &mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
+		Summary:      "子代理被阻塞",
+		Blocked:      true,
+		BlockedBy:    "sub_agent_error",
+		FinishReason: HandoffReasonError,
+	}}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e.initBackgroundTasks()
+
+	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "调研",
+	}, 0, "中文")
+	if err != nil {
+		t.Fatalf("RunSubAgent error: %v", err)
+	}
+	if res.Status != "error" {
+		t.Errorf("blocked handoff Status = %q, want error", res.Status)
+	}
+	if got := handoffEventStatus(res); got != "error" {
+		t.Errorf("panel status = %q, want error", got)
+	}
+
+	// 挂起路径：Status ok，且 FinishReason 是 awaiting_user —— 保持 ok。
+	if got := handoffEventStatus(ToolResult{Status: "ok", FinishReason: HandoffReasonAwaitingUser}); got != "ok" {
+		t.Errorf("parked run status = %q, want ok", got)
+	}
+	// 取消仍然优先。
+	if got := handoffEventStatus(ToolResult{Status: "cancelled"}); got != "cancelled" {
+		t.Errorf("cancelled status = %q, want cancelled", got)
+	}
+}

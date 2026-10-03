@@ -660,12 +660,8 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			if err := json.Unmarshal(call.Input, &params); err != nil || params.Async {
 				continue
 			}
-			name := params.Agent
-			if name == "" {
-				name = "sub"
-			}
 			e.config.OnProgress(ProgressEvent{
-				Type: "agent_start", Name: name, Detail: params.Goal,
+				Type: "agent_start", Name: agentDisplayName(params.Agent), Detail: params.Goal,
 				RunID: call.ID, Step: params.Step,
 			})
 		}
@@ -694,16 +690,12 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			if i < len(handoffCalls) {
 				_ = json.Unmarshal(handoffCalls[i].Input, &params)
 			}
-			name := params.Agent
-			if name == "" {
-				name = "sub"
-			}
 			runID := ""
 			if i < len(handoffCalls) {
 				runID = handoffCalls[i].ID
 			}
 			e.config.OnProgress(ProgressEvent{
-				Type: "agent_done", Name: name, Detail: briefDigest(r.Digest),
+				Type: "agent_done", Name: agentDisplayName(params.Agent), Detail: briefDigest(r.Digest),
 				RunID: runID, Step: params.Step, Status: handoffEventStatus(r),
 			})
 		}

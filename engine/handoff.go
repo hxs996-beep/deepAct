@@ -37,6 +37,19 @@ type handoffOptions struct {
 	// fork materializes params.ForkTurns into the copied conversation prefix.
 	// nil (nested backend, tests) = fork_turns is ignored.
 	fork func(spec string) []ModelMessage
+	// progress, when set, receives UI events this wrapper must report on behalf
+	// of the run (currently only the agent_start of a job parked on a question).
+	// nil (nested backend, tests) = nothing is reported.
+	progress func(ProgressEvent)
+}
+
+// agentDisplayName is the role tag shown for a delegation, defaulting to "sub"
+// when the caller omitted the agent.
+func agentDisplayName(agent string) string {
+	if agent == "" {
+		return "sub"
+	}
+	return agent
 }
 
 func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) ToolResult {
@@ -104,6 +117,17 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 	runID := ""
 	if result.Suspended != nil && opts.register != nil {
 		runID = opts.register(result.Suspended, AgentID(params.Agent), params.Goal)
+		// The parked run is a NEW handle — the delegating agent is told to resume
+		// with it — so the UI has never seen an agent_start for it. Report one
+		// now, or the resume's agent_done would arrive for an unknown RunID and
+		// the panel would grow a second, unpaired row. Depth 0 only: a nested
+		// delegation owns no UI row.
+		if opts.depth == 0 && runID != "" && opts.progress != nil {
+			opts.progress(ProgressEvent{
+				Type: "agent_start", Name: agentDisplayName(params.Agent),
+				Detail: params.Goal, RunID: runID, Step: params.Step,
+			})
+		}
 	}
 	// Only the top-level delegation exposes its handle: deeper handles must never
 	// reach the model (a nested digest is inlined into its parent's Summary, so
@@ -113,8 +137,15 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 	}
 
 	status := "ok"
-	if result.BlockedBy == "cancelled" {
+	switch {
+	case result.BlockedBy == "cancelled":
 		status = "cancelled"
+	case result.Blocked:
+		// A blocked run did not deliver. Reporting it as "ok" rendered a failed
+		// sub-agent with a ✓ while the same outcome in the async path rendered
+		// ✗. A run parked on a question is not blocked (it carries Suspended
+		// instead), so it stays "ok".
+		status = "error"
 	}
 	return ToolResult{
 		ToolCallID:   call.ID,
@@ -157,6 +188,11 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		userLang: userLang,
 		register: e.RegisterSuspended,
 		fork:     e.forkHistoryFor,
+		progress: func(ev ProgressEvent) {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ev)
+			}
+		},
 	})
 	// Bubble up sub-agent questions into the pending ask_user seam so the
 	// existing awaiting_user / Options UI path presents them. RunID ties the
@@ -328,13 +364,9 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 	// turn.go cannot know it before the tool call runs, and emitting one there
 	// as well would show every async delegation twice.
 	if e.config.OnProgress != nil {
-		name := params.Agent
-		if name == "" {
-			name = "sub"
-		}
 		e.config.OnProgress(ProgressEvent{
-			Type: "agent_start", Name: name, Detail: params.Goal,
-			RunID: jobID, Step: params.Step,
+			Type: "agent_start", Name: agentDisplayName(params.Agent),
+			Detail: params.Goal, RunID: jobID, Step: params.Step,
 		})
 	}
 
