@@ -29,6 +29,11 @@ const (
 // step-by-step progress through this channel, and the UI renders it as a
 // plain-text todo list (no skill-specific theming).
 type TodoItem struct {
+	// ID is an optional stable key the model assigns to the step. It exists so
+	// a delegated sub-agent can name the step it executes
+	// (handoff_to_agent.step) and be nested under it, instead of the UI
+	// guessing from step wording. Empty = the step dispatches no work.
+	ID      string `json:"id,omitempty"`
 	Content string `json:"content"` // step description (plain text)
 	Status  string `json:"status"`  // "pending" | "in_progress" | "completed"
 }
@@ -42,6 +47,18 @@ type ProgressEvent struct {
 	ModelName  string // which model was used for this API call
 	// Todos carries the full todo-list snapshot for Type == "todo_update".
 	Todos []TodoItem
+	// RunID is the stable handle of a depth-0 delegation: the handoff tool
+	// call id for a synchronous run, "bg-<seq>" for an async one. agent_start
+	// and its agent_done carry the SAME value, so the UI pairs them by
+	// identity — concurrent same-role agents are otherwise indistinguishable,
+	// and name-based pairing closes the wrong row.
+	RunID string
+	// Step is the TodoItem.ID this sub-agent executes; empty = not linked to
+	// any step, and the UI groups it separately.
+	Step string
+	// Status is the outcome carried by agent_done: "ok", "error" or
+	// "cancelled". Empty on every other event.
+	Status string
 }
 
 type ProgressFunc func(event ProgressEvent)
@@ -100,11 +117,20 @@ type EngineConfig struct {
 	MaxSuspendedSubAgents int
 	ShowThinking          bool    // stream model reasoning/thinking to UI
 	RiskThreshold         float64 // router risk threshold for Pro/Flash escalation
-	WorkDir               string
-	OnProgress            ProgressFunc
-	Pricing               PricingConfig
-	EvalStoreDir          string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
-	PromptVersion         string // SHA256 hash of the system prompt for tracking
+	// Approval policy for bash commands (see engine/approval.go). ApprovalMode
+	// is on-request (default) or never; ApprovalRules are user-declared rules
+	// from [approval.rules]; LearnedApprovals are commands the user confirmed in
+	// earlier sessions; OnApprovalLearned persists a new confirmation (nil keeps
+	// it session-only). Wired in cmd/run.go from config plus the approvals store.
+	ApprovalMode      string
+	ApprovalRules     []ApprovalRule
+	LearnedApprovals  []string
+	OnApprovalLearned func(command string)
+	WorkDir           string
+	OnProgress        ProgressFunc
+	Pricing           PricingConfig
+	EvalStoreDir      string // directory for evaluation records JSONL (default: ~/.deepact/eval/)
+	PromptVersion     string // SHA256 hash of the system prompt for tracking
 }
 
 type EngineResponse struct {

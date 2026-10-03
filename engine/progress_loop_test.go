@@ -534,3 +534,73 @@ func TestRun_ProgressLoop_EditResetsStreak(t *testing.T) {
 		t.Fatalf("expected NOT blocked after an edit progress signal, got Blocked=%v Summary=%q", resp.Blocked, resp.Summary)
 	}
 }
+
+// --- Async sub-agent status observations count as progress (regression) ---
+
+// agentPollTurnChunks is a one-turn model that polls a single background job.
+func agentPollTurnChunks(id string) []ModelChunk {
+	return []ModelChunk{{
+		Delta: "查看任务",
+		ToolCalls: []ModelToolCall{{ID: id, Type: "function", Function: ModelFunctionCall{
+			Name: AgentPollToolName, Arguments: `{"job_id":"bg-1"}`,
+		}}},
+		FinishReason: "tool_calls",
+		Usage:        &ModelUsage{},
+	}}
+}
+
+func TestExecuteTurn_MadeProgress_AgentPollNewStatus(t *testing.T) {
+	// 回归：父代理只轮询异步子任务（不再读写代码）时不得被当作无进展。
+	// 首次观测某 job、或 job 进入新状态（running→done）= 新信息 = 进展；
+	// 重复观测同一未变状态不算。
+	e := &Engine{
+		model:   &stubStreamModel{chunks: agentPollTurnChunks("p1")},
+		context: &stubContextBuilder{},
+		tools:   &recordingToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "调研"}},
+		config:  EngineConfig{ModelName: "test-model"},
+		guards:  &GuardSystem{scope: NewScopeGuard()},
+	}
+	e.initBackgroundTasks()
+	e.bgMu.Lock()
+	e.bgTasks["bg-1"] = &bgTask{id: "bg-1", agent: AgentSub, goal: "调研缓存", state: bgStateRunning}
+	e.bgMu.Unlock()
+
+	// 第 1 轮：首次观测到 bg-1 running → 新信息 → 进展。
+	r1, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !r1.MadeProgress {
+		t.Error("first observation of a running job should count as progress")
+	}
+
+	// 第 2 轮：重复观测同一 running 状态 → 不算进展。
+	e.model = &stubStreamModel{chunks: agentPollTurnChunks("p2")}
+	r2, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if r2.MadeProgress {
+		t.Error("re-observing the same unchanged job state must not count as progress")
+	}
+
+	// 第 3 轮：job 完成 → done 是新状态 → 进展。
+	e.bgMu.Lock()
+	task := e.bgTasks["bg-1"]
+	task.result = make(chan *HandoffResult, 1)
+	task.result <- &HandoffResult{Summary: "结果", FinishReason: HandoffReasonCompleted}
+	task.done = make(chan struct{})
+	close(task.done)
+	e.bgMu.Unlock()
+
+	e.model = &stubStreamModel{chunks: agentPollTurnChunks("p3")}
+	r3, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !r3.MadeProgress {
+		t.Error("a job transitioning to done should count as progress")
+	}
+}

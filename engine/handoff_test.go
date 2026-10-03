@@ -301,3 +301,61 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 		t.Fatalf("expected agent_done event with result, got events: %+v", evs)
 	}
 }
+
+// TestAsyncDispatchAgentStartCarriesJobID: 异步派发的 agent_start 必须带上
+// job id，UI 才能用它把后台完成事件配回同一行。
+func TestAsyncDispatchAgentStartCarriesJobID(t *testing.T) {
+	a := &blockingAgent{id: AgentSub, start: make(chan struct{}), released: make(chan struct{})}
+	reg := NewAgentRegistry()
+	reg.Register(a)
+	var events []ProgressEvent
+	var eventsMu sync.Mutex
+	e := &Engine{
+		agents:    reg,
+		isChinese: true,
+		state:     &TaskState{},
+		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
+			eventsMu.Lock()
+			events = append(events, ev)
+			eventsMu.Unlock()
+		}},
+	}
+	e.initBackgroundTasks()
+
+	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "调研", Async: true, Step: "dir-1",
+	}, 0, "中文"); err != nil {
+		t.Fatalf("RunSubAgent error: %v", err)
+	}
+	<-a.start // 确保后台 goroutine 已进入 Run
+
+	eventsMu.Lock()
+	evs := append([]ProgressEvent(nil), events...)
+	eventsMu.Unlock()
+
+	starts := 0
+	for _, ev := range evs {
+		if ev.Type != "agent_start" {
+			continue
+		}
+		starts++
+		if ev.RunID != "bg-1" {
+			t.Errorf("agent_start RunID = %q, want bg-1", ev.RunID)
+		}
+		if ev.Step != "dir-1" {
+			t.Errorf("agent_start Step = %q, want dir-1", ev.Step)
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("agent_start count = %d, want 1", starts)
+	}
+
+	e.bgMu.Lock()
+	task := e.bgTasks["bg-1"]
+	e.bgMu.Unlock()
+	if task == nil || task.step != "dir-1" {
+		t.Errorf("bgTask bg-1 = %+v, want step dir-1", task)
+	}
+
+	e.cancelBackgroundTasks() // 取消后台 ctx，释放阻塞的 agent goroutine
+}

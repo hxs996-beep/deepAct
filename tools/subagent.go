@@ -64,6 +64,8 @@ func (t *SubAgentTool) Spec() ToolSpec {
 				"description": "Constraints for the sub-agent (optional)"},
 			"expected_output": {"type": "string",
 				"description": "What a successful result looks like — acceptance criteria (optional)"},
+			"fork_turns": {"type": "string",
+				"description": "How much of YOUR conversation to copy into the sub-agent as starting context: \"none\" (default, independent run), \"all\", or a number of preceding user turns as a string, e.g. \"2\". Only the first-level delegation can fork."},
 			"async": {"type": "boolean",
 				"description": "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent read-only tasks (large-scope research, parallel review)."}
 		},

@@ -29,6 +29,26 @@ func TestNewDefaultRegistry_BuiltinRoles(t *testing.T) {
 	if len(r.ToolNames) == 0 {
 		t.Error("researcher should have a read-only tool allowlist")
 	}
+	// A researcher's deliverable IS prose ("a concise research note"), so it
+	// must terminate through submit_result like every other structured role.
+	// As a non-structured role its finished report was treated as "narration":
+	// the engine nudged it to "use tools", it kept going, and the run ended as
+	// stalled_narration / max_iterations with a misleading "partial result"
+	// heading. That was the observed failure mode for 4 of 6 collab researchers.
+	if !r.StructuredResult {
+		t.Error("researcher must be structured: its prose report has to terminate via submit_result, not the narration guard")
+	}
+	// A pointedly tight cap: 30 turns of 1M-context reads per direction is what
+	// made one /collab round cost ~15M prompt tokens. One direction needs far
+	// fewer turns; the wrap-up nudge (see budgetNudgeAt) covers the tail.
+	if r.MaxIterations != 15 {
+		t.Errorf("researcher MaxIterations = %d, want 15 (a single direction must not be allowed 30 turns)", r.MaxIterations)
+	}
+	// The persona must state a stopping rule: "thoroughly investigate" (the old
+	// wording) reads as an instruction to exhaust the budget.
+	if !strings.Contains(r.Persona, "Stop as soon as") {
+		t.Errorf("researcher persona must state a stopping rule, got %q", r.Persona)
+	}
 	c := got[AgentCritic]
 	if c.MaxIterations == 0 {
 		t.Error("critic should have a turn cap")

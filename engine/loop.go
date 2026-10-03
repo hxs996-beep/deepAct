@@ -64,8 +64,8 @@ type Engine struct {
 	// re-trim and re-fail (see executeTurn).
 	contextRetryDone bool
 	steerMu          sync.Mutex
-	steerQueue []string
-	guards     *GuardSystem
+	steerQueue       []string
+	guards           *GuardSystem
 	// progressLoop is the single no-progress breaker — the only loop guard that
 	// can still end a Run. Per-target repetition is no longer blocked: it is
 	// reported to the model as a fact (see noteRepeats), so the model decides
@@ -77,6 +77,13 @@ type Engine struct {
 	// (progressLoop), so legitimate investigation — reading or searching new
 	// content — is not mistaken for a no-progress loop. Reset each Run.
 	progressKeys map[string]bool
+	// observedAgentStates collects the async sub-agent status observations made
+	// during the CURRENT turn as novel-info keys ("agent:<job>::<state>"), for
+	// the progress signal at the end of executeTurn. A job seen for the first
+	// time, or moving to a new state (running→done/awaiting_user), is new
+	// information = progress; re-observing the same unchanged state is not.
+	// Rebuilt every turn (see executeTurn).
+	observedAgentStates []string
 	// repeatCounts counts per-target tool invocations within the current Run
 	// ("read:path::scope", "edit:path#sig", "grep:pattern:path", ...). A repeat
 	// is reported to the model as a fact alongside the tool result — it never
@@ -165,15 +172,24 @@ const (
 // whole history (worst case ~1M tokens), so the table must stay small.
 const defaultMaxSuspendedSubAgents = 4
 
+// inboxBufferSize bounds how many send_message calls may queue for one running
+// sub-agent before the sender is told to back off. Small on purpose: messages
+// are steered into the next iteration, not accumulated.
+const inboxBufferSize = 8
+
 // bgTask is one background sub-agent job: an async run started via
 // handoff_to_agent(async:true), or a run suspended on ask_user.
 // A running entry lives only for the current Run() — the Run's exit path
 // cancels it and drops any un-polled result. A suspended entry outlives the Run
 // (it holds no goroutine and no request) until its answer arrives.
 type bgTask struct {
-	id      string // "bg-<seq>"
-	agent   AgentID
-	goal    string
+	id    string // "bg-<seq>"
+	agent AgentID
+	goal  string
+	// step is the TodoItem.ID this job executes ("" = not linked to a step).
+	// Stored here so every terminal event can report the same link the
+	// dispatch reported, without re-parsing the original tool call.
+	step    string
 	ctx     context.Context
 	cancel  context.CancelFunc
 	result  chan *HandoffResult // 容量1：完成/错误；挂起条目在登记时即创建（I9）
@@ -189,6 +205,19 @@ type bgTask struct {
 	// suspension (empty when this run asked the user itself). The parent entry
 	// is found by reverse lookup on it — no parent field is needed.
 	childRunID string
+	// done is closed exactly once when the job publishes a terminal result.
+	// It is a SIGNAL, not a channel to consume: several waiters and the
+	// list/wait renderers can all observe completion without stealing the
+	// result, which stays in `result` for agent_poll to collect.
+	done chan struct{}
+	// inbox carries mid-run messages injected by send_message. The sub-agent
+	// run drains it at the top of each iteration (see drainInbox). nil for
+	// sync/nested runs, which have no job handle to address.
+	inbox chan string
+	// resultBrief is a one-line digest of the terminal result, set when the job
+	// finishes, so list_agents / wait_agent can show what a done job produced
+	// without consuming its result channel.
+	resultBrief string
 }
 
 // initBackgroundTasks lazily creates the background task map. Safe to call
@@ -251,6 +280,71 @@ func (e *Engine) inFlightCount() int {
 	return e.countByStateLocked(bgStateRunning)
 }
 
+// finishBackgroundJob publishes a terminal result for a background job: it
+// marks the result available (done closed) and records a short brief, then
+// notifies the UI. The entry STAYS in the table until agent_poll consumes it —
+// that preserves the outstanding-cap semantics (a slot frees on collection, not
+// on completion) and lets list/wait still observe the finished job.
+//
+// done is closed under bgMu with a closed-check so a double finish (e.g. a
+// cancellation racing a normal return) can never panic.
+func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
+	if t == nil {
+		loopLog.Printf("finishBackgroundJob: ignoring a nil job")
+		return
+	}
+	if result == nil {
+		loopLog.Printf("finishBackgroundJob: ignoring a nil result for job %s", t.id)
+		return
+	}
+	e.bgMu.Lock()
+	if t.done != nil {
+		select {
+		case <-t.done:
+			e.bgMu.Unlock()
+			return // already finished
+		default:
+		}
+	}
+	// Delivery, brief and the done signal are published under ONE lock and in
+	// the order consumers rely on: the result is in the channel before done
+	// closes, so a waiter woken by done always finds the result readable. The
+	// send cannot block — result has capacity 1 and this runs at most once per
+	// job (the closed-check above).
+	select {
+	case t.result <- result:
+	default:
+	}
+	t.resultBrief = briefDigest(result.Summary)
+	if t.done != nil {
+		close(t.done)
+	}
+	e.bgMu.Unlock()
+
+	if e.config.OnProgress != nil {
+		e.config.OnProgress(ProgressEvent{
+			Type: "agent_done", Name: string(t.agent), Detail: result.Summary,
+			RunID: t.id, Step: t.step, Status: handoffResultStatus(result),
+		})
+	}
+}
+
+// handoffResultStatus maps a finished background result to the status the UI
+// shows. Cancellation wins over failure, and a blocked run is a failure — a
+// finished run must never render as a success when it did not deliver.
+func handoffResultStatus(r *HandoffResult) string {
+	switch {
+	case r == nil:
+		return "error"
+	case r.BlockedBy == "cancelled":
+		return "cancelled"
+	case r.Blocked || r.FinishReason == HandoffReasonError:
+		return "error"
+	default:
+		return "ok"
+	}
+}
+
 // suspendedCount counts jobs waiting for the user's answer.
 func (e *Engine) suspendedCount() int {
 	e.bgMu.Lock()
@@ -262,6 +356,12 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 	guard := &GuardSystem{
 		scope: NewScopeGuard(),
 	}
+	guard.scope.Configure(ApprovalSettings{
+		Mode:      cfg.ApprovalMode,
+		Rules:     cfg.ApprovalRules,
+		Learned:   cfg.LearnedApprovals,
+		OnLearned: cfg.OnApprovalLearned,
+	})
 	e := &Engine{
 		model:        deps.Model,
 		tools:        deps.Tools,
@@ -712,6 +812,26 @@ func (e *Engine) consumeAskUser() {
 		e.pendingAskUser = e.pendingAskUser[1:]
 	}
 	e.askUserMu.Unlock()
+}
+
+// dropAskUserFor removes the pending questions belonging to the given job
+// handles. Called when a suspended job is closed: the entry is gone, so its
+// question must not remain presented (the user's answer could never be
+// delivered — agent_resume would report "not found").
+func (e *Engine) dropAskUserFor(runIDs map[string]bool) {
+	if len(runIDs) == 0 {
+		return
+	}
+	e.askUserMu.Lock()
+	defer e.askUserMu.Unlock()
+	kept := e.pendingAskUser[:0]
+	for _, q := range e.pendingAskUser {
+		if q != nil && q.RunID != "" && runIDs[q.RunID] {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	e.pendingAskUser = kept
 }
 
 // buildRunSummary produces the user-facing summary for a Run() by walking the

@@ -72,19 +72,16 @@ type Suggestion struct {
 
 // SubAgentStatus tracks a dispatched sub-agent's progress for UI display.
 type SubAgentStatus struct {
-	ID      string // unique key for tracking (agent type + index)
+	// RunID is the stable handle pairing a start with its done: the handoff
+	// tool call id for a synchronous run, "bg-<seq>" for an async one. Never
+	// pair by Agent name — concurrent agents of the same role would close each
+	// other's rows.
+	RunID   string
 	Agent   string // agent type e.g. "sub", "critic", "searcher"
 	Goal    string // what the sub-agent is dispatched to do
-	Status  string // "running", "done", "error"
+	Step    string // TodoItem.ID this run executes; "" = not linked to a step
+	Status  string // "running", "done", "error", "cancelled"
 	Summary string // result summary when done
-}
-
-var slashCommands = []Suggestion{
-	{Command: "/help", Args: "", Description: "Show this help screen"},
-	{Command: "/clear", Args: "", Description: "Reset session state (clear messages and context)"},
-	{Command: "/ratd", Args: "<需求>", Description: "反向测试驱动：内置技能（红队写对抗测试驱动实现）"},
-	{Command: "/collab", Args: "<需求>", Description: "并行研究：内置技能（拆解→并行委派调研→汇总）"},
-	{Command: "/resume", Args: "", Description: "恢复之前的会话"},
 }
 
 // helpTools is the curated capability surface shown in the /help screen. It
@@ -96,6 +93,7 @@ var helpTools = []Suggestion{
 	{Command: "read_multi", Description: "Read up to 8 files in parallel"},
 	{Command: "write", Description: "Create or overwrite a file"},
 	{Command: "edit", Description: "Search-and-replace text in a file"},
+	{Command: "apply_patch", Description: "Batch edits (multi-file, add/delete/move)"},
 	{Command: "grep", Description: "Search file contents (regex or literal)"},
 	{Command: "glob", Description: "Find files by path pattern"},
 	{Command: "bash", Description: "Run shell commands (timeout, blocked-command list)"},
@@ -200,6 +198,12 @@ type ProgressMsg struct {
 	CacheMiss  int
 	ModelName  string
 	Todos      []engine.TodoItem
+	// RunID/Step/Status mirror engine.ProgressEvent: RunID pairs a start with
+	// its done, Step links the run to a TodoItem.ID, Status carries the
+	// outcome of a done.
+	RunID  string
+	Step   string
+	Status string
 }
 
 const (
@@ -517,11 +521,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " running..."
 			}
-			// Track sub-agent in the dedicated panel
+			// Track sub-agent in the dedicated panel. RunID is the pairing key
+			// (handoff tool call id for sync runs, "bg-N" for async ones).
 			m.subAgents = append(m.subAgents, SubAgentStatus{
-				ID:     fmt.Sprintf("%s-%d", displayName, len(m.subAgents)),
+				RunID:  msg.RunID,
 				Agent:  displayName,
 				Goal:   msg.Detail,
+				Step:   msg.Step,
 				Status: "running",
 			})
 		case "agent_done":
@@ -540,14 +546,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.spinners) > 0 {
 				m.spinners[0].Goal = displayName + " ✓"
 			}
-			// Update sub-agent panel status
-			for i := range m.subAgents {
-				if m.subAgents[i].Agent == displayName && m.subAgents[i].Status == "running" {
-					m.subAgents[i].Status = "done"
-					m.subAgents[i].Summary = msg.Detail
-					break
-				}
-			}
+			// Pair by RunID: concurrent sub-agents of the SAME role are
+			// indistinguishable by name, so a name match could close the wrong
+			// row. A done whose RunID was never started (an async dispatch that
+			// failed before the agent ran) still gets a row, already finished.
+			m.subAgents = applyAgentDone(m.subAgents, msg)
 		case "tool_start":
 			m.finalizeTurnBlocks(false)
 			m.toolTree = append(m.toolTree, ToolNode{Name: msg.Name, Detail: msg.Detail, Icon: toolIcon(msg.Name)})
@@ -1207,14 +1210,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// 非末项（方案）→ 发内部 /confirm N 命令确定性确认；
 				// 末项"输入你的意见"→ 关闭弹出框回输入框自由输入。
 				n := m.selectedOption + 1
-				total := len(m.activeOptions)
+				opts := m.activeOptions
+				total := len(opts)
 				m.activeOptions = nil
 				if n == total {
 					// Last item closes the popup back to free input → repaint
 					// so the popup background doesn't linger.
 					return m, m.repaintCmd()
 				}
-				return m.submitConfirm(n)
+				return m.submitConfirm(n, opts)
 			}
 			// Alt+Enter: fall through to InputBuffer for newline
 		case tea.KeyUp:
@@ -1276,6 +1280,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text := m.inputBuf.Value()
 			m.inputBuf.SetValue("")
 			if strings.TrimSpace(text) != "" {
+				// Commands that stay available during a run (e.g. /help) are
+				// answered here; everything else is queued to the running agent
+				// as a steer message.
+				if cmd, args, ok := m.localCommandFor(text, true); ok {
+					m.messages = append(m.messages, DisplayMessage{Role: "user", Content: text})
+					updated, teaCmd, handled := cmd.Handle(&m, args)
+					if handled {
+						return updated, teaCmd
+					}
+					m.messages = m.messages[:len(m.messages)-1]
+				}
 				if m.engine != nil {
 					m.engine.Steer(text)
 				}
@@ -1326,21 +1341,17 @@ func (m *Model) updateSuggestions() {
 		return
 	}
 
-	// Filter matching commands
+	// Filter matching commands. Built-ins and skill shortcuts come from the one
+	// registry (ui/commands.go), so a new command shows up here for free.
 	prefix := strings.ToLower(val)
-	var matches []Suggestion
-	for _, cmd := range slashCommands {
-		if strings.HasPrefix(strings.ToLower(cmd.Command), prefix) {
-			matches = append(matches, cmd)
-		}
-	}
-	// Also match external skill names as /-shortcuts
-	for _, skill := range m.skillSuggestions {
-		short := "/" + skill.Command
-		if strings.HasPrefix(short, prefix) {
+	commands := m.allCommands()
+	matches := make([]Suggestion, 0, len(commands))
+	for _, cmd := range commands {
+		if strings.HasPrefix(strings.ToLower(cmd.Name), prefix) {
 			matches = append(matches, Suggestion{
-				Command:     "/" + skill.Command,
-				Description: skill.Description,
+				Command:     cmd.Name,
+				Args:        cmd.Args,
+				Description: cmd.Description,
 			})
 		}
 	}
@@ -1445,28 +1456,14 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.narration = ""
 	m.narrationPending = ""
 
-	// Handle local slash commands without invoking the engine
-	if strings.TrimSpace(content) == "/help" {
-		m.state = stateReady
-		m.messages = append(m.messages, DisplayMessage{Role: "assistant", Content: buildHelpText(slashCommands, m.skillSuggestions, helpTools)})
-		return m, nil
-	}
-
-	// Handle /resume: show session picker without invoking the engine
-	if strings.TrimSpace(content) == "/resume" {
-		if m.engine == nil {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "API key required. Restart and enter key."})
-			return m, nil
+	// Local slash commands are answered without invoking the engine. Everything
+	// the registry does not claim locally (unknown input, engine-owned commands
+	// such as /clear and /<skill>) falls through to the engine below.
+	if cmd, args, ok := m.localCommandFor(content, false); ok {
+		updated, teaCmd, handled := cmd.Handle(&m, args)
+		if handled {
+			return updated, teaCmd
 		}
-		sessions := m.engine.ListSessions()
-		if len(sessions) == 0 {
-			m.messages = append(m.messages, DisplayMessage{Role: "system", Content: "没有可恢复的会话。"})
-			return m, nil
-		}
-		m.resumeSessions = sessions
-		m.selectedResume = 0
-		m.state = stateResume
-		return m, nil
 	}
 
 	if m.engine == nil {
@@ -1484,10 +1481,32 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	)
 }
 
+// newChoiceRecord builds the conversation record appended after the user picks
+// an option from an ask_user / confirmation popup: it lists every candidate and
+// marks the chosen one, so the decision stays visible after the popup closes.
+func newChoiceRecord(opts []string, n int) DisplayMessage {
+	header := fmt.Sprintf("✓ 已选择 [%d]", n)
+	if n >= 1 && n <= len(opts) {
+		header = fmt.Sprintf("✓ 已选择 [%d] %s", n, opts[n-1])
+	}
+	numbered := make([]string, len(opts))
+	for i, o := range opts {
+		numbered[i] = fmt.Sprintf("[%d] %s", i+1, o)
+	}
+	content := header
+	if len(numbered) > 0 {
+		content += "\n候选：" + strings.Join(numbered, "  ")
+	}
+	return DisplayMessage{Role: "choice", Content: content}
+}
+
 // submitConfirm sends an internal "/confirm N" command for the selected option.
 // It drives the same Run startup path as submitInput (state→running, spinner,
-// engine.Run) but never writes to the input buffer.
-func (m Model) submitConfirm(n int) (tea.Model, tea.Cmd) {
+// engine.Run) but never writes to the input buffer. opts is the candidate list
+// as shown in the popup (captured before activeOptions was cleared); a "choice"
+// record is appended so the user can still see which option they picked.
+func (m Model) submitConfirm(n int, opts []string) (tea.Model, tea.Cmd) {
+	m.messages = append(m.messages, newChoiceRecord(opts, n))
 	m.state = stateRunning
 	m.cancelled = false
 	m.runSeq++
@@ -1897,34 +1916,35 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		toolLines := m.renderToolTree(width)
 		lines = append(lines, toolLines...)
 	}
-	if len(m.subAgents) > 0 {
-		// Sub-agent parallel execution panel: shows which sub-agents are
-		// dispatched and their current status (running/done).
-		subAgentLines := renderSubAgentPanel(m.subAgents, width)
-		lines = append(lines, subAgentLines...)
-	}
 	if len(m.todoItems) > 0 {
-		// Overlay status area: render the step-progress todo list in a single
-		// status block above the input.
-		overlayLines := renderOverlayStatus(m.todoItems, width)
-		lines = append(lines, overlayLines...)
-	} else if m.narration != "" {
-		narrationLines := renderStreaming(m.narration, width)
-		lines = append(lines, narrationLines...)
-		// Message blocks (renderBody above) each end with a trailing blank line.
-		// The streamed narration is not yet a message, so append the same
-		// separator here. Without it, finalizing the narration into a message
-		// adds one line to totalLines, shifting scrollOffset / screenToLine
-		// mapping by one row — clicking a screen row would select the next
-		// line's text.
-		lines = append(lines, "")
-	} else if m.streaming != "" {
-		streamLines := renderStreaming(m.streaming, width)
-		lines = append(lines, streamLines...)
-		// Same trailing blank line as the narration branch above: finalizing
-		// streamed text into an assistant message adds a blank separator line,
-		// so the live block must match to keep scroll/click mapping stable.
-		lines = append(lines, "")
+		// Step backbone: every sub-agent nests under the step it executes.
+		// While a step list is active this panel stands in for the live
+		// narration (unchanged behaviour).
+		lines = append(lines, renderStepsPanel(m.todoItems, m.subAgents, width)...)
+	} else {
+		if len(m.subAgents) > 0 {
+			// No step list: sub-agents keep their own block, and the live
+			// narration/streaming still renders below it.
+			lines = append(lines, renderStepsPanel(nil, m.subAgents, width)...)
+		}
+		if m.narration != "" {
+			narrationLines := renderStreaming(m.narration, width)
+			lines = append(lines, narrationLines...)
+			// Message blocks (renderBody above) each end with a trailing blank line.
+			// The streamed narration is not yet a message, so append the same
+			// separator here. Without it, finalizing the narration into a message
+			// adds one line to totalLines, shifting scrollOffset / screenToLine
+			// mapping by one row — clicking a screen row would select the next
+			// line's text.
+			lines = append(lines, "")
+		} else if m.streaming != "" {
+			streamLines := renderStreaming(m.streaming, width)
+			lines = append(lines, streamLines...)
+			// Same trailing blank line as the narration branch above: finalizing
+			// streamed text into an assistant message adds a blank separator line,
+			// so the live block must match to keep scroll/click mapping stable.
+			lines = append(lines, "")
+		}
 	}
 	if len(m.spinners) > 0 {
 		spinnerLines := renderSpinners(m.spinners, width)
@@ -2060,6 +2080,19 @@ func renderMessage(msg DisplayMessage, width int) []string {
 	switch msg.Role {
 	case "user":
 		return wrapText(UserMsgStyle.Render("> ")+content, width)
+	case "choice":
+		// ask_user selection record: the header (chosen option) stands out,
+		// the candidate list stays dim. See newChoiceRecord.
+		lines := strings.Split(content, "\n")
+		styled := make([]string, len(lines))
+		for i, l := range lines {
+			if i == 0 {
+				styled[i] = ChoiceMsgStyle.Render(l)
+			} else {
+				styled[i] = DimStyle.Render(l)
+			}
+		}
+		return wrapLines(styled, width)
 	case "system":
 		return wrapText(SystemMsgStyle.Render(content), width)
 	case "toolsummary":
@@ -2692,41 +2725,99 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 	return wrapLines(lines, width)
 }
 
-// renderSubAgentPanel renders the sub-agent parallel execution panel above the input.
-// Shows each dispatched sub-agent with its type icon, goal, and status
-// (spinner for running, checkmark for done). This is the primary visual
-// indicator when multiple sub-agents are working in parallel.
-func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
-	if len(agents) == 0 {
+// renderStepsPanel renders the step backbone with every sub-agent nested under
+// the step it executes (SubAgentStatus.Step == TodoItem.ID). Sub-agents whose
+// Step is empty or no longer matches any step keep their own Sub-Agents block,
+// so a delegation that is not part of a step list — or one whose step the model
+// rewrote away — is still visible instead of silently dropped.
+func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width int) []string {
+	var children [][]SubAgentStatus
+	var orphans []SubAgentStatus
+	if len(items) > 0 {
+		index := make(map[string]int, len(items))
+		for i, it := range items {
+			if it.ID != "" {
+				index[it.ID] = i
+			}
+		}
+		children = make([][]SubAgentStatus, len(items))
+		for _, a := range agents {
+			if i, ok := index[a.Step]; ok && a.Step != "" {
+				children[i] = append(children[i], a)
+				continue
+			}
+			orphans = append(orphans, a)
+		}
+	} else {
+		orphans = agents
+	}
+	if len(items) == 0 && len(orphans) == 0 {
 		return nil
 	}
+
 	var content []string
-	content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
-	content = append(content, "")
-	for _, a := range agents {
-		goal := a.Goal
-		if len(goal) > 60 {
-			goal = goal[:60] + "..."
-		}
-		switch a.Status {
-		case "running":
-			frame := spinnerFrames[0]
-			line := fmt.Sprintf("  %s %s  %s", frame, agentIcon(a.Agent), SpinnerStyle.Render(goal))
-			content = append(content, line)
-		case "done":
-			summary := a.Summary
-			if len(summary) > 60 {
-				summary = summary[:60] + "..."
+	if len(items) > 0 {
+		content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
+		content = append(content, "")
+		for i, it := range items {
+			content = append(content, todoLine(it))
+			for _, a := range children[i] {
+				content = append(content, "      "+subAgentLine(a))
 			}
-			line := fmt.Sprintf("  ✓ %s  %s", agentIcon(a.Agent), SpinnerDoneStyle.Render(summary))
-			content = append(content, line)
-		case "error":
-			line := fmt.Sprintf("  ✗ %s  [err]", agentIcon(a.Agent))
-			content = append(content, ErrorStyle.Render(line))
+		}
+	}
+	if len(orphans) > 0 {
+		if len(content) > 0 {
+			content = append(content, "")
+		}
+		content = append(content, DimStyle.Render("▍")+" [→] "+DimStyle.Render("Sub-Agents"))
+		content = append(content, "")
+		for _, a := range orphans {
+			content = append(content, "  "+subAgentLine(a))
 		}
 	}
 	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
 	return splitLipglossBlock(rendered, width)
+}
+
+// todoLine renders one step row. Plain-text markers: [ ] pending, [~] in_progress,
+// [✓] completed. [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
+// No emoji, no skill-specific theming — any skill drives it via todo_write.
+func todoLine(it engine.TodoItem) string {
+	switch it.Status {
+	case "in_progress":
+		return fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content))
+	case "completed":
+		return fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content))
+	default:
+		return fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content))
+	}
+}
+
+// subAgentLine renders one sub-agent row: status marker, stable run handle,
+// role tag, then the goal while running or the result once finished. The handle
+// is what makes concurrent same-role agents tellable apart.
+func subAgentLine(a SubAgentStatus) string {
+	trunc := func(s string) string { return truncateRunes(s, 60) }
+	switch a.Status {
+	case "running":
+		return fmt.Sprintf("%s %s %s  %s", spinnerFrames[0], a.RunID, agentIcon(a.Agent), SpinnerStyle.Render(trunc(a.Goal)))
+	case "error", "cancelled":
+		return ErrorStyle.Render(fmt.Sprintf("✗ %s %s  %s", a.RunID, agentIcon(a.Agent), trunc(a.Summary)))
+	default:
+		return fmt.Sprintf("✓ %s %s  %s", a.RunID, agentIcon(a.Agent), SpinnerDoneStyle.Render(trunc(a.Summary)))
+	}
+}
+
+// truncateRunes cuts s to at most n runes and appends an ellipsis. Byte slicing
+// a CJK goal would split a multi-byte character in half, rendering a replacement
+// rune and throwing off the width measure on that row.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // splitLipglossBlock splits a lipgloss-rendered block into lines, wrapping any
@@ -2735,7 +2826,7 @@ func renderSubAgentPanel(agents []SubAgentStatus, width int) []string {
 // U+2014/U+00B7) as 1 column. The gate here uses the same benchmark so already-
 // padded lines pass through unchanged. Using displayWidth (EastAsianWidth=true,
 // ambiguous counted as 2) would re-measure a padded header as 1 column over the
-// limit and split it, emitting a phantom blank line — see renderSubAgentPanel.
+// limit and split it, emitting a phantom blank line — see renderStepsPanel.
 func splitLipglossBlock(rendered string, width int) []string {
 	rawLines := strings.Split(rendered, "\n")
 	var result []string
@@ -2749,6 +2840,52 @@ func splitLipglossBlock(rendered string, width int) []string {
 	return result
 }
 
+// applyAgentDone folds an agent_done event into the sub-agent panel, pairing by
+// RunID. Falls back to the first running row of the same role only when the
+// event carries no handle at all (a handoff call without an id), which keeps
+// the panel usable if a producer ever emits an unpaired event.
+func applyAgentDone(agents []SubAgentStatus, msg ProgressMsg) []SubAgentStatus {
+	status := "done"
+	switch msg.Status {
+	case "error", "cancelled":
+		status = msg.Status
+	}
+	if i := subAgentIndexByRunID(agents, msg.RunID); i >= 0 {
+		agents[i].Status = status
+		agents[i].Summary = msg.Detail
+		return agents
+	}
+	if msg.RunID == "" {
+		for i := range agents {
+			if agents[i].Agent == msg.Name && agents[i].Status == "running" {
+				agents[i].Status = status
+				agents[i].Summary = msg.Detail
+				return agents
+			}
+		}
+		return agents
+	}
+	return append(agents, SubAgentStatus{
+		RunID: msg.RunID, Agent: msg.Name, Step: msg.Step,
+		Status: status, Summary: msg.Detail,
+	})
+}
+
+// subAgentIndexByRunID returns the row carrying runID, or -1. An empty runID
+// never matches: it is the "no handle" marker, and matching it would let an
+// unpaired event close an unpaired row.
+func subAgentIndexByRunID(agents []SubAgentStatus, runID string) int {
+	if runID == "" {
+		return -1
+	}
+	for i := range agents {
+		if agents[i].RunID == runID {
+			return i
+		}
+	}
+	return -1
+}
+
 // agentIcon returns a display tag for a known agent type. Unknown types keep
 // their name so the tag still identifies the role.
 func agentIcon(agent string) string {
@@ -2760,40 +2897,6 @@ func agentIcon(agent string) string {
 	default:
 		return "[a] " + agent
 	}
-}
-
-// renderTodoList renders the generic step-progress todo list above the input.
-// Plain-text markers: [ ] pending, [~] in_progress, [✓] completed.
-// [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
-// No emoji, no skill-specific theming — any skill drives it via todo_write.
-func renderTodoList(items []engine.TodoItem, width int) []string {
-	if len(items) == 0 {
-		return nil
-	}
-	var content []string
-	content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
-	content = append(content, "")
-	for _, it := range items {
-		switch it.Status {
-		case "in_progress":
-			content = append(content, fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content)))
-		case "completed":
-			content = append(content, fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content)))
-		default:
-			content = append(content, fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content)))
-		}
-	}
-	rendered := ExecBlockStyle.Width(width).Render(strings.Join(content, "\n"))
-	return splitLipglossBlock(rendered, width)
-}
-
-// renderOverlayStatus renders the step-progress todo list in a single overlay
-// block above the input.
-func renderOverlayStatus(todoItems []engine.TodoItem, width int) []string {
-	if len(todoItems) == 0 {
-		return nil
-	}
-	return renderTodoList(todoItems, width)
 }
 
 // truncateAnsi truncates a string containing ANSI escape codes to the given
@@ -2976,7 +3079,7 @@ func renderedHeight(s string) int {
 	return len(strings.Split(s, "\n"))
 }
 
-func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestion) string {
+func buildHelpText(commands []Command, tools []Suggestion) string {
 	var b strings.Builder
 	b.WriteString("# DeepAct — CLI Coding Agent\n\n")
 	b.WriteString("## Keyboard Shortcuts\n\n")
@@ -3001,19 +3104,30 @@ func buildHelpText(commands []Suggestion, skills []Suggestion, tools []Suggestio
 	default:
 		b.WriteString("| `Shift+drag` | Select text (bypasses mouse scroll) |\n")
 	}
+	// One registry, two sections: skill shortcuts are entries with
+	// Source == commandSourceSkill rather than a separate list.
+	var builtins, skills []Command
+	for _, c := range commands {
+		if c.Source == commandSourceSkill {
+			skills = append(skills, c)
+			continue
+		}
+		builtins = append(builtins, c)
+	}
+
 	b.WriteString("\n## Slash Commands\n\n")
-	if len(commands) == 0 {
+	if len(builtins) == 0 {
 		b.WriteString("(none)\n\n")
 	} else {
-		for _, c := range commands {
-			b.WriteString(fmt.Sprintf("- %s %s — %s\n", c.Command, c.Args, c.Description))
+		for _, c := range builtins {
+			b.WriteString(fmt.Sprintf("- %s %s — %s\n", c.Name, c.Args, c.Description))
 		}
 		b.WriteString("\n")
 	}
 	if len(skills) > 0 {
 		b.WriteString("## Skills (/<name>)\n\n")
 		for _, s := range skills {
-			b.WriteString(fmt.Sprintf("- /%s — %s\n", s.Command, s.Description))
+			b.WriteString(fmt.Sprintf("- %s — %s\n", s.Name, s.Description))
 		}
 		b.WriteString("\n")
 	}

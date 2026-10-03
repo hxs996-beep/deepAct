@@ -347,6 +347,9 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		history = []ModelMessage{
 			{Role: "system", Content: system},
 		}
+		// Forked parent context sits between the stable system prefix and the
+		// volatile goal, so the goal stays at the highest-recency position.
+		history = append(history, input.ForkedHistory...)
 		if volatileContent := r.buildVolatilePrompt(input); volatileContent != "" {
 			history = append(history, ModelMessage{Role: "user", Content: volatileContent})
 		}
@@ -476,7 +479,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// stays in history for the remaining turns. The structured variant
 		// directs the model to submit_result (plain text never completes a
 		// structured run).
-		if maxIterations > 0 && iter >= maxIterations-2 && !budgetNudged {
+		if maxIterations > 0 && iter >= budgetNudgeAt(maxIterations) && !budgetNudged {
 			history = append(history, ModelMessage{
 				Role:    "user",
 				Content: budgetTailNudge(zhFromLang(input.UserLanguage), maxIterations-iter, structured),
@@ -500,6 +503,10 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			budgetNudgedTokens = true
 			tokenNudgePending = false
 		}
+
+		// Mid-run messages from send_message. Drained at the top of the turn so
+		// the injected user message never splits a tool-call/tool-response pair.
+		history = drainInbox(input.Inbox, history)
 
 		req := ModelRequest{
 			Model:           modelName,
@@ -1266,6 +1273,29 @@ func truncateToolResult(msg ModelMessage) ModelMessage {
 	return msg
 }
 
+// budgetNudgeFraction is the share of the iteration budget that must be spent
+// before the wrap-up nudge fires (3/5 = 60%).
+const budgetNudgeFraction = 3
+
+// budgetNudgeAt returns the iteration at which the wrap-up nudge fires for a
+// given cap.
+//
+// It used to be maxIterations-2, which for the researcher's old 30-turn cap
+// meant turn 28: the warning arrived with nothing left to act on, and runaway
+// runs simply burned the whole cap. 60% leaves ~40% of the budget to converge.
+// Two bounds keep it honest: never later than cap-2 (a warning with no room to
+// act is useless) and never before iteration 1.
+func budgetNudgeAt(maxIterations int) int {
+	at := maxIterations * budgetNudgeFraction / 5
+	if at > maxIterations-2 {
+		at = maxIterations - 2
+	}
+	if at < 1 {
+		at = 1
+	}
+	return at
+}
+
 // budgetTailNudge returns a user message telling a research sub-agent to stop
 // exploring and wrap up with its findings when the iteration budget is about
 // to run out. Without it, a finite-budget research agent burns all its turns
@@ -1355,4 +1385,34 @@ func parseAskUserInput(input json.RawMessage) (struct{ Question string }, bool) 
 		}
 	}
 	return struct{ Question string }{Question: p.Question}, true
+}
+
+// drainInbox moves every pending send_message into history as a user message,
+// at the top of an iteration. Appending mid-iteration would land between an
+// assistant(tool_calls) message and its tool responses, which the API rejects —
+// the same reason tokenBudgetNudge is armed and injected here.
+//
+// Non-blocking by design: an empty inbox (the common case) costs one select.
+//
+// Each queued message becomes its OWN user message even when several are
+// drained in one go: consecutive user messages are already produced elsewhere
+// (e.g. the /confirm path appends two in a row), and the provider accepts them.
+func drainInbox(inbox <-chan string, history []ModelMessage) []ModelMessage {
+	if inbox == nil {
+		return history
+	}
+	for {
+		select {
+		case msg, ok := <-inbox:
+			if !ok {
+				return history
+			}
+			if strings.TrimSpace(msg) == "" {
+				continue
+			}
+			history = append(history, ModelMessage{Role: "user", Content: msg})
+		default:
+			return history
+		}
+	}
 }

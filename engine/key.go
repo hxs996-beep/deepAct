@@ -86,6 +86,41 @@ func extractWriteContentHash(input json.RawMessage) string {
 	return hex.EncodeToString(h[:])
 }
 
+// applyPatchEditView is engine's view of one apply_patch edit entry (mirrors
+// the tools/builtin patchEdit type, kept local to avoid a tools→engine import).
+type applyPatchEditView struct {
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"`
+	NewPath  string `json:"new_path"`
+}
+
+// parseApplyPatchTargets returns the distinct raw paths an apply_patch call
+// touches, in order, including move destinations. apply_patch carries no
+// top-level "path" — each entry in "edits" names its own file — so
+// extractPathFromArgs returns "" for it; callers that need the touched files
+// (task-state bookkeeping, UI summary) use this instead.
+func parseApplyPatchTargets(input json.RawMessage) []string {
+	var payload struct {
+		Edits []applyPatchEditView `json:"edits"`
+	}
+	if err := json.Unmarshal(input, &payload); err != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(payload.Edits))
+	paths := make([]string, 0, len(payload.Edits))
+	for _, edit := range payload.Edits {
+		for _, raw := range []string{edit.Path, edit.FilePath, edit.NewPath} {
+			raw = strings.TrimSpace(raw)
+			if raw == "" || seen[raw] {
+				continue
+			}
+			seen[raw] = true
+			paths = append(paths, raw)
+		}
+	}
+	return paths
+}
+
 // readMultiTargetView is engine's view of a read_multi target (mirrors the
 // tools/builtin readMultiTarget struct, kept unexported and local to avoid a
 // tools→engine import).

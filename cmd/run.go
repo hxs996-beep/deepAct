@@ -196,6 +196,16 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		lspOverrides = toLSPOverrides(f)
 		searchCfg = toWebSearchConfig(f)
 	}
+	// Commands the user approved in earlier sessions live in their own store, so
+	// they survive restarts and are not shadowed by a project-level config.
+	config.LearnedApprovals = deeplogconfig.LoadLearnedApprovals()
+	config.OnApprovalLearned = func(command string) {
+		if err := deeplogconfig.AppendLearnedApproval(command); err != nil {
+			// The confirmation still applies to this session; only its
+			// persistence failed, so report and continue rather than block.
+			log.Printf("WARN: persist approved command: %v", err)
+		}
+	}
 	config.SessionID = fmt.Sprintf("session-%d", time.Now().UnixNano())
 
 	estimator := llm.NewTokenEstimator()
@@ -319,8 +329,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillsBlock := buildSkillsBlock(skillReg.All())
 	contextAssembler.SetSkillsBlock(skillsBlock)
 
-	// Load AGENTS.md files (user-level + project-level) into the stable zone.
-	// Missing files are skipped; empty block → output identical to current.
+	// Load AGENTS.md files (user-level + project root → cwd chain) into the
+	// stable zone. Missing files are skipped; empty block → output identical
+	// to current.
 	agentsFiles := deeplogcontext.LoadAgentsMD(workDir)
 	contextAssembler.SetAgentsBlock(deeplogcontext.RenderAgentsBlock(agentsFiles))
 
@@ -444,6 +455,7 @@ func registerBuiltinTools(registry *tools.Registry, lspOverrides map[string]buil
 	registry.Register(builtin.NewReadMultiTool())
 	registry.Register(builtin.NewWriteTool())
 	registry.Register(builtin.NewEditTool())
+	registry.Register(builtin.NewApplyPatchTool())
 	registry.Register(builtin.NewGrepTool())
 	registry.Register(builtin.NewGlobTool())
 	registry.Register(builtin.NewBashTool())

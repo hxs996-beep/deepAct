@@ -34,6 +34,22 @@ type handoffOptions struct {
 	// nil (bare runner, tests) = suspensions are not registered, so the run
 	// behaves exactly as it does today.
 	register func(*SuspendedRun, AgentID, string) string
+	// fork materializes params.ForkTurns into the copied conversation prefix.
+	// nil (nested backend, tests) = fork_turns is ignored.
+	fork func(spec string) []ModelMessage
+	// progress, when set, receives UI events this wrapper must report on behalf
+	// of the run (currently only the agent_start of a job parked on a question).
+	// nil (nested backend, tests) = nothing is reported.
+	progress func(ProgressEvent)
+}
+
+// agentDisplayName is the role tag shown for a delegation, defaulting to "sub"
+// when the caller omitted the agent.
+func agentDisplayName(agent string) string {
+	if agent == "" {
+		return "sub"
+	}
+	return agent
 }
 
 func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) ToolResult {
@@ -72,6 +88,9 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 		Depth:          opts.depth,
 		UserLanguage:   opts.userLang,
 	}
+	if opts.fork != nil {
+		handoff.ForkedHistory = opts.fork(params.ForkTurns)
+	}
 
 	result, err := agent.Run(ctx, handoff)
 	if err != nil {
@@ -98,6 +117,17 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 	runID := ""
 	if result.Suspended != nil && opts.register != nil {
 		runID = opts.register(result.Suspended, AgentID(params.Agent), params.Goal)
+		// The parked run is a NEW handle — the delegating agent is told to resume
+		// with it — so the UI has never seen an agent_start for it. Report one
+		// now, or the resume's agent_done would arrive for an unknown RunID and
+		// the panel would grow a second, unpaired row. Depth 0 only: a nested
+		// delegation owns no UI row.
+		if opts.depth == 0 && runID != "" && opts.progress != nil {
+			opts.progress(ProgressEvent{
+				Type: "agent_start", Name: agentDisplayName(params.Agent),
+				Detail: params.Goal, RunID: runID, Step: params.Step,
+			})
+		}
 	}
 	// Only the top-level delegation exposes its handle: deeper handles must never
 	// reach the model (a nested digest is inlined into its parent's Summary, so
@@ -107,8 +137,15 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 	}
 
 	status := "ok"
-	if result.BlockedBy == "cancelled" {
+	switch {
+	case result.BlockedBy == "cancelled":
 		status = "cancelled"
+	case result.Blocked, result.FinishReason == HandoffReasonError:
+		// A failed run did not deliver. Reporting it as "ok" rendered a failed
+		// sub-agent with a ✓ while the same outcome in the async path rendered
+		// ✗ (handoffResultStatus in loop.go). A run parked on a question is not
+		// blocked and does not carry an error reason, so it stays "ok".
+		status = "error"
 	}
 	return ToolResult{
 		ToolCallID:   call.ID,
@@ -150,6 +187,12 @@ func (e *Engine) RunSubAgent(ctx context.Context, params HandoffToAgentParams, d
 		depth:    depth,
 		userLang: userLang,
 		register: e.RegisterSuspended,
+		fork:     e.forkHistoryFor,
+		progress: func(ev ProgressEvent) {
+			if e.config.OnProgress != nil {
+				e.config.OnProgress(ev)
+			}
+		},
 	})
 	// Bubble up sub-agent questions into the pending ask_user seam so the
 	// existing awaiting_user / Options UI path presents them. RunID ties the
@@ -222,6 +265,7 @@ func (e *Engine) RegisterSuspended(s *SuspendedRun, agent AgentID, goal string) 
 		childRunID: s.ChildRunID,
 		startAt:    time.Now(),
 		result:     make(chan *HandoffResult, 1),
+		done:       make(chan struct{}),
 	}
 	return id
 }
@@ -269,6 +313,9 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 		Depth:          0,
 		UserLanguage:   userLang,
 	}
+	// The async path does not go through runHandoff, so the fork is materialized
+	// here too — otherwise fork_turns would be silently ignored on async:true.
+	handoff.ForkedHistory = e.forkHistoryFor(params.ForkTurns)
 	if e.state != nil {
 		params = injectMainAgentContext(params, e.state)
 		handoff.Context = params.Context
@@ -293,26 +340,34 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 	e.bgSeq++
 	jobID := fmt.Sprintf("bg-%d", e.bgSeq)
 	bgCtx, cancel := context.WithCancel(ctx)
+	inbox := make(chan string, inboxBufferSize)
 	task := &bgTask{
 		id:      jobID,
 		agent:   AgentID(params.Agent),
 		goal:    params.Goal,
+		step:    params.Step,
 		ctx:     bgCtx,
 		cancel:  cancel,
 		result:  make(chan *HandoffResult, 1),
+		done:    make(chan struct{}),
+		inbox:   inbox,
 		startAt: time.Now(),
 		state:   bgStateRunning,
 	}
 	e.bgTasks[jobID] = task
 	e.bgMu.Unlock()
+	// The run reads this inbox at each iteration boundary (send_message).
+	handoff.Inbox = inbox
 
-	// agent_start event for UI (same as synchronous handoff).
+	// agent_start event for UI. Emitted HERE, and not in turn.go, because only
+	// this point knows the job id the UI must pair the run's outcome with —
+	// turn.go cannot know it before the tool call runs, and emitting one there
+	// as well would show every async delegation twice.
 	if e.config.OnProgress != nil {
-		name := params.Agent
-		if name == "" {
-			name = "sub"
-		}
-		e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+		e.config.OnProgress(ProgressEvent{
+			Type: "agent_start", Name: agentDisplayName(params.Agent),
+			Detail: params.Goal, RunID: jobID, Step: params.Step,
+		})
 	}
 
 	go func() {
@@ -346,17 +401,7 @@ func (e *Engine) dispatchAsync(ctx context.Context, params HandoffToAgentParams,
 			loopLog.Printf("async job %s suspended on a question; answer with agent_resume(%s, ...)", task.id, task.id)
 			return
 		}
-		select {
-		case task.result <- result:
-		default:
-		}
-		if e.config.OnProgress != nil {
-			e.config.OnProgress(ProgressEvent{
-				Type:   "agent_done",
-				Name:   string(task.agent),
-				Detail: result.Summary,
-			})
-		}
+		e.finishBackgroundJob(task, result)
 	}()
 
 	return ToolResult{

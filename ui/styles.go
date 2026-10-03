@@ -31,6 +31,7 @@ var (
 	ErrorStyle          lipgloss.Style
 	DimStyle            lipgloss.Style
 	SystemMsgStyle      lipgloss.Style
+	ChoiceMsgStyle      lipgloss.Style // ask_user selection record header
 	SuggestionBox       lipgloss.Style
 	SuggestionItem      lipgloss.Style
 	SuggestionDesc      lipgloss.Style
@@ -83,6 +84,7 @@ func initStyles() {
 		ErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 		DimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		SystemMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Italic(true)
+		ChoiceMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108")).Bold(true)
 		SuggestionBox = lipgloss.NewStyle().Background(lipgloss.Color("234")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		SuggestionItem = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
@@ -121,6 +123,7 @@ func initStyles() {
 		ErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
 		DimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		SystemMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+		ChoiceMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("28")).Bold(true)
 		SuggestionBox = lipgloss.NewStyle().Background(lipgloss.Color("255")).PaddingLeft(2).PaddingRight(1).PaddingTop(1).PaddingBottom(1)
 		SuggestionItem = lipgloss.NewStyle().Foreground(lipgloss.Color("236"))
 		SuggestionDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("249"))

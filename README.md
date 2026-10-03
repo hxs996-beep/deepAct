@@ -138,7 +138,19 @@ reasoning_effort = "high" # thinking effort: none | low | high | max (optional; 
 provider    = "tavily"    # built-in web_search tool
 api_key     = "tvly-..."
 max_results = 5
+
+[approval]
+mode = "on-request"       # or "never": stop asking for project-level danger (system-level stays blocked)
+
+[[approval.rules]]        # declared command rules, evaluated before the built-in judge
+program  = "terraform"
+args     = ["destroy"]    # token prefix; "*" matches any one token (empty = every invocation)
+decision = "forbidden"    # allow | prompt | forbidden
+reason   = "production only"
 ```
+
+> [!NOTE]
+> Dangerous commands pass four judgement layers, most authoritative first: (1) irreversible system-level operations — hard-blocked, no rule can unlock them; (2) `decision = "forbidden"` rules; (3) `decision = "allow"` rules and commands you confirmed in a session; (4) project-level danger and `decision = "prompt"` rules, which ask unless `mode = "never"`. A command you confirm in the popup is remembered **verbatim** and survives restarts (stored in `~/.deepact/approvals.toml`); to allow a whole family of commands, declare `[[approval.rules]]` explicitly instead of expecting one confirmation to widen itself.
 
 > [!TIP]
 > See the comments inside the config file for the full field list: model & routing, context budget, UI, LSP, MCP servers, and user-defined sub-agent roles are all TOML-configurable.

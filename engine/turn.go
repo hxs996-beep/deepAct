@@ -52,6 +52,10 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		turnLog.Printf("turn %d total=%s", e.state.TurnNumber, time.Since(turnStart))
 	}()
 
+	// Status observations from this turn's async sub-agent tool calls are
+	// collected here and folded into the progress signal at the end of the turn.
+	e.observedAgentStates = nil
+
 	if e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "thinking", Name: "deepact", Detail: "analyzing..."})
 	}
@@ -563,6 +567,11 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
 	pendingAskUserMsgs = append(pendingAskUserMsgs, e.processAgentResumeCalls(ctx, calls)...)
 	pendingPollMsgs := e.processAgentPollCalls(calls)
+	pendingListMsgs := e.processListAgentsCalls(calls)
+	pendingWaitMsgs := e.processWaitAgentCalls(ctx, calls)
+	pendingSendMsgs := e.processSendMessageCalls(calls)
+	pendingInterruptMsgs := e.processInterruptAgentCalls(calls)
+	pendingCloseMsgs := e.processCloseAgentCalls(calls)
 
 	e.history = append(e.history, assistant)
 
@@ -581,6 +590,21 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		e.history = append(e.history, msg)
 	}
 	for _, msg := range pendingPollMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingListMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingWaitMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingSendMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingInterruptMsgs {
+		e.history = append(e.history, msg)
+	}
+	for _, msg := range pendingCloseMsgs {
 		e.history = append(e.history, msg)
 	}
 
@@ -606,6 +630,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			continue
 		} else if call.Name == AgentResumeToolName {
 			continue
+		} else if call.Name == ListAgentsToolName {
+			continue
+		} else if call.Name == WaitAgentToolName {
+			continue
+		} else if call.Name == SendMessageToolName {
+			continue
+		} else if call.Name == InterruptAgentToolName {
+			continue
+		} else if call.Name == CloseAgentToolName {
+			continue
 		} else {
 			regularCalls = append(regularCalls, call)
 		}
@@ -614,16 +648,22 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Execute handoff calls through the registered SubAgentTool.
 	if len(handoffCalls) > 0 {
 		userLang := UserLanguageFor(e.isChinese)
-		// agent_start events for UI.
+		// agent_start events for UI. Only the synchronous path reports here:
+		// an async dispatch reports its own start inside dispatchAsync, once
+		// the job id it must carry has been allocated. Emitting one here too
+		// would list every async delegation twice.
 		for _, call := range handoffCalls {
-			var params HandoffToAgentParams
-			if err := json.Unmarshal(call.Input, &params); err == nil && e.config.OnProgress != nil {
-				name := params.Agent
-				if name == "" {
-					name = "sub"
-				}
-				e.config.OnProgress(ProgressEvent{Type: "agent_start", Name: name, Detail: params.Goal})
+			if e.config.OnProgress == nil {
+				continue
 			}
+			var params HandoffToAgentParams
+			if err := json.Unmarshal(call.Input, &params); err != nil || params.Async {
+				continue
+			}
+			e.config.OnProgress(ProgressEvent{
+				Type: "agent_start", Name: agentDisplayName(params.Agent), Detail: params.Goal,
+				RunID: call.ID, Step: params.Step,
+			})
 		}
 		execCtx := ToolExecContext{
 			WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
@@ -631,19 +671,33 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		results := e.tools.Execute(execCtx, handoffCalls)
 		// agent_done events for UI. Execute preserves order, so results[i]
-		// corresponds to handoffCalls[i]; parse the real agent name from the
-		// call input (r.ToolName is always "handoff_to_agent").
+		// corresponds to handoffCalls[i]; parse the real agent name and step
+		// from the call input (r.ToolName is always "handoff_to_agent").
+		//
+		// A successful async dispatch is NOT a finished run: the job keeps
+		// running in the background and finishBackgroundJob emits the real
+		// agent_done (carrying the job's own RunID) when it ends. Emitting one
+		// here would close the row while the agent is still working — the
+		// dispatch receipt is not a result.
 		for i, r := range results {
-			if e.config.OnProgress != nil {
-				name := "sub"
-				if i < len(handoffCalls) {
-					var params HandoffToAgentParams
-					if err := json.Unmarshal(handoffCalls[i].Input, &params); err == nil && params.Agent != "" {
-						name = params.Agent
-					}
-				}
-				e.config.OnProgress(ProgressEvent{Type: "agent_done", Name: name, Detail: briefDigest(r.Digest)})
+			if e.config.OnProgress == nil {
+				continue
 			}
+			if r.FinishReason == HandoffReasonAsyncRunning {
+				continue
+			}
+			var params HandoffToAgentParams
+			if i < len(handoffCalls) {
+				_ = json.Unmarshal(handoffCalls[i].Input, &params)
+			}
+			runID := ""
+			if i < len(handoffCalls) {
+				runID = handoffCalls[i].ID
+			}
+			e.config.OnProgress(ProgressEvent{
+				Type: "agent_done", Name: agentDisplayName(params.Agent), Detail: briefDigest(r.Digest),
+				RunID: runID, Step: params.Step, Status: handoffEventStatus(r),
+			})
 		}
 		msgs := e.processHandoffResults(handoffCalls, results)
 		for _, msg := range msgs {
@@ -661,7 +715,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		callByID := make(map[string]ToolCallRequest, len(regularCalls))
 		for _, call := range regularCalls {
 			callByID[call.ID] = call
-			if call.Name == "edit" || call.Name == "write" {
+			if call.Name == "edit" || call.Name == "write" || call.Name == "apply_patch" {
 				destructiveCalls = append(destructiveCalls, call)
 			} else {
 				readOnlyCalls = append(readOnlyCalls, call)
@@ -746,7 +800,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 	for _, c := range regularCalls {
 		switch c.Name {
-		case "edit", "write", "revert", "bash":
+		case "edit", "write", "apply_patch", "revert", "bash":
 			if statusByID[c.ID] == "ok" {
 				result.MadeProgress = true
 			}
@@ -801,6 +855,19 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	if !result.MadeProgress && len(handoffCalls) > 0 {
 		result.MadeProgress = true
 	}
+	// Async sub-agent status observations made this turn are new information
+	// too: a job seen for the first time, or a job that moved to a new state
+	// (running→done/awaiting_user), counts as progress; re-observing the same
+	// unchanged state does not. Without this, a parent legitimately waiting on
+	// or collecting async jobs is misjudged as a no-progress loop and blocked.
+	// Keys are recorded regardless (like read keys) so a later repeat is never
+	// mistaken for a first sighting.
+	for _, key := range e.observedAgentStates {
+		if !e.progressKeys[key] {
+			e.progressKeys[key] = true
+			result.MadeProgress = true
+		}
+	}
 	return result, nil
 }
 
@@ -842,6 +909,11 @@ func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs = append(specs, askUserToolSpec(e.isChinese))
 	specs = append(specs, agentPollToolSpec(e.isChinese))
 	specs = append(specs, agentResumeToolSpec(e.isChinese))
+	specs = append(specs, listAgentsToolSpec(e.isChinese))
+	specs = append(specs, waitAgentToolSpec(e.isChinese))
+	specs = append(specs, sendMessageToolSpec(e.isChinese))
+	specs = append(specs, interruptAgentToolSpec(e.isChinese))
+	specs = append(specs, closeAgentToolSpec(e.isChinese))
 	return specs
 }
 
@@ -900,6 +972,29 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 			parts = append(parts, s)
 		}
 		result := strings.Join(parts, ", ")
+		if len(result) > 100 {
+			result = result[:97] + "..."
+		}
+		return result
+	}
+
+	// apply_patch: show the edit count and touched files. It has no top-level
+	// "path", so without this it falls through and the user sees only a bare
+	// file name (or nothing) for a batch that may span many files.
+	if toolName == "apply_patch" {
+		paths := parseApplyPatchTargets(input)
+		if len(paths) == 0 {
+			return fallbackSummary(toolName, m)
+		}
+		edits := 0
+		if list, ok := m["edits"].([]interface{}); ok {
+			edits = len(list)
+		}
+		rel := make([]string, 0, len(paths))
+		for _, p := range paths {
+			rel = append(rel, relPath(p, cwd))
+		}
+		result := fmt.Sprintf("%d edit(s) in %d file(s): %s", edits, len(paths), strings.Join(rel, ", "))
 		if len(result) > 100 {
 			result = result[:97] + "..."
 		}
@@ -1093,6 +1188,19 @@ func shortPath(p string) string {
 	return relPath(p, "")
 }
 
+// handoffEventStatus maps a handoff tool result to the status the UI shows for
+// that row. runHandoff already normalized ToolResult.Status to
+// "ok" / "cancelled" / "error"; anything unexpected reads as a success so a new
+// status value can never silently render a finished run as failed.
+func handoffEventStatus(r ToolResult) string {
+	switch r.Status {
+	case "error", "cancelled":
+		return r.Status
+	default:
+		return "ok"
+	}
+}
+
 func briefDigest(digest string) string {
 	if len(digest) == 0 {
 		return ""
@@ -1126,6 +1234,22 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 					e.state.ReadHistory = append(e.state.ReadHistory, rec)
 				}
 			}
+			continue
+		}
+		if call.Name == "apply_patch" {
+			// apply_patch has no top-level "path": every file named by an edit
+			// (move destinations included) counts as modified.
+			for _, raw := range parseApplyPatchTargets(call.Input) {
+				path := normalizePath(raw, e.config.WorkDir)
+				if path == "" {
+					continue
+				}
+				if !containsString(e.state.ModifiedFiles, path) {
+					e.state.ModifiedFiles = append(e.state.ModifiedFiles, path)
+				}
+				addToWorkingSet(e.state, path, "modified")
+			}
+			e.state.EditScopeFiles = len(e.state.ModifiedFiles)
 			continue
 		}
 		path := extractPathFromArgs(call.Input, e.config.WorkDir)
@@ -1427,6 +1551,7 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 			continue
 		}
 		valid := true
+		seenIDs := make(map[string]bool, len(params.Todos))
 		for _, t := range params.Todos {
 			if strings.TrimSpace(t.Content) == "" {
 				msgs = append(msgs, Message{
@@ -1447,6 +1572,19 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 				})
 				valid = false
 				break
+			}
+			if id := strings.TrimSpace(t.ID); id != "" {
+				if seenIDs[id] {
+					msgs = append(msgs, Message{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    fmt.Sprintf("Error: duplicate todo id %q — ids must be unique when present", id),
+						Timestamp:  time.Now(),
+					})
+					valid = false
+					break
+				}
+				seenIDs[id] = true
 			}
 		}
 		if !valid {
@@ -1503,6 +1641,7 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			continue
 		}
 		if e.suspendedJobExpiredLocked(task) {
+			e.noteAgentState(params.JobID, "expired")
 			delete(e.bgTasks, params.JobID)
 			e.bgMu.Unlock()
 			msgs = append(msgs, Message{
@@ -1516,6 +1655,7 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 		if task.state == bgStateAwaitingUser {
 			// Suspended: nothing is running, so the channel would always read as
 			// "still running". Report the question and how to answer it.
+			e.noteAgentState(params.JobID, agentJobState(task))
 			e.bgMu.Unlock()
 			msgs = append(msgs, Message{
 				Role:       "tool",
@@ -1531,6 +1671,7 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 		case result := <-task.result:
 			// Done: remove from table and return the result.
 			e.bgMu.Lock()
+			e.noteAgentState(params.JobID, "done")
 			delete(e.bgTasks, params.JobID)
 			e.bgMu.Unlock()
 			if result == nil {
@@ -1545,6 +1686,7 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			})
 		default:
 			// Still running.
+			e.noteAgentState(params.JobID, "running")
 			msgs = append(msgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
@@ -1576,11 +1718,17 @@ func (e *Engine) injectBackgroundJobsSummary() {
 			b.WriteString("; ")
 		}
 		first = false
-		switch {
-		case t.state == bgStateAwaitingUser && t.suspended != nil && t.suspended.Question != "":
-			fmt.Fprintf(&b, "%s (%s): %s — waiting for user input (answer with agent_resume(%s, …))", id, t.agent, t.goal, id)
-		case t.state == bgStateAwaitingUser:
-			fmt.Fprintf(&b, "%s (%s): %s — waiting for a sub-agent result", id, t.agent, t.goal)
+		// Classification is shared with list_agents (agentJobState), so the two
+		// renderings can never disagree — only the wording differs here.
+		switch agentJobState(t) {
+		case "awaiting_user":
+			if t.suspended != nil && t.suspended.Question != "" {
+				fmt.Fprintf(&b, "%s (%s): %s — waiting for user input (answer with agent_resume(%s, …))", id, t.agent, t.goal, id)
+			} else {
+				fmt.Fprintf(&b, "%s (%s): %s — waiting for a sub-agent result", id, t.agent, t.goal)
+			}
+		case "done":
+			fmt.Fprintf(&b, "%s (%s): %s — done (collect with agent_poll(%s))", id, t.agent, t.goal, id)
 		default:
 			fmt.Fprintf(&b, "%s (%s): %s — running", id, t.agent, t.goal)
 		}

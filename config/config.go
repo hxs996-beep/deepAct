@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,32 @@ type File struct {
 	LSP    lspConfig    `toml:"lsp"`
 	Search searchConfig `toml:"search"`
 	UI     uiConfig     `toml:"ui"`
+	// Approval holds the command-approval policy: when to interrupt the user,
+	// and which command families the user has declared rules for.
+	Approval approvalConfig `toml:"approval"`
+}
+
+// approvalConfig mirrors the [approval] section:
+//
+//	[approval]
+//	mode = "on-request"        # or "never"
+//
+//	[[approval.rules]]
+//	program = "terraform"
+//	args = ["destroy"]         # token prefix; "*" matches exactly one token
+//	decision = "forbidden"     # allow | prompt | forbidden
+//	reason = "生产环境禁地"
+type approvalConfig struct {
+	Mode  string               `toml:"mode"`
+	Rules []approvalRuleConfig `toml:"rules"`
+}
+
+// approvalRuleConfig is one [[approval.rules]] entry.
+type approvalRuleConfig struct {
+	Program  string   `toml:"program"`
+	Args     []string `toml:"args"`
+	Decision string   `toml:"decision"`
+	Reason   string   `toml:"reason"`
 }
 
 // agentRoleConfig is one user-defined sub-agent role (codex-style).
@@ -230,6 +257,128 @@ func saveAPIKeyAtPath(path, key string) error {
 	return nil
 }
 
+// learnedApprovalsFile is the on-disk shape of ~/.deepact/approvals.toml.
+type learnedApprovalsFile struct {
+	Commands []string `toml:"commands"`
+}
+
+// LearnedApprovalsPath is where confirmed commands are remembered.
+//
+// Deliberately NOT config.toml: LoadProject returns either the project config or
+// the user config (never a merge), so approvals stored in the user config would
+// be shadowed — and silently stop working — in any project that ships its own
+// .deepact/config.toml.
+func LearnedApprovalsPath() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".deepact", "approvals.toml")
+	}
+	return filepath.Join(os.TempDir(), "deepact", "approvals.toml")
+}
+
+// LoadLearnedApprovals returns the commands the user confirmed in earlier
+// sessions. A missing or unreadable file yields no approvals: this is a
+// convenience store, never a startup blocker.
+func LoadLearnedApprovals() []string {
+	return loadLearnedApprovalsAt(LearnedApprovalsPath())
+}
+
+func loadLearnedApprovalsAt(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var parsed learnedApprovalsFile
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	commands := make([]string, 0, len(parsed.Commands))
+	for _, cmd := range parsed.Commands {
+		if trimmed := strings.TrimSpace(cmd); trimmed != "" {
+			commands = append(commands, trimmed)
+		}
+	}
+	return commands
+}
+
+// AppendLearnedApproval records one confirmed command, de-duplicated, so
+// re-confirming the same command does not grow the file without bound.
+func AppendLearnedApproval(command string) error {
+	return appendLearnedApprovalAt(LearnedApprovalsPath(), command)
+}
+
+func appendLearnedApprovalAt(path, command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+
+	existing := loadLearnedApprovalsAt(path)
+	for _, cmd := range existing {
+		if cmd == command {
+			return nil
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := toml.NewEncoder(&encoded).Encode(learnedApprovalsFile{Commands: append(existing, command)}); err != nil {
+		return fmt.Errorf("encode approvals: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	// tmp+rename: a crash mid-write must not lose the approvals already learned.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, encoded.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("write approvals: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("commit approvals: %w", err)
+	}
+	return nil
+}
+
+// applyApproval maps the [approval] section onto the engine config. An absent
+// section leaves the engine defaults alone. Every malformed value fails loud:
+// a typo here silently widening what runs without asking is exactly the failure
+// mode this section exists to prevent.
+func applyApproval(cfg *engine.EngineConfig, section approvalConfig) error {
+	if mode := strings.TrimSpace(section.Mode); mode != "" {
+		switch mode {
+		case engine.ApprovalModeOnRequest, engine.ApprovalModeNever:
+			cfg.ApprovalMode = mode
+		default:
+			return fmt.Errorf("[approval] mode must be %q or %q, got %q",
+				engine.ApprovalModeOnRequest, engine.ApprovalModeNever, section.Mode)
+		}
+	}
+
+	for i, rc := range section.Rules {
+		program := strings.TrimSpace(rc.Program)
+		if program == "" {
+			return fmt.Errorf("[approval] rules[%d]: program is required", i)
+		}
+		decision := strings.TrimSpace(rc.Decision)
+		switch decision {
+		case engine.ApprovalAllow, engine.ApprovalPrompt, engine.ApprovalForbidden:
+		default:
+			return fmt.Errorf("[approval] rules[%d] (%s): decision must be %q, %q or %q, got %q",
+				i, program, engine.ApprovalAllow, engine.ApprovalPrompt, engine.ApprovalForbidden, rc.Decision)
+		}
+		for _, arg := range rc.Args {
+			if strings.TrimSpace(arg) == "" {
+				return fmt.Errorf("[approval] rules[%d] (%s): args must not contain empty tokens", i, program)
+			}
+		}
+		cfg.ApprovalRules = append(cfg.ApprovalRules, engine.ApprovalRule{
+			Program:  program,
+			Args:     rc.Args,
+			Decision: decision,
+			Reason:   strings.TrimSpace(rc.Reason),
+		})
+	}
+	return nil
+}
+
 // Apply overwrites engine config fields that are explicitly set in the TOML file.
 // Fields not present in the file keep their default values. It returns an
 // error when an [agents] role names tools outside the sub-agent read-only
@@ -282,6 +431,9 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
+	}
+	if err := applyApproval(cfg, f.Approval); err != nil {
+		return err
 	}
 	// User-defined sub-agent roles: convert [agents] section to AgentSpecs.
 	// tools = ["*"] means all sub-agent tools (empty ToolNames in AgentSpec
