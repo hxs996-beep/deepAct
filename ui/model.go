@@ -2798,12 +2798,7 @@ func todoLine(it engine.TodoItem) string {
 // role tag, then the goal while running or the result once finished. The handle
 // is what makes concurrent same-role agents tellable apart.
 func subAgentLine(a SubAgentStatus) string {
-	trunc := func(s string) string {
-		if len(s) > 60 {
-			return s[:60] + "..."
-		}
-		return s
-	}
+	trunc := func(s string) string { return truncateRunes(s, 60) }
 	switch a.Status {
 	case "running":
 		return fmt.Sprintf("%s %s %s  %s", spinnerFrames[0], a.RunID, agentIcon(a.Agent), SpinnerStyle.Render(trunc(a.Goal)))
@@ -2812,6 +2807,17 @@ func subAgentLine(a SubAgentStatus) string {
 	default:
 		return fmt.Sprintf("✓ %s %s  %s", a.RunID, agentIcon(a.Agent), SpinnerDoneStyle.Render(trunc(a.Summary)))
 	}
+}
+
+// truncateRunes cuts s to at most n runes and appends an ellipsis. Byte slicing
+// a CJK goal would split a multi-byte character in half, rendering a replacement
+// rune and throwing off the width measure on that row.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // splitLipglossBlock splits a lipgloss-rendered block into lines, wrapping any
