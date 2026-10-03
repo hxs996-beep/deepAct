@@ -140,11 +140,11 @@ func runHandoff(ctx context.Context, call ToolCallRequest, opts handoffOptions) 
 	switch {
 	case result.BlockedBy == "cancelled":
 		status = "cancelled"
-	case result.Blocked:
-		// A blocked run did not deliver. Reporting it as "ok" rendered a failed
+	case result.Blocked, result.FinishReason == HandoffReasonError:
+		// A failed run did not deliver. Reporting it as "ok" rendered a failed
 		// sub-agent with a ✓ while the same outcome in the async path rendered
-		// ✗. A run parked on a question is not blocked (it carries Suspended
-		// instead), so it stays "ok".
+		// ✗ (handoffResultStatus in loop.go). A run parked on a question is not
+		// blocked and does not carry an error reason, so it stays "ok".
 		status = "error"
 	}
 	return ToolResult{

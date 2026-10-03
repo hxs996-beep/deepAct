@@ -213,4 +213,23 @@ func TestBlockedSyncHandoffReportsError(t *testing.T) {
 	if got := handoffEventStatus(ToolResult{Status: "cancelled"}); got != "cancelled" {
 		t.Errorf("cancelled status = %q, want cancelled", got)
 	}
+
+	// 与异步路径的 handoffResultStatus 对齐：没被标记 Blocked、但以 error 结束的
+	// 运行同样是失败，不能报 ok。
+	errAgent := &mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
+		Summary: "模型调用失败", FinishReason: HandoffReasonError,
+	}}
+	errReg := NewAgentRegistry()
+	errReg.Register(errAgent)
+	errEngine := &Engine{agents: errReg, isChinese: true, state: &TaskState{}}
+	errEngine.initBackgroundTasks()
+	errRes, err := errEngine.RunSubAgent(context.Background(), HandoffToAgentParams{
+		Agent: "sub", Goal: "调研",
+	}, 0, "中文")
+	if err != nil {
+		t.Fatalf("RunSubAgent error: %v", err)
+	}
+	if errRes.Status != "error" {
+		t.Errorf("error-finished handoff Status = %q, want error", errRes.Status)
+	}
 }
