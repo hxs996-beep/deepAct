@@ -63,9 +63,13 @@ type Engine struct {
 	// a 400 after the pre-send estimate is rare, and retrying forever would just
 	// re-trim and re-fail (see executeTurn).
 	contextRetryDone bool
-	steerMu          sync.Mutex
-	steerQueue       []string
-	guards           *GuardSystem
+	// toolExposureLogged guards the one-shot tool-array diagnostic. The tool set
+	// is fixed for the process, so the exposure line is logged once (see
+	// logToolExposureOnce) rather than every turn.
+	toolExposureLogged bool
+	steerMu            sync.Mutex
+	steerQueue         []string
+	guards             *GuardSystem
 	// progressLoop is the single no-progress breaker — the only loop guard that
 	// can still end a Run. Per-target repetition is no longer blocked: it is
 	// reported to the model as a fact (see noteRepeats), so the model decides

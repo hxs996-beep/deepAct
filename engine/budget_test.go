@@ -62,3 +62,26 @@ func TestGuardContextBudget_TruncatesBodyWithSameMessageCount(t *testing.T) {
 		t.Fatalf("tool pairing must survive body truncation")
 	}
 }
+
+// TestToolExposureSummary verifies the exposure line's numbers: the
+// registry-vs-engine split and the budget share when a window is known.
+func TestToolExposureSummary(t *testing.T) {
+	tools := []ModelTool{
+		{Function: ModelToolFunction{Name: "a"}},
+		{Function: ModelToolFunction{Name: "b"}},
+		{Function: ModelToolFunction{Name: "c"}},
+	}
+	count := func(msgs []ModelMessage) int { return len(msgs) }
+
+	got := toolExposureSummary(tools, 1, 10, count)
+	for _, want := range []string{"sent=3", "registry=1", "core=2", "tool_tokens=3", "~30% of 10 budget"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q missing %q", got, want)
+		}
+	}
+
+	// Without a known budget the share must be omitted, not reported as 0%.
+	if got := toolExposureSummary(tools, 1, 0, count); strings.Contains(got, "budget") {
+		t.Errorf("summary without budget must not mention budget: %q", got)
+	}
+}

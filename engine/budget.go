@@ -1,6 +1,9 @@
 package engine
 
-import "unicode/utf8"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // This file holds the context-budget primitives shared by compression and the
 // pre-send context guard. They use a dependency-free 1 token ≈ 3 characters
@@ -80,6 +83,39 @@ func estimateToolSpecTokens(estimate func([]ModelMessage) int, tools []ModelTool
 		})
 	}
 	return estimate(msgs)
+}
+
+// toolExposureSummary renders a one-line diagnostic of the per-request tool
+// schema cost. Tool and MCP growth is easy to miss: the schemas are sent with
+// every request but never appear in history, so their token weight stays
+// invisible when deciding whether deferred tool loading is worthwhile. It is
+// pure so the numbers are testable without an Engine.
+func toolExposureSummary(tools []ModelTool, registryCount, maxContextTokens int, estimate func([]ModelMessage) int) string {
+	tokens := estimateToolSpecTokens(estimate, tools)
+	core := len(tools) - registryCount
+	if core < 0 {
+		core = 0
+	}
+	if maxContextTokens > 0 {
+		return fmt.Sprintf("sent=%d (registry=%d, core=%d) tool_tokens=%d (~%d%% of %d budget)",
+			len(tools), registryCount, core, tokens, 100*tokens/maxContextTokens, maxContextTokens)
+	}
+	return fmt.Sprintf("sent=%d (registry=%d, core=%d) tool_tokens=%d", len(tools), registryCount, core, tokens)
+}
+
+// logToolExposureOnce emits toolExposureSummary once per Engine. registryCount
+// separates tools registered by cmd (built-in + MCP) from the engine's inline
+// specs, so an MCP-driven blow-up is attributable at a glance.
+func (e *Engine) logToolExposureOnce(tools []ModelTool) {
+	if e.toolExposureLogged || e.context == nil {
+		return
+	}
+	e.toolExposureLogged = true
+	registry := 0
+	if e.tools != nil {
+		registry = len(e.tools.Specs())
+	}
+	turnLog.Printf("tool exposure: %s", toolExposureSummary(tools, registry, e.config.MaxContextTokens, e.context.EstimateTokens))
 }
 
 // promptBlocksTokens estimates the fixed prompt blocks (system prompt, stable

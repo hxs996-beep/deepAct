@@ -75,6 +75,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// Tool schemas are sent with every request but are not part of e.history;
 	// build them once so the budget guard and the request share one list.
 	tools := e.toolSpecsWithHandoff()
+	e.logToolExposureOnce(tools)
 	// Last-resort pre-send guard: if compression could not bring the request
 	// under the window (failure cooldown, or a single turn's tool batch grew
 	// faster than the per-turn check), drop the oldest history now.

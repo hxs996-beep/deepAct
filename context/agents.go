@@ -43,6 +43,18 @@ func LoadAgentsMD(cwd string) []AgentsFile {
 	return append(files, loadProjectAgentsMD(cwd)...)
 }
 
+// ProjectAgentsMDPath 返回 cwd 对应项目根下的 AGENTS.md 路径。项目根的定义与
+// LoadAgentsMD 一致：cwd 自身或最近的含 agentsMDProjectMarker 的祖先；找不到时
+// 退化为 cwd。cwd 为空时返回空串。写入方（remember_preference 工具）据此把偏好
+// 落到与读取端同一个文件，避免写出一个不会被加载的副本。
+func ProjectAgentsMDPath(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	dirs := projectAgentsMDDirs(filepath.Clean(cwd))
+	return filepath.Join(dirs[0], agentsMDFilename)
+}
+
 // loadProjectAgentsMD 收集项目级 AGENTS.md，顺序为 项目根 → cwd。
 func loadProjectAgentsMD(cwd string) []AgentsFile {
 	if cwd == "" {

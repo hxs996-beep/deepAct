@@ -17,6 +17,7 @@ import (
 	deeplogconfig "github.com/deepact/deepact/config"
 	deeplogcontext "github.com/deepact/deepact/context"
 	"github.com/deepact/deepact/engine"
+	dlog "github.com/deepact/deepact/internal/log"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/memory"
 	"github.com/deepact/deepact/router"
@@ -224,7 +225,8 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	// Start MCP servers and register their tools
 	var mcpManagers []*mcp.ManagedServer
-	if err := registerMCPTools(registry, workDir, &mcpManagers); err != nil {
+	mcpToolCount, err := registerMCPTools(registry, workDir, &mcpManagers)
+	if err != nil {
 		return engine.EngineConfig{}, engine.EngineDeps{}, fmt.Errorf("MCP: %w", err)
 	}
 
@@ -329,6 +331,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	skillsBlock := buildSkillsBlock(skillReg.All())
 	contextAssembler.SetSkillsBlock(skillsBlock)
 
+	// One-shot exposure diagnostic: how many tools (and how many from MCP) and
+	// skills are wired in. Without this the tool/MCP growth that motivates
+	// deferred tool loading is invisible; enable it with DEEPACT_LOG=<file>.
+	dlog.New("[tools] ").Printf("registered=%d mcp=%d skills=%d", len(registry.AllSpecs()), mcpToolCount, len(skillReg.All()))
+
 	// Load AGENTS.md files (user-level + project root → cwd chain) into the
 	// stable zone. Missing files are skipped; empty block → output identical
 	// to current.
@@ -393,15 +400,16 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 // registerMCPTools loads MCP server config, starts each server, and
 // registers their tools in the tool registry with a "<server>_" prefix.
-func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp.ManagedServer) error {
+func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp.ManagedServer) (int, error) {
 	cfg, err := mcp.LoadConfig(workDir)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return 0, fmt.Errorf("load config: %w", err)
 	}
 	if cfg == nil {
-		return nil // no MCP servers configured
+		return 0, nil // no MCP servers configured
 	}
 
+	added := 0
 	for _, sc := range cfg.Servers {
 		manager, err := mcp.StartServer(sc)
 		if err != nil {
@@ -417,9 +425,10 @@ func registerMCPTools(registry *tools.Registry, workDir string, managers *[]*mcp
 				MCPTool:   mt,
 			}
 			registry.Register(wrapper)
+			added++
 		}
 	}
-	return nil
+	return added, nil
 }
 
 // buildModelClient creates an LLM client with an AdaptiveLimiter sized to
@@ -464,6 +473,7 @@ func registerBuiltinTools(registry *tools.Registry, lspOverrides map[string]buil
 	registry.Register(builtin.NewFetchTool())
 	registry.Register(builtin.NewWebSearchTool(searchCfg))
 	registry.Register(builtin.NewLSPToolWithOverrides(lspOverrides))
+	registry.Register(builtin.NewRememberPreferenceTool())
 }
 
 // toLSPOverrides converts the [lsp.servers] config section into the builtin

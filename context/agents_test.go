@@ -288,3 +288,28 @@ func TestSetAgentsBlock(t *testing.T) {
 		t.Fatalf("agentsBlock = %q, want empty", a.agentsBlock)
 	}
 }
+
+// TestProjectAgentsMDPath verifies the write-side path resolution matches the
+// read side: the nearest ancestor holding .git wins, otherwise cwd itself.
+func TestProjectAgentsMDPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := ProjectAgentsMDPath(sub), filepath.Join(root, "AGENTS.md"); got != want {
+		t.Errorf("ProjectAgentsMDPath(sub) = %q, want %q", got, want)
+	}
+
+	plain := t.TempDir()
+	if got, want := ProjectAgentsMDPath(plain), filepath.Join(plain, "AGENTS.md"); got != want {
+		t.Errorf("ProjectAgentsMDPath(plain) = %q, want %q", got, want)
+	}
+	if got := ProjectAgentsMDPath(""); got != "" {
+		t.Errorf("ProjectAgentsMDPath(\"\") = %q, want empty", got)
+	}
+}
