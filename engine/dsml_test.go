@@ -166,9 +166,20 @@ func TestStripDSMLTokens(t *testing.T) {
 			want:  "text",
 		},
 		{
-			name:  "incomplete/truncated (no closing tag)",
+			// A truncated DSML block is left verbatim: deleting it cannot
+			// recover anything (the tool never ran), while the old
+			// "incomplete block to EOF" rule silently swallowed any legitimate
+			// text that followed a quoted opening token.
+			name:  "incomplete/truncated (no closing tag) left verbatim",
 			input: "思考中...\n<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"grep\"><｜｜DSML｜｜parameter name=\"pattern\"",
-			want:  "思考中...",
+			want:  "思考中...\n<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"grep\"><｜｜DSML｜｜parameter name=\"pattern\"",
+		},
+		{
+			// Regression: prose that merely quotes the opening token must keep
+			// everything after it (this is how a DSML explanation got cut off).
+			name:  "quoted opening token keeps trailing text",
+			input: "前半段要保留。引用一下起始标记：<||DSML||tool_calls> 后半段结论也必须保留。",
+			want:  "前半段要保留。引用一下起始标记：<||DSML||tool_calls> 后半段结论也必须保留。",
 		},
 		{
 			name:  "empty after strip",

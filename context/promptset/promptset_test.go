@@ -27,3 +27,15 @@ func TestSubAgentPrompt_StructuredJSONTakesPrecedence(t *testing.T) {
 		t.Errorf("sub-agent prompt must mention structured JSON output precedence, got %q", p)
 	}
 }
+
+// TestSystemPrompt_MandatorySkillRule locks the mandatory skill rule: a possible
+// match means you MUST load, it is not optional, and the rationalization escape
+// hatches are listed.
+func TestSystemPrompt_MandatorySkillRule(t *testing.T) {
+	p := Get().System
+	for _, want := range []string{"你没有选择", "不得用以下理由跳过技能匹配"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("system prompt must carry the mandatory skill rule (missing %q)", want)
+		}
+	}
+}

@@ -139,16 +139,38 @@ func buildSkillSuggestions(reg *skill.Registry) {
 	}
 }
 
+// skillsCatalogDescriptionMaxLen caps a skill description rendered in the
+// model-facing catalog. The full description can be long; the catalog only needs
+// enough to match, and an unbounded list both dilutes the model's selection and
+// inflates the injected block. Mirrors the harness's catalogDescriptionMaxLength.
+const skillsCatalogDescriptionMaxLen = 500
+
+// catalogDescription collapses whitespace and truncates a description to the
+// catalog cap on rune boundaries (never splitting a multi-byte character).
+func catalogDescription(desc string) string {
+	normalized := strings.Join(strings.Fields(desc), " ")
+	if normalized == "" {
+		return "(no description)"
+	}
+	runes := []rune(normalized)
+	if len(runes) > skillsCatalogDescriptionMaxLen {
+		return string(runes[:skillsCatalogDescriptionMaxLen-3]) + "..."
+	}
+	return normalized
+}
+
 // buildSkillsBlock renders a static skills list for the stable zone.
-// Each skill is shown as "name: description". The model loads a skill's full
-// instructions via the load_skill tool when the task matches.
+// Each skill is shown as "name: description" (description capped) plus its
+// when_to_use trigger. The model loads a skill's full instructions via the
+// load_skill tool when the task matches.
 func buildSkillsBlock(all []*skill.Skill) string {
 	if len(all) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("以下为可用技能摘要，仅供选择。当用户明确命名某技能，或任务明显匹配某技能描述时，先调用 `load_skill` 工具加载其全文，再遵循其中指令。摘要不含完整指令，加载前不得推断或遵循。用户也可用 `/<name>` 直接加载。若当前技能到达终态需切换，调用 `load_skill` 加载下一个技能。\n\n")
+	b.WriteString("**必须：只要当前任务有哪怕 1% 的可能适用下面某个技能，就先调用 `load_skill` 加载它，再动手。这不是可选项——不能用「这题简单 / 先看代码更快 / 我记得这个技能」来跳过。**\n\n")
+	b.WriteString("判断依据是**任务属于什么类型**，不是用户用没用某个词。候选不止一个时选**最贴切**的；请求围绕**具体错误 / 失败 / 异常**时，优先选调试/根因类技能。摘要不含完整指令，加载前不得按摘要执行。加载后发现不适用可以不用它。用户也可用 `/<name>` 直接加载；若当前技能到达终态需切换，调用 `load_skill` 加载下一个技能。\n\n")
 	for _, s := range all {
 		if s.DisableModelInvocation {
 			continue
@@ -156,11 +178,7 @@ func buildSkillsBlock(all []*skill.Skill) string {
 		b.WriteString("- **")
 		b.WriteString(s.Name)
 		b.WriteString("**: ")
-		if s.Description != "" {
-			b.WriteString(s.Description)
-		} else {
-			b.WriteString("(no description)")
-		}
+		b.WriteString(catalogDescription(s.Description))
 		if s.WhenToUse != "" {
 			b.WriteString(" Use when ")
 			b.WriteString(s.WhenToUse)

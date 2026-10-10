@@ -174,6 +174,30 @@ func TestBuild_EnglishSessionGetsSystemPrompt(t *testing.T) {
 	}
 }
 
+// TestBuild_SkillsBlockInSystemMessage locks the injection position chosen for
+// this change: the skills catalog ships inside the system message so the model
+// treats it as a system-level instruction — it still decides whether to load a
+// skill. It must no longer appear as a separate message.
+func TestBuild_SkillsBlockInSystemMessage(t *testing.T) {
+	assembler := NewContextAssembler(".", nil)
+	state := &engine.TaskState{}
+	assembler.SetSkillsBlock("## Available Skills\n- **x**: y")
+	history := []engine.Message{{Role: "user", Content: "帮我分析这个错误"}}
+
+	assembler.Build(state, history, nil) // warm-up build (mirrors executeTurn)
+	msgs := assembler.Build(state, history, nil)
+
+	const marker = "- **x**: y"
+	if msgs[0].Role != "system" || !strings.Contains(msgs[0].Content, marker) {
+		t.Fatalf("skills catalog must live in the system message, got msgs[0].Role=%q", msgs[0].Role)
+	}
+	for i, m := range msgs[1:] {
+		if strings.Contains(m.Content, marker) {
+			t.Fatalf("skills catalog must not be injected as a separate message (msgs[%d].Role=%q)", i+1, m.Role)
+		}
+	}
+}
+
 // TestBuild_SystemPromptDeferredUntilFirstUserMessage keeps the placeholder's
 // intended meaning: it is only for the window before the first user message,
 // after which the prompt must be built from the locked language.

@@ -39,6 +39,72 @@ You are a test agent.
 	}
 }
 
+// TestLoadExternalSkills_FollowsSymlinkedSkillDir locks the fix for the common
+// ~/.claude/skills layout: each skill is a symlink to a directory elsewhere
+// (~/.agents/skills/<name>). os.ReadDir does not follow symlinks, so a naive
+// entry.IsDir() check silently dropped every such skill.
+func TestLoadExternalSkills_FollowsSymlinkedSkillDir(t *testing.T) {
+	root := t.TempDir()
+	realSkill := filepath.Join(root, "real", "linked_skill")
+	if err := os.MkdirAll(realSkill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `---
+name: linked_skill
+description: "A symlinked skill"
+---
+
+body
+`
+	if err := os.WriteFile(filepath.Join(realSkill, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	skillsRoot := filepath.Join(root, "skills")
+	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realSkill, filepath.Join(skillsRoot, "linked_skill")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	skills, err := LoadExternalSkills(skillsRoot)
+	if err != nil {
+		t.Fatalf("LoadExternalSkills failed: %v", err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("expected the symlinked skill to load, got %d skills", len(skills))
+	}
+	if skills[0].Name != "linked_skill" {
+		t.Errorf("name = %q, want linked_skill", skills[0].Name)
+	}
+}
+
+// TestLoadExternalSkills_SkipsSymlinkToFile keeps the directory-format contract:
+// a symlink that does not resolve to a directory is still not a skill.
+func TestLoadExternalSkills_SkipsSymlinkToFile(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(target, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(skillsRoot, "notes.md")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	skills, err := LoadExternalSkills(skillsRoot)
+	if err != nil {
+		t.Fatalf("LoadExternalSkills failed: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("a symlink to a file must not become a skill, got %d", len(skills))
+	}
+}
+
 func TestLoadExternalSkills_SkipsReferencesDir(t *testing.T) {
 	dir := t.TempDir()
 

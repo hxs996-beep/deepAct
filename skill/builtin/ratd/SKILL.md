@@ -2,6 +2,7 @@
 name: ratd
 description: 反向测试驱动开发（Red-Team-Then-Drive）：由红队写对抗测试，再驱动实现。需要严格验证实现、防止过度自信时使用。
 when_to_use: 用户要求"先写测试再实现"、需要对抗性验证、或明确使用 /ratd 时
+disable-model-invocation: true
 argument-hint: "<需求>"
 ---
 

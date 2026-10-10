@@ -39,6 +39,26 @@ func TestBuiltinSkills_Parsable(t *testing.T) {
 	}
 }
 
+// TestBuiltinSkills_NotModelInvocable locks the policy that the builtin
+// multi-agent skills (collab, ratd) are user-invocable only. They must stay out
+// of the model-facing catalog so the model never auto-starts a multi-agent run
+// the user did not ask for (token cost the user did not opt into). Manual /name
+// invocation remains available.
+func TestBuiltinSkills_NotModelInvocable(t *testing.T) {
+	skills, err := BuiltinSkills()
+	if err != nil {
+		t.Fatalf("BuiltinSkills() error: %v", err)
+	}
+	if len(skills) == 0 {
+		t.Fatal("expected builtin skills")
+	}
+	for _, s := range skills {
+		if !s.DisableModelInvocation {
+			t.Errorf("builtin skill %q must be disable-model-invocation (user-invocable only)", s.Name)
+		}
+	}
+}
+
 // isValidSkillName 复制 engine/loop.go 的校验逻辑（skill 包不依赖 engine，避免循环依赖）。
 func isValidSkillName(name string) bool {
 	if len(name) == 0 || len(name) > 30 {

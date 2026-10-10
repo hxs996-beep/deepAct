@@ -74,9 +74,7 @@ func stripDSMLTokens(content string) string {
 		return content
 	}
 	result := dsmlBlockRe.ReplaceAllString(content, "")
-	result = dsmlIncompleteBlockRe.ReplaceAllString(result, "")
 	result = dsmlAsciiBlockRe.ReplaceAllString(result, "")
-	result = dsmlAsciiIncompleteRe.ReplaceAllString(result, "")
 	return strings.TrimSpace(result)
 }
 
@@ -199,7 +197,10 @@ func normalizeDSMLValue(raw string) string {
 
 // Regex patterns for DSML detection and parsing.
 // Supports full-width vertical bar ｜ (U+FF5C), ASCII pipe |, and mixed variants.
-// Also handles incomplete/truncated DSML blocks (missing closing tag).
+//
+// Only complete blocks are stripped. A truncated block (no closing tag) is left
+// verbatim on purpose: deleting it to EOF cannot recover a tool call that never
+// ran, and it silently swallowed legitimate prose that quoted an opening token.
 var (
 	// Detection: broad check for any DSML-like content (full-width OR ASCII)
 	dsmlDetectRe = regexp.MustCompile(`[<＜][｜|]+DSML[｜|]+`)
@@ -207,14 +208,8 @@ var (
 	// Full-width complete block: <｜+DSML｜+tool_calls>...</｜+DSML｜+tool_calls>
 	dsmlBlockRe = regexp.MustCompile(`(?s)[<＜][｜|]+DSML[｜|]+tool_calls[>＞]\s*(.*?)\s*[<＜]/[｜|]+DSML[｜|]+tool_calls[>＞]`)
 
-	// Full-width incomplete block (truncated, no closing tag): <｜+DSML｜+tool_calls>...EOF
-	dsmlIncompleteBlockRe = regexp.MustCompile(`(?s)[<＜][｜|]+DSML[｜|]+tool_calls[>＞].*$`)
-
 	// ASCII pipe variant complete: <||DSML||tool_calls>...</||DSML||tool_calls>
 	dsmlAsciiBlockRe = regexp.MustCompile(`(?s)<\|+DSML\|+tool_calls>\s*(.*?)\s*</\|+DSML\|+tool_calls>`)
-
-	// ASCII pipe variant incomplete
-	dsmlAsciiIncompleteRe = regexp.MustCompile(`(?s)<\|+DSML\|+tool_calls>.*$`)
 
 	// Invoke and parameter patterns (support both pipe variants)
 	dsmlInvokeRe = regexp.MustCompile(`(?s)[<＜][｜|]+DSML[｜|]+invoke\s+name="([^"]+)"[>＞]\s*(.*?)\s*[<＜]/[｜|]+DSML[｜|]+invoke[>＞]`)

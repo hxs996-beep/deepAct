@@ -2,6 +2,7 @@
 name: collab
 description: 并行研究：把研究目标拆成多个互不重叠方向，并行委派子代理调研，再汇总成报告。需要多方向/多模块调研、交叉验证的深度分析时使用。
 when_to_use: 用户要求"调研""分析""研究"某主题、涉及多个模块/方向、或明确使用 /collab 时
+disable-model-invocation: true
 argument-hint: "<研究目标>"
 ---
 

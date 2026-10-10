@@ -48,8 +48,18 @@ func LoadExternalSkills(dir string) ([]*Skill, error) {
 
 	var skills []*Skill
 	for _, entry := range entries {
+		// Only the <name>/SKILL.md directory format is supported. os.ReadDir does
+		// not follow symlinks, so a skill installed as a symlink (the common
+		// ~/.claude/skills layout, where each entry links to ~/.agents/skills/<name>)
+		// reports IsDir()==false; resolve it and accept it when it is a directory.
 		if !entry.IsDir() {
-			continue // only <name>/SKILL.md directory format is supported
+			if entry.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			info, statErr := os.Stat(filepath.Join(dir, entry.Name()))
+			if statErr != nil || !info.IsDir() {
+				continue
+			}
 		}
 		// The references/ directory holds reference files namespaced
 		// by skill name (references/<skill-name>/), not skill definitions.

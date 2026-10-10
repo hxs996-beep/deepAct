@@ -76,6 +76,13 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 	if prompt == "" {
 		prompt = "(loading...)"
 	}
+	// The skills catalog ships inside the system message so the model treats it
+	// as a system-level instruction; whether to load a skill stays the model's own
+	// decision. The block is stable across the session, so the system prefix still
+	// caches as one piece.
+	if a.skillsBlock != "" {
+		prompt += "\n\n" + a.skillsBlock
+	}
 	messages = append(messages, engine.ModelMessage{Role: "system", Content: prompt})
 
 	// Message 2: Session-stable context — language detected from the FIRST
@@ -105,14 +112,6 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 		}
 	}
 	messages = append(messages, engine.ModelMessage{Role: "user", Content: a.stableSessionBlock})
-
-	// Message 3: Available skills — stable across the session → cached ✓
-	// Always included, even when a skill is active. Removing it shifts all subsequent
-	// messages (history, Block B) by one position, destroying the prefix cache for the
-	// rest of the session.
-	if a.skillsBlock != "" {
-		messages = append(messages, engine.ModelMessage{Role: "user", Content: a.skillsBlock})
-	}
 
 	// === HISTORY ZONE (append-only — cacheable prefix) ===
 	// History sits after the stable zone. Since previous turns' messages

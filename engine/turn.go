@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1435,14 +1436,53 @@ func addToWorkingSet(state *TaskState, path string, notes string) {
 	state.WorkingSet.Files = append(state.WorkingSet.Files, FileRef{Path: path, Notes: notes})
 }
 
+// maxSkillResourceBytes caps one resource read so a single huge file cannot blow
+// the context window.
+const maxSkillResourceBytes = 256 * 1024
+
+// readSkillResource reads one file inside a skill directory. resource is resolved
+// relative to baseDir and must stay inside it, so a SKILL.md cannot use this to
+// read arbitrary files. It returns either the file content or a model-facing
+// error string (never both).
+func readSkillResource(skillName, baseDir, resource string) (string, string) {
+	if baseDir == "" {
+		return "", fmt.Sprintf("Error: skill %q has no filesystem resources", skillName)
+	}
+	base, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Sprintf("Error: cannot resolve skill %q directory", skillName)
+	}
+	target, err := filepath.Abs(filepath.Join(base, resource))
+	if err != nil {
+		return "", fmt.Sprintf("Error: invalid resource path %q", resource)
+	}
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Sprintf("Error: resource %q is outside the skill directory", resource)
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.IsDir() {
+		return "", fmt.Sprintf("Error: resource %q not found in skill %q", resource, skillName)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return "", fmt.Sprintf("Error: cannot read resource %q", resource)
+	}
+	if len(data) > maxSkillResourceBytes {
+		return string(data[:maxSkillResourceBytes]) + "\n\n[truncated: resource exceeds 256KiB]", ""
+	}
+	return string(data), ""
+}
+
 // processLoadSkillCalls intercepts load_skill tool calls from the
 // assistant's response. For each call, it either returns the skill's full
 // content as the tool result (success) or produces an error tool message
-// (bad JSON, empty name, unknown skill). Every load_skill call receives a
-// tool response — this is critical because the DeepSeek API requires that
-// every tool_call_id in an assistant message has a matching tool response.
-// Without it, the next model call would be rejected and the session would
-// be permanently stuck.
+// (bad JSON, empty name, unknown skill). A call may also carry `resource`, in
+// which case one file inside the skill directory is returned instead
+// (progressive disclosure). Every load_skill call receives a tool response —
+// this is critical because the DeepSeek API requires that every tool_call_id in
+// an assistant message has a matching tool response. Without it, the next model
+// call would be rejected and the session would be permanently stuck.
 //
 // The returned slice of Messages must be appended to history AFTER the
 // assistant message to satisfy the API ordering:
@@ -1479,6 +1519,44 @@ func (e *Engine) processLoadSkillCalls(calls []ToolCallRequest) []Message {
 				Role:       "tool",
 				ToolCallID: call.ID,
 				Content:    fmt.Sprintf("Error: skill %q not found", params.SkillName),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+
+		// A model-hidden skill (disable-model-invocation, e.g. the builtin
+		// multi-agent skills collab/ratd) is user-invocable only, via /name. The
+		// catalog already omits it; refusing here keeps that policy true even if
+		// the model guesses the name.
+		if s.DisableModelInvocation {
+			pendingLoadMsgs = append(pendingLoadMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("Error: skill %q is not available for model invocation (user-invocable only)", params.SkillName),
+				Timestamp:  time.Now(),
+			})
+			continue
+		}
+
+		// Progressive disclosure: `resource` names a file inside the skill
+		// directory (e.g. references/root-cause.md) that the SKILL.md pointed at.
+		// Read it through the same tool so the model never needs a raw path and
+		// cannot escape the skill directory.
+		if params.Resource != "" {
+			content, errMsg := readSkillResource(s.Name, s.BaseDir, params.Resource)
+			if errMsg != "" {
+				pendingLoadMsgs = append(pendingLoadMsgs, Message{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    errMsg,
+					Timestamp:  time.Now(),
+				})
+				continue
+			}
+			pendingLoadMsgs = append(pendingLoadMsgs, Message{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    fmt.Sprintf("[SKILL — %s / %s]\n\n%s", s.Name, params.Resource, content),
 				Timestamp:  time.Now(),
 			})
 			continue

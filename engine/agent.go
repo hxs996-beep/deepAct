@@ -205,6 +205,10 @@ type Agent interface {
 // LoadSkillParams is the JSON schema for the load_skill tool call.
 type LoadSkillParams struct {
 	SkillName string `json:"skill_name"`
+	// Resource optionally names a file inside the skill directory (a path
+	// relative to it, e.g. "references/root-cause.md") to read instead of the
+	// SKILL.md itself — progressive disclosure for the files a SKILL.md points at.
+	Resource  string `json:"resource,omitempty"`
 	Reasoning string `json:"reasoning,omitempty"`
 }
 
@@ -285,13 +289,17 @@ func loadSkillToolSpec() ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        LoadSkillToolName,
-			Description: "Load the full instructions for an available skill. Call this with the exact skill name from the Available Skills list before acting on a task that names or clearly matches that skill. The catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.",
+			Description: "Load the full instructions for an available skill, or one of its resource files. Call this with the exact skill name from the Available Skills list before acting on a task that names or clearly matches that skill. When the loaded SKILL.md points at another file inside the skill (e.g. references/foo.md), pass that path as `resource` to read it with this same tool; the path is relative to the skill directory. The catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"skill_name": {
 						"type": "string",
 						"description": "Name of the skill to load, e.g. 'writing-plans'"
+					},
+					"resource": {
+						"type": "string",
+						"description": "Optional path of a file inside the skill directory to read instead of SKILL.md, e.g. 'references/root-cause.md'"
 					},
 					"reasoning": {
 						"type": "string",

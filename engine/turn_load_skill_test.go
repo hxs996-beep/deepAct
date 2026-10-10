@@ -2,6 +2,8 @@ package engine
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -119,6 +121,96 @@ func TestProcessLoadSkillCalls_ValidReturnsFullContent(t *testing.T) {
 	}
 	if !strings.Contains(msgs[0].Content, "step 1...") {
 		t.Errorf("Content = %q, want full skill content", msgs[0].Content)
+	}
+}
+
+// TestProcessLoadSkillCalls_RefusesModelHiddenSkill verifies that a skill marked
+// disable-model-invocation (the builtin multi-agent skills collab/ratd) cannot be
+// loaded through load_skill: those are user-invocable only, via /name.
+func TestProcessLoadSkillCalls_RefusesModelHiddenSkill(t *testing.T) {
+	skillReg := skill.NewRegistry()
+	skillReg.Register(&skill.Skill{
+		Name:                   "collab",
+		Description:            "parallel research",
+		Content:                "orchestration...",
+		DisableModelInvocation: true,
+	})
+
+	e := &Engine{
+		skills: skillReg,
+		state:  &TaskState{},
+		config: EngineConfig{},
+	}
+
+	calls := []ToolCallRequest{
+		{ID: "call_hidden", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"collab"}`)},
+	}
+	msgs := e.processLoadSkillCalls(calls)
+
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 tool response (no orphaned tool_call), got %d", len(msgs))
+	}
+	if msgs[0].ToolCallID != "call_hidden" {
+		t.Errorf("ToolCallID = %q, want call_hidden", msgs[0].ToolCallID)
+	}
+	if !strings.Contains(msgs[0].Content, "not available for model invocation") {
+		t.Errorf("Content = %q, want a refusal for a model-hidden skill", msgs[0].Content)
+	}
+}
+
+// TestProcessLoadSkillCalls_ResourceRead locks progressive disclosure: a
+// SKILL.md that points at a reference file can be followed with the same tool by
+// passing `resource` (a path relative to the skill directory).
+func TestProcessLoadSkillCalls_ResourceRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "references"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "references", "root-cause.md"), []byte("trace the source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	skillReg := skill.NewRegistry()
+	skillReg.Register(&skill.Skill{Name: "debug", Content: "main body", BaseDir: dir})
+	e := &Engine{skills: skillReg, state: &TaskState{}, config: EngineConfig{}}
+
+	msgs := e.processLoadSkillCalls([]ToolCallRequest{
+		{ID: "call_ref", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"debug","resource":"references/root-cause.md"}`)},
+	})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 tool response, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Content, "trace the source") {
+		t.Errorf("Content = %q, want the reference file body", msgs[0].Content)
+	}
+}
+
+// TestProcessLoadSkillCalls_ResourceCannotEscape locks the boundary: a resource
+// path may never read outside the skill directory.
+func TestProcessLoadSkillCalls_ResourceCannotEscape(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "debug")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "secret.txt"), []byte("SECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	skillReg := skill.NewRegistry()
+	skillReg.Register(&skill.Skill{Name: "debug", Content: "main body", BaseDir: skillDir})
+	e := &Engine{skills: skillReg, state: &TaskState{}, config: EngineConfig{}}
+
+	for _, res := range []string{"../../secret.txt", "/etc/hosts"} {
+		msgs := e.processLoadSkillCalls([]ToolCallRequest{
+			{ID: "call_esc", Name: LoadSkillToolName, Input: json.RawMessage(`{"skill_name":"debug","resource":"` + res + `"}`)},
+		})
+		if len(msgs) != 1 {
+			t.Fatalf("resource %q: expected 1 tool response, got %d", res, len(msgs))
+		}
+		if strings.Contains(msgs[0].Content, "SECRET") {
+			t.Errorf("resource %q escaped the skill directory", res)
+		}
 	}
 }
 
