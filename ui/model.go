@@ -2798,7 +2798,7 @@ func todoLine(it engine.TodoItem) string {
 // role tag, then the goal while running or the result once finished. The handle
 // is what makes concurrent same-role agents tellable apart.
 func subAgentLine(a SubAgentStatus) string {
-	trunc := func(s string) string { return truncateRunes(s, 60) }
+	trunc := func(s string) string { return truncateRunes(inlineText(s), 60) }
 	switch a.Status {
 	case "running":
 		return fmt.Sprintf("%s %s %s  %s", spinnerFrames[0], a.RunID, agentIcon(a.Agent), SpinnerStyle.Render(trunc(a.Goal)))
@@ -2807,6 +2807,31 @@ func subAgentLine(a SubAgentStatus) string {
 	default:
 		return fmt.Sprintf("✓ %s %s  %s", a.RunID, agentIcon(a.Agent), SpinnerDoneStyle.Render(trunc(a.Summary)))
 	}
+}
+
+// inlineText flattens sub-agent text into one terminal row. A done row's
+// Summary is the sub-agent's raw conclusion — usually a multi-line markdown
+// document — and a goal is model-authored text that may also carry newlines.
+// Left as-is, embedded newlines turn one agent row into several styled lines,
+// and the inner style's reset breaks the ExecBlockStyle background on the
+// continuation rows. Splitting on lines and rejoining drops the line breaks;
+// per-line heading (#), bold (**) and code (`) markers are removed so only the
+// prose survives. The result is then rune-truncated by the caller.
+func inlineText(s string) string {
+	var parts []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+		line = strings.TrimLeft(line, "#")
+		line = strings.ReplaceAll(line, "**", "")
+		line = strings.ReplaceAll(line, "`", "")
+		if line = strings.Join(strings.Fields(line), " "); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // truncateRunes cuts s to at most n runes and appends an ellipsis. Byte slicing

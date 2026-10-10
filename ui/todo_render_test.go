@@ -107,6 +107,40 @@ func TestRenderStepsPanel_OrphanOnly(t *testing.T) {
 	}
 }
 
+// TestRenderStepsPanel_MultilineSummaryStaysOneRow: done 行的 Summary 是子代理
+// 的原始结论（多行 markdown）。它必须折叠成单行，否则一行子代理会渲染成多行，
+// 内层样式的 reset 会截断 ExecBlockStyle 背景，续行看起来与相邻行不同。
+func TestRenderStepsPanel_MultilineSummaryStaysOneRow(t *testing.T) {
+	summary := "# dir-6 研究小结：持久化检索\n\n## 总体结论\n\ndsh 在本方向的核心机制是 **缓存**。"
+	lines := renderStepsPanel(nil, []SubAgentStatus{
+		{RunID: "bg-1", Agent: "researcher", Status: "done", Summary: summary},
+	}, 200)
+	plain := make([]string, len(lines))
+	for i, l := range lines {
+		plain[i] = strings.TrimRight(stripAnsi(l), " ")
+	}
+	joined := strings.Join(plain, "\n")
+
+	var rows []string
+	for _, l := range plain {
+		if strings.Contains(l, "bg-1") {
+			rows = append(rows, l)
+		}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("multi-line summary must render as exactly one bg-1 row, got %d:\n%s", len(rows), joined)
+	}
+	row := rows[0]
+	if !strings.Contains(row, "dir-6 研究小结") || !strings.Contains(row, "总体结论") {
+		t.Errorf("collapsed summary must sit on the agent row:\n%s", row)
+	}
+	for _, l := range plain {
+		if strings.Contains(l, "##") || strings.Contains(l, "**") {
+			t.Errorf("markdown markers leaked into the panel:\n%s", joined)
+		}
+	}
+}
+
 // TestRenderStepsPanel_ErrorStatus: error/cancelled 用 ✗，不再是 ✓。
 func TestRenderStepsPanel_ErrorStatus(t *testing.T) {
 	lines := renderStepsPanel(nil, []SubAgentStatus{
