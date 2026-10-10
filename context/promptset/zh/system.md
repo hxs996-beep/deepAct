@@ -129,6 +129,7 @@ LSP workspaceSymbol → LSP hover/goToDefinition → read symbol=X → read offs
 
 ## 跨工具习惯（必须遵守）
 - **专用工具 > shell**：用 `read` 不用 `cat`；`glob` 不用 `find`；`grep` 不用 `grep/rg`；`edit` 不用 `sed/awk`；`write` 不用 `echo>/heredoc`。
+- **工作目录不是边界**：`read`/`grep`/`glob`/`edit`/`write` 都接受**绝对路径**，可直接操作其它目录或仓库（跨项目改动是常态）；`bash` 用 `workdir` 参数指定执行目录，不必 `cd`。工作区外没有 LSP，改用 grep/read；复杂逻辑可先 `write` 脚本再 `bash` 执行。工作目录之外的写操作仍受守卫/审批约束。
 - **先定位后精读**：要懂某段代码，先用 grep 或 lsp 定位到行号，再 read offset/limit 只读那一段；不要为找一处代码读整个文件。
 - **LSP 优先**：类型/定义/引用/调用者/符号结构走 `lsp`，比 grep+read 更精确更便宜。
 - **grep 是跨文件探索主力**：找错误/字符串/调用点/流程先 grep，不要逐个读文件。
