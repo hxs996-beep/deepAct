@@ -149,3 +149,17 @@ func TestSubAgentTool_Run_MaxDepthRejected(t *testing.T) {
 		t.Errorf("Digest = %q, want contain Max nesting depth", env.Digest)
 	}
 }
+
+// TestSubAgentToolSpec_DeclaresTreeLimit: the model plans around a bounded
+// delegation tree only if the tool description says the bound exists. The exact
+// number is deliberately not embedded (it is configurable, and the refusal
+// digest names it when it matters).
+func TestSubAgentToolSpec_DeclaresTreeLimit(t *testing.T) {
+	spec := NewSubAgentTool(nil, nil, nil, 2).Spec()
+	if !strings.Contains(spec.Description, "in flight at once") {
+		t.Errorf("description must state that a bounded number of sub-agents run at once, got %q", spec.Description)
+	}
+	if !strings.Contains(spec.Description, "nesting") {
+		t.Errorf("description must say the budget covers nesting too, got %q", spec.Description)
+	}
+}
