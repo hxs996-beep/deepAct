@@ -362,6 +362,10 @@ func TestSubAgentBudget_ConcurrentRuns(t *testing.T) {
 	runner.SetSubAgentTokenBudget(10_000)
 
 	const n = 8
+	// Above the delegation-tree default (6) on purpose: this test is about the
+	// per-run budget resolution being race-free, so it needs all n runs to be
+	// admitted rather than refused by the width cap.
+	runner.SetMaxConcurrentSubAgents(n)
 	var wg sync.WaitGroup
 	reasons := make([]string, n)
 	for i := 0; i < n; i++ {

@@ -14,6 +14,17 @@ import (
 
 const (
 	defaultSubAgentContext = 1_048_576 // ~1M — match main engine context window
+
+	// defaultMaxConcurrentSubAgents bounds how many sub-agent runs may be in
+	// flight at once across the whole delegation tree. Six matches the 2-6
+	// directions a /collab round fans out, so normal parallel research is
+	// unaffected; how that budget is split between width and nesting is the
+	// model's call.
+	defaultMaxConcurrentSubAgents = 6
+	// defaultTreeBudgetWindows is the Run-level token cap expressed in
+	// sub-agent context windows (~20M with a 1M window). Its job is to bound a
+	// runaway Run, not to be a daily budget.
+	defaultTreeBudgetWindows = 20
 )
 
 // subAgentUniverseNames is the closed set of tools a sub-agent may ever be
@@ -99,6 +110,25 @@ type SubAgentRunner struct {
 	// Three-state: 0 = default (2× the context window), -1 = explicit
 	// unlimited, >0 = explicit cap. Set from [context].sub_agent_token_budget.
 	tokenBudget int
+
+	// --- Delegation-tree invariants --------------------------------------
+	// Every delegation path (sync depth 0, async, nested, resumed) runs
+	// through this ONE runner instance, so one counter bounds them all.
+	//
+	// inFlight counts runs currently executing. A run parked on ask_user
+	// leaves runLoopFrom and therefore holds no slot — the same rule the async
+	// outstanding cap uses (see dispatchAsync).
+	inFlight atomic.Int64
+	// treeSpent is the billable token total (cache-miss + completion) of every
+	// sub-agent run in the CURRENT Run, nested children included. Reset by the
+	// Engine at Run start via StartRun; never model-settable.
+	treeSpent atomic.Int64
+	// treeBudget caps treeSpent: 0 = default, -1 = unlimited, >0 = explicit.
+	treeBudget atomic.Int64
+	// maxConcurrent caps inFlight: 0 = defaultMaxConcurrentSubAgents.
+	maxConcurrent atomic.Int64
+	// treeNudged marks the one-shot near-limit notice for the current Run.
+	treeNudged atomic.Bool
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -206,6 +236,111 @@ func (r *SubAgentRunner) MaxDepth() int {
 	return r.maxDepth
 }
 
+// SetMaxConcurrentSubAgents caps how many sub-agent runs may be in flight at
+// once across the whole delegation tree. 0 resets to the default (6).
+func (r *SubAgentRunner) SetMaxConcurrentSubAgents(n int) {
+	r.maxConcurrent.Store(int64(n))
+}
+
+func (r *SubAgentRunner) maxConcurrentSubAgents() int {
+	if n := r.maxConcurrent.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultMaxConcurrentSubAgents
+}
+
+// SetRunTokenBudget caps the billable tokens of every sub-agent run in one Run
+// (the whole delegation tree). Three-state: 0 = default (20 context windows),
+// -1 = explicit unlimited, >0 = explicit cap. The model can neither set nor
+// widen it — it only ever sees the remaining amount in the near-limit notice.
+func (r *SubAgentRunner) SetRunTokenBudget(n int) {
+	r.treeBudget.Store(int64(n))
+}
+
+// Budget resolves the effective Run-level cap; 0 means unlimited.
+func (r *SubAgentRunner) Budget() int64 {
+	switch n := r.treeBudget.Load(); {
+	case n > 0:
+		return n
+	case n < 0:
+		return 0
+	default:
+		return int64(defaultTreeBudgetWindows) * int64(r.contextLimit())
+	}
+}
+
+// Spent reports the billable tokens the current Run's delegation tree has used.
+func (r *SubAgentRunner) Spent() int64 { return r.treeSpent.Load() }
+
+// StartRun resets the Run-scoped aggregate and its one-shot notice. Called by
+// the Engine at Run start so the cap covers exactly one Run.
+func (r *SubAgentRunner) StartRun() {
+	r.treeSpent.Store(0)
+	r.treeNudged.Store(false)
+}
+
+// ClaimBudgetNotice reports whether the near-limit notice still has to be
+// emitted this Run, and consumes it. One-shot by design: the notice is
+// information the model acts on, not a per-turn banner.
+func (r *SubAgentRunner) ClaimBudgetNotice() bool { return r.treeNudged.CompareAndSwap(false, true) }
+
+// admitRun reserves an in-flight slot and checks the Run-level token budget.
+// nil = admitted, and the caller MUST defer releaseRunSlot. A non-nil result is
+// the fail-loud refusal handed back to the delegating model: nothing ran, so it
+// carries no partial output and the summary says how to proceed.
+func (r *SubAgentRunner) admitRun(input Handoff) *HandoffResult {
+	zh := zhFromLang(input.UserLanguage)
+	limit := r.maxConcurrentSubAgents()
+	for {
+		cur := r.inFlight.Load()
+		if int(cur) >= limit {
+			return &HandoffResult{
+				Summary:      fanoutRefusalText(zh, limit),
+				Blocked:      true,
+				BlockedBy:    HandoffReasonFanoutLimit,
+				FinishReason: HandoffReasonFanoutLimit,
+			}
+		}
+		if r.inFlight.CompareAndSwap(cur, cur+1) {
+			break
+		}
+	}
+	// Checked AFTER taking the slot so the refusal cannot be raced past by two
+	// runs entering together; the slot is released before returning.
+	if budget := r.Budget(); budget > 0 && r.treeSpent.Load() >= budget {
+		r.inFlight.Add(-1)
+		return &HandoffResult{
+			Summary:      treeBudgetRefusalText(zh, r.treeSpent.Load(), budget),
+			Blocked:      true,
+			BlockedBy:    HandoffReasonTreeBudgetExceeded,
+			FinishReason: HandoffReasonTreeBudgetExceeded,
+		}
+	}
+	return nil
+}
+
+func (r *SubAgentRunner) releaseRunSlot() { r.inFlight.Add(-1) }
+
+// fanoutRefusalText explains a width refusal. It names the limit and the ways
+// forward, because the refusal is not a dead end: the parent can collect a
+// running result or do the step itself, then delegate again.
+func fanoutRefusalText(zh bool, limit int) string {
+	if zh {
+		return fmt.Sprintf("委派被拒：整个委派树已有 %d 个子代理在跑（上限 %d）。先取一个结果（list_agents / wait_agent / agent_poll），或你自己完成这一步，然后再委派。", limit, limit)
+	}
+	return fmt.Sprintf("Delegation refused: %d sub-agents are already in flight across the delegation tree (limit %d). Collect a result first (list_agents / wait_agent / agent_poll) or do this step yourself, then delegate again.", limit, limit)
+}
+
+// treeBudgetRefusalText explains a Run-budget refusal and, crucially, what is
+// still available: tokens already spent cannot be reclaimed, but results of
+// runs that are still working can.
+func treeBudgetRefusalText(zh bool, spent, budget int64) string {
+	if zh {
+		return fmt.Sprintf("委派被拒：本次 Run 的子代理 token 预算已用完（已用 %d / %d）。请基于已有结果继续；仍在运行的子代理结果仍可用 agent_poll 收取。", spent, budget)
+	}
+	return fmt.Sprintf("Delegation refused: this Run's sub-agent token budget is exhausted (%d of %d spent). Continue from the results you already have; runs still in flight can still be collected with agent_poll.", spent, budget)
+}
+
 // SetLangPacks sets both language variants of the language-specific rules.
 // Called once at startup from cmd/run.go after language detection.
 func (r *SubAgentRunner) SetLangPacks(zh, en string) {
@@ -291,6 +426,15 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		}, nil
 	}
 
+	// Delegation-tree admission: width, then the Run-level token aggregate.
+	// The refusal is returned BEFORE any per-run state is built (no history, no
+	// model fork, no partition), so a refused delegation is cheap and
+	// deterministic. Resumed runs take a slot too — they are in flight again.
+	if refused := r.admitRun(input); refused != nil {
+		return refused, nil
+	}
+	defer r.releaseRunSlot()
+
 	// ---- Prologue: per-RUN state, derived exactly once ----------------------
 	// A resumed run takes it from the breakpoint instead: re-deriving the model
 	// and partition would throw away the prefix cache (and bump partitionSeq),
@@ -361,6 +505,18 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
 		}
 	}
+
+	// Tree accounting: this run's billable tokens join the Run aggregate on
+	// EVERY exit path. A resumed run already contributed everything it spent
+	// before parking, so only the delta since the breakpoint counts — without
+	// the subtraction each resume would double-count its pre-suspension spend.
+	baseSpent := 0
+	if resume != nil {
+		baseSpent = resume.Spent.CacheMissTokens + resume.Spent.CompletionTokens
+	}
+	defer func() {
+		r.treeSpent.Add(int64(totalUsage.CacheMissTokens + totalUsage.CompletionTokens - baseSpent))
+	}()
 
 	// Model resolution. A fresh run derives it from the role's override; a
 	// resumed run keeps the effective model it had at the breakpoint (it may

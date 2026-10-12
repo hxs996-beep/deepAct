@@ -369,6 +369,11 @@ func TestSubAgentUniverse_ConcurrentSpawns(t *testing.T) {
 	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test"}
 
 	const n = 8
+	// This test stresses concurrency above the delegation-tree default (6), so
+	// it raises the width cap explicitly instead of being silently refused.
+	// That is the point: it asserts race-freedom at a deliberately high fan-out,
+	// and pins that a raised cap is honored.
+	runner.SetMaxConcurrentSubAgents(n)
 	var wg sync.WaitGroup
 	reasons := make([]string, n)
 	for i := 0; i < n; i++ {
