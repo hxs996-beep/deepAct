@@ -266,6 +266,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetMaxOutputTokens(config.MaxOutputTokens)
 	runner.SetSubAgentTokenBudget(config.SubAgentTokenBudget)
+	runner.SetMaxConcurrentSubAgents(config.MaxConcurrentSubAgents)
+	runner.SetMaxDepth(config.MaxSubAgentDepth)
+	runner.SetRunTokenBudget(config.RunSubAgentTokenBudget)
 	runner.SetReasoningEffort(config.ReasoningEffort)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
@@ -377,6 +380,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Memory:     memStore,
 		Agents:     agentReg,
+		SubAgents:  runner,
 		Skills:     skillReg,
 		Router:     routing,
 	}
