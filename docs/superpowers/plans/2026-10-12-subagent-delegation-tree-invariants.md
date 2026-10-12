@@ -1175,3 +1175,14 @@ git commit -m "test(engine): pin the six-way fan-out regression"
 **4. 已知边界（写下来而不是留空）**：异步委派的拒绝发生在后台 goroutine 内，因此模型是在 `agent_poll` 时读到拒绝摘要，而非在派发当下。这是"单一收口点"设计的自觉代价——若在 `dispatchAsync` 再预占一次槽位，就会出现第二处计数，正是本方案要避免的。默认 async 在飞上限（8）高于树宽度上限（6），所以正常用法不会撞上这一点。
 
 **5. 既有缺口（不在本次范围）**：`Engine.runUsageAccum` 只累计 depth-0 委派返回的用量，嵌套子 run 的用量在 `runHandoff` 的 nested 分支被丢弃（`engine/handoff.go:424`）。本方案的 Run 聚合在 runner 侧独立计数，因此不受影响；修正 eval 统计的嵌套归集是独立的后续项。
+
+---
+
+## 执行记录（偏差，2026-10-12）
+
+计划已按任务 1-7 内联执行完毕；`make test`（`go test ./... -count=1 -race`）全绿。以下四处与计划原文不一致，**以仓库代码为准**：
+
+1. **不变量测试必须传 `NoNudge: true`**（计划原文未写）。非结构化 run 的纯文本回复**永远不算完成**——它被判定为叙述，3 击后以 `stalled_narration` 结束（`engine/sub_agent.go:669-679`）。计划里断言 `completed` 的用例原本会全部失败。这也是本次调研中一个宽范围 researcher 拿不到结果的同一个机制。
+2. **token「无上限」用例需同时给 per-run `TokenBudget: -1` 并循环 4 次**。单次 9M 用量会先撞 per-run 默认上限（2×上下文窗口 ≈ 2.1M），从而根本测不到 Run 级开关；4 次是为了让"若 -1 被误当成默认值（20 窗口 ≈ 21M）"这一回退在该用例里必定暴露。
+3. **两个既有并发测试需显式抬高宽度上限**：`TestSubAgentUniverse_ConcurrentSpawns` 与 `TestSubAgentBudget_ConcurrentRuns` 都压 8 路并发（高于新默认 6），现在各自 `SetMaxConcurrentSubAgents(8)` 并注明原因——它们测的是竞态与预算解析，不是上限。
+4. **未执行任务 7 步骤 4 的人工 `/collab` 冒烟**（当前为非交互执行环境）。已用 `TestSubAgentWidth_SixWayFanoutStillFits` 覆盖"6 方向默认宽度下不被拒"这一点；真实会话冒烟仍建议由人工补一次。
