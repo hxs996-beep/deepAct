@@ -28,14 +28,29 @@ const (
 	DefaultMaxOutputTokens = 128 * 1024
 )
 
+// SubAgentBudget is the delegation-tree budget surface the Engine owns across a
+// Run: it clears the Run-scoped aggregate at Run start and reports the spend for
+// the near-limit notice. *SubAgentRunner implements it; cmd/run.go injects it
+// through EngineDeps. nil = no aggregate (tests, embeddings) and the notice
+// stays silent.
+type SubAgentBudget interface {
+	StartRun()
+	Spent() int64
+	Budget() int64
+	ClaimBudgetNotice() bool
+}
+
 type EngineDeps struct {
-	Model       ModelClient
-	Tools       ToolExecutor
-	Context     ContextBuilder
-	Compressor  Compressor
-	Session     SessionStore
-	Memory      MemoryStore
-	Agents      *AgentRegistry
+	Model      ModelClient
+	Tools      ToolExecutor
+	Context    ContextBuilder
+	Compressor Compressor
+	Session    SessionStore
+	Memory     MemoryStore
+	Agents     *AgentRegistry
+	// SubAgents, when set, is the shared sub-agent budget surface. Optional:
+	// nil means the Engine neither resets nor reports the Run aggregate.
+	SubAgents   SubAgentBudget
 	Skills      *skill.Registry
 	Router      ModelRouter
 	MCPManagers []io.Closer // MCP server connections to close on shutdown
@@ -54,11 +69,13 @@ type Engine struct {
 	session    SessionStore
 	memory     MemoryStore
 	agents     *AgentRegistry
-	skills     *skill.Registry
-	router     ModelRouter
-	config     EngineConfig
-	state      *TaskState
-	history    []Message
+	// subBudget is the shared delegation-tree budget (nil when not wired).
+	subBudget SubAgentBudget
+	skills    *skill.Registry
+	router    ModelRouter
+	config    EngineConfig
+	state     *TaskState
+	history   []Message
 	// contextRetryDone caps the reactive context-length retry to once per Run:
 	// a 400 after the pre-send estimate is rare, and retrying forever would just
 	// re-trim and re-fail (see executeTurn).
@@ -383,6 +400,7 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		session:      deps.Session,
 		memory:       deps.Memory,
 		agents:       deps.Agents,
+		subBudget:    deps.SubAgents,
 		skills:       deps.Skills,
 		router:       deps.Router,
 		config:       cfg,
@@ -499,6 +517,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.repeatCounts = make(map[string]int)
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
+	// The delegation tree's token aggregate is per-Run, exactly like the
+	// background tasks that feed it: a new Run starts with a fresh budget.
+	if e.subBudget != nil {
+		e.subBudget.StartRun()
+	}
 	e.runToolCallCount = 0
 	e.runErrorCount = 0
 	e.stopHookActive = false

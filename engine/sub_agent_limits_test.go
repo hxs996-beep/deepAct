@@ -272,3 +272,107 @@ func TestSubAgentTreeBudget_Unlimited(t *testing.T) {
 		}
 	}
 }
+
+// --- engine wiring ----------------------------------------------------------
+
+// budgetStub is a scripted SubAgentBudget, so the Engine-side reset and notice
+// can be tested without a live runner.
+type budgetStub struct {
+	spent      int64
+	budget     int64
+	starts     int
+	noticeLeft int // how many ClaimBudgetNotice calls still return true
+}
+
+func (b *budgetStub) StartRun()    { b.starts++; b.spent = 0; b.noticeLeft = 1 }
+func (b *budgetStub) Spent() int64 { return b.spent }
+func (b *budgetStub) Budget() int64 {
+	return b.budget
+}
+func (b *budgetStub) ClaimBudgetNotice() bool {
+	if b.noticeLeft <= 0 {
+		return false
+	}
+	b.noticeLeft--
+	return true
+}
+
+// TestEngineRun_ResetsSubAgentBudget: every Run must start with a clean
+// delegation-tree aggregate, or the cap silently becomes a session cap.
+func TestEngineRun_ResetsSubAgentBudget(t *testing.T) {
+	budget := &budgetStub{budget: 1000, spent: 999, noticeLeft: 0}
+	e := newTestEngineWithBudget(t, budget)
+	if _, err := e.Run(context.Background(), "你好"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if budget.starts == 0 {
+		t.Error("Run must call SubAgentBudget.StartRun")
+	}
+}
+
+// TestEngineRun_SubAgentBudgetNoticeOnce: past 80% the pinned notice fires
+// exactly once and names both numbers.
+func TestEngineRun_SubAgentBudgetNoticeOnce(t *testing.T) {
+	budget := &budgetStub{budget: 1000, spent: 900, noticeLeft: 1}
+	e := newTestEngineWithBudget(t, budget)
+	e.isChinese = true
+	e.langDetected = true
+
+	e.injectSubAgentBudgetNotice()
+	if len(e.pendingPinnedMessages) != 1 {
+		t.Fatalf("expected exactly one pinned notice, got %d", len(e.pendingPinnedMessages))
+	}
+	got := e.pendingPinnedMessages[0]
+	if !strings.Contains(got, "900") || !strings.Contains(got, "1000") {
+		t.Errorf("notice must name spent and budget, got %q", got)
+	}
+	e.pendingPinnedMessages = nil
+
+	// Second call: already claimed this Run → no second banner.
+	e.injectSubAgentBudgetNotice()
+	if len(e.pendingPinnedMessages) != 0 {
+		t.Errorf("the near-limit notice must be one-shot, got %d", len(e.pendingPinnedMessages))
+	}
+}
+
+// TestEngineRun_SubAgentBudgetNoticeSilent: below the threshold, when the cap
+// is unlimited, and when no budget surface is wired, the notice stays silent.
+func TestEngineRun_SubAgentBudgetNoticeSilent(t *testing.T) {
+	cases := []struct {
+		name   string
+		budget SubAgentBudget
+	}{
+		{"below threshold", &budgetStub{budget: 1000, spent: 100, noticeLeft: 1}},
+		{"unlimited", &budgetStub{budget: 0, spent: 100_000, noticeLeft: 1}},
+		{"not wired", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{subBudget: tc.budget}
+			e.injectSubAgentBudgetNotice()
+			if len(e.pendingPinnedMessages) != 0 {
+				t.Errorf("expected no notice, got %v", e.pendingPinnedMessages)
+			}
+		})
+	}
+}
+
+// newTestEngineWithBudget builds a minimal Engine whose single turn answers with
+// plain text, with the given delegation-budget surface wired. The field set
+// mirrors the other Engine literals in this package (there is no shared helper):
+// Run dereferences context, state, config and guards, so all four are required.
+func newTestEngineWithBudget(t *testing.T, budget SubAgentBudget) *Engine {
+	t.Helper()
+	return &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{
+			{Delta: "任务已完成。", FinishReason: "stop"},
+		}},
+		tools:     stubToolExecutor{},
+		context:   steerContextBuilder{},
+		state:     &TaskState{TaskID: "test"},
+		config:    EngineConfig{ModelName: "test-model"},
+		isChinese: true,
+		guards:    &GuardSystem{scope: NewScopeGuard()},
+		subBudget: budget,
+	}
+}

@@ -91,6 +91,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// turns within the same Run() call don't repeat them.
 	// Remind the model about outstanding background async sub-agent tasks.
 	e.injectBackgroundJobsSummary()
+	e.injectSubAgentBudgetNotice()
 	// injectedBlocks collects every block this turn injects besides history
 	// (system prompt, stable session context, skills, pinned messages). The
 	// echoed-block stripper derives its headers from them, so it always
@@ -1883,6 +1884,41 @@ func (e *Engine) injectBackgroundJobsSummary() {
 	e.bgMu.Unlock()
 	b.WriteString(". Continue your work; use agent_poll(job_id) to fetch results.")
 	e.pendingPinnedMessages = append(e.pendingPinnedMessages, b.String())
+}
+
+// injectSubAgentBudgetNotice appends a one-shot pinned notice when this Run's
+// delegation tree has spent 80% of its token budget, so the model knows the
+// remaining total BEFORE it delegates again. This is information, not a guard:
+// the same principle as the per-run tokenBudgetNudge — the model decides how to
+// converge, the engine only reports. No-op when no budget surface is wired,
+// when the cap is unlimited, when the threshold is not reached, or when the
+// notice already fired this Run.
+func (e *Engine) injectSubAgentBudgetNotice() {
+	if e.subBudget == nil {
+		return
+	}
+	budget := e.subBudget.Budget()
+	if budget <= 0 {
+		return
+	}
+	spent := e.subBudget.Spent()
+	if spent*5 < budget*4 { // below 80%
+		return
+	}
+	if !e.subBudget.ClaimBudgetNotice() {
+		return
+	}
+	remaining := budget - spent
+	if remaining < 0 {
+		remaining = 0
+	}
+	if e.isChinese {
+		e.pendingPinnedMessages = append(e.pendingPinnedMessages, fmt.Sprintf(
+			"注意：本次 Run 的子代理 token 总量已用 %d / %d（剩余约 %d）。请基于已有结果收敛，或用你自己的工具完成剩余工作。", spent, budget, remaining))
+		return
+	}
+	e.pendingPinnedMessages = append(e.pendingPinnedMessages, fmt.Sprintf(
+		"Note: this Run's sub-agent token total is at %d / %d (~%d left). Converge on the results you have, or do the remaining work with your own tools.", spent, budget, remaining))
 }
 
 // processAskUserCalls intercepts ask_user tool calls from the assistant's
