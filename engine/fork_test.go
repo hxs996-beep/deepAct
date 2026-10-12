@@ -93,7 +93,7 @@ func TestRunLoopFrom_InjectsForkBeforeVolatileGoal(t *testing.T) {
 	if _, err := r.runLoop(context.Background(), Handoff{
 		Agent:         AgentSub,
 		Goal:          "总结上面的讨论",
-		NoNudge:       true,
+		TextResult:    true,
 		ForkedHistory: []ModelMessage{{Role: "user", Content: "第一个请求"}, {Role: "assistant", Content: "结论一"}},
 	}, "", 3); err != nil {
 		t.Fatalf("runLoop: %v", err)

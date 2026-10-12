@@ -639,7 +639,7 @@ func TestRunLoopFrom_DrainsInboxIntoTheRequest(t *testing.T) {
 	inbox <- "运行中补充的信息"
 
 	if _, err := r.runLoop(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "g", NoNudge: true, Inbox: inbox,
+		Agent: AgentSub, Goal: "g", TextResult: true, Inbox: inbox,
 	}, "", 3); err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}

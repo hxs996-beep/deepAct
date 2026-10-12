@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// NOTE on NoNudge in these tests: a text-only reply NEVER completes a
+// NOTE on TextResult in these tests: a text-only reply NEVER completes a
 // non-structured run — it is treated as narration and nudged, then ends as
 // stalled_narration after 3 strikes (see the completion rules in runLoopFrom).
 // These tests are about the delegation-tree invariants, not about completion
-// semantics, so every handoff sets NoNudge to make the run's outcome
+// semantics, so every handoff sets TextResult to make the run's outcome
 // deterministic and its token math exact.
 
 // A refused delegation is NOT a partial result: nothing ran. These two reasons
@@ -90,7 +90,7 @@ func TestSubAgentWidth_RefusesBeyondLimit(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", NoNudge: true})
+			res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", TextResult: true})
 			if err != nil {
 				t.Errorf("run %d: %v", i, err)
 				return
@@ -102,7 +102,7 @@ func TestSubAgentWidth_RefusesBeyondLimit(t *testing.T) {
 	<-model.entered
 	<-model.entered
 
-	refused, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "third", NoNudge: true})
+	refused, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "third", TextResult: true})
 	if err != nil {
 		t.Fatalf("refused run returned an error instead of a result: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestSubAgentWidth_SlotReleasedAfterRun(t *testing.T) {
 	runner.SetMaxConcurrentSubAgents(1)
 
 	for i := 0; i < 3; i++ {
-		res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", NoNudge: true})
+		res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", TextResult: true})
 		if err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}
@@ -157,7 +157,7 @@ func TestSubAgentDepth_Configurable(t *testing.T) {
 		t.Fatalf("default MaxDepth = %d, want 2", got)
 	}
 	runner.SetMaxDepth(1)
-	res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", Depth: 2, NoNudge: true})
+	res, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", Depth: 2, TextResult: true})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSubAgentDepth_Configurable(t *testing.T) {
 		t.Fatalf("expected %q at depth 2 with max 1, got %q", HandoffReasonMaxDepth, res.FinishReason)
 	}
 	runner.SetMaxDepth(3)
-	res, err = runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", Depth: 2, NoNudge: true})
+	res, err = runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", Depth: 2, TextResult: true})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSubAgentTreeBudget_RefusesAfterSpent(t *testing.T) {
 	runner.SetRunTokenBudget(1000)
 	runner.StartRun()
 
-	first, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", NoNudge: true})
+	first, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", TextResult: true})
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSubAgentTreeBudget_RefusesAfterSpent(t *testing.T) {
 		t.Fatalf("Spent after one 600-token run = %d, want 600", got)
 	}
 
-	second, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", NoNudge: true})
+	second, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", TextResult: true})
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestSubAgentTreeBudget_RefusesAfterSpent(t *testing.T) {
 		t.Fatalf("second run must still be admitted (600 < 1000): got %q", second.FinishReason)
 	}
 
-	third, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", NoNudge: true})
+	third, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", TextResult: true})
 	if err != nil {
 		t.Fatalf("third run: %v", err)
 	}
@@ -232,15 +232,15 @@ func TestSubAgentTreeBudget_StartRunResets(t *testing.T) {
 	runner.SetRunTokenBudget(1000)
 
 	runner.StartRun()
-	if _, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", NoNudge: true}); err != nil {
+	if _, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", TextResult: true}); err != nil {
 		t.Fatal(err)
 	}
-	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", NoNudge: true}); res.FinishReason != HandoffReasonTreeBudgetExceeded {
+	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", TextResult: true}); res.FinishReason != HandoffReasonTreeBudgetExceeded {
 		t.Fatalf("expected the cap to bite in Run 1, got %q", res.FinishReason)
 	}
 
 	runner.StartRun()
-	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", NoNudge: true}); res.FinishReason != HandoffReasonCompleted {
+	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", TextResult: true}); res.FinishReason != HandoffReasonCompleted {
 		t.Fatalf("a new Run must start with a fresh budget, got %q", res.FinishReason)
 	}
 }
@@ -262,7 +262,7 @@ func TestSubAgentTreeBudget_Unlimited(t *testing.T) {
 	runner.StartRun()
 	for i := 0; i < 4; i++ {
 		res, err := runner.Run(context.Background(), Handoff{
-			Agent: AgentSub, Goal: "g", NoNudge: true, TokenBudget: -1,
+			Agent: AgentSub, Goal: "g", TextResult: true, TokenBudget: -1,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -391,7 +391,7 @@ func TestSubAgentWidth_SixWayFanoutStillFits(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			res, err := runner.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "方向", NoNudge: true})
+			res, err := runner.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "方向", TextResult: true})
 			if err != nil {
 				t.Errorf("run %d: %v", i, err)
 				return

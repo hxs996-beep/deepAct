@@ -72,6 +72,10 @@ type agentRoleConfig struct {
 	Model            string   `toml:"model"`
 	MaxIterations    int      `toml:"max_iterations"`
 	StructuredResult *bool    `toml:"structured_result"`
+	// TextResult declares that this role's text-only reply IS its result (a
+	// text-payload contract, e.g. ratd's JSON). Mutually exclusive with
+	// structured_result: a structured role completes only via submit_result.
+	TextResult *bool `toml:"text_result"`
 	// TokenBudget caps this role's runs (cache-miss + completion tokens).
 	// 0 = inherit the runner default, -1 = unlimited, >0 = explicit cap.
 	TokenBudget int `toml:"token_budget"`
@@ -501,6 +505,15 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 		}
 		if rc.StructuredResult != nil {
 			spec.StructuredResult = *rc.StructuredResult
+		}
+		if rc.TextResult != nil {
+			spec.TextResult = *rc.TextResult
+		}
+		// The two completion contracts are contradictory: structured means "only
+		// submit_result counts", text means "the text reply is the result". Fail
+		// loud rather than pick one silently.
+		if spec.TextResult && spec.StructuredResult {
+			return fmt.Errorf("[agents.%s] text_result and structured_result cannot both be true: a structured run completes only through submit_result", name)
 		}
 		cfg.AgentSpecs = append(cfg.AgentSpecs, spec)
 	}

@@ -27,7 +27,7 @@ func (r *recordingToolExecutor) Specs() []ModelTool {
 
 // TestSubAgentTruncation_NeverEndsOnPartialText: a response cut off by the
 // output cap (finish_reason == "length") must never be treated as a
-// conclusion — neither by the ConclusionClassifier nor by the NoNudge path.
+// conclusion — neither by the ConclusionClassifier nor by the TextResult path.
 // After 3 consecutive truncations the loop gives up with reason="max_tokens"
 // carrying the partial text.
 func TestSubAgentTruncation_NeverEndsOnPartialText(t *testing.T) {
@@ -290,14 +290,14 @@ func TestSubAgentStructured_InvalidSubmitRetries(t *testing.T) {
 	}
 }
 
-// TestSubAgentStructured_NoNudgeDoesNotShortCircuit: a structured run must
-// never complete on a plain-text reply even when NoNudge is set. NoNudge is
+// TestSubAgentStructured_TextResultDoesNotShortCircuit: a structured run must
+// never complete on a plain-text reply even when TextResult is set. TextResult is
 // a lenient mode ("any text is the answer") that must not bypass the
 // structured contract ("only submit_result counts"). Harness roles
-// (collab/ratd) pass NoNudge:true while the generic sub-agent forces
+// (collab/ratd) pass TextResult:true while the generic sub-agent forces
 // StructuredResult:true — the plain text must be nudged to submit_result
 // (3-strike → no_result), not returned as the final summary.
-func TestSubAgentStructured_NoNudgeDoesNotShortCircuit(t *testing.T) {
+func TestSubAgentStructured_TextResultDoesNotShortCircuit(t *testing.T) {
 	model := &stubSeqModel{
 		responses: []ModelResponse{
 			{Message: ModelMessage{Role: "assistant", Content: "好的，我来拆解这个目标。"}, FinishReason: "stop"},
@@ -306,7 +306,7 @@ func TestSubAgentStructured_NoNudgeDoesNotShortCircuit(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "拆解", MaxIterations: 8, StructuredResult: true, NoNudge: true,
+		Agent: AgentSub, Goal: "拆解", MaxIterations: 8, StructuredResult: true, TextResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)

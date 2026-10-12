@@ -79,7 +79,13 @@ type Handoff struct {
 	// (e.g. a cheap role uses flash). "flash" selects the flash model.
 	ModelOverride string `json:"model_override,omitempty"`
 	Depth         int    `json:"depth"`
-	NoNudge       bool   `json:"no_nudge,omitempty"`
+	// TextResult declares this run's completion semantics: a text-only reply IS
+	// the result (the role delivers its payload as text, e.g. ratd's
+	// CodePayload/TestPayload/decision JSON). Set from AgentSpec.TextResult by
+	// the agent before Run executes; never model-settable. Without it, a
+	// non-structured run treats a text-only reply as narration
+	// (3-strike → stalled_narration).
+	TextResult bool `json:"text_result,omitempty"`
 	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
 	MaxIterations int `json:"max_iterations,omitempty"`
 	// TokenBudget caps this run's billable tokens (cache-miss + completion;
@@ -201,6 +207,13 @@ type AgentSpec struct {
 	// never completes the run — the agent MUST call submit_result with its
 	// final summary, so termination never depends on an LLM judgment call.
 	StructuredResult bool
+	// TextResult declares that this role's text-only reply IS its result, so a
+	// non-structured run completes on it instead of counting it as narration.
+	// Use it for roles whose contract is a text payload (ratd's
+	// CodePayload/TestPayload/decision JSON). It is structurally the complement
+	// of StructuredResult — a structured run completes only through
+	// submit_result — so a role must not set both.
+	TextResult bool
 }
 
 // Agent is the interface all sub-agents implement.

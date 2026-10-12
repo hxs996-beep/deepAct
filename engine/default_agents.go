@@ -101,6 +101,11 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 		input.TokenBudget = spec.TokenBudget
 	}
 	input.StructuredResult = spec.StructuredResult
+	// Completion semantics are a role invariant, so the spec — not the caller —
+	// decides whether text completes the run. An explicit caller opt-in is kept.
+	if spec.TextResult {
+		input.TextResult = true
+	}
 	return a.runner.Run(ctx, input)
 }
 
@@ -196,6 +201,9 @@ func proposerSpec() AgentSpec {
 		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
 		MaxIterations: 20,
 		Persona:       proposerPersona,
+		// Its contract IS a text payload ("Nothing but the JSON object"), so its
+		// text reply is the result — not narration.
+		TextResult: true,
 	}
 }
 
@@ -208,6 +216,8 @@ func redteamSpec() AgentSpec {
 		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
 		MaxIterations: 20,
 		Persona:       redteamPersona,
+		// Delivers TestPayload JSON as text (see proposerSpec).
+		TextResult: true,
 	}
 }
 
@@ -221,6 +231,8 @@ func arbitratorSpec() AgentSpec {
 		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
 		MaxIterations: 5,
 		Persona:       arbitratorPersona,
+		// Delivers the decision as a JSON text reply (see proposerSpec).
+		TextResult: true,
 	}
 }
 

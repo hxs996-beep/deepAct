@@ -450,10 +450,10 @@ func TestApply_UserAgentRoles(t *testing.T) {
 	f := &File{
 		Agents: map[string]agentRoleConfig{
 			"researcher": {
-				Description: "只读调研员",
-				Persona:     "你是研究员……",
-				Tools:       []string{"read", "grep", "glob", "lsp"},
-				Model:       "flash",
+				Description:   "只读调研员",
+				Persona:       "你是研究员……",
+				Tools:         []string{"read", "grep", "glob", "lsp"},
+				Model:         "flash",
 				MaxIterations: 20,
 			},
 			"full-tool": {
@@ -630,5 +630,40 @@ func TestApply_DelegationTreeLimits_Unlimited(t *testing.T) {
 	}
 	if cfg.RunSubAgentTokenBudget != -1 {
 		t.Errorf("RunSubAgentTokenBudget = %d, want -1", cfg.RunSubAgentTokenBudget)
+	}
+}
+
+// TestApply_AgentTextResult: [agents.x] text_result declares that a role's text
+// reply IS its result, and must survive Apply onto the AgentSpec.
+func TestApply_AgentTextResult(t *testing.T) {
+	yes := true
+	cfg := &engine.EngineConfig{}
+	err := Apply(cfg, &File{Agents: map[string]agentRoleConfig{
+		"prop": {Description: "d", TextResult: &yes},
+	}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(cfg.AgentSpecs) != 1 {
+		t.Fatalf("expected 1 role spec, got %d", len(cfg.AgentSpecs))
+	}
+	if !cfg.AgentSpecs[0].TextResult {
+		t.Error("text_result must apply to the role spec")
+	}
+}
+
+// The two completion contracts contradict: structured means "only submit_result
+// counts", text means "the text reply is the result". Fail loud rather than
+// silently picking one.
+func TestApply_AgentTextResult_ConflictsWithStructured(t *testing.T) {
+	yes := true
+	err := Apply(&engine.EngineConfig{}, &File{Agents: map[string]agentRoleConfig{
+		"prop": {TextResult: &yes, StructuredResult: &yes},
+	}})
+	if err == nil {
+		t.Fatal("text_result + structured_result must fail loud")
+	}
+	if !strings.Contains(err.Error(), "text_result") {
+		t.Errorf("error must name the key, got %q", err)
 	}
 }

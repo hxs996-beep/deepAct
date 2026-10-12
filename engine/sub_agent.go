@@ -539,7 +539,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 	// Deterministic completion (C5): no LLM ConclusionClassifier probe.
 	// A text-only reply never completes a sub-agent run through an LLM
 	// judgment call — completion is deterministic: submit_result (structured),
-	// the critic VERDICT line, NoNudge, or tool calls that lead to them.
+	// a role-declared text result, or tool calls that lead to them.
 	// Narration is 3-strike nudged below and ends with stalled_narration.
 
 	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
@@ -795,13 +795,12 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 				continue
 			}
 			// Structured run: text alone never completes. Nudge toward
-			// submit_result — no classifier probe, no ambiguity. This MUST
-			// take precedence over NoNudge: harness roles (collab/ratd) pass
-			// NoNudge:true while the generic sub-agent forces
-			// StructuredResult:true. A lenient "any text is the answer" mode
-			// must not bypass the deterministic structured contract ("only
-			// submit_result counts") — otherwise a plain-text narration
-			// becomes the final summary and the harness parse fails.
+			// submit_result — no classifier probe, no ambiguity. This takes
+			// precedence over TextResult, so the two declarations cannot be
+			// combined: a lenient "any text is the answer" mode must not bypass
+			// the deterministic structured contract ("only submit_result
+			// counts"), or a plain-text narration becomes the final summary and
+			// the harness parse fails.
 			if structured {
 				consecutiveIntermediate++
 				if consecutiveIntermediate >= 3 {
@@ -817,7 +816,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 				})
 				continue
 			}
-			if input.NoNudge {
+			if input.TextResult {
 				result := r.buildResult(msg.Content, input.Goal)
 				result.Usage = &totalUsage
 				return result, nil

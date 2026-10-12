@@ -166,7 +166,7 @@ func TestSubAgent_NoSyntheticPerCallDeadline(t *testing.T) {
 	model := &deadlineProbeModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", NoNudge: true, UserLanguage: "中文",
+		Agent: AgentSub, Goal: "审查", TextResult: true, UserLanguage: "中文",
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -189,7 +189,7 @@ func TestSubAgent_BudgetTailNudge_ConvergesToConclusion(t *testing.T) {
 	model := &researchUntilNudgedModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研 codex 与 deepact 的区别", MaxIterations: 6, NoNudge: true, UserLanguage: "中文",
+		Agent: AgentSub, Goal: "调研 codex 与 deepact 的区别", MaxIterations: 6, TextResult: true, UserLanguage: "中文",
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
