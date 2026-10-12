@@ -21,8 +21,12 @@ func (r *recordingToolExecutor) Execute(_ ToolExecContext, calls []ToolCallReque
 	return out
 }
 
+// Specs mirrors the production tool semantics for the tools these tests
+// exercise (the real table is pinned by tools/builtin/tool_metadata_test.go).
+// The engine reads scheduling and progress from these declarations, so a
+// double without them would not behave like production.
 func (r *recordingToolExecutor) Specs() []ModelTool {
-	return []ModelTool{{Type: "function", Function: ModelToolFunction{Name: "read"}}}
+	return testToolSpecs()
 }
 
 // TestSubAgentTruncation_NeverEndsOnPartialText: a response cut off by the

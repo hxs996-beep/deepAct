@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -760,21 +761,19 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	}
 
 	// Execute regular tool calls.
-	// Split into read-only (batch for speed) and destructive (sequential for progressive UX).
+	// Calls are split by the tool's OWN declared execution class: a tool that
+	// needs progressive display (diffs) declares Sequential and runs alone;
+	// everything else batches. An undeclared tool runs alone — serial execution
+	// is the safe direction when the engine has no declaration to go by.
 	// statusByID records each call's outcome status.
 	statusByID := make(map[string]string, len(regularCalls))
 	if len(regularCalls) > 0 {
 		toolsStart := time.Now()
-		var readOnlyCalls, destructiveCalls []ToolCallRequest
 		callByID := make(map[string]ToolCallRequest, len(regularCalls))
 		for _, call := range regularCalls {
 			callByID[call.ID] = call
-			if call.Name == "edit" || call.Name == "write" || call.Name == "apply_patch" {
-				destructiveCalls = append(destructiveCalls, call)
-			} else {
-				readOnlyCalls = append(readOnlyCalls, call)
-			}
 		}
+		readOnlyCalls, destructiveCalls := splitCallsByExecution(regularCalls, e.specsByName())
 		// rawResults keeps the un-annotated tool digests for task-state
 		// extraction, while history carries the repeat annotation.
 		rawResults := make([]ToolResult, 0, len(regularCalls))
@@ -842,69 +841,13 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			result.Questions = []string{req.Question}
 		}
 	}
-	// Progress signal for the progressLoop breaker: a successful destructive
-	// call (edit/write/revert/bash), a handoff, a NOVEL read (a (path, scope)
-	// not yet read this Run), a NOVEL search (grep/glob with a new
-	// pattern/path key), or a NOVEL lsp query counts as progress. Repeated
-	// reads, searches and lsp queries do not. This distinguishes legitimate
-	// investigation — reading, searching or inspecting new content advances
-	// the task — from a "N turns narrate but never act" loop.
-	if e.progressKeys == nil {
-		e.progressKeys = make(map[string]bool)
-	}
-	for _, c := range regularCalls {
-		switch c.Name {
-		case "edit", "write", "apply_patch", "revert", "bash":
-			if statusByID[c.ID] == "ok" {
-				result.MadeProgress = true
-			}
-		case "read":
-			if path := extractPathFromArgs(c.Input, e.config.WorkDir); path != "" {
-				key := "read:" + path + "::" + extractReadScope(c.Input)
-				if !e.progressKeys[key] {
-					e.progressKeys[key] = true
-					result.MadeProgress = true
-				}
-			}
-		case "read_multi":
-			for _, tgt := range parseReadMultiTargets(c.Input) {
-				if tgt.Path == "" {
-					continue
-				}
-				key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
-				if !e.progressKeys[key] {
-					e.progressKeys[key] = true
-					result.MadeProgress = true
-				}
-			}
-		case "grep", "glob":
-			// 新信息获取（新 pattern/路径的搜索）＝推进理解＝进展。
-			key := searchKey(c, e.config.WorkDir)
-			if key != "" && !e.progressKeys[key] {
-				e.progressKeys[key] = true
-				result.MadeProgress = true
-			}
-		case "lsp":
-			// 同理：新的 lsp 查询（新 operation/文件/符号/位置）＝获取新信息＝
-			// 进展；重复同一查询不算。
-			key := lspKey(c, e.config.WorkDir)
-			if key != "" && !e.progressKeys[key] {
-				e.progressKeys[key] = true
-				result.MadeProgress = true
-			}
-		case "web_search", "fetch":
-			// 同理：新 query 的联网检索/新 url 的取页＝获取新信息＝进展。
-			// 否则纯联网调研的会话会累积"无进展"轮次，被 progress guard
-			// （4 nudge / 6 block）误终止。
-			key := infoQueryKey(c)
-			if key != "" && !e.progressKeys[key] {
-				e.progressKeys[key] = true
-				result.MadeProgress = true
-			}
-		}
-		// 不 break：所有 read key 必须无条件记录，即使本轮已因 edit 等
-		// 置位 MadeProgress——否则后续轮次重复读同一 (path, scope) 会被
-		// 误判为"新读"而错误重置 progress 计数。
+	// Progress signal for the progressLoop breaker: this is what tells a run
+	// that is investigating from one that is spinning. It reads each tool's own
+	// declarations (Mutates / NovelInfo) instead of a tool-name list, so a tool
+	// the engine has never heard of is judged on its declared semantics rather
+	// than silently ignored.
+	if e.madeProgressFromCalls(regularCalls, statusByID, e.specsByName()) {
+		result.MadeProgress = true
 	}
 	if !result.MadeProgress && len(handoffCalls) > 0 {
 		result.MadeProgress = true
@@ -1329,6 +1272,132 @@ func (e *Engine) updateTaskStateFromTools(calls []ToolCallRequest, results []Too
 			}
 		}
 	}
+}
+
+// specsByName indexes the tool specs offered this turn, so scheduling and
+// progress decisions can read declared metadata instead of matching tool names.
+func (e *Engine) specsByName() map[string]ModelTool {
+	specs := e.tools.Specs()
+	m := make(map[string]ModelTool, len(specs))
+	for _, s := range specs {
+		m[s.Function.Name] = s
+	}
+	return m
+}
+
+// splitCallsByExecution partitions calls into those the engine runs alone and
+// those it may batch. A call runs alone when the tool declares Sequential
+// (diff-rendered work that needs progressive display) or when the engine has no
+// declaration for it at all — serial execution is the safe direction when the
+// engine cannot know what a tool does.
+func splitCallsByExecution(calls []ToolCallRequest, specs map[string]ModelTool) (batch, sequential []ToolCallRequest) {
+	for _, call := range calls {
+		spec, declared := specs[call.Name]
+		if !declared || spec.Sequential {
+			sequential = append(sequential, call)
+			continue
+		}
+		batch = append(batch, call)
+	}
+	return batch, sequential
+}
+
+// madeProgressFromCalls decides whether a turn advanced the run. It replaces
+// the per-tool-name switch that used to hold this knowledge, and answers from
+// the tools' own declarations:
+//
+//   - Mutates: a successful modification is progress by definition;
+//   - NovelInfo: information the run has not seen yet is progress, a repeat is
+//     not (that is what distinguishes investigation from spinning);
+//   - a tool that declares neither (or is not in the spec list at all, e.g. an
+//     MCP tool) is TRUSTED: the engine has no basis to call a call it cannot
+//     classify "no progress", and a false no-progress block ends the run.
+//
+// Novelty keys are recorded for every call even once the turn already counts as
+// progress, or a later repeat would look like a first sighting and wrongly
+// reset the streak.
+func (e *Engine) madeProgressFromCalls(calls []ToolCallRequest, statusByID map[string]string, specs map[string]ModelTool) bool {
+	if e.progressKeys == nil {
+		e.progressKeys = make(map[string]bool)
+	}
+	progress := false
+	for _, c := range calls {
+		spec, declared := specs[c.Name]
+		switch {
+		case c.Name == "read_multi":
+			// One call, several targets: every new (path, scope) is progress.
+			// This is the one call that needs more than one key, which a single
+			// declared field cannot express, so it keeps its own shape.
+			for _, tgt := range parseReadMultiTargets(c.Input) {
+				if tgt.Path == "" {
+					continue
+				}
+				key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
+				if !e.progressKeys[key] {
+					e.progressKeys[key] = true
+					progress = true
+				}
+			}
+		case declared && spec.Mutates:
+			if statusByID[c.ID] == "ok" {
+				progress = true
+			}
+		case declared && spec.NovelInfo:
+			key := infoKeyFor(c, e.config.WorkDir)
+			if key != "" && !e.progressKeys[key] {
+				e.progressKeys[key] = true
+				progress = true
+			}
+		case !declared || (!spec.Mutates && !spec.NovelInfo):
+			progress = true
+		}
+	}
+	return progress
+}
+
+// infoKeyFor builds the novelty key for an information-returning call. The
+// per-tool key shapes are the ones the engine always used (read scope, search
+// pattern, lsp query, web query) — only the dispatch moved here. A declared
+// NovelInfo tool with no known shape falls back to its canonical arguments, so a
+// new information tool is novel exactly once per distinct call with no per-tool
+// code.
+func infoKeyFor(call ToolCallRequest, workDir string) string {
+	switch call.Name {
+	case "read":
+		if path := extractPathFromArgs(call.Input, workDir); path != "" {
+			return "read:" + path + "::" + extractReadScope(call.Input)
+		}
+		return ""
+	case "read_multi":
+		return "" // per-target keys are recorded by madeProgressFromCalls
+	case "grep", "glob":
+		return searchKey(call, workDir)
+	case "lsp":
+		return lspKey(call, workDir)
+	case "web_search", "fetch":
+		return infoQueryKey(call)
+	default:
+		return call.Name + ":" + canonicalArgs(call.Input)
+	}
+}
+
+// canonicalArgs renders a call's arguments deterministically (object keys
+// sorted) so the same call always yields the same novelty key.
+func canonicalArgs(input json.RawMessage) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return string(input)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&sb, "%s=%v;", k, m[k])
+	}
+	return sb.String()
 }
 
 // parseReadMultiDigestScopes extracts per-target ReadRecords from a read_multi
