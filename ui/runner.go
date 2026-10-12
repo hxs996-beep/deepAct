@@ -15,6 +15,32 @@ import (
 
 var runnerLog = dlog.New("[runner] ")
 
+// Progress delivery budgets under UI backpressure. A progressCh send is
+// abandoned after its budget expires, so the budget has to match what the event
+// is worth losing:
+//   - text deltas (content/reasoning/stream) and transient spinner text only
+//     lose a fragment that has already been streamed — a short budget keeps a
+//     slow renderer from stalling the run;
+//   - state events (todo_update, agent_*, tool_*, usage) are what the panels
+//     display. Dropping one leaves a panel showing a state that is no longer
+//     true (the step list frozen on a superseded snapshot), so they wait far
+//     longer and report a drop instead of vanishing silently.
+const (
+	progressDeltaTimeout = 100 * time.Millisecond
+	progressStateTimeout = 5 * time.Second
+)
+
+// isLossyProgress reports whether discarding the event under backpressure is
+// acceptable: true for streamed text and transient activity lines, false for
+// anything the panels keep as state.
+func isLossyProgress(eventType string) bool {
+	switch eventType {
+	case "content_delta", "reasoning_delta", "stream_delta", "thinking", "retry":
+		return true
+	}
+	return false
+}
+
 // SessionSummary 是 /resume 选择器展示的会话摘要（ui 自有类型，
 // 避免 ui 直接依赖 session 包）。
 type SessionSummary struct {
@@ -187,30 +213,47 @@ func (r *ProgressEngineRunner) Run(prompt string, runSeq uint64) tea.Cmd {
 		defer cancel()
 
 		eng := r.getEngine()
-		eng.SetOnProgress(func(event engine.ProgressEvent) {
-			if r.progressCh != nil {
-				msg := ProgressMsg{
-					Type: event.Type, Name: event.Name, Detail: event.Detail,
-					FullDetail: event.FullDetail, Todos: event.Todos,
-					RunID: event.RunID, Step: event.Step, Status: event.Status,
-				}
-				if event.Usage != nil {
-					msg.TokensIn = event.Usage.PromptTokens
-					msg.TokensOut = event.Usage.CompletionTokens
-					msg.CacheHit = event.Usage.CacheHitTokens
-					msg.CacheMiss = event.Usage.CacheMissTokens
-					msg.ModelName = event.ModelName
-				}
-				select {
-				case r.progressCh <- msg:
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-		})
+		eng.SetOnProgress(r.forwardProgress)
 		resp, err := eng.Run(ctx, prompt)
 		if err != nil {
 			runnerLog.Printf("Engine.Run err: %v", err)
 		}
 		return EngineResponseMsg{Response: resp, Err: err, RunSeq: runSeq}
+	}
+}
+
+// forwardProgress delivers one engine progress event to the UI.
+//
+// Delivery is best-effort under UI backpressure, but not equally so: a dropped
+// text delta only loses a fragment of prose that already streamed, while a
+// dropped state event (todo_update, agent_*, tool_*, usage) leaves a panel
+// showing something that never happened — the step list stays frozen on a
+// snapshot the model has already superseded.
+func (r *ProgressEngineRunner) forwardProgress(event engine.ProgressEvent) {
+	if r.progressCh == nil {
+		return
+	}
+	msg := ProgressMsg{
+		Type: event.Type, Name: event.Name, Detail: event.Detail,
+		FullDetail: event.FullDetail, Todos: event.Todos,
+		RunID: event.RunID, Step: event.Step, Status: event.Status,
+	}
+	if event.Usage != nil {
+		msg.TokensIn = event.Usage.PromptTokens
+		msg.TokensOut = event.Usage.CompletionTokens
+		msg.CacheHit = event.Usage.CacheHitTokens
+		msg.CacheMiss = event.Usage.CacheMissTokens
+		msg.ModelName = event.ModelName
+	}
+	timeout := progressStateTimeout
+	if isLossyProgress(event.Type) {
+		timeout = progressDeltaTimeout
+	}
+	select {
+	case r.progressCh <- msg:
+	case <-time.After(timeout):
+		if timeout > progressDeltaTimeout {
+			runnerLog.Printf("dropped %s progress event after %s (UI backpressure)", event.Type, timeout)
+		}
 	}
 }

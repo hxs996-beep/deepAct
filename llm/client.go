@@ -20,6 +20,30 @@ type ChatRequest struct {
 	JsonMode        bool      `json:"-"`
 }
 
+// MarshalJSON guarantees that an assistant message always carries a `content`
+// field, even when it is empty.
+//
+// A model turn that produced only reasoning has an empty Content; with
+// `json:"content,omitempty"` the field disappeared from the request entirely and
+// the API rejected the whole request with
+// 400 "Invalid assistant message: content or tool_calls must be set".
+// Emitting `content: ""` keeps every assistant turn schema-valid (the empty
+// string is accepted where an absent field is not). Non-assistant roles keep
+// omitempty.
+func (m Message) MarshalJSON() ([]byte, error) {
+	// Alias has no methods, so marshaling it cannot recurse into this one.
+	type alias Message
+	if m.Role != "assistant" {
+		return json.Marshal(alias(m))
+	}
+	// Content is declared again one level shallower, which makes it win over
+	// the promoted `content,omitempty` field of the embedded alias.
+	return json.Marshal(struct {
+		alias
+		Content string `json:"content"`
+	}{alias(m), m.Content})
+}
+
 type Message struct {
 	Role             string     `json:"role"`
 	Content          string     `json:"content,omitempty"`

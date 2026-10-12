@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -128,5 +129,28 @@ func TestResumeNoSessions(t *testing.T) {
 	m2 := result.(Model)
 	if m2.state == stateResume {
 		t.Fatalf("state = %v, want stay ready with notice", m2.state)
+	}
+}
+
+// TestResumeClearsStepsPanel: 恢复会话是"新上下文"的起点，上一会话的步骤面板不得
+// 残留。方案1 把面板清理点收敛到 submitInput 后，/resume 切会话成为唯一漏网点：
+// 面板会挂在新会话的界面上，读起来像是新任务"卡在第一个步骤"。
+func TestResumeClearsStepsPanel(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	r := &mockResumeRunner{sessions: []SessionSummary{{ID: "sess-1", FirstMsg: "问题1"}}}
+	m.engine = r
+	m.state = stateResume
+	m.resumeSessions = r.sessions
+	m.todoItems = []engine.TodoItem{{ID: "s1", Content: "上一会话的步骤", Status: "in_progress"}}
+	m.width, m.height = 80, 40
+
+	result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := result.(Model)
+
+	if m2.todoItems != nil {
+		t.Errorf("todoItems = %+v, want cleared when switching sessions", m2.todoItems)
+	}
+	if view := stripAnsi(m2.View()); strings.Contains(view, "[::] Steps") {
+		t.Errorf("previous session's step panel must not stay on screen:\n%s", view)
 	}
 }

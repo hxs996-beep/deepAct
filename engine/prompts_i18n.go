@@ -1,5 +1,7 @@
 package engine
 
+import "fmt"
+
 // pickPrompt returns the Chinese prompt when zh is true, otherwise the English
 // prompt. Used at every prompt-construction site to select between the two
 // language variants based on the session-locked language flag.
@@ -47,4 +49,14 @@ func UserLanguageFor(zh bool) UserLanguage {
 // zhFromLang maps a session language to the Chinese/English prompt choice.
 func zhFromLang(userLang UserLanguage) bool {
 	return userLang.IsChinese()
+}
+
+// todoNudgeMessage is the task_complete tool response when completion is deferred
+// because the step panel is stale (see the task_complete interception in
+// turn.go). It is the channel the model reads, so it names the exact statuses to
+// fix and the call to repeat.
+func todoNudgeMessage(zh bool, inProgress int) string {
+	return pickPrompt(zh,
+		fmt.Sprintf("Completion deferred: your step panel still lists %d step(s) as in_progress. Send the full snapshot first — completed for the steps that are finished, pending for the ones you deliberately left — then call task_complete again.", inProgress),
+		fmt.Sprintf("收尾被推迟：你的步骤面板仍有 %d 项处于 in_progress。请先下发完整快照（已完成的标 completed，确实留白的标 pending），然后再调用 task_complete。", inProgress))
 }

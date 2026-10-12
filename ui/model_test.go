@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/deepact/deepact/engine"
 )
@@ -495,7 +496,7 @@ func TestWrapLineAnsi_WideChars(t *testing.T) {
 func TestRenderSubAgentPanel_NoPhantomBlankLine(t *testing.T) {
 	lines := renderStepsPanel(nil, []SubAgentStatus{
 		{Agent: "sub", Goal: "批判性审查本次\"修复 narration 流式/快照渲染\"", Status: "running"},
-	}, 80)
+	}, 80, true)
 
 	plain := make([]string, len(lines))
 	for i, l := range lines {
@@ -593,5 +594,78 @@ func TestAgentDoneUnknownRunIDAppendsFinishedRow(t *testing.T) {
 	}
 	if m.subAgents[1].RunID != "bg-9" || m.subAgents[1].Status != "error" {
 		t.Errorf("bg-9 row = %+v, want error", m.subAgents[1])
+	}
+}
+
+// TestStepsPanelSurvivesRunEnd: run 结束不得抹掉步骤面板。模型的收尾快照（通常
+// 是“全部 completed”）与 run 结束同时到达，之前被 EngineResponseMsg 立即清空——
+// 最后一份快照只闪一帧，用户读作“执行结束后不会打勾”。
+func TestStepsPanelSurvivesRunEnd(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateRunning
+	m.ready = true
+	m.width, m.height = 80, 40
+	res, _ := m.Update(ProgressMsg{Type: "todo_update", Todos: []engine.TodoItem{
+		{ID: "s1", Content: "步骤一", Status: "completed"},
+		{ID: "s2", Content: "步骤二", Status: "completed"},
+	}})
+	m = res.(Model)
+
+	res, _ = m.Update(EngineResponseMsg{Response: &engine.EngineResponse{Summary: "done"}})
+	m = res.(Model)
+
+	if len(m.todoItems) != 2 {
+		t.Fatalf("todoItems = %+v, want the final snapshot to survive the run end", m.todoItems)
+	}
+	if view := stripAnsi(m.View()); !strings.Contains(view, "[✓]") {
+		t.Errorf("final ticked steps must stay visible after the run ends:\n%s", view)
+	}
+}
+
+// TestStepsPanelStopsLookingActiveWhenRunEnds: 面板的“活动态”必须跟着 Run 走——
+// 这是收尾残留快照被读成“卡在第一个步骤还在跑”的根因。run 结束后同一个 in_progress
+// 项不再高亮，并标明这是最后一次快照。
+func TestStepsPanelStopsLookingActiveWhenRunEnds(t *testing.T) {
+	// Style assertions need colors on (see todo_render_test.go).
+	lipgloss.SetColorProfile(termenv.ANSI256)
+
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateRunning
+	m.ready = true
+	m.width, m.height = 80, 40
+
+	res, _ := m.Update(ProgressMsg{Type: "todo_update", Todos: []engine.TodoItem{
+		{ID: "s1", Content: "步骤一", Status: "in_progress"},
+	}})
+	m = res.(Model)
+	if view := m.View(); !strings.Contains(view, SpinnerStyle.Render("步骤一")) {
+		t.Errorf("a step running now must be highlighted while the run is live:\n%s", stripAnsi(view))
+	}
+
+	res, _ = m.Update(EngineResponseMsg{Response: &engine.EngineResponse{Summary: "done"}})
+	m = res.(Model)
+
+	view := m.View()
+	if strings.Contains(view, SpinnerStyle.Render("步骤一")) {
+		t.Errorf("the retained panel must not look active once the run ended:\n%s", stripAnsi(view))
+	}
+	if !strings.Contains(stripAnsi(view), "最后一次快照") {
+		t.Errorf("an unfinished retained panel must be labelled as the last snapshot:\n%s", stripAnsi(view))
+	}
+}
+
+// TestStepsPanelClearedOnNextRun: 面板在下一次提交输入时清空，避免上一轮的
+// 步骤残留到新任务旁边。
+func TestStepsPanelClearedOnNextRun(t *testing.T) {
+	m := NewModel(nil, engine.PricingConfig{})
+	m.state = stateReady
+	m.todoItems = []engine.TodoItem{{ID: "s1", Content: "步骤一", Status: "completed"}}
+	m.inputBuf.SetValue("/help")
+
+	result, _ := m.submitInput()
+	m2 := result.(Model)
+
+	if m2.todoItems != nil {
+		t.Errorf("todoItems = %+v, want cleared when the next run starts", m2.todoItems)
 	}
 }

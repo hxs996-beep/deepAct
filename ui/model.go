@@ -475,7 +475,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkingContent = ""
 		m.thinkingActivity = ""
 		m.subAgents = nil // sub-agent panel done, clear
-		m.todoItems = nil // todo list done, clear items
+		// The step panel is deliberately NOT cleared here. The model's final
+		// snapshot — usually every step completed — arrives at the same moment
+		// the run ends, so wiping it here made that snapshot flash by unseen:
+		// "the steps never get ticked". It stays on screen until the next run
+		// starts (submitInput), which keeps the outcome readable.
 		m.finishStreaming(msg)
 		return m, m.repaintCmd()
 	case ProgressMsg:
@@ -1452,6 +1456,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	m.toolTree = nil
 	m.spinners = nil
 	m.subAgents = nil
+	m.todoItems = nil // the previous run's step panel is replaced by this run's
 	m.streaming = ""
 	m.narration = ""
 	m.narrationPending = ""
@@ -1545,6 +1550,12 @@ func (m *Model) applyResume(idx int) {
 	m.state = stateReady
 	m.resumeSessions = nil
 	m.selectedResume = 0
+	// The step panel survives a run end by design (see EngineResponseMsg), and
+	// submitInput is what replaces it for the next run. Switching sessions is the
+	// other way into a fresh context, so the previous session's steps must not
+	// carry over — they would hang on the new session's screen as if its task
+	// were stuck on the first step.
+	m.todoItems = nil
 }
 
 // flushNarration moves buffered content_delta text from narrationPending into
@@ -1920,12 +1931,12 @@ func (m Model) renderBody(width int) (rendered []string, plain []string) {
 		// Step backbone: every sub-agent nests under the step it executes.
 		// While a step list is active this panel stands in for the live
 		// narration (unchanged behaviour).
-		lines = append(lines, renderStepsPanel(m.todoItems, m.subAgents, width)...)
+		lines = append(lines, renderStepsPanel(m.todoItems, m.subAgents, width, m.state == stateRunning)...)
 	} else {
 		if len(m.subAgents) > 0 {
 			// No step list: sub-agents keep their own block, and the live
 			// narration/streaming still renders below it.
-			lines = append(lines, renderStepsPanel(nil, m.subAgents, width)...)
+			lines = append(lines, renderStepsPanel(nil, m.subAgents, width, m.state == stateRunning)...)
 		}
 		if m.narration != "" {
 			narrationLines := renderStreaming(m.narration, width)
@@ -2730,7 +2741,11 @@ func renderSpinners(spinners []AgentSpinner, width int) []string {
 // Step is empty or no longer matches any step keep their own Sub-Agents block,
 // so a delegation that is not part of a step list — or one whose step the model
 // rewrote away — is still visible instead of silently dropped.
-func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width int) []string {
+//
+// running reports whether a Run is in flight. When it is not, the panel is a
+// frozen snapshot of the model's last report: see todoLine for the row styling
+// and the header note below.
+func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width int, running bool) []string {
 	var children [][]SubAgentStatus
 	var orphans []SubAgentStatus
 	if len(items) > 0 {
@@ -2757,10 +2772,17 @@ func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width in
 
 	var content []string
 	if len(items) > 0 {
-		content = append(content, DimStyle.Render("▍")+" [::] "+DimStyle.Render("Steps"))
+		header := DimStyle.Render("▍") + " [::] " + DimStyle.Render("Steps")
+		if !running && hasUnfinishedSteps(items) {
+			// The Run is over but steps are still open. Without this note the
+			// frozen rows read as "still working on step 1" — the panel keeps
+			// showing an in_progress step that nothing is advancing.
+			header += " " + DimStyle.Render("· 最后一次快照")
+		}
+		content = append(content, header)
 		content = append(content, "")
 		for i, it := range items {
-			content = append(content, todoLine(it))
+			content = append(content, todoLine(it, running))
 			for _, a := range children[i] {
 				content = append(content, "      "+subAgentLine(a))
 			}
@@ -2783,15 +2805,36 @@ func renderStepsPanel(items []engine.TodoItem, agents []SubAgentStatus, width in
 // todoLine renders one step row. Plain-text markers: [ ] pending, [~] in_progress,
 // [✓] completed. [✓] instead of [x]: [x] reads as "failed/cancelled" to users.
 // No emoji, no skill-specific theming — any skill drives it via todo_write.
-func todoLine(it engine.TodoItem) string {
+//
+// The active highlight means "this step is running right now", so it is tied to
+// the Run being in flight: with no Run going, an in_progress row falls back to
+// the dim style instead of claiming progress that is not happening. The marker
+// stays [~] — that is the status the model reported; only the emphasis changes.
+func todoLine(it engine.TodoItem, running bool) string {
 	switch it.Status {
 	case "in_progress":
-		return fmt.Sprintf("  [~]  %s", SpinnerStyle.Render(it.Content))
+		style := SpinnerStyle
+		if !running {
+			style = DimStyle
+		}
+		return fmt.Sprintf("  [~]  %s", style.Render(it.Content))
 	case "completed":
 		return fmt.Sprintf("  [✓]  %s", SpinnerDoneStyle.Render(it.Content))
 	default:
 		return fmt.Sprintf("  [ ]  %s", DimStyle.Render(it.Content))
 	}
+}
+
+// hasUnfinishedSteps reports whether the snapshot still holds open steps. An
+// all-completed panel speaks for itself; only an unfinished one needs the
+// "last snapshot" note to explain why it stopped moving.
+func hasUnfinishedSteps(items []engine.TodoItem) bool {
+	for _, it := range items {
+		if it.Status != "completed" {
+			return true
+		}
+	}
+	return false
 }
 
 // subAgentLine renders one sub-agent row: status marker, stable run handle,

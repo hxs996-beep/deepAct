@@ -149,6 +149,15 @@ type Engine struct {
 	persistedCount int
 	runErrorCount  int
 
+	// lastTodos is the newest step-list snapshot the model reported through
+	// todo_write during this Run (see processTodoWriteCalls); todoNudgeSent
+	// records that this Run's one-shot completion nudge has been spent. Together
+	// they let task_complete refuse a stale panel: a Run must not end while the
+	// panel it leaves on screen still says a step is in progress. Both are reset
+	// at Run start.
+	lastTodos     []TodoItem
+	todoNudgeSent bool
+
 	// isChinese is set once from the first user message in the session.
 	// All per-turn UI messages (skill list, activation prompts, etc.) use
 	// this instead of recomputing msgIsChinese per-turn, which would switch
@@ -495,6 +504,10 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.stopHookActive = false
 	e.stopHookRetryCount = 0
 	e.contextRetryDone = false
+	// Per Run: the step panel's newest snapshot, and one completion nudge at
+	// most — a fresh Run gives the model a fresh chance to finish its panel.
+	e.lastTodos = nil
+	e.todoNudgeSent = false
 
 	// Skill command handling — /skills (list) and /skill <name> (load)
 	if sc := parseSkillCommand(userMsg); sc != nil {

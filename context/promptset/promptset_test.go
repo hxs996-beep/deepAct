@@ -39,3 +39,18 @@ func TestSystemPrompt_MandatorySkillRule(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemPrompt_TodoProgressIsLive locks the step-reporting cadence: status
+// changes must be reported in the turn they happen (a delegated step counts as
+// finished when its sub-agent returns), and a final all-completed snapshot must
+// precede the completion call. Without it the model batches updates until the
+// end — or skips the final snapshot entirely — and the panel looks stuck on the
+// first step even though the run is done.
+func TestSystemPrompt_TodoProgressIsLive(t *testing.T) {
+	p := Get().System
+	for _, want := range []string{"todo_write", "子代理已返回", "收尾前先发一份"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("system prompt must carry the live step-reporting rule (missing %q)", want)
+		}
+	}
+}

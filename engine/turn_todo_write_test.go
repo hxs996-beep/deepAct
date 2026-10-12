@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -161,6 +162,106 @@ func TestProcessTodoWriteCalls_DuplicateIDRejected(t *testing.T) {
 	}
 }
 
+// TestExecuteTurn_TodoUpdateSurvivesTaskComplete: "标全部 completed + task_complete"
+// 是最常见的收尾形态。todo_write 的拦截必须早于 task_complete 的早退，否则最后
+// 一份快照永远到不了 UI——步骤面板会停在旧状态，正是"执行结束后不打勾"。
+func TestExecuteTurn_TodoUpdateSurvivesTaskComplete(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "全部完成",
+			ToolCalls: []ModelToolCall{
+				{ID: "c_todo", Type: "function", Function: ModelFunctionCall{
+					Name:      TodoWriteToolName,
+					Arguments: `{"todos":[{"content":"步骤一","status":"completed"}]}`,
+				}},
+				{ID: "c_done", Type: "function", Function: ModelFunctionCall{
+					Name: TaskCompleteToolName, Arguments: `{"summary":"done"}`,
+				}},
+			},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   stubToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "做完"}},
+		config: EngineConfig{
+			ModelName:  "test-model",
+			OnProgress: func(ev ProgressEvent) { events = append(events, ev) },
+		},
+		guards: &GuardSystem{scope: NewScopeGuard()},
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Done {
+		t.Fatalf("task_complete must end the turn, got %+v", result)
+	}
+
+	var todos []ProgressEvent
+	for _, ev := range events {
+		if ev.Type == "todo_update" {
+			todos = append(todos, ev)
+		}
+	}
+	if len(todos) != 1 {
+		t.Fatalf("todo_update must reach the UI even when the same message calls task_complete; events = %+v", events)
+	}
+	if got := todos[0].Todos[0].Status; got != "completed" {
+		t.Errorf("final snapshot status = %q, want completed", got)
+	}
+}
+
+// TestExecuteTurn_TodoUpdateSurvivesBlockedCall: guard 拦截（危险 bash）同样在
+// todo_write 拦截之前早退。同一轮携带的步骤快照不得因此丢失。
+func TestExecuteTurn_TodoUpdateSurvivesBlockedCall(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{
+		model: &stubStreamModel{chunks: []ModelChunk{{
+			Delta: "更新步骤后执行危险命令",
+			ToolCalls: []ModelToolCall{
+				{ID: "c_todo", Type: "function", Function: ModelFunctionCall{
+					Name:      TodoWriteToolName,
+					Arguments: `{"todos":[{"content":"步骤一","status":"completed"}]}`,
+				}},
+				{ID: "c_bash", Type: "function", Function: ModelFunctionCall{
+					Name: "bash", Arguments: `{"command":"rm -rf /"}`,
+				}},
+			},
+			FinishReason: "tool_calls",
+		}}},
+		context: &stubContextBuilder{},
+		tools:   stubToolExecutor{},
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "危险操作"}},
+		config: EngineConfig{
+			ModelName:  "test-model",
+			OnProgress: func(ev ProgressEvent) { events = append(events, ev) },
+		},
+		guards: &GuardSystem{scope: NewScopeGuard()},
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Blocked {
+		t.Fatalf("dangerous bash must be blocked, got %+v", result)
+	}
+
+	var todos []ProgressEvent
+	for _, ev := range events {
+		if ev.Type == "todo_update" {
+			todos = append(todos, ev)
+		}
+	}
+	if len(todos) != 1 {
+		t.Fatalf("todo_update must reach the UI even when the same message is blocked; events = %+v", events)
+	}
+}
+
 // TestProcessTodoWriteCalls_UniqueIDsAccepted: 正常路径必须原样透传 id。
 func TestProcessTodoWriteCalls_UniqueIDsAccepted(t *testing.T) {
 	var events []ProgressEvent
@@ -181,5 +282,152 @@ func TestProcessTodoWriteCalls_UniqueIDsAccepted(t *testing.T) {
 	}
 	if got := events[0].Todos[0].ID; got != "dir-1" {
 		t.Errorf("Todos[0].ID = %q, want dir-1", got)
+	}
+}
+
+// taskCompleteTodoChunks is the收尾 shape that the nudge exists for: the model
+// declares completion in the same message where it reports a step as still
+// running.
+func taskCompleteTodoChunks(todos string) []ModelChunk {
+	return []ModelChunk{{
+		Delta: "收尾",
+		ToolCalls: []ModelToolCall{
+			{ID: "c_todo", Type: "function", Function: ModelFunctionCall{
+				Name: TodoWriteToolName, Arguments: todos,
+			}},
+			{ID: "c_done", Type: "function", Function: ModelFunctionCall{
+				Name: TaskCompleteToolName, Arguments: `{"summary":"done"}`,
+			}},
+		},
+		FinishReason: "tool_calls",
+	}}
+}
+
+// toolResponses indexes the tool results in history by tool_call_id.
+func toolResponses(history []Message) map[string]string {
+	out := map[string]string{}
+	for _, m := range history {
+		if m.Role == "tool" {
+			out[m.ToolCallID] = m.Content
+		}
+	}
+	return out
+}
+
+// TestExecuteTurn_TaskCompleteDeferredWhileStepInProgress: 收尾时面板仍把某步标为
+// in_progress，与"任务已完成"自相矛盾——用户看到的就是永远不打勾的步骤。引擎给
+// 模型一次自纠机会：把 task_complete 的 tool 回执写成"先补最终快照"，不结束 run。
+// 通道就是回执本身，引擎不替模型编造任何状态。
+func TestExecuteTurn_TaskCompleteDeferredWhileStepInProgress(t *testing.T) {
+	var events []ProgressEvent
+	e := &Engine{
+		model: &stubStreamModel{chunks: taskCompleteTodoChunks(
+			`{"todos":[{"content":"步骤一","status":"in_progress"},{"content":"步骤二","status":"pending"}]}`)},
+		context:   &stubContextBuilder{},
+		tools:     stubToolExecutor{},
+		state:     &TaskState{TurnNumber: 0},
+		history:   []Message{{Role: "user", Content: "做完"}},
+		config:    EngineConfig{ModelName: "test-model", OnProgress: func(ev ProgressEvent) { events = append(events, ev) }},
+		guards:    &GuardSystem{scope: NewScopeGuard()},
+		isChinese: true,
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if result.Done {
+		t.Fatalf("completion must be deferred while a step is still in_progress, got %+v", result)
+	}
+	if !e.todoNudgeSent {
+		t.Error("the one-shot nudge must be marked as spent")
+	}
+
+	responses := toolResponses(e.history)
+	if got := responses["c_done"]; got == "" || got == "Task completed." {
+		t.Errorf("task_complete response = %q, want the final-snapshot reminder", got)
+	} else if !strings.Contains(got, "in_progress") || !strings.Contains(got, "completed") {
+		t.Errorf("reminder must name the statuses to fix, got %q", got)
+	}
+	if responses["c_todo"] == "" {
+		t.Error("todo_write must still be answered (one response per tool_call_id)")
+	}
+	var todos int
+	for _, ev := range events {
+		if ev.Type == "todo_update" {
+			todos++
+		}
+	}
+	if todos != 1 {
+		t.Errorf("todo_update events = %d, want 1 (the snapshot still reaches the UI)", todos)
+	}
+}
+
+// TestExecuteTurn_TaskCompleteNotDeferredTwice: 只给一次机会。第二次 task_complete
+// 必须收尾——否则模型可以把 run 拖成无限循环。
+func TestExecuteTurn_TaskCompleteNotDeferredTwice(t *testing.T) {
+	e := &Engine{
+		model: &stubStreamModel{chunks: taskCompleteTodoChunks(
+			`{"todos":[{"content":"步骤一","status":"in_progress"}]}`)},
+		context:       &stubContextBuilder{},
+		tools:         stubToolExecutor{},
+		state:         &TaskState{TurnNumber: 0},
+		history:       []Message{{Role: "user", Content: "做完"}},
+		config:        EngineConfig{ModelName: "test-model"},
+		guards:        &GuardSystem{scope: NewScopeGuard()},
+		todoNudgeSent: true, // 本 run 的提醒已经用掉
+	}
+
+	result, err := e.executeTurn(context.Background())
+	if err != nil {
+		t.Fatalf("executeTurn error: %v", err)
+	}
+	if !result.Done {
+		t.Fatalf("a spent nudge must not defer again, got %+v", result)
+	}
+	if got := toolResponses(e.history)["c_done"]; got != "Task completed." {
+		t.Errorf("task_complete response = %q, want the normal completion ack", got)
+	}
+}
+
+// TestExecuteTurn_TaskCompleteNotDeferredWhenPanelSettled: 打勾齐全、或模型明确留白
+// 的 pending、或整轮没用过 todo_write，都不得触发提醒（否则每次收尾都白烧一轮）。
+func TestExecuteTurn_TaskCompleteNotDeferredWhenPanelSettled(t *testing.T) {
+	cases := []struct {
+		name   string
+		chunks []ModelChunk
+	}{
+		{"all completed", taskCompleteTodoChunks(`{"todos":[{"content":"步骤一","status":"completed"}]}`)},
+		{"pending left on purpose", taskCompleteTodoChunks(`{"todos":[{"content":"步骤一","status":"completed"},{"content":"步骤二","status":"pending"}]}`)},
+		{"no snapshot this run", []ModelChunk{{
+			Delta: "收尾",
+			ToolCalls: []ModelToolCall{{ID: "c_done", Type: "function", Function: ModelFunctionCall{
+				Name: TaskCompleteToolName, Arguments: `{"summary":"done"}`,
+			}}},
+			FinishReason: "tool_calls",
+		}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{
+				model:   &stubStreamModel{chunks: tc.chunks},
+				context: &stubContextBuilder{},
+				tools:   stubToolExecutor{},
+				state:   &TaskState{TurnNumber: 0},
+				history: []Message{{Role: "user", Content: "做完"}},
+				config:  EngineConfig{ModelName: "test-model"},
+				guards:  &GuardSystem{scope: NewScopeGuard()},
+			}
+			result, err := e.executeTurn(context.Background())
+			if err != nil {
+				t.Fatalf("executeTurn error: %v", err)
+			}
+			if !result.Done {
+				t.Fatalf("a settled panel must end the run immediately, got %+v", result)
+			}
+			if e.todoNudgeSent {
+				t.Error("no nudge may be spent when the panel is settled")
+			}
+		})
 	}
 }

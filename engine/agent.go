@@ -256,10 +256,10 @@ type SubmitResultParams struct {
 // taskCompleteToolSpec returns the tool definition for signaling task completion.
 // The model calls this to submit its final output to the user.
 func taskCompleteToolSpec(zh bool) ModelTool {
-	desc := "Submit your final conclusion or reply to the user. Call this when the user's goal is fully accomplished. This is the ONLY way to return output to the user."
+	desc := "Submit your final conclusion or reply to the user. Call this when the user's goal is fully accomplished. This is the ONLY way to return output to the user. If your step panel (todo_write) still lists a step as in_progress, this call is deferred once and answered with a reminder to send the final snapshot first."
 	summaryDesc := "Your final conclusion, analysis result, or reply to the user"
 	if zh {
-		desc = "提交最终结论或回复给用户。目标全部完成后调用此工具。这是向用户返回输出的唯一方式。"
+		desc = "提交最终结论或回复给用户。目标全部完成后调用此工具。这是向用户返回输出的唯一方式。若你的步骤面板（todo_write）仍把某步标为 in_progress，本次调用会被推迟一次，并提示你先下发最终快照。"
 		summaryDesc = "你的最终结论、分析结果或给用户的回复"
 	}
 	params := fmt.Sprintf(`{
@@ -423,7 +423,7 @@ func todoWriteToolSpec() ModelTool {
 		Type: "function",
 		Function: ModelToolFunction{
 			Name:        TodoWriteToolName,
-			Description: "Report the current state of your step-by-step todo list. Call this whenever you start, complete, or change the status of a step. Pass the FULL list of steps each time (snapshot, not diff). The UI displays it as a plain-text todo list. Status must be one of: pending, in_progress, completed. Give a step an \"id\" when you delegate work for it: handoff_to_agent(step=<id>) then nests that sub-agent under this step in the UI. Ids must be unique within the list when present.",
+			Description: "Report the current state of your step-by-step todo list. Call this whenever you start, complete, or change the status of a step, in the same turn the change happens: the step you are starting reads in_progress immediately, and a step whose work just finished reads completed right away — including a delegated step, once its sub-agent has returned. Batching updates until the end leaves the panel stuck on the step the user last heard about. Before you finish the task, send one final snapshot with every step completed (or the ones you knowingly left unfinished) and then call task_complete — that snapshot is what the user reads. Pass the FULL list of steps each time (snapshot, not diff). The UI displays it as a plain-text todo list. Status must be one of: pending, in_progress, completed. Give a step an \"id\" when you delegate work for it: handoff_to_agent(step=<id>) then nests that sub-agent under this step in the UI. Ids must be unique within the list when present.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {

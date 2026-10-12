@@ -367,11 +367,11 @@ const (
 // pasteThreshold is the minimum newline count or total rune count to trigger
 // paste-shorthand mode (show line count instead of the full pasted content
 // in the input box).
-const pasteThresholdNewlines = 3  // ≥3 newlines → paste
-const pasteThresholdRunes = 200   // ≥200 runes → paste
+const pasteThresholdNewlines = 3 // ≥3 newlines → paste
+const pasteThresholdRunes = 200  // ≥200 runes → paste
 
 // pasteGap is the maximum interval between two input events for them to be
-// considered part of the same paste burst. Human typing gaps are typically
+// considered part of the same input run. Human typing gaps are typically
 // 100ms+; terminal paste events arrive essentially back-to-back (sub-millisecond
 // on Unix, a few ms apart on Windows ConPTY). 100ms safely separates the two.
 //
@@ -379,9 +379,29 @@ const pasteThresholdRunes = 200   // ≥200 runes → paste
 // bracketed-paste markers (\x1b[200~...\x1b[201~) never arrive as a single
 // KeyRunes event with msg.Paste set — each pasted character (including each
 // newline) arrives as a separate KeyEventRecord. We MUST use this time window
-// to detect paste bursts on Windows, otherwise the first pasted newline would
+// to detect pastes on Windows, otherwise the first pasted newline would
 // immediately trigger ActionSubmit.
 const pasteGap = 100 * time.Millisecond
+
+// pasteIdleGap is how long an input run that has ALREADY been classified as a
+// paste may go quiet — an event arriving late because the console, the
+// scheduler or a render stall delayed it — before the run counts as over.
+// Ending the run at pasteGap instead would chop one paste into several
+// "[Pasted +N lines]" indicators and spill pasted content into the input as raw
+// text.
+//
+// The grace is spent on the first quiet event: absorbing one clears the run's
+// paste counters, so a later quiet event only counts again once the run looks
+// like a paste anew. The cost is bounded to that single event: if the paste had
+// already ended, one character of the user's own typing is folded into the
+// indicator, and everything typed after it is shown as text again. Without that
+// bound, a user typing at human speed after a paste would stay inside the
+// grace forever and never see their own text.
+//
+// Enter deliberately keeps the tighter pasteGap rule: a pasted newline delayed
+// by a hiccup may still submit, but the far more common "paste, then press
+// Enter to send" keeps working on the first press.
+const pasteIdleGap = 500 * time.Millisecond
 
 // inputSegment is one piece of PasteMode input. Typed text segments render
 // as-is; paste segments render as a "[Pasted +N lines]" indicator. The raw
@@ -407,26 +427,78 @@ type InputBuffer struct {
 	// paste keeps its own indicator.
 	suffixSegments []inputSegment
 
-	// lastEventTime is the timestamp of the most recent KeyRunes/KeyEnter/
-	// KeySpace event. Used to detect paste bursts (events arriving within
-	// pasteGap of each other).
-	lastEventTime time.Time
+	// burst is the current uninterrupted run of input events — the unit the
+	// paste heuristic judges (see inputBurst).
+	burst inputBurst
 
-	// (pendingSubmit was removed: Enter now submits immediately;
-	// only fast events in a paste burst insert newlines.)
-
-	// burstStartLen records len(ib.text) at the moment the current paste
-	// burst began. Everything in text[:burstStartLen] is the user's pre-burst
-	// input (the prefix); text[burstStartLen:] is accumulating paste content.
-	// Used to split prefix from pasted content when entering PasteMode.
-	burstStartLen int
-
-	// pasteStreamActive is true while a paste stream is still arriving event
-	// by event (Windows ConPTY without bracketed paste). A fast event in
-	// PasteMode then continues the current paste segment. After a bracketed
-	// paste (msg.Paste) the full content arrived in one event, so
-	// pasteStreamActive is false and fast events are fast typing (text).
+	// pasteStreamActive is true while a paste is still arriving event by event
+	// (Windows ConPTY without bracketed paste). A live event in PasteMode then
+	// continues the current paste segment. After a bracketed paste (msg.Paste)
+	// the full content arrived in one event, so pasteStreamActive is false and
+	// later events are the user typing.
 	pasteStreamActive bool
+}
+
+// inputBurst is one uninterrupted run of input events: the terminal delivering
+// a paste character by character (Windows ConPTY, where msg.Paste is never set)
+// or the user typing. It is the unit the paste heuristic judges — never text
+// that predates it — so lines typed or pasted earlier can no longer make the
+// current run look like a paste.
+type inputBurst struct {
+	active   bool      // a run is in progress (lastAt is meaningful)
+	lastAt   time.Time // timestamp of the run's most recent event
+	startLen int       // len(text) when the run began: text[:startLen] is the
+	// user's pre-run input, text[startLen:] was inserted by this run
+	runes     int  // runes inserted by this run
+	newlines  int  // newlines inserted by this run
+	confirmed bool // the run already looks like a paste rather than typing
+}
+
+// beginBurst starts a run whose content begins at the current end of the
+// buffer: everything already in the buffer is the user's pre-run input (shown
+// as the prefix before a paste indicator).
+func (ib *InputBuffer) beginBurst() {
+	ib.burst = inputBurst{active: true, startLen: len(ib.text)}
+}
+
+// endBurst closes the current run. The next event opens a fresh one, so neither
+// its timing nor its counters can continue the closed run.
+func (ib *InputBuffer) endBurst() {
+	ib.burst = inputBurst{}
+}
+
+// noteEvent records one input event in the run timeline. An event arriving
+// within pasteGap of the previous one continues the run; anything slower opens
+// a new run. Returns whether the existing run was continued.
+func (ib *InputBuffer) noteEvent(hot bool, now time.Time) bool {
+	if !hot {
+		ib.beginBurst()
+	}
+	ib.burst.lastAt = now
+	return hot
+}
+
+// growBurst accounts the runes inserted by the current run and confirms the run
+// as a paste once it crosses a threshold. Both thresholds are evaluated on the
+// run itself, never on the whole buffer.
+func (ib *InputBuffer) growBurst(runes, newlines int) {
+	ib.burst.runes += runes
+	ib.burst.newlines += newlines
+	if ib.burst.newlines >= pasteThresholdNewlines || ib.burst.runes >= pasteThresholdRunes {
+		ib.burst.confirmed = true
+	}
+}
+
+// absorbHiccup keeps a confirmed, still-streaming paste in one piece when an
+// event arrives after more than pasteGap (a delivery or scheduling hiccup).
+// The run stays open but its paste counters are cleared, which spends the
+// grace: a later slow event is treated as the user again unless the run
+// rebuilds enough paste-shaped content to be confirmed once more.
+func (ib *InputBuffer) absorbHiccup(now time.Time) {
+	ib.burst.runes = 0
+	ib.burst.newlines = 0
+	ib.burst.confirmed = false
+	ib.burst.lastAt = now
 }
 
 func NewInputBuffer() *InputBuffer {
@@ -444,8 +516,7 @@ func (ib *InputBuffer) SetValue(s string) {
 	ib.PasteContent = ""
 	ib.pastePrefix = ""
 	ib.suffixSegments = nil
-	ib.burstStartLen = 0
-	ib.lastEventTime = time.Time{}
+	ib.endBurst()
 }
 
 // SubmitContent returns the content to submit. In paste shorthand mode it
@@ -460,8 +531,7 @@ func (ib *InputBuffer) SubmitContent() string {
 		ib.suffixSegments = nil
 		ib.text = nil
 		ib.cursor = 0
-		ib.burstStartLen = 0
-		ib.lastEventTime = time.Time{}
+		ib.endBurst()
 		return content
 	}
 	return ib.Value()
@@ -474,8 +544,6 @@ func (ib *InputBuffer) Cursor() int {
 func (ib *InputBuffer) Len() int {
 	return len(ib.text)
 }
-
-
 
 func (ib *InputBuffer) clampCursor() {
 	if ib.cursor < 0 {
@@ -497,16 +565,16 @@ func (ib *InputBuffer) insertRunes(runes []rune) {
 	}
 }
 
-// enterPasteMode splits the current text at burstStartLen: the prefix
-// (user's pre-burst input) is preserved and shown before the indicator;
-// the rest (accumulated paste) becomes the first paste segment.
+// enterPasteMode splits the current text at the run boundary: the prefix
+// (input that predates the run) is preserved and shown before the indicator;
+// the rest (the run's own content) becomes the first paste segment.
 func (ib *InputBuffer) enterPasteMode(fullText string, streamActive bool) {
 	prefix := ""
 	pasted := fullText
 	textRunes := []rune(fullText)
-	if ib.burstStartLen > 0 && ib.burstStartLen <= len(textRunes) {
-		prefix = string(textRunes[:ib.burstStartLen])
-		pasted = string(textRunes[ib.burstStartLen:])
+	if ib.burst.startLen > 0 && ib.burst.startLen <= len(textRunes) {
+		prefix = string(textRunes[:ib.burst.startLen])
+		pasted = string(textRunes[ib.burst.startLen:])
 	}
 	ib.pastePrefix = prefix
 	ib.suffixSegments = []inputSegment{{text: pasted, isPaste: true}}
@@ -564,8 +632,8 @@ func (ib *InputBuffer) appendTextSegment(s string) {
 }
 
 // appendPasteSegment appends pasted content. A bracketed paste always starts a
-// NEW paste segment (new indicator); fast events from an in-flight burst
-// (Windows ConPTY without bracketed paste) continue the current paste segment.
+// NEW paste segment (new indicator); live events from a paste that is still
+// arriving (Windows ConPTY without bracketed paste) continue the current one.
 func (ib *InputBuffer) appendPasteSegment(s string, forceNew bool) {
 	if !forceNew && len(ib.suffixSegments) > 0 {
 		last := &ib.suffixSegments[len(ib.suffixSegments)-1]
@@ -615,7 +683,7 @@ func (ib *InputBuffer) deleteTrailingPasteSegment() bool {
 		ib.PasteMode = false
 		ib.pastePrefix = ""
 		ib.PasteContent = ""
-		ib.burstStartLen = 0
+		ib.endBurst()
 		ib.pasteStreamActive = false
 		ib.text = []rune(prefix)
 		ib.cursor = len(ib.text)
@@ -633,7 +701,7 @@ func (ib *InputBuffer) cancelPaste() {
 	ib.suffixSegments = nil
 	ib.text = nil
 	ib.cursor = 0
-	ib.burstStartLen = 0
+	ib.endBurst()
 }
 
 // HandleKey processes a keyboard event and returns the action to take.
@@ -642,43 +710,54 @@ func (ib *InputBuffer) cancelPaste() {
 // Paste detection strategy:
 //   - Bracketed paste (Unix/macOS): the whole paste arrives as a single
 //     KeyRunes event with msg.Paste == true. We check the batch size.
-//   - Time-window burst (Windows ConPTY, or terminals without bracketed
-//     paste): pastes arrive as a rapid burst of KeyRunes/KeyEnter events,
-//     each within pasteGap of the previous. We track lastEventTime; if an
-//     event arrives within pasteGap, it's part of a burst. When the burst
-//     accumulates ≥3 newlines, we switch to PasteMode.
+//   - Time-window run (Windows ConPTY, or terminals without bracketed
+//     paste): pastes arrive as a rapid series of KeyRunes/KeyEnter events,
+//     each within pasteGap of the previous. That run is tracked in
+//     InputBuffer.burst; once it accumulates ≥3 newlines or ≥200 runes the
+//     input switches to PasteMode. Only the run's own content is counted, so
+//     lines typed or pasted earlier can never fold the current run.
+//   - A deliberate newline (Alt/Shift/Ctrl+Enter) closes the run, so the
+//     keystrokes after it are never mistaken for pasted content.
 //
-// IME safety: runes are ALWAYS inserted into ib.text immediately. The burst
+// IME safety: runes are ALWAYS inserted into ib.text immediately. The run
 // detector only decides whether an Enter inserts \n (paste) or submits — it
-// never defers rune insertion. IME composition bursts (which contain no
+// never defers rune insertion. IME composition runs (which contain no
 // Enter keys) are therefore never misclassified as paste.
 //
 // PasteMode display: once entered, the visible input is a series of segments:
 // paste chunks render as "[Pasted +N lines]" indicators and user-typed text
 // renders as-is (e.g. "123 [Pasted +4 lines] 456 [Pasted +3 lines] 789").
-// Each bracketed paste starts a NEW indicator; slow events (user typing after
-// the burst) become text segments; fast events (still inside the paste burst)
+// Each bracketed paste starts a NEW indicator; quiet events (user typing after
+// the run) become text segments; live events (still inside the paste stream)
 // continue the current paste segment. Only Enter submits, Backspace cancels.
 func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	now := time.Now()
-	fast := !ib.lastEventTime.IsZero() && now.Sub(ib.lastEventTime) < pasteGap
+	// hot: this event continues the run already in progress.
+	hot := ib.burst.active && now.Sub(ib.burst.lastAt) < pasteGap
+	// hiccup: a confirmed paste that is still streaming may go quiet for longer
+	// than pasteGap without being over (see pasteIdleGap). Only content travels
+	// through this window — Enter keeps the tighter hot rule.
+	hiccup := !hot && ib.burst.active && ib.burst.confirmed && ib.pasteStreamActive &&
+		now.Sub(ib.burst.lastAt) < pasteIdleGap
 
 	// ---- PasteMode: indicator stays, new input appends as segments ----
 	if ib.PasteMode {
 		switch msg.Type {
 		case tea.KeyEnter:
-			if msg.Alt || (!fast && runtime.GOOS == "windows" && ctrlKeyPressed()) {
-				// Deliberate manual newline — append visibly as a text segment.
+			if msg.Alt || (!hot && runtime.GOOS == "windows" && ctrlKeyPressed()) {
+				// Deliberate manual newline — append visibly as a text segment and
+				// close the run, so the Enter after it submits.
+				ib.endBurst()
 				ib.appendTextSegment("\n")
 				ib.rebuild()
-				ib.lastEventTime = now
 				return ActionNewline
 			}
-			if fast {
+			if hot {
 				// More paste arriving — absorb newline into the current paste segment.
 				ib.appendPasteSegment("\n", false)
+				ib.growBurst(1, 1)
+				ib.burst.lastAt = now
 				ib.rebuild()
-				ib.lastEventTime = now
 				return ActionNewline
 			}
 			// Slow Enter — submit the accumulated content.
@@ -687,18 +766,18 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 		case tea.KeyBackspace:
 			if ib.deleteFromLastTextSegment() {
 				ib.rebuild()
-				ib.lastEventTime = now
+				ib.burst.lastAt = now
 				return ActionBackspace
 			}
 			// Trailing segment is a paste indicator (or nothing) — remove the
 			// paste segment itself, keeping the prefix and earlier segments.
 			if ib.deleteTrailingPasteSegment() {
-				ib.lastEventTime = time.Time{}
+				ib.endBurst()
 				return ActionBackspace
 			}
 			// Nothing to delete at all — cancel the paste entirely (clear input).
 			ib.cancelPaste()
-			ib.lastEventTime = time.Time{}
+			ib.endBurst()
 			return ActionBackspace
 
 		case tea.KeyRunes:
@@ -717,36 +796,54 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			if len(filtered) == 0 {
 				return ActionNone
 			}
+			nNewlines := strings.Count(string(filtered), "\n")
 			switch {
 			case msg.Paste:
-				// A bracketed paste always starts a NEW paste segment so it
-				// gets its own indicator (Bug: multiple pastes folded into one).
+				// A bracketed paste arrives complete in one event: it opens a NEW
+				// run and a NEW paste segment so it gets its own indicator (Bug:
+				// multiple pastes folded into one).
+				ib.beginBurst()
 				ib.appendPasteSegment(string(filtered), true)
-			case fast && ib.pasteStreamActive:
-				// Fast event while a paste stream is still arriving event by
-				// event (Windows ConPTY, no bracketed paste) — continue the
-				// current paste segment (no new indicator). After a bracketed
-				// paste (msg.Paste) the content arrived complete in one event,
-				// so pasteStreamActive is false and a fast event is just fast
-				// typing — it must go to a text segment, otherwise it creates
-				// a bogus "[Pasted +1 lines]" indicator.
+				ib.growBurst(len(filtered), nNewlines)
+				ib.burst.lastAt = now
+			case (hot || hiccup) && ib.pasteStreamActive:
+				// A live event while a paste is still arriving event by event
+				// (Windows ConPTY, no bracketed paste) — continue the current
+				// paste segment (no new indicator). After a bracketed paste
+				// (msg.Paste) the content arrived complete in one event, so
+				// pasteStreamActive is false and this is the user typing: it
+				// must go to a text segment, otherwise it creates a bogus
+				// "[Pasted +1 lines]" indicator.
+				if hiccup {
+					ib.absorbHiccup(now)
+				} else {
+					ib.noteEvent(hot, now)
+				}
 				ib.appendPasteSegment(string(filtered), false)
+				ib.growBurst(len(filtered), nNewlines)
 			default:
-				// User typing after the burst — show as a text segment.
+				// User typing after the paste — show as a text segment. Typed
+				// text never counts towards the paste thresholds.
+				ib.noteEvent(hot, now)
 				ib.appendTextSegment(string(filtered))
 			}
 			ib.rebuild()
-			ib.lastEventTime = now
 			return ActionRuneInserted
 
 		case tea.KeySpace:
-			if fast {
+			if (hot || hiccup) && ib.pasteStreamActive {
+				if hiccup {
+					ib.absorbHiccup(now)
+				} else {
+					ib.noteEvent(hot, now)
+				}
 				ib.appendPasteSegment(" ", false)
+				ib.growBurst(1, 0)
 			} else {
+				ib.noteEvent(hot, now)
 				ib.appendTextSegment(" ")
 			}
 			ib.rebuild()
-			ib.lastEventTime = now
 			return ActionRuneInserted
 
 		case tea.KeyDelete:
@@ -756,18 +853,18 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			// semantically identical.
 			if ib.deleteFromLastTextSegment() {
 				ib.rebuild()
-				ib.lastEventTime = now
+				ib.burst.lastAt = now
 				return ActionDelete
 			}
 			// Trailing segment is a paste indicator (or nothing) — remove the
 			// paste segment itself, keeping the prefix and earlier segments.
 			if ib.deleteTrailingPasteSegment() {
-				ib.lastEventTime = time.Time{}
+				ib.endBurst()
 				return ActionDelete
 			}
 			// Nothing to delete at all — cancel the paste entirely (clear input).
 			ib.cancelPaste()
-			ib.lastEventTime = time.Time{}
+			ib.endBurst()
 			return ActionDelete
 
 		default:
@@ -780,46 +877,36 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 	// ---- Normal (non-paste) input handling ----
 	switch {
 	case msg.Type == tea.KeyEnter && !msg.Alt:
-		// Windows: Ctrl+Enter = newline when NOT in a paste burst (fast).
-		// Detected via physical key state since bubbletea's KeyMsg lacks a
-		// Ctrl modifier field. Must gate on !fast to avoid intercepting paste
-		// newlines when the user hasn't released Ctrl after Ctrl+V.
-		if !fast && runtime.GOOS == "windows" && ctrlKeyPressed() {
-			ib.burstStartLen = 0
+		// Windows: Ctrl+Enter = newline when NOT mid-run. Detected via physical
+		// key state since bubbletea's KeyMsg lacks a Ctrl modifier field. Must
+		// gate on !hot to avoid intercepting pasted newlines when the user
+		// hasn't released Ctrl after Ctrl+V.
+		if !hot && runtime.GOOS == "windows" && ctrlKeyPressed() {
+			// Deliberate manual newline — a run boundary.
+			ib.endBurst()
 			ib.insertAtCursor('\n')
 			return ActionNewline
 		}
-		if fast {
-			// Paste newline mid-burst — insert as literal \n, don't submit.
-			// Mark burstStartLen on the first fast event so we can later
-			// split prefix (pre-burst typing) from pasted content.
-			if ib.burstStartLen == 0 {
-				ib.burstStartLen = len(ib.text)
-			}
+		if hot {
+			// Pasted newline mid-run — insert as literal \n, don't submit.
 			ib.insertAtCursor('\n')
-			nlCount := strings.Count(string(ib.text), "\n")
-			if nlCount >= pasteThresholdNewlines {
-				// Bug #1: Correct burstStartLen when the first paste event
-				// wasn't fast (gap > 100ms from user typing).
-				origLen := len(ib.text) - 1
-				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
-					ib.burstStartLen = origLen
-				}
+			ib.growBurst(1, 1)
+			ib.burst.lastAt = now
+			if ib.burst.confirmed {
 				ib.enterPasteMode(string(ib.text), true)
 			}
-			ib.lastEventTime = now
 			return ActionNewline
 		}
 		// Slow Enter — submit immediately.
-		ib.burstStartLen = 0
-		ib.lastEventTime = time.Time{}
+		ib.endBurst()
 		return ActionSubmit
 
 	case msg.Type == tea.KeyEnter && msg.Alt:
-		// Option/Alt+Enter -> newline (Mac Option key = Alt in terminals).
-		// This is a deliberate manual newline, not a paste — don't update
-		// lastEventTime so it doesn't seed a fake burst.
-		ib.burstStartLen = 0
+		// Option/Alt/Shift+Enter -> newline (Mac Option key = Alt in
+		// terminals). A deliberate manual newline closes the run: a quick
+		// keystroke right after it must not look like pasted content, and the
+		// run's newline count must not include it.
+		ib.endBurst()
 		ib.insertAtCursor('\n')
 		return ActionNewline
 
@@ -829,44 +916,38 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			ib.text = append(ib.text[:ib.cursor-1], ib.text[ib.cursor:]...)
 			ib.cursor--
 		}
-		ib.burstStartLen = 0
-		ib.lastEventTime = time.Time{}
+		ib.endBurst()
 		return ActionBackspace
 
 	case msg.Type == tea.KeyDelete:
-		ib.burstStartLen = 0
+		ib.endBurst()
 		if ib.cursor < len(ib.text) {
 			ib.text = append(ib.text[:ib.cursor], ib.text[ib.cursor+1:]...)
 		}
-		ib.lastEventTime = time.Time{}
 		return ActionDelete
 
 	case msg.Type == tea.KeyLeft:
-		ib.burstStartLen = 0
+		ib.endBurst()
 		if ib.cursor > 0 {
 			ib.cursor--
 		}
-		ib.lastEventTime = time.Time{}
 		return ActionCursorLeft
 
 	case msg.Type == tea.KeyRight:
-		ib.burstStartLen = 0
+		ib.endBurst()
 		if ib.cursor < len(ib.text) {
 			ib.cursor++
 		}
-		ib.lastEventTime = time.Time{}
 		return ActionCursorRight
 
 	case msg.Type == tea.KeyHome:
-		ib.burstStartLen = 0
+		ib.endBurst()
 		ib.cursor = 0
-		ib.lastEventTime = time.Time{}
 		return ActionCursorHome
 
 	case msg.Type == tea.KeyEnd:
-		ib.burstStartLen = 0
+		ib.endBurst()
 		ib.cursor = len(ib.text)
-		ib.lastEventTime = time.Time{}
 		return ActionCursorEnd
 
 	case msg.Type == tea.KeyRunes:
@@ -888,63 +969,36 @@ func (ib *InputBuffer) HandleKey(msg tea.KeyMsg) InputAction {
 			return ActionNone
 		}
 
-		// (pendingSubmit was removed.)
-		// Mark the burst boundary on the first fast event or bracketed paste:
-		// everything in text[:burstStartLen] is pre-burst typing (the prefix
-		// shown before the indicator when we later enter PasteMode).
-		// For bracketed paste (msg.Paste), the paste arrives as a single event
-		// regardless of typing speed — we must always capture burstStartLen
-		// before inserting, otherwise the user's pre-existing text is swallowed
-		// into PasteContent without a visible prefix (Bug #1).
-		if (msg.Paste || fast) && ib.burstStartLen == 0 {
-			ib.burstStartLen = len(ib.text)
+		// A bracketed paste arrives complete in a single event: it opens its own
+		// run, so its content can never be attributed to earlier typing. Every
+		// other event continues the current run or opens a new one.
+		if msg.Paste {
+			ib.beginBurst()
+		} else {
+			ib.noteEvent(hot, now)
 		}
 
 		// Insert runes into text immediately (IME-safe: no deferred buffer).
 		ib.insertRunes(filtered)
+		ib.growBurst(len(filtered), strings.Count(string(filtered), "\n"))
+		ib.burst.lastAt = now
 
-		// Check whether this looks like a paste: either a single large
-		// bracketed-paste batch (msg.Paste, Unix/macOS) or a fast burst
-		// whose accumulated text just crossed the newline threshold.
-		enteredPaste := false
-		if msg.Paste {
-			nlCount := strings.Count(string(ib.text), "\n")
-			if nlCount >= pasteThresholdNewlines || len(filtered) >= pasteThresholdRunes {
-				// Bug #1: When the first paste event arrives not-fast (gap > 100ms),
-				// burstStartLen is set AFTER that event's characters have already been
-				// inserted. Correct it by using the actual pre-insertion length.
-				origLen := len(ib.text) - len(filtered)
-				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
-					ib.burstStartLen = origLen
-				}
-				ib.enterPasteMode(string(ib.text), false)
-				enteredPaste = true
-			}
-		} else if fast {
-			nlCount := strings.Count(string(ib.text), "\n")
-			if nlCount >= pasteThresholdNewlines {
-				origLen := len(ib.text) - len(filtered)
-				if ib.burstStartLen == 0 || ib.burstStartLen > origLen {
-					ib.burstStartLen = origLen
-				}
-				ib.enterPasteMode(string(ib.text), true)
-				enteredPaste = true
-			}
+		// A run that accumulated paste-shaped content switches to the paste
+		// shorthand: either a single large bracketed-paste batch (msg.Paste,
+		// Unix/macOS) or a run whose own newline/rune count crossed a threshold.
+		if ib.burst.confirmed {
+			ib.enterPasteMode(string(ib.text), !msg.Paste)
 		}
-		// Slow rune ends any in-progress burst that didn't reach the threshold.
-		if !enteredPaste && !fast {
-			ib.burstStartLen = 0
-		}
-		ib.lastEventTime = now
 		return ActionRuneInserted
 
 	case msg.Type == tea.KeySpace:
-		ib.burstStartLen = 0
+		// A space is ordinary input: like a rune, it continues or opens a run,
+		// so pasted text containing spaces stays attributed to the run.
+		ib.noteEvent(hot, now)
 		ib.insertAtCursor(' ')
-		ib.lastEventTime = now
+		ib.growBurst(1, 0)
 		return ActionRuneInserted
 	}
 
 	return ActionNone
 }
-

@@ -200,19 +200,28 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// loop drains the steer queue and starts a fresh turn.
 	handleSteerInterrupt := func() TurnResult {
 		flushUpTo(len(seg))
-		if contentBuilder.Len() > 0 || reasoningBuilder.Len() > 0 || len(toolCalls) > 0 {
+		// An assistant message must carry visible text or a usable tool call.
+		// `content` is omitempty on the wire, so a message holding only
+		// reasoning (or only half-assembled tool calls whose names never
+		// streamed) serializes without content or tool_calls and the API rejects
+		// the request with 400 "Invalid assistant message: content or tool_calls
+		// must be set" — poisoning every later request in the session.
+		usable := make([]ModelToolCall, 0, len(toolCalls))
+		for _, call := range toolCalls {
+			if call.Function.Name != "" {
+				usable = append(usable, call)
+			}
+		}
+		if contentBuilder.Len() > 0 || len(usable) > 0 {
 			assistant := Message{
 				Role:             "assistant",
 				Content:          contentBuilder.String(),
 				ReasoningContent: reasoningBuilder.String(),
 				Timestamp:        time.Now(),
 			}
-			if len(toolCalls) > 0 {
-				assistant.ToolCalls = make([]MessageToolCall, 0, len(toolCalls))
-				for _, call := range toolCalls {
-					if call.Function.Name == "" {
-						continue
-					}
+			if len(usable) > 0 {
+				assistant.ToolCalls = make([]MessageToolCall, 0, len(usable))
+				for _, call := range usable {
 					assistant.ToolCalls = append(assistant.ToolCalls, MessageToolCall{
 						ID:        call.ID,
 						Name:      call.Function.Name,
@@ -413,14 +422,22 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			// the partial reply is never mistaken for a conclusion. The pinned
 			// message is seen by the model next turn but is NOT persisted as a
 			// fake user message in history.
-			if assistant.Content != "" || assistant.ReasoningContent != "" {
+			// Only visible text is persisted: see the content-less guard below.
+			if assistant.Content != "" {
 				e.history = append(e.history, assistant)
 			}
 			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "继续")
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
-		if assistant.Content == "" && assistant.ReasoningContent == "" {
-			turnLog.Printf("skipping empty assistant message (no content, no reasoning, no tool_calls)")
+		// A model turn that produced only reasoning (thinking, no answer) must
+		// not reach history: with an empty Content the `content` field is
+		// omitted from the request and the API rejects it with 400 "Invalid
+		// assistant message: content or tool_calls must be set". That failure is
+		// permanent — the message stays in history, so every later request of
+		// the session fails the same way. The thinking was already streamed to
+		// the user as reasoning_delta.
+		if assistant.Content == "" {
+			turnLog.Printf("skipping content-less assistant message (reasoning=%d runes, no tool_calls)", utf8.RuneCountInString(reasoning))
 			return TurnResult{Done: true, FinishReason: finish}, nil
 		}
 		e.history = append(e.history, assistant)
@@ -505,6 +522,16 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
+	// Intercept todo_write first: every early return below (task_complete,
+	// blocked call) ends the turn without reaching the normal tool-response
+	// path, so a snapshot arriving in the same assistant message would never
+	// reach the UI. The final "all completed" snapshot accompanies
+	// task_complete by design — dropping it leaves the step panel frozen on a
+	// stale state. Only the event is emitted here; the early returns below
+	// answer every tool_call_id themselves, so the messages returned here are
+	// discarded on those paths to keep the API contract (one response per id).
+	pendingTodoMsgs := e.processTodoWriteCalls(calls)
+
 	// Intercept task_complete: explicit completion signal from the LLM.
 	// When the model calls this tool, the turn ends immediately with the
 	// provided summary. This is the primary completion mechanism - no stop
@@ -513,6 +540,31 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		if call.Name == TaskCompleteToolName {
 			var params TaskCompleteParams
 			_ = json.Unmarshal(call.Input, &params)
+			// Self-report consistency: a panel that still shows a step as
+			// in_progress contradicts the completion just declared, and the panel
+			// the user is left looking at is the last snapshot the model sent —
+			// the "finished but nothing got ticked" picture. Give the model one
+			// chance per Run to send its final snapshot: the task_complete tool
+			// response is the channel (nothing is invented engine-side), and a
+			// second task_complete always ends the Run. Deliberately-left pending
+			// steps do not trigger this — leaving work undone is legitimate.
+			if n := countInProgressSteps(e.lastTodos); n > 0 && !e.todoNudgeSent {
+				e.todoNudgeSent = true
+				e.history = append(e.history, assistant)
+				for _, c := range calls {
+					content := "Skipped: task_complete was called."
+					if c.ID == call.ID {
+						content = todoNudgeMessage(e.isChinese, n)
+					}
+					e.history = append(e.history, Message{
+						Role:       "tool",
+						ToolCallID: c.ID,
+						Content:    content,
+						Timestamp:  time.Now(),
+					})
+				}
+				return TurnResult{Done: false, FinishReason: finish}, nil
+			}
 			e.history = append(e.history, assistant)
 			for _, c := range calls {
 				content := "Skipped: task_complete was called."
@@ -565,7 +617,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// followed by tool messages responding to each tool_call_id.
 	pendingLoadMsgs := e.processLoadSkillCalls(calls)
 	pendingPlanMsgs := e.processPlanTaskCalls(calls)
-	pendingTodoMsgs := e.processTodoWriteCalls(calls)
 	pendingAskUserMsgs := e.processAskUserCalls(calls)
 	pendingAskUserMsgs = append(pendingAskUserMsgs, e.processAgentResumeCalls(ctx, calls)...)
 	pendingPollMsgs := e.processAgentPollCalls(calls)
@@ -1606,6 +1657,20 @@ func (e *Engine) processPlanTaskCalls(calls []ToolCallRequest) []Message {
 	return msgs
 }
 
+// countInProgressSteps counts the steps the model last reported as actively
+// running. Only in_progress counts: a step deliberately left pending is a
+// legitimate way to end a task, but nothing can still be running once the Run
+// has been declared complete.
+func countInProgressSteps(items []TodoItem) int {
+	n := 0
+	for _, it := range items {
+		if it.Status == "in_progress" {
+			n++
+		}
+	}
+	return n
+}
+
 // processTodoWriteCalls intercepts todo_write tool calls from the assistant's
 // response. Each call carries a FULL snapshot of the step list; the engine
 // validates it and forwards it to the UI as a "todo_update" progress event.
@@ -1669,6 +1734,9 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 		if !valid {
 			continue
 		}
+		// Remember the newest snapshot for this Run: it is what the panel shows,
+		// and task_complete checks it before letting the Run end.
+		e.lastTodos = params.Todos
 		if e.config.OnProgress != nil {
 			e.config.OnProgress(ProgressEvent{Type: "todo_update", Todos: params.Todos})
 		}
