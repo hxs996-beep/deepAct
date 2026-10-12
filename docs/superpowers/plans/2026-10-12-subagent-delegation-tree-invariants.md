@@ -412,7 +412,12 @@ func TestSubAgentWidth_SlotReleasedAfterRun(t *testing.T) {
 // the historical default (2), so existing behavior is unchanged unless the user
 // opts in.
 func TestSubAgentDepth_Configurable(t *testing.T) {
-	runner := &SubAgentRunner{model: &stubSeqModel{}, tools: stubToolExecutor{}, modelName: "test"}
+	// An explicit text-only "stop" response, so the admitted run's outcome does
+	// not depend on what an empty response happens to do in the loop.
+	model := &stubSeqModel{responses: []ModelResponse{
+		{Message: ModelMessage{Role: "assistant", Content: "结论"}, FinishReason: "stop"},
+	}}
+	runner := &SubAgentRunner{model: model, tools: readSpecExec(), modelName: "test"}
 	if got := runner.MaxDepth(); got != 2 {
 		t.Fatalf("default MaxDepth = %d, want 2", got)
 	}
@@ -945,18 +950,23 @@ func (e *Engine) injectSubAgentBudgetNotice() {
 
 ```go
 // newTestEngineWithBudget builds a minimal Engine whose single turn answers with
-// plain text, with the given delegation-budget surface wired.
+// plain text, with the given delegation-budget surface wired. The field set
+// mirrors the other Engine literals in this package (there is no shared helper):
+// Run dereferences context, state, config and guards, so all four are required.
 func newTestEngineWithBudget(t *testing.T, budget SubAgentBudget) *Engine {
 	t.Helper()
-	e := &Engine{
+	return &Engine{
 		model: &stubStreamModel{chunks: []ModelChunk{
 			{Delta: "任务已完成。", FinishReason: "stop"},
 		}},
 		tools:     stubToolExecutor{},
-		state:     &TaskState{},
+		context:   steerContextBuilder{},
+		state:     &TaskState{TaskID: "test"},
+		config:    EngineConfig{ModelName: "test-model"},
+		isChinese: true,
+		guards:    &GuardSystem{scope: NewScopeGuard()},
 		subBudget: budget,
 	}
-	return e
 }
 ```
 
