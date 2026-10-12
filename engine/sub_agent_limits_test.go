@@ -376,3 +376,37 @@ func newTestEngineWithBudget(t *testing.T, budget SubAgentBudget) *Engine {
 		subBudget: budget,
 	}
 }
+
+// TestSubAgentWidth_SixWayFanoutStillFits: the default width (6) is chosen to
+// match the 2-6 directions a /collab round fans out, so a six-way parallel
+// delegation must complete with NO refusal. This is the regression that keeps
+// the invariant from breaking the built-in research skill.
+func TestSubAgentWidth_SixWayFanoutStillFits(t *testing.T) {
+	model := &gateModel{release: make(chan struct{}), entered: make(chan struct{}, 8)}
+	runner := &SubAgentRunner{model: model, tools: readSpecExec(), modelName: "test"}
+
+	var wg sync.WaitGroup
+	results := make([]*HandoffResult, 6)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			res, err := runner.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "方向", NoNudge: true})
+			if err != nil {
+				t.Errorf("run %d: %v", i, err)
+				return
+			}
+			results[i] = res
+		}(i)
+	}
+	for i := 0; i < 6; i++ {
+		<-model.entered
+	}
+	close(model.release)
+	wg.Wait()
+	for i, res := range results {
+		if res == nil || res.FinishReason != HandoffReasonCompleted {
+			t.Fatalf("six-way fan-out must fit the default width; run %d: %+v", i, res)
+		}
+	}
+}
