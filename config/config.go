@@ -108,10 +108,10 @@ type lspServerOverride struct {
 }
 
 type modelConfig struct {
-	Default     string `toml:"default"`
-	Escalation  string `toml:"escalation"`
-	BaseURL     string `toml:"base_url"` // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
-	APIKey      string `toml:"api_key"`  // DeepSeek/OpenRouter API key
+	Default    string `toml:"default"`
+	Escalation string `toml:"escalation"`
+	BaseURL    string `toml:"base_url"` // API base URL (e.g. https://api.deepseek.com). Defaults to DeepSeek official.
+	APIKey     string `toml:"api_key"`  // DeepSeek/OpenRouter API key
 	// MaxConcurrentRequests caps concurrent in-flight LLM requests (shared
 	// AdaptiveLimiter slots). 0 = default 8. Lower it if the provider rate-limits
 	// you (e.g. 1-minute TPM windows); raise it for parallel sub-agent workloads.
@@ -147,6 +147,15 @@ type contextConfig struct {
 	// jobs are kept at once — each retains a whole history, so the table must
 	// stay small. 0 = default 4; negative fails loud at startup.
 	MaxSuspendedSubAgents int `toml:"max_suspended_subagents"`
+	// MaxConcurrentSubAgents caps how many sub-agent runs may be in flight at
+	// once across the whole delegation tree. 0 = default 6.
+	MaxConcurrentSubAgents int `toml:"max_concurrent_subagents"`
+	// MaxSubAgentDepth caps sub-agent nesting. 0 = default 2.
+	MaxSubAgentDepth int `toml:"max_subagent_depth"`
+	// RunSubAgentTokenBudget caps the billable tokens of all sub-agent runs in
+	// one Run (the whole delegation tree). 0 = default (20× the sub-agent
+	// context window), -1 = unlimited, >0 = explicit cap.
+	RunSubAgentTokenBudget int `toml:"run_sub_agent_token_budget"`
 }
 
 // conferenceConfig struct removed — ConferenceEnabled was dead code (never read by engine).
@@ -429,6 +438,26 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 		}
 		cfg.MaxSuspendedSubAgents = f.Context.MaxSuspendedSubAgents
 	}
+	// Delegation-tree caps. 0 means "engine default"; a negative value is a
+	// typo — fail loud rather than silently fall back.
+	if f.Context.MaxConcurrentSubAgents != 0 {
+		if f.Context.MaxConcurrentSubAgents < 1 {
+			return fmt.Errorf("[context] max_concurrent_subagents must be positive, got %d", f.Context.MaxConcurrentSubAgents)
+		}
+		cfg.MaxConcurrentSubAgents = f.Context.MaxConcurrentSubAgents
+	}
+	if f.Context.MaxSubAgentDepth != 0 {
+		if f.Context.MaxSubAgentDepth < 1 {
+			return fmt.Errorf("[context] max_subagent_depth must be positive, got %d", f.Context.MaxSubAgentDepth)
+		}
+		cfg.MaxSubAgentDepth = f.Context.MaxSubAgentDepth
+	}
+	if f.Context.RunSubAgentTokenBudget != 0 {
+		if f.Context.RunSubAgentTokenBudget < -1 {
+			return fmt.Errorf("[context] run_sub_agent_token_budget must be -1 (unlimited), 0 (default), or positive, got %d", f.Context.RunSubAgentTokenBudget)
+		}
+		cfg.RunSubAgentTokenBudget = f.Context.RunSubAgentTokenBudget
+	}
 	if f.Routing.RiskThreshold > 0 {
 		cfg.RiskThreshold = f.Routing.RiskThreshold
 	}
@@ -443,12 +472,12 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 			continue
 		}
 		spec := engine.AgentSpec{
-			ID:          engine.AgentID(name),
-			Description: rc.Description,
-			Persona:     rc.Persona,
-			ModelName:   rc.Model,
+			ID:            engine.AgentID(name),
+			Description:   rc.Description,
+			Persona:       rc.Persona,
+			ModelName:     rc.Model,
 			MaxIterations: rc.MaxIterations,
-			TokenBudget:  rc.TokenBudget,
+			TokenBudget:   rc.TokenBudget,
 		}
 		// Same three-state semantics as [context].sub_agent_token_budget;
 		// below -1 fails loud (a typo must not silently become a cap).

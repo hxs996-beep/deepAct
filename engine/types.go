@@ -115,8 +115,22 @@ type EngineConfig struct {
 	// must stay small. 0 = default 4. Wired via
 	// [context].max_suspended_subagents.
 	MaxSuspendedSubAgents int
-	ShowThinking          bool    // stream model reasoning/thinking to UI
-	RiskThreshold         float64 // router risk threshold for Pro/Flash escalation
+	// MaxConcurrentSubAgents caps how many sub-agent runs may be in flight at
+	// once across the WHOLE delegation tree (sync depth 0, async, nested and
+	// resumed runs share one counter). 0 = default 6. Wired via
+	// [context].max_concurrent_subagents.
+	MaxConcurrentSubAgents int
+	// MaxSubAgentDepth caps sub-agent nesting. 0 = default 2. Wired via
+	// [context].max_subagent_depth.
+	MaxSubAgentDepth int
+	// RunSubAgentTokenBudget caps the billable tokens (cache-miss + completion;
+	// cache hits are free) of every sub-agent run in ONE Run, nested children
+	// included. Three-state: 0 = default (20× the sub-agent context window),
+	// -1 = unlimited, >0 = explicit cap. Wired via
+	// [context].run_sub_agent_token_budget.
+	RunSubAgentTokenBudget int
+	ShowThinking           bool    // stream model reasoning/thinking to UI
+	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
 	// Approval policy for bash commands (see engine/approval.go). ApprovalMode
 	// is on-request (default) or never; ApprovalRules are user-declared rules
 	// from [approval.rules]; LearnedApprovals are commands the user confirmed in

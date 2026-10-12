@@ -557,3 +557,78 @@ func TestApply_MaxSuspendedSubAgents(t *testing.T) {
 		t.Errorf("error must name the knob, got %q", err)
 	}
 }
+
+// TestApply_DelegationTreeLimits: the three delegation-tree caps are applied
+// when set and left at their engine defaults (0 = default) when omitted.
+func TestApply_DelegationTreeLimits(t *testing.T) {
+	cfg := &engine.EngineConfig{}
+	err := Apply(cfg, &File{Context: contextConfig{
+		MaxConcurrentSubAgents: 4,
+		MaxSubAgentDepth:       3,
+		RunSubAgentTokenBudget: 2000000,
+	}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if cfg.MaxConcurrentSubAgents != 4 {
+		t.Errorf("MaxConcurrentSubAgents = %d, want 4", cfg.MaxConcurrentSubAgents)
+	}
+	if cfg.MaxSubAgentDepth != 3 {
+		t.Errorf("MaxSubAgentDepth = %d, want 3", cfg.MaxSubAgentDepth)
+	}
+	if cfg.RunSubAgentTokenBudget != 2000000 {
+		t.Errorf("RunSubAgentTokenBudget = %d, want 2000000", cfg.RunSubAgentTokenBudget)
+	}
+}
+
+// TestApply_DelegationTreeLimits_Omitted: 0 means "use the engine default", so
+// omitting the keys must not write anything into the config.
+func TestApply_DelegationTreeLimits_Omitted(t *testing.T) {
+	cfg := &engine.EngineConfig{}
+	if err := Apply(cfg, &File{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if cfg.MaxConcurrentSubAgents != 0 || cfg.MaxSubAgentDepth != 0 || cfg.RunSubAgentTokenBudget != 0 {
+		t.Errorf("omitted keys must stay 0, got %d/%d/%d",
+			cfg.MaxConcurrentSubAgents, cfg.MaxSubAgentDepth, cfg.RunSubAgentTokenBudget)
+	}
+}
+
+// TestApply_DelegationTreeLimits_Invalid: a zero/negative width or depth and a
+// token budget below -1 are typos — fail loud at startup, naming the key and
+// the legal values (the form every other [context] key uses).
+func TestApply_DelegationTreeLimits_Invalid(t *testing.T) {
+	cases := []struct {
+		name string
+		f    *File
+		want string
+	}{
+		{"negative width", &File{Context: contextConfig{MaxConcurrentSubAgents: -1}}, "max_concurrent_subagents"},
+		{"negative depth", &File{Context: contextConfig{MaxSubAgentDepth: -2}}, "max_subagent_depth"},
+		{"token below -1", &File{Context: contextConfig{RunSubAgentTokenBudget: -3}}, "run_sub_agent_token_budget"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Apply(&engine.EngineConfig{}, tc.f)
+			if err == nil {
+				t.Fatalf("expected a startup error naming %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error must name the key %q, got %q", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestApply_DelegationTreeLimits_Unlimited: -1 is the explicit opt-out for the
+// Run-level token cap and must survive Apply unchanged (never mistaken for
+// "unset, use the default").
+func TestApply_DelegationTreeLimits_Unlimited(t *testing.T) {
+	cfg := &engine.EngineConfig{}
+	if err := Apply(cfg, &File{Context: contextConfig{RunSubAgentTokenBudget: -1}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if cfg.RunSubAgentTokenBudget != -1 {
+		t.Errorf("RunSubAgentTokenBudget = %d, want -1", cfg.RunSubAgentTokenBudget)
+	}
+}
