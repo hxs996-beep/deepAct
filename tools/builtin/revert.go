@@ -20,6 +20,7 @@ func NewRevertTool() *RevertTool {
 func (t *RevertTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "revert",
+		Mutates:     true,
 		Description: "Revert a file to a previous version stored in the artifact store. The ref comes from the 'backup:' field in a previous edit tool result. Use this to undo an edit when the result is incorrect.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"ref":{"type":"string","description":"Artifact ref (sha256:xxx) from a previous edit backup"}},"required":["path","ref"]}`),
 	}

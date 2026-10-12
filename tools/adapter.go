@@ -26,6 +26,9 @@ func (e *EngineExecutor) Specs() []engine.ModelTool {
 				Description: spec.Description,
 				Parameters:  spec.Parameters,
 			},
+			Mutates:    spec.Mutates,
+			NovelInfo:  spec.NovelInfo,
+			Sequential: spec.Sequential,
 		})
 	}
 	return result

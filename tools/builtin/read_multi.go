@@ -19,7 +19,8 @@ func NewReadMultiTool() *ReadMultiTool {
 
 func (t *ReadMultiTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name: "read_multi",
+		Name:      "read_multi",
+		NovelInfo: true, // fans out over targets, each one new information
 		Description: "Read up to 8 file targets in one call, executed in parallel. Use this for fan-out " +
 			"exploration: when you need to understand several files/symbols/directions at once, list them " +
 			"as targets instead of issuing many single reads. Each target supports path + optional " +

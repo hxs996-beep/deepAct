@@ -33,7 +33,8 @@ func NewLSPToolWithOverrides(overrides map[string]LSPCommand) *LSPTool {
 
 func (t *LSPTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name: "lsp",
+		Name:      "lsp",
+		NovelInfo: true,
 		Description: `Interact with a language server for precise code intelligence. The server is
 selected automatically from the file extension (gopls for Go, typescript-language-server
 for TS/JS, pyright-langserver for Python, rust-analyzer for Rust, clangd for C/C++, and more).

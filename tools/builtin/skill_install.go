@@ -38,6 +38,7 @@ func NewSkillInstallTool(skillsDir string, reg *skill.Registry) *SkillInstallToo
 func (t *SkillInstallTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "skill_install",
+		Mutates:     true, // writes the skill to disk
 		Description: "Install a skill from the community registry. Fetches the skill definition by name and saves it to ~/.deepact/skills/<name>/SKILL.md. After installation, the skill is immediately available. Optionally provide a custom source_url to install from a specific skill file URL.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Skill name to install (e.g., 'brainstorming', 'debugging')"},"source_url":{"type":"string","description":"Optional: custom URL to a skill file (.md with YAML frontmatter). If omitted, fetches from the default community registry."}},"required":["name"]}`),
 	}

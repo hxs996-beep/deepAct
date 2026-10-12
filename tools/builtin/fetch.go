@@ -35,6 +35,7 @@ func NewFetchTool() *FetchTool {
 func (t *FetchTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "fetch",
+		NovelInfo:   true,
 		Description: "Fetch a web page and extract readable text content. Returns line-numbered text extracted from HTML, with metadata (URL, status code, content length). For large pages, full content is stored in the artifact store.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch (http/https)"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"}},"required":["url"]}`),
 	}

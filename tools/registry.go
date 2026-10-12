@@ -10,10 +10,25 @@ import (
 	"github.com/deepact/deepact/engine"
 )
 
+// ToolSpec describes a tool to the engine. The trailing fields are the tool's
+// OWN declaration of its semantics: the engine keys its scheduling and
+// progress decisions off them, so it never has to know a tool's name.
 type ToolSpec struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+
+	// Mutates: the tool changes files or system state. A successful call counts
+	// as progress — no name list needed to tell it from read-only work.
+	Mutates bool `json:"-"`
+	// NovelInfo: the tool returns information. A first-time call (per its own
+	// key shape) counts as progress; a repeat does not.
+	NovelInfo bool `json:"-"`
+	// Sequential: the engine must run this call ALONE and display its result as
+	// it lands (diff-style UX), instead of batching it with the others.
+	// false = batch. A tool that leaves it false must tolerate concurrent
+	// execution with its siblings.
+	Sequential bool `json:"-"`
 }
 
 type ToolContext struct {

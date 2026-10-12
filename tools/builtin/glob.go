@@ -22,6 +22,7 @@ func NewGlobTool() *GlobTool {
 func (t *GlobTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "glob",
+		NovelInfo:   true,
 		Description: "Find files matching a glob pattern. For searching symbols by name (e.g., finding which file defines a type/function), prefer `lsp workspaceSymbol` — it's more precise and doesn't require knowing the filename pattern in advance. `path` may be absolute — outside the working directory is allowed.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"max_results":{"type":"integer","description":"Maximum results (default 100)"}},"required":["pattern"]}`),
 	}

@@ -64,6 +64,7 @@ func NewWebSearchTool(cfg WebSearchConfig) *WebSearchTool {
 func (t *WebSearchTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "web_search",
+		NovelInfo:   true,
 		Description: "Search the web and return ranked results (title, URL, snippet) for a query. Use this to discover information, docs, references, or latest details you don't already know. Pair with the `fetch` tool to read a specific result's full page. Backed by Tavily; requires an API key (TAVILY_API_KEY or [search].api_key).",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Max results to return (default 5, max 20)"},"search_depth":{"type":"string","description":"basic (default) for fast results, advanced for deeper crawling"}},"required":["query"]}`),
 	}

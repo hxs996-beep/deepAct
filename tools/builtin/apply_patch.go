@@ -34,7 +34,9 @@ func NewApplyPatchTool() *ApplyPatchTool {
 
 func (t *ApplyPatchTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name: "apply_patch",
+		Name:       "apply_patch",
+		Mutates:    true,
+		Sequential: true, // diff-rendered: run alone and display each change
 		Description: "Apply a batch of file edits in one atomic call: update several sites and/or files, or add, delete and move files. " +
 			"Prefer apply_patch for multi-site changes and use edit for a single exact replacement. " +
 			"Updates locate old_string with progressively looser matching (exact substring, then ignoring trailing whitespace, then ignoring leading and trailing whitespace); " +

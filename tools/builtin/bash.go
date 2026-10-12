@@ -54,7 +54,12 @@ func NewBashToolWithBlocklist(blocklist map[string]string) *BashTool {
 
 func (t *BashTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name:        "bash",
+		Name:    "bash",
+		Mutates: true,
+		// Deliberately batched: bash output is not diff-rendered, and serializing
+		// it would slow the common mixed batch for no gain. Written down here so
+		// the deviation is declared by the tool, not implied by an engine list.
+		Sequential:  false,
 		Description: "Execute shell commands. Use for build/test/git/package-manager operations and anything not covered by a dedicated tool. Prefer read/write/edit/grep/glob/lsp for file inspection and code changes; prefer web_search/fetch for web content. Set workdir to run in another directory — no cd needed, and other projects/repos are allowed.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"workdir":{"type":"string"},"timeout":{"type":"integer"}},"required":["command"]}`),
 	}

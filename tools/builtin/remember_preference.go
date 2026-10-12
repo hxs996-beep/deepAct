@@ -28,7 +28,8 @@ func NewRememberPreferenceTool() *RememberPreferenceTool { return &RememberPrefe
 
 func (t *RememberPreferenceTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name: "remember_preference",
+		Name:    "remember_preference",
+		Mutates: true, // writes the project-root AGENTS.md
 		Description: "Append a durable user preference to the project-root AGENTS.md under the \"" + preferenceSectionHeading + "\" section, deduplicating identical bullets. " +
 			"Call this only AFTER the user explicitly agreed to record it (normally by first asking via ask_user). " +
 			"Record only stable preferences that will recur across future sessions, not one-off task-specific instructions. " +

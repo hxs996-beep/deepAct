@@ -191,6 +191,15 @@ type ModelMessage struct {
 type ModelTool struct {
 	Type     string
 	Function ModelToolFunction
+
+	// Declarative tool semantics, mirrored from tools.ToolSpec by the adapter.
+	// The engine schedules calls and scores progress from THESE, never from a
+	// tool-name list.
+	Mutates   bool
+	NovelInfo bool
+	// Sequential: run this call alone with progressive display; false = batch it
+	// with its siblings.
+	Sequential bool
 }
 
 type ModelToolFunction struct {

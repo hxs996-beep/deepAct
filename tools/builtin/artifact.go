@@ -22,7 +22,8 @@ func NewArtifactTool() *ArtifactTool {
 
 func (t *ArtifactTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
-		Name: "artifact",
+		Name:      "artifact",
+		NovelInfo: true, // reading back a stored output is new information
 		Description: "Read the full content of an artifact stored by a previous tool result. When a tool output is too " +
 			"large (truncated bash output, fetched page source, web_search results), the result carries a ref " +
 			"(sha256:xxx) — pass that ref here to read the stored content. Large artifacts support offset/limit " +
