@@ -164,21 +164,12 @@ func readMultiTargetScope(t readMultiTargetView) string {
 	return fmt.Sprintf("L%d-%d", start, t.Limit)
 }
 
+// extractPathField returns the call's target path. It accepts every alias the
+// tool layer accepts (path / file_path / filePath) by delegating to the one
+// extraction the rest of the engine uses, so the repeat key and the progress key
+// can never disagree about which file a call touches.
 func extractPathField(input json.RawMessage, workDir string) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return ""
-	}
-	if p, ok := m["path"].(string); ok {
-		return normalizePath(p, workDir)
-	}
-	if p, ok := m["file_path"].(string); ok {
-		return normalizePath(p, workDir)
-	}
-	return ""
+	return extractPathFromArgs(input, workDir)
 }
 
 // repeatKeys returns the per-target keys a tool call counts against for repeat

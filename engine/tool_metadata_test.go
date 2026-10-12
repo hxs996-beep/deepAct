@@ -229,3 +229,30 @@ func TestInterceptedTools_TableIsConsistent(t *testing.T) {
 		}
 	}
 }
+
+// extractToolKey must see the same path aliases the read path sees
+// (extractPathFromArgs accepts path / file_path / filePath). A tool call sent
+// with an alias the repeat key cannot see loses its key, so the model never
+// learns it is repeating itself — while the same file is tracked normally on the
+// read path.
+func TestExtractToolKey_PathAliases(t *testing.T) {
+	forms := []string{
+		`{"path":"a.go","old_string":"x","new_string":"y"}`,
+		`{"file_path":"a.go","old_string":"x","new_string":"y"}`,
+		`{"filePath":"a.go","old_string":"x","new_string":"y"}`,
+	}
+	var canonical string
+	for i, in := range forms {
+		got := extractToolKey(ToolCallRequest{Name: "edit", Input: json.RawMessage(in)}, "/repo")
+		if got == "" {
+			t.Fatalf("form %d produced no key: the alias is invisible to repeat tracking", i)
+		}
+		if i == 0 {
+			canonical = got
+			continue
+		}
+		if got != canonical {
+			t.Errorf("form %d key %q != canonical key %q", i, got, canonical)
+		}
+	}
+}
