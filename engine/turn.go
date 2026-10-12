@@ -524,15 +524,17 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		return TurnResult{Done: true, FinishReason: finish}, nil
 	}
 
-	// Intercept todo_write first: every early return below (task_complete,
-	// blocked call) ends the turn without reaching the normal tool-response
-	// path, so a snapshot arriving in the same assistant message would never
-	// reach the UI. The final "all completed" snapshot accompanies
-	// task_complete by design — dropping it leaves the step panel frozen on a
-	// stale state. Only the event is emitted here; the early returns below
-	// answer every tool_call_id themselves, so the messages returned here are
-	// discarded on those paths to keep the API contract (one response per id).
-	pendingTodoMsgs := e.processTodoWriteCalls(calls)
+	// Engine-side tool calls are answered by the engine, never dispatched to the
+	// tool registry (see interceptedTools). Interceptors marked `early` run here,
+	// before the early-return blocks below, because their side effects (the todo
+	// event) must happen even when the turn ends there. Their messages are
+	// appended in table order with everyone else's.
+	earlyInterceptMsgs := make(map[string][]Message)
+	for _, it := range interceptedTools() {
+		if it.early {
+			earlyInterceptMsgs[it.name] = it.handle(e, ctx, calls)
+		}
+	}
 
 	// Intercept task_complete: explicit completion signal from the LLM.
 	// When the model calls this tool, the turn ends immediately with the
@@ -613,89 +615,42 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 	}
 
-	// Check for load_skill tool call — intercept and return the skill's full content.
-	// Collect tool messages in a separate slice and add them AFTER the assistant
-	// message to satisfy DeepSeek API requirement: assistant(tool_calls) must be
-	// followed by tool messages responding to each tool_call_id.
-	pendingLoadMsgs := e.processLoadSkillCalls(calls)
-	pendingPlanMsgs := e.processPlanTaskCalls(calls)
-	pendingAskUserMsgs := e.processAskUserCalls(calls)
-	pendingAskUserMsgs = append(pendingAskUserMsgs, e.processAgentResumeCalls(ctx, calls)...)
-	pendingPollMsgs := e.processAgentPollCalls(calls)
-	pendingListMsgs := e.processListAgentsCalls(calls)
-	pendingWaitMsgs := e.processWaitAgentCalls(ctx, calls)
-	pendingSendMsgs := e.processSendMessageCalls(calls)
-	pendingInterruptMsgs := e.processInterruptAgentCalls(calls)
-	pendingCloseMsgs := e.processCloseAgentCalls(calls)
-
+	// The assistant(tool_calls) message goes in FIRST: the API contract is that
+	// every tool response below it follows the message that requested it.
 	e.history = append(e.history, assistant)
 
-	// Add load_skill tool messages AFTER the assistant message, so the
-	// DeepSeek API sees the correct order: assistant(tool_calls) → tool.
-	for _, msg := range pendingLoadMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingPlanMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingTodoMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingAskUserMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingPollMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingListMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingWaitMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingSendMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingInterruptMsgs {
-		e.history = append(e.history, msg)
-	}
-	for _, msg := range pendingCloseMsgs {
-		e.history = append(e.history, msg)
+	// Answer every engine-side call, in table order. Each of these tool messages
+	// closes one id of the assistant message just appended; a call that reached
+	// the registry instead would produce a second response for the same id and
+	// the API would reject the request.
+	for _, it := range interceptedTools() {
+		msgs := earlyInterceptMsgs[it.name]
+		if !it.early {
+			msgs = it.handle(e, ctx, calls)
+		}
+		for _, msg := range msgs {
+			e.history = append(e.history, msg)
+		}
 	}
 
-	// Separate handoff calls from regular tool calls.
-	// load_skill is already handled by the intercept block above
-	// (turn.go:363-416) — it must NOT enter regularCalls, or Execute will
-	// produce a duplicate tool message ("tool not found: load_skill")
-	// with the same tool_call_id, violating the API contract.
+	// Separate handoff calls from regular tool calls. Engine-side tools are
+	// excluded from the batch by the SAME table that answered them, so a new
+	// interceptor cannot fall through to Execute and produce a duplicate tool
+	// message for one tool_call_id.
+	intercepted := interceptedToolNames()
 	var handoffCalls []ToolCallRequest
 	var regularCalls []ToolCallRequest
 	for _, call := range calls {
-		if call.Name == HandoffToolName {
+		switch {
+		case call.Name == HandoffToolName:
 			handoffCalls = append(handoffCalls, call)
-		} else if call.Name == LoadSkillToolName {
+		case call.Name == TaskCompleteToolName:
+			// task_complete already ended the turn above; it must never be
+			// dispatched to the registry either.
 			continue
-		} else if call.Name == TodoWriteToolName {
-			continue
-		} else if call.Name == AskUserToolName {
-			continue
-		} else if call.Name == PlanTaskToolName {
-			continue
-		} else if call.Name == AgentPollToolName {
-			continue
-		} else if call.Name == AgentResumeToolName {
-			continue
-		} else if call.Name == ListAgentsToolName {
-			continue
-		} else if call.Name == WaitAgentToolName {
-			continue
-		} else if call.Name == SendMessageToolName {
-			continue
-		} else if call.Name == InterruptAgentToolName {
-			continue
-		} else if call.Name == CloseAgentToolName {
-			continue
-		} else {
+		case intercepted[call.Name]:
+			continue // answered by the engine (see interceptedTools)
+		default:
 			regularCalls = append(regularCalls, call)
 		}
 	}

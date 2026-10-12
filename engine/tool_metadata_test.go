@@ -176,3 +176,56 @@ func withExtra(specs map[string]ModelTool, name string, mutates, novelInfo bool)
 	out[name] = ModelTool{Type: "function", Function: ModelToolFunction{Name: name}, Mutates: mutates, NovelInfo: novelInfo}
 	return out
 }
+
+// Every engine-side tool must be in the interception table, or its calls fall
+// through to the registry: the engine has already answered the id, the registry
+// answers it again with "tool not found", and the API rejects the duplicate
+// response. This derives the requirement from the spec list the engine actually
+// offers, so adding an inline tool without a table entry fails here.
+func TestInterceptedTools_CoversEveryEngineInlineTool(t *testing.T) {
+	e := &Engine{tools: stubToolExecutor{}, isChinese: true}
+	intercepted := interceptedToolNames()
+	for _, spec := range e.toolSpecsWithHandoff() {
+		name := spec.Function.Name
+		if name == TaskCompleteToolName {
+			// task_complete ends the turn before the split, so it never reaches
+			// the batch; the split still refuses to dispatch it explicitly.
+			continue
+		}
+		if !intercepted[name] {
+			t.Errorf("engine-inline tool %q is missing from interceptedTools()", name)
+		}
+	}
+}
+
+// The table is the single source of truth: every entry needs a name and a
+// handler, names must be unique, and the derived exclusion set must match it
+// exactly (otherwise "answered by the engine" and "excluded from the batch"
+// could disagree in either direction).
+func TestInterceptedTools_TableIsConsistent(t *testing.T) {
+	table := interceptedTools()
+	seen := make(map[string]bool, len(table))
+	for _, it := range table {
+		if it.name == "" {
+			t.Error("intercepted tool with an empty name")
+			continue
+		}
+		if seen[it.name] {
+			t.Errorf("intercepted tool %q listed twice", it.name)
+		}
+		seen[it.name] = true
+		if it.handle == nil {
+			t.Errorf("intercepted tool %q has no handler", it.name)
+		}
+	}
+
+	set := interceptedToolNames()
+	if len(set) != len(table) {
+		t.Fatalf("name set has %d entries, table has %d", len(set), len(table))
+	}
+	for _, it := range table {
+		if !set[it.name] {
+			t.Errorf("%q missing from the derived name set", it.name)
+		}
+	}
+}
