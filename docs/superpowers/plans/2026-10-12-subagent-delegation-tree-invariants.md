@@ -1182,7 +1182,7 @@ git commit -m "test(engine): pin the six-way fan-out regression"
 
 计划已按任务 1-7 内联执行完毕；`make test`（`go test ./... -count=1 -race`）全绿。以下四处与计划原文不一致，**以仓库代码为准**：
 
-1. **不变量测试必须传 `NoNudge: true`**（计划原文未写）。非结构化 run 的纯文本回复**永远不算完成**——它被判定为叙述，3 击后以 `stalled_narration` 结束（`engine/sub_agent.go:669-679`）。计划里断言 `completed` 的用例原本会全部失败。这也是本次调研中一个宽范围 researcher 拿不到结果的同一个机制。
+1. **不变量测试必须传 `TextResult: true`**（计划原文写作 `NoNudge: true`；该字段已按语义更名为 `TextResult`，见 `2026-10-12-guard-conflict-fixes.md`）。非结构化、未声明 `TextResult` 的 run，纯文本回复**不算完成**——它被判定为叙述，`narrationStrikeLimit`（＝3）击后以 `stalled_narration` 结束（`engine/sub_agent.go:834-848`，判定与击数在 `:845`；常量在 `:34`）。计划里断言 `completed` 的用例原本会全部失败。这也是本次调研中一个宽范围 researcher 拿不到结果的同一个机制（collab 的 `researcher` 早已用 `StructuredResult` 规避；ratd 三个角色本次改为声明 `TextResult`）。
 2. **token「无上限」用例需同时给 per-run `TokenBudget: -1` 并循环 4 次**。单次 9M 用量会先撞 per-run 默认上限（2×上下文窗口 ≈ 2.1M），从而根本测不到 Run 级开关；4 次是为了让"若 -1 被误当成默认值（20 窗口 ≈ 21M）"这一回退在该用例里必定暴露。
 3. **两个既有并发测试需显式抬高宽度上限**：`TestSubAgentUniverse_ConcurrentSpawns` 与 `TestSubAgentBudget_ConcurrentRuns` 都压 8 路并发（高于新默认 6），现在各自 `SetMaxConcurrentSubAgents(8)` 并注明原因——它们测的是竞态与预算解析，不是上限。
 4. **未执行任务 7 步骤 4 的人工 `/collab` 冒烟**（当前为非交互执行环境）。已用 `TestSubAgentWidth_SixWayFanoutStillFits` 覆盖"6 方向默认宽度下不被拒"这一点；真实会话冒烟仍建议由人工补一次。

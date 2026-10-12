@@ -25,6 +25,20 @@ const (
 	// sub-agent context windows (~20M with a 1M window). Its job is to bound a
 	// runaway Run, not to be a daily budget.
 	defaultTreeBudgetWindows = 20
+
+	// narrationStrikeLimit is how many consecutive text-only replies (no tool
+	// calls) a non-structured run may produce before the engine ends it as
+	// stalled_narration. It is a completion contract, not a tuning knob: a role
+	// that delivers its payload as text declares AgentSpec.TextResult instead of
+	// relying on this.
+	narrationStrikeLimit = 3
+	// truncationStrikeLimit is how many consecutive responses cut off by the
+	// output cap (finish_reason=length) a run tolerates before giving up as
+	// max_tokens.
+	truncationStrikeLimit = 3
+	// blockedStrikeLimit is how many consecutive gate-refused tool calls (with
+	// no real dispatch in between) end a run as loop_detected.
+	blockedStrikeLimit = 3
 )
 
 // subAgentUniverseNames is the closed set of tools a sub-agent may ever be
@@ -782,7 +796,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		if len(msg.ToolCalls) == 0 {
 			if truncated {
 				consecutiveTruncation++
-				if consecutiveTruncation >= 3 {
+				if consecutiveTruncation >= truncationStrikeLimit {
 					result := r.buildResult(msg.Content, input.Goal)
 					result.FinishReason = HandoffReasonMaxTokens
 					result.Usage = &totalUsage
@@ -803,7 +817,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			// the harness parse fails.
 			if structured {
 				consecutiveIntermediate++
-				if consecutiveIntermediate >= 3 {
+				if consecutiveIntermediate >= narrationStrikeLimit {
 					result := r.buildResult(msg.Content, input.Goal)
 					result.FinishReason = HandoffReasonNoResult
 					result.Usage = &totalUsage
@@ -825,7 +839,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			// through an LLM judgment call. Text-only output is narration →
 			// 3-strike nudge → stalled_narration.
 			consecutiveIntermediate++
-			if consecutiveIntermediate >= 3 {
+			if consecutiveIntermediate >= narrationStrikeLimit {
 				// Break — model keeps producing text without acting
 				result := r.buildResult(msg.Content, input.Goal)
 				result.FinishReason = HandoffReasonStalledNarration
@@ -937,7 +951,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 					ToolCallID: call.ID,
 					Content:    blockedToolMessage(call.Name, effectiveNames, zhFromLang(input.UserLanguage)),
 				})
-				if consecutiveBlocked >= 3 {
+				if consecutiveBlocked >= blockedStrikeLimit {
 					return &HandoffResult{
 						Summary:      r.summarizeHistory(history, input.Goal),
 						FinishReason: HandoffReasonLoopDetected,
