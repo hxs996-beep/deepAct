@@ -44,6 +44,14 @@ const (
 	HandoffReasonMaxDepth         = "max_depth"         // nesting depth exceeded
 	HandoffReasonAwaitingUser     = "awaiting_user"     // sub-agent asked the user; parent must present the question
 	HandoffReasonBudgetExceeded   = "budget_exceeded"   // sub-agent exhausted its token budget (cache-miss + completion)
+	// HandoffReasonFanoutLimit and HandoffReasonTreeBudgetExceeded are
+	// REFUSALS, not failures: the delegation tree was already at its limit and
+	// nothing was run, so the result carries no partial output. Their headings
+	// must therefore never use the "partial result" wording the run-that-
+	// stopped-halfway reasons use — the parent's correct move is to collect a
+	// running result or do the step itself.
+	HandoffReasonFanoutLimit        = "fanout_limit"         // in-flight width cap reached
+	HandoffReasonTreeBudgetExceeded = "tree_budget_exceeded" // this Run's sub-agent token cap exhausted
 	// HandoffReasonAsyncRunning is the FinishReason on the immediate dispatch
 	// result of an async handoff (handoff_to_agent async:true). It is NOT a
 	// failure: the sub-agent is still running in the background and the
@@ -663,6 +671,10 @@ func handoffReasonHeading(reason string, runID string, zh bool) string {
 		return pickPrompt(zh, "Sub-agent stopped: max nesting depth reached.", "子代理停止：达到最大嵌套深度。")
 	case HandoffReasonBudgetExceeded:
 		return pickPrompt(zh, "Sub-agent exceeded its token budget (partial result):", "子代理超出 token 预算（部分结果）：")
+	case HandoffReasonFanoutLimit:
+		return pickPrompt(zh, "Delegation refused: too many sub-agents are already in flight.", "委派被拒：同时在跑的子代理已达上限。")
+	case HandoffReasonTreeBudgetExceeded:
+		return pickPrompt(zh, "Delegation refused: this Run's sub-agent token budget is exhausted.", "委派被拒：本次 Run 的子代理 token 预算已用完。")
 	case HandoffReasonAwaitingUser:
 		// Not a failure: the run stopped because it needs input the user must
 		// give. The handle is appended when the suspension was registered (top
