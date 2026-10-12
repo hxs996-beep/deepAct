@@ -1,6 +1,8 @@
 # 子代理委派树不变量 实现计划
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
+>
+> **执行环境约束（deepact）：** 本仓库的 `handoff_to_agent` 子代理是**只读**的（`read/read_multi/grep/glob/lsp/web_search/fetch`，见 `engine/sub_agent.go` 的只读宇宙），既不能写文件也不能跑 `go test`。因此"每个任务派一个子代理去实现"在本仓库里不成立：子代理最多能产出代码文本（`proposer`/`sub` 角色），落盘与验证必须由主代理完成。**推荐内联执行**；若要走子代理，只把它们当作"代码草拟/评审"环节，落盘与 `make test` 仍由主代理执行。
 
 **目标：** 给子代理委派树加三条确定性不变量——在跑宽度（默认 6）、嵌套深度（默认 2，可配置）、单次 Run 的 token 聚合上限（默认 20× 子代理上下文窗口）——三条共用一个准入点和一份计数状态，不引入任何"跑飞判定"启发式。
 
