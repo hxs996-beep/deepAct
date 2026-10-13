@@ -11,12 +11,18 @@ import (
 // registered in the tool registry and called by the engine.
 type ToolWrapper struct {
 	Client    *Client // initialized MCP client
-	MCPServer string // server name for tool name prefixing
+	MCPServer string  // server name for tool name prefixing
 	MCPTool   Tool    // the MCP tool definition
 }
 
 // Spec returns the tool specification for the engine.
 // The tool name is prefixed with "<server>_" to avoid collisions.
+//
+// An MCP tool declares NO semantics (Mutates / NovelInfo / Sequential): we do
+// not know what it does. The engine treats that as unclassifiable — the call runs
+// alone instead of in the parallel batch, and counts as progress — which is the
+// safe direction for a tool that might write. Declaring a semantic here would be
+// a deliberate act per server, not a default.
 func (w *ToolWrapper) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        w.MCPServer + "_" + w.MCPTool.Name,

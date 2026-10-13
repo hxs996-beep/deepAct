@@ -256,3 +256,51 @@ func TestExtractToolKey_PathAliases(t *testing.T) {
 		}
 	}
 }
+
+// A registered tool that declares nothing (an MCP wrapper) must run ALONE,
+// exactly like an unlisted one. The batch executes concurrently and the file
+// lock covers only edit/write, so batching a tool whose semantics are unknown is
+// the very hazard the declarations exist to remove.
+func TestSplitCallsByExecution_UnclassifiableRunsAlone(t *testing.T) {
+	wrapped := map[string]ModelTool{
+		"fs_write": {Type: "function", Function: ModelToolFunction{Name: "fs_write"}},
+	}
+	batch, sequential := splitCallsByExecution([]ToolCallRequest{{ID: "1", Name: "fs_write"}}, wrapped)
+	if len(batch) != 0 {
+		t.Errorf("unclassifiable tool must not be batched, got batch=%v", toolCallNames(batch))
+	}
+	if len(sequential) != 1 {
+		t.Fatalf("unclassifiable tool must run alone, got sequential=%v", toolCallNames(sequential))
+	}
+}
+
+// Scheduling and progress must agree on what "unclassifiable" means: a tool that
+// is trusted as progress while being batched (or vice versa) is how the two
+// halves of the same rule drift apart. This pins the shared predicate.
+func TestToolClassification_AgreesBetweenDecisions(t *testing.T) {
+	e := &Engine{config: EngineConfig{WorkDir: "/repo"}}
+	cases := []struct {
+		name  string
+		specs map[string]ModelTool
+	}{
+		{
+			"registered wrapper without semantics",
+			map[string]ModelTool{"wrapper": {Type: "function", Function: ModelToolFunction{Name: "wrapper"}}},
+		},
+		{"absent from the spec list", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := []ToolCallRequest{{ID: "1", Name: "wrapper", Input: json.RawMessage(`{}`)}}
+			batch, sequential := splitCallsByExecution(call, tc.specs)
+			progress := e.madeProgressFromCalls(call, map[string]string{"1": "ok"}, tc.specs)
+			if len(sequential) != 1 || len(batch) != 0 {
+				t.Errorf("expected the engine to run this call alone, got batch=%v sequential=%v",
+					toolCallNames(batch), toolCallNames(sequential))
+			}
+			if !progress {
+				t.Error("expected the engine to trust this call as progress")
+			}
+		})
+	}
+}

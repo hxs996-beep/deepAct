@@ -1240,15 +1240,27 @@ func (e *Engine) specsByName() map[string]ModelTool {
 	return m
 }
 
+// toolSemanticsKnown reports whether a tool told the engine what it does. A
+// registered tool that declares neither semantic — an MCP wrapper, currently —
+// is UNCLASSIFIABLE: the engine may neither call it safe to batch (it might
+// write) nor call a call to it "no progress". Scheduling and progress share
+// this predicate so the two can never disagree about the same tool.
+func toolSemanticsKnown(spec ModelTool) bool {
+	return spec.Mutates || spec.NovelInfo
+}
+
 // splitCallsByExecution partitions calls into those the engine runs alone and
 // those it may batch. A call runs alone when the tool declares Sequential
-// (diff-rendered work that needs progressive display) or when the engine has no
-// declaration for it at all — serial execution is the safe direction when the
-// engine cannot know what a tool does.
+// (diff-rendered work that needs progressive display) or when the engine cannot
+// classify the tool at all: absent from the spec list, or present without any
+// declared semantic (e.g. an MCP wrapper). Serial execution is the safe
+// direction there — the batch runs concurrently, and the file lock covers only
+// edit/write.
 func splitCallsByExecution(calls []ToolCallRequest, specs map[string]ModelTool) (batch, sequential []ToolCallRequest) {
 	for _, call := range calls {
 		spec, declared := specs[call.Name]
-		if !declared || spec.Sequential {
+		unclassifiable := !declared || !toolSemanticsKnown(spec)
+		if unclassifiable || spec.Sequential {
 			sequential = append(sequential, call)
 			continue
 		}
@@ -1278,6 +1290,7 @@ func (e *Engine) madeProgressFromCalls(calls []ToolCallRequest, statusByID map[s
 	progress := false
 	for _, c := range calls {
 		spec, declared := specs[c.Name]
+		unclassifiable := !declared || !toolSemanticsKnown(spec)
 		switch {
 		case c.Name == "read_multi":
 			// One call, several targets: every new (path, scope) is progress.
@@ -1303,7 +1316,9 @@ func (e *Engine) madeProgressFromCalls(calls []ToolCallRequest, statusByID map[s
 				e.progressKeys[key] = true
 				progress = true
 			}
-		case !declared || (!spec.Mutates && !spec.NovelInfo):
+		case unclassifiable:
+			// Same predicate the scheduler uses: a tool that declares nothing
+			// cannot be judged, so it is trusted rather than starved.
 			progress = true
 		}
 	}

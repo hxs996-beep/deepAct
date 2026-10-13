@@ -1329,3 +1329,25 @@ git commit -m "test(engine): pin ratd text-result completion; sync the audit doc
 
 - **未做真实会话人工冒烟**：`/ratd` 全流程、多轮只调 `artifact` 的只读会话、`bash`+`read` 混合批的性能表现。当前为非交互执行环境。已用测试覆盖对应性质：`TestRatdArbitrator_CompletesWithoutNudge`（一次文本回复即 `completed`）、`TestMadeProgressFromCalls_NovelInfoOnlyOnce`（artifact 读回计进展、重复不计）、`TestSplitCallsByExecution_FromMetadata`（bash 仍在并行批）。
 - **计划范围外的审计项保持原状**：只读宇宙元数据化（§2.5）、角色 enum 双源（§2.6）、UI 渲染元数据（§2.7）、提示块剥离边界（§4）、token 口径（§5）、安全层客观缺陷（§7）、单形态能力（§6）。见 `docs/code-review-report/deepact-2026-10-12-硬编码与护栏哲学审计.md`。
+
+### 复核修正（2026-10-12，审查意见 #1）
+
+**审查意见：** D4 的"未声明→串行"对 MCP 工具未生效——`splitCallsByExecution` 只把"不在 spec 列表里"视为未声明，而 MCP 包装器（`tools/mcp/tool.go` 的 `Spec()`）不设任何语义字段却仍在 `e.tools.Specs()` 里 → 被判为已声明且 `Sequential=false` → 进并行批，与 D4=a 及函数注释矛盾（后果正是审计 §2.2 要消除的"写类工具并发执行、无文件锁"）。
+
+**核实结论：成立。** `tools/mcp/tool.go:22-26` 确认无任何语义字段；MCP 包装器经 `cmd/run.go:449 registry.Register(wrapper)` 注册，故确实出现在 spec 列表里。`madeProgressFromCalls` 已按"无法分类"信任它 → 同一工具在调度与进展两处得到不一致的分类，D4 只落地了一半。
+
+**修法（对建议做了技术修正）：** 不复制判定式，而是抽出**共享谓词**，两处调用同一份定义，避免"同一事实两处维护"：
+
+```go
+// toolSemanticsKnown reports whether a tool told the engine what it does.
+func toolSemanticsKnown(spec ModelTool) bool { return spec.Mutates || spec.NovelInfo }
+```
+
+- `splitCallsByExecution`：`unclassifiable := !declared || !toolSemanticsKnown(spec)`；`if unclassifiable || spec.Sequential` → 串行
+- `madeProgressFromCalls`：同一 `unclassifiable` 走"信任为进展"分支
+
+**新增测试（已证明非空洞）**：`TestSplitCallsByExecution_UnclassifiableRunsAlone`（已注册但无语义 → 必须串行）、`TestToolClassification_AgreesBetweenDecisions`（同一 `unclassifiable` 输入下，调度与进展两个判断必须一致）。把缺陷临时还原后复跑，两条用例精确失败（`got batch=[fs_write]` / `batch=[wrapper] sequential=[]`），恢复后通过 —— 证明测试真的守着这条规则。
+
+**顺带写下契约**：`tools/mcp/tool.go` 的 `Spec()` 增加注释，说明 MCP 工具**有意不声明语义**，引擎按"无法分类"处理（串行 + 计进展），未来若要声明必须是逐 server 的自觉行为。
+
+**验证证据：** `make test` → 17 行、0 FAIL；改动文件 `gofmt -l` 干净。
