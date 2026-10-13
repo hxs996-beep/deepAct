@@ -65,6 +65,7 @@ The environment variable `DEEPSEEK_API_KEY` takes priority; a project-level `.de
 | `Enter` | Submit |
 | `Shift+Enter` | Newline |
 | `Tab` | Complete |
+| `↑` | Recall the last submitted input (empty box) |
 
 ### One-Line Tasks (from the shell)
 

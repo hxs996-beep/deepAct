@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -380,19 +381,53 @@ func truncateVisual(s string, maxW int) string {
 // When the selection carries a body snapshot (sel.Plain), extraction uses the
 // snapshot so the copied text matches what was highlighted at mouse-down
 // instead of the live (possibly shifted) view.
-func copySelection(plainLines []string, sel SelectionState) (string, error) {
+func (m Model) copySelection(plainLines []string, sel SelectionState) (string, error) {
 	plain := plainLines
 	if sel.Plain != nil {
 		plain = sel.Plain
 	}
-	text := extractSelectionText(plain, sel)
+	return m.copyText(extractSelectionText(plain, sel))
+}
+
+// copyInputSelection copies the selected input-box text to the clipboard.
+func (m Model) copyInputSelection() (string, error) {
+	return m.copyText(m.inputSelectionText())
+}
+
+// copyText writes text to the clipboard. It returns ("", nil) when there is
+// nothing to copy, so callers never report a copy that did not happen.
+// The writer is taken from the model (m.clipboardWrite) so a test can capture
+// the text without mutating process-wide state; a nil field means the system
+// clipboard, which keeps a zero-value Model usable.
+func (m Model) copyText(text string) (string, error) {
 	if text == "" {
 		return "", nil
 	}
-	if err := copyToClipboard(text); err != nil {
+	write := m.clipboardWrite
+	if write == nil {
+		write = copyToClipboard
+	}
+	if err := write(text); err != nil {
 		return "", err
 	}
 	return text, nil
+}
+
+// reportCopy records a copy attempt in the status bar. An empty selection is not
+// reported: a "✓ Copied" on a clipboard that was never written told the user
+// something false.
+func (m *Model) reportCopy(text string, err error) {
+	switch {
+	case err != nil:
+		m.clipboardError = err.Error()
+		m.clipboardFeedback = time.Now()
+	case text == "":
+		m.clipboardError = ""
+		m.clipboardFeedback = time.Time{}
+	default:
+		m.clipboardError = ""
+		m.clipboardFeedback = time.Now()
+	}
 }
 
 // copyToClipboard writes plain text to the system clipboard.

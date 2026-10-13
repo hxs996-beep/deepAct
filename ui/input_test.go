@@ -374,11 +374,11 @@ func TestPasteModeValueNoBareReset(t *testing.T) {
 	}
 }
 
-// TestWrapInputTextPreservesANSI verifies that wrapInputText never splits an
+// TestWrapInputRowsPreservesANSI verifies that wrapInputRows never splits an
 // ANSI escape sequence across a hard wrap. Long input lines containing the
 // styled paste indicator must wrap between printable characters, not inside
 // the escape sequence.
-func TestWrapInputTextPreservesANSI(t *testing.T) {
+func TestWrapInputRowsPreservesANSI(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 
 	ind := PasteIndicatorStyle.Render("[Pasted +4 lines]")
@@ -386,8 +386,11 @@ func TestWrapInputTextPreservesANSI(t *testing.T) {
 	// ("123 \x1b[38;5;240" accumulates exactly 13 before the final 'm').
 	text := "123 " + ind + " 456"
 
-	wrapped := wrapInputText(text, 13)
-	for _, line := range strings.Split(wrapped, "\n") {
+	rows, starts := wrapInputRows(text, 13)
+	if len(rows) == 0 || len(starts) != len(rows) {
+		t.Fatalf("wrapInputRows: %d rows, %d starts", len(rows), len(starts))
+	}
+	for _, line := range rows {
 		assertNoSplitANSISequence(t, line)
 	}
 }

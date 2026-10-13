@@ -160,6 +160,7 @@ type Model struct {
 
 	// Mouse drag selection
 	selection         SelectionState
+	inputSel          InputSelectionState
 	clipboardFeedback time.Time // timestamp of last clipboard copy for status bar feedback
 	clipboardError    string    // last clipboard error message, shown briefly in status bar
 	autoScrollDir     int       // auto-scroll direction during drag: -1=up, 0=none, +1=down
@@ -179,6 +180,17 @@ type Model struct {
 	// workDir is the current working directory, shown on the bottom row of
 	// the status bar (flush with the screen's bottom boundary).
 	workDir string
+
+	// lastSubmittedInput is the text of the most recent submission (typed
+	// message or steer). ↑ recalls it into an empty input box so a message
+	// sent before it was finished can be continued instead of retyped.
+	lastSubmittedInput string
+
+	// clipboardWrite is the writer the copy paths use; nil means the system
+	// clipboard (copyToClipboard). It is a field rather than a package variable
+	// so a test injects a stub per model instead of mutating state shared with
+	// every other test, which would break under t.Parallel().
+	clipboardWrite func(string) error
 }
 
 type messageRenderCache struct {
@@ -274,7 +286,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Handle motion events (drag) — they have Button=MouseButtonNone
 		if msg.Action == tea.MouseActionMotion {
-			if m.selection.Active {
+			if m.inputSel.Active {
+				// The input box is fixed on screen, so the drag maps against the
+				// live layout (the body selection needs its snapshot because
+				// streaming output shifts the transcript underneath it).
+				m.inputSel.End = m.inputRuneAt(msg.Y, msg.X)
+			} else if m.selection.Active {
 				sel := m.selection
 				// Map against the mouse-down snapshot, not the live view:
 				// streaming output may have appended lines and shifted the
@@ -326,6 +343,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.repaintCmd()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
+				// A new gesture supersedes the previous one: the status bar reports
+				// the last copy, so a press that copies nothing must not leave an
+				// earlier "✓ Copied" standing.
+				m.reportCopy("", nil)
+				// Below the body sit the popups, the input box and the status
+				// bar. A press there must not open a body selection: those rows
+				// draw no transcript, so it selected text the user never pointed
+				// at yet still reported "✓ Copied" on an untouched clipboard.
+				if top, height, ok := m.inputBoxRange(); ok && msg.Y >= m.bodyBottom() {
+					m.selection = SelectionState{}
+					if msg.Y < top+height {
+						idx := m.inputRowRuneAt(msg.Y-top, msg.X)
+						m.inputSel = InputSelectionState{Active: true, Start: idx, End: idx}
+					} else {
+						m.inputSel = InputSelectionState{}
+					}
+					return m, m.repaintCmd()
+				}
+				m.inputSel = InputSelectionState{}
 				// Snapshot the body at mouse-down. Selection indices anchor
 				// into this snapshot so highlight and copy stay correct even
 				// if streaming output later shifts the live view.
@@ -357,7 +393,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastMouseY = msg.Y
 				return m, m.repaintCmd()
 			} else if msg.Action == tea.MouseActionRelease {
-				if m.selection.Active {
+				if m.inputSel.Active {
+					m.inputSel.End = m.inputRuneAt(msg.Y, msg.X)
+					sel := m.inputSel
+					if _, _, selected := m.normalizeInputSelection(sel); !selected {
+						m.inputSel = InputSelectionState{}
+					} else {
+						sel.Active = false
+						sel.Done = true
+						m.inputSel = sel
+						text, err := m.copyInputSelection()
+						m.reportCopy(text, err)
+					}
+				} else if m.selection.Active {
 					sel := m.selection
 					sel.End = screenToLine(msg.Y, msg.X, sel.Scroll, sel.BodyHeight, len(sel.Plain))
 					sel.Active = false
@@ -370,13 +418,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// copySelection uses sel.Plain (the snapshot), so the
 						// clipboard receives exactly what was selected at
 						// mouse-down, not the live shifted view.
-						_, err := copySelection(nil, m.selection)
-						if err != nil {
-							m.clipboardError = err.Error()
-						} else {
-							m.clipboardError = ""
-						}
-						m.clipboardFeedback = time.Now()
+						text, err := m.copySelection(nil, m.selection)
+						m.reportCopy(text, err)
 					}
 				}
 				// Force full repaint on release: the selection highlight is
@@ -668,6 +711,11 @@ func (m Model) scrollUp() Model {
 	return m
 }
 
+// statusBarHeight is the fixed number of rows the status bar draws: top padding,
+// content line and workdir line. footerHeight, View and inputBoxRange all have
+// to agree on it.
+const statusBarHeight = 3
+
 // footerHeight computes the footer height the same way View() does: by
 // rendering the input line and any popups and summing their rendered row
 // counts. This is shared with View() (via computeLayout) so mouse coordinate
@@ -677,7 +725,7 @@ func (m Model) scrollUp() Model {
 func (m Model) footerHeight() int {
 	// Status bar is 3 lines: top padding, content line, workdir line — must
 	// stay in lockstep with View() Step 2.
-	h := 3 + renderedHeight(renderInputLine(m))
+	h := statusBarHeight + renderedHeight(renderInputLine(m))
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		h += renderedHeight(renderSuggestions(m, m.width))
 	}
@@ -703,10 +751,7 @@ func (m Model) computeLayout() (totalLines, bodyHeight int, plainLines []string)
 // plain line arrays. Used at mouse-down to snapshot the body so a selection
 // stays anchored even while streaming output shifts the live view.
 func (m Model) computeLayoutFull() (totalLines, bodyHeight int, rendered, plain []string) {
-	bh := m.height - m.footerHeight()
-	if bh < 1 {
-		bh = 1
-	}
+	bh := bodyBottomFor(m.height, m.footerHeight())
 	rendered, plain = m.renderBody(m.renderBodyWidth())
 	return len(plain), bh, rendered, plain
 }
@@ -755,7 +800,7 @@ func (m Model) View() string {
 	// ---- Step 2: Compute footer height — this area is FIXED and NEVER scrolls ----
 	// Status bar is always 3 lines (top padding, content line, workdir line —
 	// flush at the bottom boundary)
-	footerHeight := 3 + renderedHeight(inputLine)
+	footerHeight := statusBarHeight + renderedHeight(inputLine)
 	if suggestionPopup != "" {
 		footerHeight += renderedHeight(suggestionPopup)
 	}
@@ -932,6 +977,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any key press clears the current selection
 	if m.selection.Done {
 		m.selection = SelectionState{}
+	}
+	if m.inputSel.Done {
+		m.inputSel = InputSelectionState{}
 	}
 
 	// ---- Terminal escape split bracket tracker ----
@@ -1273,6 +1321,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// ---- ↑ recalls the last submitted input ----
+	// Submitting clears the buffer, so text sent before it was finished is
+	// gone. ↑ brings the last submission back into an EMPTY box for editing;
+	// a non-empty draft is never overwritten.
+	if msg.Type == tea.KeyUp && m.lastSubmittedInput != "" && m.inputBuf.Value() == "" {
+		m.inputBuf.SetValue(m.lastSubmittedInput)
+		return m, nil
+	}
+
 	// ---- Normal input handling ----
 	action := m.inputBuf.HandleKey(msg)
 
@@ -1281,9 +1338,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showSuggestions = false
 		m.activeOptions = nil
 		if m.state == stateRunning {
-			text := m.inputBuf.Value()
+			// SubmitContent returns the real content. In paste-shorthand mode
+			// Value() is only the visible "[Pasted +N lines]" indicator, which
+			// would be what the engine is steered with and what ↑ recalls.
+			text := m.inputBuf.SubmitContent()
 			m.inputBuf.SetValue("")
 			if strings.TrimSpace(text) != "" {
+				m.lastSubmittedInput = text
 				// Commands that stay available during a run (e.g. /help) are
 				// answered here; everything else is queued to the running agent
 				// as a steer message.
@@ -1445,6 +1506,8 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(content) == "" {
 		return m, nil
 	}
+	// Remember the submission so ↑ can recall it once the buffer is cleared.
+	m.lastSubmittedInput = content
 	if m.state == stateRunning {
 		return m, nil
 	}
@@ -3158,6 +3221,7 @@ func buildHelpText(commands []Command, tools []Suggestion) string {
 	b.WriteString("| `Enter` | Submit input |\n")
 	b.WriteString("| `Tab` | Autocomplete suggestion |\n")
 	b.WriteString("| `\u2191/\u2193` | Navigate suggestions |\n")
+	b.WriteString("| `\u2191` | Recall last submitted input (empty input box) |\n")
 	switch runtime.GOOS {
 	case "windows":
 		b.WriteString("| `Ctrl+Enter` | Insert newline |\n")
@@ -3261,26 +3325,7 @@ func renderInputLine(m Model) string {
 		return StatusBarStyle.Render(content)
 	}
 
-	runes := []rune(m.inputBuf.Value())
-	cursor := "█"
-
-	var left, right string
-	cursorPos := m.inputBuf.Cursor()
-	if cursorPos <= len(runes) {
-		left = string(runes[:cursorPos])
-		right = string(runes[cursorPos:])
-	} else {
-		left = m.inputBuf.Value()
-	}
-
-	innerWidth := m.width - 6
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-
-	text := left + cursor + right
-	wrapped := wrapInputText(text, innerWidth)
-	wLines := strings.Split(wrapped, "\n")
+	wLines, rowStarts := wrapInputRows(m.inputTextWithCaret(), m.inputInnerWidth())
 
 	var rows []string
 
@@ -3293,12 +3338,13 @@ func renderInputLine(m Model) string {
 		InputBarStyle.Render(bar)+
 			InputBlockStyle.Render(strings.Repeat(" ", m.width-1)))
 
-	for i, line := range wLines {
-		var prefix string
+	// Each row is highlighted against the offset it starts at, so the escape
+	// sequences highlightInputRow inserts cannot shift the next row.
+	for i, raw := range wLines {
+		line := m.highlightInputRow(raw, rowStarts[i])
+		prefix := inputContinuationPrefix
 		if i == 0 {
-			prefix = "  " + "> "
-		} else {
-			prefix = "    "
+			prefix = inputPrefix
 		}
 		content := prefix + line
 		padW := m.width - 1 - displayWidth(content)
@@ -3313,49 +3359,67 @@ func renderInputLine(m Model) string {
 	return strings.Join(rows, "\n")
 }
 
-func wrapInputText(text string, width int) string {
+// wrapInputRows wraps text the way the input box draws it and reports where each
+// drawn row starts in text.
+//
+// A real '\n' is a rune of text but never a rune of a row (splitting consumes
+// it), so a row's start offset has to add the newlines before it back; a hard
+// wrap breaks a row without consuming anything. Offsets therefore stay in
+// text's rune space — the space caretToBufferIndex/bufferToCaretIndex translate
+// into — which is what keeps the drag mapping, the highlight and the clipboard
+// slice in agreement.
+func wrapInputRows(text string, width int) (rows []string, starts []int) {
+	offset := 0
+	add := func(row string) {
+		rows = append(rows, row)
+		starts = append(starts, offset)
+		offset += utf8.RuneCountInString(row)
+	}
+
 	lines := strings.Split(text, "\n")
-	var result []string
-	for _, line := range lines {
+	for li, line := range lines {
 		if displayWidth(line) <= width {
-			result = append(result, line)
-			continue
-		}
-		// Hard-wrap by visual width, not rune count.
-		// This correctly handles CJK characters (visual width 2) and emoji.
-		// ANSI escape sequences (e.g. the styled paste indicator embedded in
-		// ib.text) are skipped as zero-width tokens so they are never split
-		// across a hard wrap — a split sequence would corrupt terminal parsing.
-		runes := []rune(line)
-		var chunk strings.Builder
-		chunkWidth := 0
-		for i := 0; i < len(runes); i++ {
-			r := runes[i]
-			if r == 0x1b {
-				// Copy the whole escape sequence into the chunk without
-				// counting its width, and without wrapping inside it.
-				start := i
-				i++
-				for i < len(runes) && runes[i] != 'm' {
+			add(line)
+		} else {
+			// Hard-wrap by visual width, not rune count.
+			// This correctly handles CJK characters (visual width 2) and emoji.
+			// ANSI escape sequences (e.g. the styled paste indicator embedded in
+			// ib.text) are skipped as zero-width tokens so they are never split
+			// across a hard wrap — a split sequence would corrupt terminal parsing.
+			runes := []rune(line)
+			var chunk strings.Builder
+			chunkWidth := 0
+			for i := 0; i < len(runes); i++ {
+				r := runes[i]
+				if r == 0x1b {
+					// Copy the whole escape sequence into the chunk without
+					// counting its width, and without wrapping inside it.
+					start := i
 					i++
+					for i < len(runes) && runes[i] != 'm' {
+						i++
+					}
+					chunk.WriteString(string(runes[start : i+1]))
+					continue
 				}
-				chunk.WriteString(string(runes[start : i+1]))
-				continue
+				rw := runeWidth(r)
+				if chunkWidth+rw > width && chunkWidth > 0 {
+					add(chunk.String())
+					chunk.Reset()
+					chunkWidth = 0
+				}
+				chunk.WriteRune(r)
+				chunkWidth += rw
 			}
-			rw := runeWidth(r)
-			if chunkWidth+rw > width && chunkWidth > 0 {
-				result = append(result, chunk.String())
-				chunk.Reset()
-				chunkWidth = 0
+			if chunkWidth > 0 {
+				add(chunk.String())
 			}
-			chunk.WriteRune(r)
-			chunkWidth += rw
 		}
-		if chunkWidth > 0 {
-			result = append(result, chunk.String())
+		if li < len(lines)-1 {
+			offset++ // the real '\n' that separated this line from the next
 		}
 	}
-	return strings.Join(result, "\n")
+	return rows, starts
 }
 
 func estimateCost(tokensIn, tokensOut, cacheHit int, modelName string, pricing *engine.PricingConfig) float64 {
@@ -3749,7 +3813,7 @@ func runeVisualWidth(r rune, size int) int {
 }
 
 // runeWidth returns the terminal display width of a single rune (already
-// decoded; used by wrapInputText/wrapLineAnsi where the rune comes from a
+// decoded; used by wrapInputRows/wrapLineAnsi where the rune comes from a
 // []rune slice). U+FFFD (replacement char from cutting a multi-byte rune) is
 // rendered 1 column by terminals and ansi/lipgloss count it as 1. Box Drawing
 // / Block Elements (U+2500-U+259F) are likewise pinned to 1 column — see

@@ -348,7 +348,12 @@ func TestExtractSelectionText_WithContent(t *testing.T) {
 // ---- copySelection tests ----
 
 func TestCopySelection_EmptyText(t *testing.T) {
-	text, err := copySelection([]string{"hello"}, SelectionState{})
+	m := NewModel(nil, engine.PricingConfig{})
+	m.clipboardWrite = func(string) error {
+		t.Error("an empty selection must not write to the clipboard")
+		return nil
+	}
+	text, err := m.copySelection([]string{"hello"}, SelectionState{})
 	if text != "" || err != nil {
 		t.Errorf("empty selection: want ('', nil), got (%q, %v)", text, err)
 	}
