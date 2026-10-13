@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-
-	"github.com/deepact/deepact/engine"
 )
 
 // ToolSpec describes a tool to the engine. The trailing fields are the tool's
@@ -36,10 +34,9 @@ type ToolContext struct {
 	SessionID   string
 	TurnNumber  int
 	ArtifactDir string // base directory for artifact store (e.g., ~/.deepact/artifacts)
-	// Ctx/Depth/UserLang mirror engine.ToolExecContext — see engine/types.go.
+	// Ctx/Depth mirror engine.ToolExecContext — see engine/types.go.
 	Ctx      context.Context
 	Depth    int
-	UserLang engine.UserLanguage
 }
 
 type ToolResultEnvelope struct {

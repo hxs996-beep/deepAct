@@ -3,7 +3,6 @@ package context
 import (
 	"os"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/deepact/deepact/context/promptset"
@@ -12,19 +11,16 @@ import (
 )
 
 type ContextAssembler struct {
-	systemPromptWithLang string // system prompt in the detected user language, built once and cached
-	projectRoot          string
-	estimator            *llm.TokenEstimator
-	envInfo              EnvironmentInfo     // session-stable env info, built once at startup
-	userLang             engine.UserLanguage // detected once from first user message, locked for the whole session
-	userLangSet          bool                // true once first-user-message language has been determined (LangUnset means "no user message yet")
-	stableSessionBlock   string              // built once from envInfo + userLang, cached for cache stability
-	skillsBlock          string              // built once from skill registry, cached for cache stability
-	agentsBlock          string              // rendered AGENTS.md content in the stable zone; built once at startup, cached
+	systemPrompt       string // canonical system prompt, built once and cached
+	projectRoot        string
+	estimator          *llm.TokenEstimator
+	envInfo            EnvironmentInfo // session-stable env info, built once at startup
+	stableSessionBlock string         // built once from envInfo, cached for cache stability
+	skillsBlock        string         // built once from skill registry, cached for cache stability
+	agentsBlock        string         // rendered AGENTS.md content in the stable zone; built once at startup, cached
 }
 
 func NewContextAssembler(projectRoot string, estimator *llm.TokenEstimator) *ContextAssembler {
-	// systemPrompt is built lazily once userLang is known (see Build).
 	if estimator == nil {
 		estimator = llm.NewTokenEstimator()
 	}
@@ -58,7 +54,7 @@ func (a *ContextAssembler) SetAgentsBlock(rendered string) {
 // Blocks not built yet (no user message / no skills) are omitted.
 func (a *ContextAssembler) InjectedBlocks() []string {
 	blocks := make([]string, 0, 3)
-	for _, b := range []string{a.systemPromptWithLang, a.stableSessionBlock, a.skillsBlock} {
+	for _, b := range []string{a.systemPrompt, a.stableSessionBlock, a.skillsBlock} {
 		if b != "" {
 			blocks = append(blocks, b)
 		}
@@ -71,42 +67,28 @@ func (a *ContextAssembler) Build(state *engine.TaskState, history []engine.Messa
 
 	// === STABLE ZONE (TOP — prefix cache friendly) ===
 	// Message 1: System prompt — identical every turn → cached ✓
-	// Built once from the detected user language's prompt set (see below).
-	prompt := a.systemPromptWithLang
-	if prompt == "" {
-		prompt = "(loading...)"
+	// Built once from the single canonical (English) prompt set. The prompt is
+	// language-independent, so no per-session language gate is needed.
+	if a.systemPrompt == "" {
+		langPacks := GetLangPacks(DetectLanguages(a.projectRoot))
+		prompts := promptset.Get()
+		a.systemPrompt = prompts.System + "\n\n# Language Pack\n" + langPacks + "\n\n" + prompts.Examples
 	}
 	// The skills catalog ships inside the system message so the model treats it
 	// as a system-level instruction; whether to load a skill stays the model's own
 	// decision. The block is stable across the session, so the system prefix still
 	// caches as one piece.
+	prompt := a.systemPrompt
 	if a.skillsBlock != "" {
 		prompt += "\n\n" + a.skillsBlock
 	}
 	messages = append(messages, engine.ModelMessage{Role: "system", Content: prompt})
 
-	// Message 2: Session-stable context — language detected from the FIRST
-	// user message and locked for the session (see detectUserLanguage). We only
-	// resolve it once the first real user message is present, then cache both
-	// the language and the assembled block so they never change again — this
-	// keeps the prefix stable for DeepSeek's cache AND prevents later English
-	// confirmations ("ok") from flipping the locked language.
-	if !a.userLangSet && hasFirstUserMessage(history) {
-		a.userLang = detectUserLanguage(history)
-		a.userLangSet = true
-	}
-	// Once userLang is known, build the system prompt from the single canonical
-	// prompt set. This is done once and cached, keeping the prefix stable across
-	// turns. The prompt instructs the model to respond in the user's language,
-	// so one set suffices regardless of session language — including English,
-	// whose language value is explicit (engine.LangEnglish) rather than empty.
-	if a.userLangSet && a.systemPromptWithLang == "" {
-		langPacks := GetLangPacks(DetectLanguages(a.projectRoot), a.userLang)
-		prompts := promptset.Get()
-		a.systemPromptWithLang = prompts.System + "\n\n# Language Pack\n" + langPacks + "\n\n" + prompts.Examples
-	}
-	if a.stableSessionBlock == "" && a.userLangSet {
-		a.stableSessionBlock = BuildStableSessionContext(a.envInfo, a.userLang)
+	// Message 2: Session-stable context — the environment block. Built once and
+	// cached so it never changes across turns, keeping the prefix stable for
+	// DeepSeek's cache.
+	if a.stableSessionBlock == "" {
+		a.stableSessionBlock = BuildStableSessionContext(a.envInfo)
 		if a.agentsBlock != "" {
 			a.stableSessionBlock += a.agentsBlock
 		}
@@ -168,17 +150,9 @@ func buildEnvironmentInfo(root string) EnvironmentInfo {
 	}
 }
 
-// hasFirstUserMessage reports whether history contains at least one non-empty
-// user message. Used to defer language detection until the first real user
-// turn arrives (the engine may call Build before any user input).
-func hasFirstUserMessage(history []engine.Message) bool {
-	for _, m := range history {
-		if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
-			return true
-		}
-	}
-	return false
-}
+// hasFirstUserMessage was used to defer prompt building until the session
+// language could be locked; the prompt is now language-independent, so it is
+// gone.
 
 func mapMessage(msg engine.Message) engine.ModelMessage {
 	model := engine.ModelMessage{

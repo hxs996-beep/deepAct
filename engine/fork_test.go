@@ -146,7 +146,7 @@ func TestForkTurns_ReachTheRun(t *testing.T) {
 		a := &handoffCaptureAgent{id: "cap", got: make(chan Handoff, 1)}
 		reg := NewAgentRegistry()
 		reg.Register(a)
-		e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+		e := &Engine{agents: reg, state: &TaskState{}}
 		e.initBackgroundTasks()
 		e.history = forkHistory()
 		return e, a
@@ -155,7 +155,7 @@ func TestForkTurns_ReachTheRun(t *testing.T) {
 	e, a := newEngine()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "cap", Goal: "g", ForkTurns: "all",
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("sync handoff: %v", err)
 	}
 	if got := <-a.got; len(got.ForkedHistory) != 5 {
@@ -165,7 +165,7 @@ func TestForkTurns_ReachTheRun(t *testing.T) {
 	e, a = newEngine()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "cap", Goal: "g", ForkTurns: "all", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("async handoff: %v", err)
 	}
 	if got := <-a.got; len(got.ForkedHistory) != 5 {
@@ -183,7 +183,7 @@ func TestForkTurns_NestedDelegationDoesNotFork(t *testing.T) {
 
 	if _, err := r.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "cap", Goal: "g", ForkTurns: "all",
-	}, 1, "中文"); err != nil {
+	}, 1); err != nil {
 		t.Fatalf("nested handoff: %v", err)
 	}
 	if got := <-a.got; len(got.ForkedHistory) != 0 {

@@ -40,7 +40,7 @@ func (e *EngineExecutor) Execute(ctx engine.ToolExecContext, calls []engine.Tool
 	}
 	toolCtx := ToolContext{
 		WorkDir: ctx.WorkDir, SessionID: ctx.SessionID, TurnNumber: ctx.TurnNumber,
-		ArtifactDir: e.ArtifactDir, Ctx: ctx.Ctx, Depth: ctx.Depth, UserLang: ctx.UserLang,
+		ArtifactDir: e.ArtifactDir, Ctx: ctx.Ctx, Depth: ctx.Depth,
 	}
 	toolCalls := make([]ToolCall, 0, len(calls))
 	for _, call := range calls {

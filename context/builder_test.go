@@ -9,57 +9,6 @@ import (
 	"github.com/deepact/deepact/engine"
 )
 
-func TestHasFirstUserMessage(t *testing.T) {
-	tests := []struct {
-		name    string
-		history []engine.Message
-		want    bool
-	}{
-		{
-			name:    "empty history",
-			history: []engine.Message{},
-			want:    false,
-		},
-		{
-			name: "user message present",
-			history: []engine.Message{
-				{Role: "system", Content: "system prompt"},
-				{Role: "user", Content: "hello"},
-			},
-			want: true,
-		},
-		{
-			name: "only non-user messages",
-			history: []engine.Message{
-				{Role: "system", Content: "system prompt"},
-				{Role: "assistant", Content: "response"},
-			},
-			want: false,
-		},
-		{
-			name: "user message with only whitespace",
-			history: []engine.Message{
-				{Role: "user", Content: "   "},
-			},
-			want: false,
-		},
-		{
-			name: "multiple messages with user",
-			history: []engine.Message{
-				{Role: "assistant", Content: "first"},
-				{Role: "user", Content: "fix the bug"},
-				{Role: "assistant", Content: "ok"},
-			},
-			want: true,
-		},
-	}
-	for _, tt := range tests {
-		if got := hasFirstUserMessage(tt.history); got != tt.want {
-			t.Errorf("%s: hasFirstUserMessage = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
 func TestMapMessage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -120,8 +69,6 @@ func TestMapMessage(t *testing.T) {
 
 func TestBuild_AgentsBlockInStableZone(t *testing.T) {
 	assembler := NewContextAssembler(".", nil)
-	assembler.userLang = "中文"
-	assembler.userLangSet = true
 
 	agentsContent := "\n## Project Conventions (AGENTS.md)\n\n### AGENTS.md\n\n项目规则：用标准库\n"
 	assembler.SetAgentsBlock(agentsContent)
@@ -167,10 +114,10 @@ func TestBuild_EnglishSessionGetsSystemPrompt(t *testing.T) {
 		t.Error("system message does not start with the canonical prompt set")
 	}
 	if !strings.Contains(msgs[0].Content, "Detected project languages") {
-		t.Error("English session should get the English language-pack header")
+		t.Error("the system prompt should carry the language-pack header")
 	}
 	if !strings.Contains(msgs[1].Content, "# Block S: Session Context (Stable)") {
-		t.Error("English session should get the English Block S header")
+		t.Error("the stable context should carry the English Block S header")
 	}
 }
 
@@ -198,27 +145,21 @@ func TestBuild_SkillsBlockInSystemMessage(t *testing.T) {
 	}
 }
 
-// TestBuild_SystemPromptDeferredUntilFirstUserMessage keeps the placeholder's
-// intended meaning: it is only for the window before the first user message,
-// after which the prompt must be built from the locked language.
-func TestBuild_SystemPromptDeferredUntilFirstUserMessage(t *testing.T) {
+// TestBuild_SystemPromptBuiltOnFirstBuild locks the eager build: the prompt is
+// language-independent, so there is no placeholder window and the first Build
+// already carries the canonical prompt and the Block S header.
+func TestBuild_SystemPromptBuiltOnFirstBuild(t *testing.T) {
 	assembler := NewContextAssembler(".", nil)
 	state := &engine.TaskState{}
 
-	if msgs := assembler.Build(state, nil, nil); msgs[0].Content != "(loading...)" {
-		t.Fatalf("before the first user message system content = %q, want %q", msgs[0].Content, "(loading...)")
+	msgs := assembler.Build(state, nil, nil)
+	if msgs[0].Content == "" || msgs[0].Content == "(loading...)" {
+		t.Fatalf("the system prompt must be built on the first Build, got %q", msgs[0].Content)
 	}
-
-	history := []engine.Message{{Role: "user", Content: "修复这个 bug"}}
-	assembler.Build(state, history, nil) // warm-up build, mirrors executeTurn's estimation build
-	msgs := assembler.Build(state, history, nil)
-	if msgs[0].Content == "(loading...)" {
-		t.Fatal("system prompt must be built once the first user message arrives")
+	if !strings.Contains(msgs[0].Content, "Detected project languages") {
+		t.Error("the system prompt should carry the language-pack header")
 	}
-	if !strings.Contains(msgs[0].Content, "检测到的项目语言") {
-		t.Error("Chinese session should get the Chinese language-pack header")
-	}
-	if !strings.Contains(msgs[1].Content, "# Block S：会话上下文（固定）") {
-		t.Error("Chinese session should get the Chinese Block S header")
+	if !strings.Contains(msgs[1].Content, "# Block S: Session Context (Stable)") {
+		t.Error("the stable context should carry the English Block S header")
 	}
 }

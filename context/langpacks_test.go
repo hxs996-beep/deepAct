@@ -52,7 +52,7 @@ func TestGetLangPacks_IncludesGenericAndDetected(t *testing.T) {
 		{Lang: LangGo, Marker: "go.mod"},
 		{Lang: LangTypeScript, Marker: "tsconfig.json"},
 	}
-	got := GetLangPacks(hits, "")
+	got := GetLangPacks(hits)
 
 	for _, want := range []string{
 		"Detected project languages",
@@ -71,7 +71,7 @@ func TestGetLangPacks_IncludesGenericAndDetected(t *testing.T) {
 // TestGetLangPacks_GenericOnlyWhenNothingDetected: without a detection the block
 // still carries the cross-language baseline, and no language-specific rules.
 func TestGetLangPacks_GenericOnlyWhenNothingDetected(t *testing.T) {
-	got := GetLangPacks(nil, "")
+	got := GetLangPacks(nil)
 	if !strings.Contains(got, "# Generic Language Pack") {
 		t.Errorf("generic pack must always be present:\n%s", got)
 	}
@@ -80,21 +80,10 @@ func TestGetLangPacks_GenericOnlyWhenNothingDetected(t *testing.T) {
 	}
 }
 
-// TestGetLangPacks_ChineseVariant: a Chinese session gets the Chinese packs
-// where they exist (generic, go) and the English pack otherwise.
-func TestGetLangPacks_ChineseVariant(t *testing.T) {
-	got := GetLangPacks([]LanguageHit{{Lang: LangGo, Marker: "go.mod"}}, "中文")
-	for _, want := range []string{"检测到的项目语言", "# 通用语言包", "# Go 语言包"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Chinese pack block missing %q:\n%s", want, got)
-		}
-	}
-}
-
 // TestGetLangPacks_NoDuplicateGeneric: the generic pack appears exactly once
 // even when it is the only pack in play.
 func TestGetLangPacks_NoDuplicateGeneric(t *testing.T) {
-	got := GetLangPacks([]LanguageHit{{Lang: LangGeneric}}, "")
+	got := GetLangPacks([]LanguageHit{{Lang: LangGeneric}})
 	if n := strings.Count(got, "# Generic Language Pack"); n != 1 {
 		t.Errorf("generic pack appears %d times, want 1:\n%s", n, got)
 	}

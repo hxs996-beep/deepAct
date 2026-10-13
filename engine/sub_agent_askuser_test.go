@@ -49,7 +49,7 @@ func TestSubAgentAskUser_CarriesPartialFindings(t *testing.T) {
 	}}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, UserLanguage: "中文"})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -76,14 +76,14 @@ func TestSubAgentAskUser_NoFindingsMeansNoFallbackNoise(t *testing.T) {
 	}}
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, UserLanguage: "中文"})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if result.Summary != "问题：选哪个缓存？" {
+	if result.Summary != "Question: 选哪个缓存？" {
 		t.Errorf("Summary = %q, want just the question", result.Summary)
 	}
-	if strings.Contains(result.Summary, "请重试") || strings.Contains(result.Summary, "缩小任务范围") {
+	if strings.Contains(result.Summary, "Retry or narrow") {
 		t.Errorf("Summary must not carry summarizeHistory's retry fallback: %q", result.Summary)
 	}
 }

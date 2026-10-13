@@ -53,7 +53,6 @@ func TestHandleConfirmCommand_WithOptions_FirstPlanInjected(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese: true,
 		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
@@ -92,7 +91,6 @@ func TestConfirmOptions_AskUserWithOptions_Mounted(t *testing.T) {
 		context:   steerContextBuilder{},
 		state:     &TaskState{TaskID: "test"},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
 		guards:    &GuardSystem{scope: NewScopeGuard()},
 	}
 
@@ -168,7 +166,6 @@ func TestHandleConfirmCommand_Dangerous_Confirm(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
 		history:   []Message{{Role: "user", Content: "/confirm 1"}},
-		isChinese: true,
 		guards:    &GuardSystem{scope: guard},
 	}
 
@@ -185,7 +182,7 @@ func TestHandleConfirmCommand_Dangerous_Confirm(t *testing.T) {
 	for _, m := range e.history {
 		joined += m.Content + "\n"
 	}
-	if !strings.Contains(joined, "重新执行之前被阻断的命令") {
+	if !strings.Contains(joined, "re-issue the previously blocked command") {
 		t.Errorf("confirm path should inject re-issue hint, got %q", joined)
 	}
 }
@@ -196,7 +193,6 @@ func TestHandleConfirmCommand_Dangerous_Cancel(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{PendingDangerousCmd: "rm -rf /tmp/folder"},
 		history:   []Message{{Role: "user", Content: "/confirm 2"}},
-		isChinese: true,
 		guards:    &GuardSystem{scope: guard},
 	}
 

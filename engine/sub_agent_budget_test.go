@@ -45,8 +45,7 @@ func TestSubAgentBudget_HardStopCountsMissOnly(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -72,8 +71,7 @@ func TestSubAgentBudget_NudgeOnceBeforeStop(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	_, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -83,7 +81,7 @@ func TestSubAgentBudget_NudgeOnceBeforeStop(t *testing.T) {
 		if msg.Role == "tool" {
 			lastToolIdx = i
 		}
-		if strings.Contains(msg.Content, "预算只剩") {
+		if strings.Contains(msg.Content, "tokens remain in this run's budget") {
 			nudges++
 			nudgeIdx = i
 			if !strings.Contains(msg.Content, "200") {
@@ -124,7 +122,7 @@ func (m *tokenNudgeProbeModel) Complete(_ context.Context, req ModelRequest) (*M
 	m.lastReq = req
 	if !m.nudged {
 		for _, msg := range req.Messages {
-			if strings.Contains(msg.Content, "预算只剩") {
+			if strings.Contains(msg.Content, "tokens remain in this run's budget") {
 				m.nudged = true
 				break
 			}
@@ -164,8 +162,7 @@ func TestSubAgentBudget_NudgeStructuredNamesSubmitResult(t *testing.T) {
 	// injected into turn 9's request, so the submission lands at 900 — below the
 	// cap. (Right at the cap the hard stop returns before the submit branch.)
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, StructuredResult: true, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, StructuredResult: true, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -174,7 +171,7 @@ func TestSubAgentBudget_NudgeStructuredNamesSubmitResult(t *testing.T) {
 	}
 	found := false
 	for _, msg := range model.lastReq.Messages {
-		if strings.Contains(msg.Content, "预算只剩") && strings.Contains(msg.Content, "submit_result") {
+		if strings.Contains(msg.Content, "tokens remain in this run's budget") && strings.Contains(msg.Content, "submit_result") {
 			found = true
 		}
 	}
@@ -190,8 +187,7 @@ func TestSubAgentBudget_CompletionTokensCount(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -212,8 +208,7 @@ func TestSubAgentBudget_CacheHitsFree(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 15, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: 15, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -297,8 +292,7 @@ func TestSubAgentBudget_ExplicitUnlimitedRunsPastBudget(t *testing.T) {
 	runner.SetSubAgentTokenBudget(500)
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: -1, MaxIterations: 3, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", TokenBudget: -1, MaxIterations: 3, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -315,11 +309,11 @@ func TestSubAgentBudget_ExplicitUnlimitedRunsPastBudget(t *testing.T) {
 func TestSubAgentBudget_DigestHeading(t *testing.T) {
 	digest := formatHandoffResult(&HandoffResult{
 		Summary: "部分发现", FinishReason: HandoffReasonBudgetExceeded,
-	}, true)
-	if !strings.Contains(digest, "超出 token 预算") {
+	})
+	if !strings.Contains(digest, "exceeded its token budget") {
 		t.Errorf("digest must carry the budget heading, got %q", digest)
 	}
-	if strings.Contains(digest, "完成") && strings.Contains(digest, "子代理完成任务") {
+	if strings.Contains(digest, "Agent completed:") {
 		t.Errorf("budget_exceeded digest must not present as completed, got %q", digest)
 	}
 }
@@ -340,8 +334,7 @@ func TestSubAgentBudget_MaxIterationsCarriesUsage(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", MaxIterations: 3, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", MaxIterations: 3, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -373,8 +366,7 @@ func TestSubAgentBudget_ConcurrentRuns(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			result, err := runner.Run(context.Background(), Handoff{
-				Agent: AgentSub, Goal: "调研", StructuredResult: true, UserLanguage: "中文",
-			})
+				Agent: AgentSub, Goal: "调研", StructuredResult: true, })
 			if err != nil {
 				reasons[i] = "error: " + err.Error()
 				return

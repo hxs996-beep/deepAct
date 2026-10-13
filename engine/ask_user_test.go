@@ -8,7 +8,7 @@ import (
 )
 
 func TestAskUserToolSpec(t *testing.T) {
-	spec := askUserToolSpec(true)
+	spec := askUserToolSpec()
 	if spec.Function.Name != AskUserToolName {
 		t.Errorf("name = %q, want %q", spec.Function.Name, AskUserToolName)
 	}
@@ -140,7 +140,7 @@ func TestProcessAskUserCalls_IgnoresOtherTools(t *testing.T) {
 }
 
 func TestToolSpecsWithHandoff_IncludesAskUser(t *testing.T) {
-	e := &Engine{tools: stubToolExecutor{}, isChinese: true}
+	e := &Engine{tools: stubToolExecutor{}}
 	specs := e.toolSpecsWithHandoff()
 	found := false
 	for _, s := range specs {
@@ -193,7 +193,6 @@ func TestHandleConfirmCommand_WithOptions_SelectedPlanInjected(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 2"}},
-		isChinese: true,
 		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
@@ -217,7 +216,6 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 	e := &Engine{
 		state:     &TaskState{},
 		history:   []Message{{Role: "user", Content: "/confirm 5"}},
-		isChinese: true,
 		pendingAskUser: []*AskUserRequest{{
 			Question: "缓存方案选哪个？",
 			Options:  []string{"用 Redis 缓存", "改用 MySQL"},
@@ -228,7 +226,7 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 		t.Fatal("handleConfirmCommand should handle /confirm 5")
 	}
 	last := e.history[len(e.history)-1].Content
-	if !strings.Contains(last, "无效") {
+	if !strings.Contains(last, "out-of-range") {
 		t.Errorf("history should mention invalid option for out-of-range N, got %q", last)
 	}
 	if strings.Contains(last, "按报告执行") {
@@ -242,13 +240,9 @@ func TestHandleConfirmCommand_WithOptions_InvalidIndex(t *testing.T) {
 // askUserToolSpec 描述需包含软引导（建议改代码前用 ask_user 让用户确认方案），
 // 按会话语言单一渲染。这是能力层引导，替代已移除的引擎级 analysis gate。
 func TestAskUserToolSpec_SoftGuidance(t *testing.T) {
-	zhSpec := askUserToolSpec(true)
-	if !strings.Contains(zhSpec.Function.Description, "建议先用本工具向用户确认") {
-		t.Errorf("zh desc should contain soft guidance, got %q", zhSpec.Function.Description)
-	}
-	enSpec := askUserToolSpec(false)
-	if !strings.Contains(enSpec.Function.Description, "consider confirming with the user first") {
-		t.Errorf("en desc should contain soft guidance, got %q", enSpec.Function.Description)
+	spec := askUserToolSpec()
+	if !strings.Contains(spec.Function.Description, "consider confirming with the user first") {
+		t.Errorf("desc should contain soft guidance, got %q", spec.Function.Description)
 	}
 }
 

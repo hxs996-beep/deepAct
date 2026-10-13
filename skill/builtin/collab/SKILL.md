@@ -1,34 +1,34 @@
 ---
 name: collab
-description: 并行研究：把研究目标拆成多个互不重叠方向，并行委派子代理调研，再汇总成报告。需要多方向/多模块调研、交叉验证的深度分析时使用。
-when_to_use: 用户要求"调研""分析""研究"某主题、涉及多个模块/方向、或明确使用 /collab 时
+description: Parallel research — split a research goal into several non-overlapping directions, delegate them to sub-agents in parallel, then synthesize a report. Use for deep analysis that needs multi-direction / multi-module investigation and cross-checking.
+when_to_use: the user asks to "investigate", "analyze" or "research" a topic spanning several modules/directions, or explicitly uses /collab
 disable-model-invocation: true
-argument-hint: "<研究目标>"
+argument-hint: "<research goal>"
 ---
 
-# 并行研究（/collab）
+# Parallel research (/collab)
 
-## 编排（模型自主）
+## Orchestration (the model decides)
 
-0. **规划阶段**（先做，不委派）：先用只读工具吃透背景——用户原始请求全文、相关代码、目录树、AGENTS.md、现有模式。形成**全局框架**：目标、拆解理由、初步方向草图及可能的关系。
-1. **拆解**（不委派）：在全局框架基础上，把研究目标拆成 2-6 个互不重叠的研究方向。每个方向自包含——独立子代理无共享上下文，仅凭方向描述 + context 就能开工。用 `todo_write` 记录方向时，给每个方向一个短稳定 `id`（如 `dir-1`），UI 靠它把子代理嵌到对应方向下。
-2. **并行委派**：对每个方向发起一次 `handoff_to_agent`（**agent="researcher"**，引擎内置只读调研角色，自带研究员 persona 与只读工具白名单），**一轮内并行发出多个 handoff**（引擎天然并行）。每个 handoff 参数：
-   - `goal`：**只放研究方向描述**（角色 persona 已由 researcher 内置，无需重复）
-   - `step`：填该方向在 `todo_write` 里的 `id`，UI 会把这次委派的子代理缩进到该方向下；不对应任何方向的委派则省略
-   - `context`：**必填**，包含三块：
-     a. **用户原始请求**全文（子代理了解问题背景）
-     b. **全局框架**（主 agent 规划阶段形成的目标、拆解理由、方向间关系）
-     c. **本方向定位**（本方向负责什么、边界在哪、与哪些方向互补，避免重复劳动）
-     context 必须足够详实，让子代理无需重新探索背景即可开工。
-   - `expected_output`：`"研究小结：结论 + 关键证据 file:line 引用"`
-   - （可选）`constraints`：如需要补充角色 persona 之外的约束；纯只读调研无需再写"不改文件"——researcher 工具白名单已限只读。
-3. **汇总**（不委派）：合并各 worker 报告，对照全局框架做交叉分析（找矛盾、验证证据、标注未验证假设），产出结构化研究报告。
+0. **Planning phase** (do this first, no delegation): use read-only tools to absorb the background — the user's full original request, the relevant code, the directory tree, AGENTS.md, and existing patterns. Build a **global framework**: the goal, the rationale for the split, a first sketch of directions and how they relate.
+1. **Decompose** (no delegation): based on the global framework, split the research goal into 2-6 non-overlapping directions. Each direction must be self-contained — an independent sub-agent shares no context, so it must be able to start from the direction description + context alone. When recording directions with `todo_write`, give each a short stable `id` (e.g. `dir-1`); the UI uses it to nest the sub-agent under that direction.
+2. **Delegate in parallel**: issue one `handoff_to_agent` per direction (**agent="researcher"**, the engine's built-in read-only investigation role, with its own researcher persona and read-only tool allowlist), **in a single turn** (the engine runs them in parallel). Parameters per handoff:
+   - `goal`: **the direction description only** (the role persona is built into `researcher`; do not repeat it)
+   - `step`: the `id` of this direction from `todo_write`; the UI indents the delegated sub-agent under that direction. Omit it when the delegation does not map to a direction
+   - `context`: **required**, containing three parts:
+     a. the **user's full original request** (so the sub-agent understands the problem)
+     b. the **global framework** (goal, split rationale, how the directions relate, from the planning phase)
+     c. **this direction's remit** (what it owns, its boundary, which directions it complements, to avoid duplicated work)
+     The context must be detailed enough that the sub-agent can start without re-exploring the background.
+   - `expected_output`: `"Research note: conclusion + key evidence with file:line references"`
+   - (optional) `constraints`: only to add constraints beyond the role persona; a pure read-only investigation needs no "do not modify files" — the researcher allowlist is already read-only.
+3. **Synthesize** (no delegation): merge the worker reports, cross-analyze against the global framework (find contradictions, verify evidence, mark unverified assumptions), and produce a structured research report.
 
-## 说明
-- `researcher` 是引擎内置的具名角色（`AgentResearcher`）：稳定 persona（"你是研究员……"）、只读工具白名单（`read/grep/glob/lsp`）、**轮次上限 15**、**结构化角色**（必须调用 `submit_result` 提交研究小结——纯文本不算完成），goal 只需放研究方向。
-- 所有方向调研完毕 → `task_complete`，交付研究报告：总体结论 + 各方向发现 + 跨方向综合分析 + 未验证假设。
-- 单方向失败：你自己决定重试/降级/标注，不隐藏失败。
+## Notes
+- `researcher` is an engine built-in named role (`AgentResearcher`): a stable persona (an independent investigator), a read-only tool allowlist (`read/grep/glob/lsp`), a **15-turn cap**, and a **structured role** (it must call `submit_result` to submit its note — plain text does not complete it). The `goal` only carries the direction.
+- When all directions are done → `task_complete`, delivering: overall conclusion + per-direction findings + cross-direction analysis + unverified assumptions.
+- A single direction failing: you decide whether to retry / degrade / mark it; never hide a failure.
 
-## 注意
-- 会话语言为中文时使用上面中文角色提示；英文时译为英文。
-- 深度纪律：每个方向必须真实读代码取证，禁止凭印象；worker 结果中的 file:line 你应抽查复核。
+## Caveats
+- Write the `goal` in the user's language; keep the tool calls themselves as described.
+- Depth discipline: every direction must actually read code for evidence — no impressions; cross-check the file:line citations in worker results.

@@ -27,8 +27,7 @@ func TestExecuteTurn_EmitsContentDelta(t *testing.T) {
 				events = append(events, ev)
 			},
 		},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -71,8 +70,7 @@ func TestExecuteTurn_NoContentDeltaForEmptyChunk(t *testing.T) {
 				events = append(events, ev)
 			},
 		},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -113,8 +111,7 @@ func TestExecuteTurn_SegmentsOnBlankLine(t *testing.T) {
 				events = append(events, ev)
 			},
 		},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -158,8 +155,7 @@ func TestExecuteTurn_ParagraphSpansChunks(t *testing.T) {
 				events = append(events, ev)
 			},
 		},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -207,8 +203,7 @@ func TestExecuteTurn_ForceFlushLongParagraph(t *testing.T) {
 				events = append(events, ev)
 			},
 		},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {

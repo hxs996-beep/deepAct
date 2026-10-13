@@ -87,19 +87,11 @@ type GuardSystem struct {
 	scope *ScopeGuard
 }
 
-// SetLanguage propagates the session-locked language flag to the scope guard
-// for bilingual dangerous-command prompts.
-func (g *GuardSystem) SetLanguage(zh bool) {
-	if g == nil || g.scope == nil {
-		return
-	}
-	g.scope.SetLanguage(zh)
-}
+// SetLanguage is gone: guard messages are English-only.
 
 type ScopeGuard struct {
 	dangerousPending   string // normalized command pending user confirmation
 	dangerousConfirmed map[string]bool
-	isChinese          bool // session-locked language flag for bilingual prompts
 
 	// Approval policy (see engine/approval.go). Zero values reproduce the
 	// historical behaviour: no rules, nothing remembered, ask on project-level
@@ -115,10 +107,7 @@ func NewScopeGuard() *ScopeGuard {
 	}
 }
 
-// SetLanguage sets the session-locked language flag used for bilingual guard messages.
-func (g *ScopeGuard) SetLanguage(zh bool) {
-	g.isChinese = zh
-}
+// SetLanguage is gone: guard messages are English-only.
 
 // ConfirmDangerous marks a pending dangerous command as confirmed by the user
 // and reports it to the host so the confirmation outlives this process. The
@@ -219,5 +208,5 @@ func checkDangerousBash(input json.RawMessage, g *ScopeGuard) GuardAction {
 	// command with different spacing stays confirmed.
 	key := normalizeApprovalCommand(cmd)
 	g.dangerousPending = key
-	return GuardAction{Type: GuardAskUser, Message: approvalAskMessage(g.isChinese, reason, cmd)}
+	return GuardAction{Type: GuardAskUser, Message: approvalAskMessage(reason, cmd)}
 }

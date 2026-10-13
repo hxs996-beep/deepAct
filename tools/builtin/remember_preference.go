@@ -15,7 +15,12 @@ import (
 // durable user preferences are recorded. The loader injects AGENTS.md verbatim
 // into the stable prompt, so one stable heading lets both humans and this tool
 // find the section without extra markers.
-const preferenceSectionHeading = "## 用户偏好"
+const preferenceSectionHeading = "## User Preferences"
+
+// legacyPreferenceHeadings are headings this tool wrote before the model-facing
+// text became English-only. They are still recognized — and renamed in place —
+// so an AGENTS.md written earlier does not end up with two preference sections.
+var legacyPreferenceHeadings = []string{"## 用户偏好"}
 
 // RememberPreferenceTool records a durable user preference into the project
 // AGENTS.md. It exists because preferences that are never written down force the
@@ -102,9 +107,17 @@ func upsertPreference(content, pref string) (string, bool) {
 	lines := strings.Split(content, "\n")
 
 	heading := -1
+	renamed := false
 	for i, ln := range lines {
-		if strings.TrimRight(ln, " \t\r") == preferenceSectionHeading {
+		trimmed := strings.TrimRight(ln, " \t\r")
+		if trimmed == preferenceSectionHeading {
 			heading = i
+			break
+		}
+		if isLegacyPreferenceHeading(trimmed) {
+			heading = i
+			lines[i] = preferenceSectionHeading
+			renamed = true
 			break
 		}
 	}
@@ -130,7 +143,7 @@ func upsertPreference(content, pref string) (string, bool) {
 	for i := heading + 1; i < end; i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "- ") {
 			if normalizePreference(strings.TrimPrefix(strings.TrimSpace(lines[i]), "- ")) == pref {
-				return content, false
+				return strings.Join(lines, "\n"), renamed
 			}
 		}
 	}
@@ -152,6 +165,17 @@ func upsertPreference(content, pref string) (string, bool) {
 	out = append(out, bullet)
 	out = append(out, lines[insert:]...)
 	return strings.Join(out, "\n"), true
+}
+
+// isLegacyPreferenceHeading reports whether ln is a preference heading this tool
+// wrote before the English-only switch (see legacyPreferenceHeadings).
+func isLegacyPreferenceHeading(ln string) bool {
+	for _, h := range legacyPreferenceHeadings {
+		if ln == h {
+			return true
+		}
+	}
+	return false
 }
 
 // writeAgentsFileAtomic writes data to path via a temp file + rename.

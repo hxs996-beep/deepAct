@@ -17,8 +17,7 @@ func TestExecuteTurn_NoStopHooks_TextOnlyDone(t *testing.T) {
 		state:     &TaskState{TurnNumber: 3, Goal: "分析代码"},
 		history:   []Message{{Role: "user", Content: "分析代码"}},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
-	}
+		}
 
 	result, err := e.executeTurn(context.Background())
 	if err != nil {

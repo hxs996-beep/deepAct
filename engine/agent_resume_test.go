@@ -25,9 +25,9 @@ func suspendMockAgent(summary string) *mockAgentForHandoff {
 func TestSuspendRegistersJobAndBindsQuestion(t *testing.T) {
 	reg := NewAgentRegistry()
 	reg.Register(suspendMockAgent("选哪个缓存？"))
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 
-	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "任务"}, 0, "中文")
+	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "任务"}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -87,14 +87,14 @@ func TestAsyncSuspendDoesNotStaleResult(t *testing.T) {
 	reg.Register(suspendMockAgent("选哪个？"))
 	var mu sync.Mutex
 	var events []string
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{},
+	e := &Engine{agents: reg, state: &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			mu.Lock()
 			events = append(events, ev.Type)
 			mu.Unlock()
 		}}}
 
-	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "任务", Async: true}, 0, "中文")
+	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "任务", Async: true}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -317,8 +317,7 @@ func TestAgentResumeIterationBudgetNotReset(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "g", MaxIterations: 3, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "g", MaxIterations: 3, })
 	if err != nil || result.Suspended == nil {
 		t.Fatalf("expected a suspension at the last allowed turn, got %+v err=%v", result, err)
 	}
@@ -523,15 +522,15 @@ func TestDigestHandleOnlyAtTopLevel(t *testing.T) {
 // TestFollowUpPinPointsAtResume: the pinned follow-up for awaiting_user must
 // point at agent_resume; other reasons keep the re-delegate wording.
 func TestFollowUpPinPointsAtResume(t *testing.T) {
-	zh := buildHandoffFollowUp(HandoffReasonAwaitingUser, true)
+	zh := buildHandoffFollowUp(HandoffReasonAwaitingUser)
 	if !strings.Contains(zh, "agent_resume") {
 		t.Errorf("awaiting_user pin must mention agent_resume, got %q", zh)
 	}
-	en := buildHandoffFollowUp(HandoffReasonAwaitingUser, false)
+	en := buildHandoffFollowUp(HandoffReasonAwaitingUser)
 	if !strings.Contains(en, "agent_resume") {
 		t.Errorf("english awaiting_user pin must mention agent_resume, got %q", en)
 	}
-	other := buildHandoffFollowUp(HandoffReasonMaxIterations, true)
+	other := buildHandoffFollowUp(HandoffReasonMaxIterations)
 	if strings.Contains(other, "agent_resume") {
 		t.Errorf("other reasons keep the re-delegate wording, got %q", other)
 	}

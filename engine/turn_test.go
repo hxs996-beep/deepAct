@@ -90,8 +90,7 @@ func TestExecuteTurn_ZeroToolCalls_TextOnlyDone(t *testing.T) {
 		state:     &TaskState{TurnNumber: 0},
 		history:   []Message{{Role: "user", Content: "执行方案"}},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
-	}
+		}
 
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -122,7 +121,6 @@ func TestExecuteTurn_FinalTextAfterToolCalls_Done(t *testing.T) {
 		state:            &TaskState{TurnNumber: 0},
 		history:          []Message{{Role: "user", Content: "执行方案"}},
 		config:           EngineConfig{ModelName: "test-model"},
-		isChinese:        true,
 		runToolCallCount: 2, // prior tool calls
 	}
 

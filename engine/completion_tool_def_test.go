@@ -6,7 +6,7 @@ import (
 )
 
 func TestTaskCompleteToolSpec(t *testing.T) {
-	spec := taskCompleteToolSpec(true)
+	spec := taskCompleteToolSpec()
 	if spec.Function.Name != TaskCompleteToolName {
 		t.Errorf("name = %q, want %q", spec.Function.Name, TaskCompleteToolName)
 	}
@@ -26,7 +26,7 @@ func TestTaskCompleteToolSpec(t *testing.T) {
 }
 
 func TestTaskCompleteToolSpec_English(t *testing.T) {
-	spec := taskCompleteToolSpec(false)
+	spec := taskCompleteToolSpec()
 	if spec.Function.Name != TaskCompleteToolName {
 		t.Errorf("name = %q, want %q", spec.Function.Name, TaskCompleteToolName)
 	}

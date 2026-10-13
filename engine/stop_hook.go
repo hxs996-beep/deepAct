@@ -12,7 +12,6 @@ type StopHookContext struct {
 	FinishReason       string // finish reason (stop/length/etc)
 	StopHookActive     bool   // true if this turn was triggered by a prior hook block
 	StopHookRetryCount int    // consecutive hook-triggered continuations
-	IsChinese          bool   // language preference for nudge message
 	Goal               string // current Run's user goal (e.state.Goal)
 	ToolCallSummary    string // brief summary of tools called this Run() (e.g. "grep×3, read×2")
 }

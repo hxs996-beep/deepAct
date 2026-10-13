@@ -229,7 +229,7 @@ func (e *Engine) finishResumedJob(ctx context.Context, id string, result *Handof
 		loopLog.Printf("resume cascade: %v (child %s result dropped)", err, id)
 		return
 	}
-	go e.resumeSuspendedJob(ctx, parentID, parentSuspended, formatHandoffResult(result, e.isChinese))
+	go e.resumeSuspendedJob(ctx, parentID, parentSuspended, formatHandoffResult(result))
 }
 
 // takeParentForCascade claims a parent entry for the cascade (mirrors

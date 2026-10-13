@@ -143,11 +143,8 @@ func (e *Engine) renderAgentList() string {
 // --- list_agents -------------------------------------------------------------
 
 // listAgentsToolSpec returns the tool definition for enumerating background jobs.
-func listAgentsToolSpec(zh bool) ModelTool {
+func listAgentsToolSpec() ModelTool {
 	desc := "List the background sub-agent jobs of this session with their status (running / done / awaiting_user), agent role, elapsed time and goal. Call it before dispatching more work to see what is already running."
-	if zh {
-		desc = "列出本会话的后台子代理任务及其状态（running / done / awaiting_user）、角色、已运行时长与目标。派发新任务前先用它查看已在运行的任务。"
-	}
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
@@ -206,11 +203,8 @@ func clampAgentWaitMS(ms int) int {
 }
 
 // waitAgentToolSpec returns the tool definition for waiting on background jobs.
-func waitAgentToolSpec(zh bool) ModelTool {
+func waitAgentToolSpec() ModelTool {
 	desc := "Block until one of the given background sub-agent jobs finishes or starts waiting for the user, the timeout elapses, or the turn is cancelled — then report each job's status. OBSERVES only: it never consumes a result, so collect a finished job with agent_poll(job_id) (and answer a waiting one with agent_resume). Omit job_ids to wait on every running job."
-	if zh {
-		desc = "阻塞等待，直到指定的后台子代理任务之一完成或进入等待用户输入、超时或本轮被取消，然后报告各任务状态。只观测、不消费结果——完成的任务之后仍要用 agent_poll(job_id) 取结果（等待用户输入的任务用 agent_resume 回答）。省略 job_ids 表示等待所有运行中的任务。"
-	}
 	return ModelTool{
 		Type: "function",
 		Function: ModelToolFunction{
@@ -371,15 +365,10 @@ type SendMessageParams struct {
 }
 
 // sendMessageToolSpec returns the tool definition for messaging a running job.
-func sendMessageToolSpec(zh bool) ModelTool {
+func sendMessageToolSpec() ModelTool {
 	desc := "Send a message to a RUNNING background sub-agent. It reads the message at its next step and can act on it (redirect the work, add a constraint, answer its question). Check its state with agent_poll first; for a job that is waiting for the user, use agent_resume instead."
 	jobDesc := "The job handle, e.g. bg-3"
 	msgDesc := "The message, phrased as an instruction or fact for the sub-agent"
-	if zh {
-		desc = "向正在运行的后台子代理发送一条消息。它会在下一步读到并据此行动（改方向、加约束、回答它的疑问）。先用 agent_poll 看状态；等待用户输入的任务请改用 agent_resume。"
-		jobDesc = "任务句柄，例如 bg-3"
-		msgDesc = "消息内容，写成给子代理的指令或事实"
-	}
 	params := fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
@@ -461,13 +450,9 @@ type AgentJobParams struct {
 }
 
 // interruptAgentToolSpec returns the tool definition for soft-stopping a job.
-func interruptAgentToolSpec(zh bool) ModelTool {
+func interruptAgentToolSpec() ModelTool {
 	desc := "Interrupt a running background sub-agent. It stops at its next safe point with finish_reason=cancelled; the job stays collectable, so fetch the partial result with agent_poll(job_id). Use it when the sub-agent has gone off track and letting it run would waste budget."
 	jobDesc := "The job handle, e.g. bg-3"
-	if zh {
-		desc = "中断正在运行的后台子代理。它会在下一个安全点停下（finish_reason=cancelled），任务仍可收集——用 agent_poll(job_id) 取部分结果。当子代理跑偏、继续运行会浪费预算时使用。"
-		jobDesc = "任务句柄，例如 bg-3"
-	}
 	params := fmt.Sprintf(`{
 		"type": "object",
 		"properties": {"job_id": {"type": "string", "description": %q}},
@@ -484,13 +469,9 @@ func interruptAgentToolSpec(zh bool) ModelTool {
 }
 
 // closeAgentToolSpec returns the tool definition for permanently dropping a job.
-func closeAgentToolSpec(zh bool) ModelTool {
+func closeAgentToolSpec() ModelTool {
 	desc := "Close a background sub-agent and every job below it, permanently. Unlike interrupt_agent, the job is removed and its result can no longer be collected — use it when the work is no longer wanted."
 	jobDesc := "The job handle, e.g. bg-3"
-	if zh {
-		desc = "彻底关闭一个后台子代理及其下级所有任务。与 interrupt_agent 不同，任务会被移除，结果不再可取——当这项工作已经不需要时使用。"
-		jobDesc = "任务句柄，例如 bg-3"
-	}
 	params := fmt.Sprintf(`{
 		"type": "object",
 		"properties": {"job_id": {"type": "string", "description": %q}},

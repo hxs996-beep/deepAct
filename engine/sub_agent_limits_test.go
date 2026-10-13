@@ -27,7 +27,7 @@ func TestHandoffReasonHeading_RefusalReasons(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.reason, func(t *testing.T) {
-			got := handoffReasonHeading(tc.reason, "", false)
+			got := handoffReasonHeading(tc.reason, "")
 			if !strings.Contains(strings.ToLower(got), tc.want) {
 				t.Errorf("heading for %q must say %q, got %q", tc.reason, tc.want, got)
 			}
@@ -315,8 +315,6 @@ func TestEngineRun_ResetsSubAgentBudget(t *testing.T) {
 func TestEngineRun_SubAgentBudgetNoticeOnce(t *testing.T) {
 	budget := &budgetStub{budget: 1000, spent: 900, noticeLeft: 1}
 	e := newTestEngineWithBudget(t, budget)
-	e.isChinese = true
-	e.langDetected = true
 
 	e.injectSubAgentBudgetNotice()
 	if len(e.pendingPinnedMessages) != 1 {
@@ -371,7 +369,6 @@ func newTestEngineWithBudget(t *testing.T, budget SubAgentBudget) *Engine {
 		context:   steerContextBuilder{},
 		state:     &TaskState{TaskID: "test"},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
 		guards:    &GuardSystem{scope: NewScopeGuard()},
 		subBudget: budget,
 	}

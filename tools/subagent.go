@@ -9,9 +9,8 @@ import (
 )
 
 // SubAgentBackend runs one handoff delegation. depth is the depth of the NEW
-// sub-agent (0 = first level). userLang is the session language (see
-// engine.UserLanguage).
-type SubAgentBackend func(ctx context.Context, params engine.HandoffToAgentParams, depth int, userLang engine.UserLanguage) (engine.ToolResult, error)
+// sub-agent (0 = first level).
+type SubAgentBackend func(ctx context.Context, params engine.HandoffToAgentParams, depth int) (engine.ToolResult, error)
 
 // AgentInfo describes a registered sub-agent for the handoff tool's dynamic
 // enum: the ID is the selectable value, Description tells the delegating model
@@ -96,9 +95,9 @@ func (t *SubAgentTool) Run(ctx ToolContext, input json.RawMessage) (ToolResultEn
 	var res engine.ToolResult
 	var err error
 	if ctx.Depth == 0 {
-		res, err = t.main(ctx.Ctx, params, 0, ctx.UserLang)
+		res, err = t.main(ctx.Ctx, params, 0)
 	} else {
-		res, err = t.nested(ctx.Ctx, params, ctx.Depth, ctx.UserLang)
+		res, err = t.nested(ctx.Ctx, params, ctx.Depth)
 	}
 	if err != nil {
 		return ToolResultEnvelope{Status: StatusError, Digest: err.Error()}, nil

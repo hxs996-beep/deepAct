@@ -329,8 +329,7 @@ func TestExecuteTurn_TaskCompleteDeferredWhileStepInProgress(t *testing.T) {
 		history:   []Message{{Role: "user", Content: "做完"}},
 		config:    EngineConfig{ModelName: "test-model", OnProgress: func(ev ProgressEvent) { events = append(events, ev) }},
 		guards:    &GuardSystem{scope: NewScopeGuard()},
-		isChinese: true,
-	}
+		}
 
 	result, err := e.executeTurn(context.Background())
 	if err != nil {

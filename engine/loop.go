@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	dlog "github.com/deepact/deepact/internal/log"
 	"github.com/deepact/deepact/skill"
@@ -174,13 +173,6 @@ type Engine struct {
 	// at Run start.
 	lastTodos     []TodoItem
 	todoNudgeSent bool
-
-	// isChinese is set once from the first user message in the session.
-	// All per-turn UI messages (skill list, activation prompts, etc.) use
-	// this instead of recomputing msgIsChinese per-turn, which would switch
-	// to English when the user types "ok"/"yes" to confirm.
-	isChinese    bool
-	langDetected bool
 
 	// memoryLoaded guards lazy persistent-memory loading. Memory is restored
 	// only on /resume (SetHistory), never at startup, so a fresh session
@@ -483,22 +475,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Ensure the background task table exists for this Run (paired with the
 	// cancelBackgroundTasks defer on exit).
 	e.initBackgroundTasks()
-	// Detect language once at session start, not per-turn.
-	// This prevents "ok"/"yes"/"confirm" from switching UI to English.
-	if !e.langDetected {
-		e.isChinese = msgIsChinese(userMsg)
-		e.langDetected = true
-		// Broadcast the session-locked language to the shared compressor and
-		// guard instances so their LLM prompts / messages pick the right variant.
-		userLang := UserLanguageFor(e.isChinese)
-		if e.compressor != nil {
-			e.compressor.SetUserLang(userLang)
-		}
-		if e.guards != nil {
-			e.guards.SetLanguage(e.isChinese)
-		}
-	}
-	zh := e.isChinese
 	if err := e.emitEvent("user_message", StageIntake, userMsg); err != nil {
 		return nil, err
 	}
@@ -538,26 +514,14 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		case "list":
 			skills := e.skills.All()
 			if len(skills) == 0 {
-				msg := "No skills available."
-				if zh {
-					msg = "当前没有可用技能。"
-				}
-				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+				return &EngineResponse{Summary: "No skills available.", Stage: StageAct}, nil
 			}
 			var b strings.Builder
-			if zh {
-				b.WriteString("## 可用的 Skills\n\n")
-			} else {
-				b.WriteString("## Available Skills\n\n")
-			}
+			b.WriteString("## Available Skills\n\n")
 			for _, s := range skills {
 				b.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
 			}
-			if zh {
-				b.WriteString("\n使用 `/<名称>` 加载指定技能。")
-			} else {
-				b.WriteString("\nUse `/<name>` to load a specific skill.")
-			}
+			b.WriteString("\nUse `/<name>` to load a specific skill.")
 			return &EngineResponse{Summary: b.String(), Stage: StageAct}, nil
 
 		case "load":
@@ -572,11 +536,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				}
 			}
 			if s == nil {
-				msg := fmt.Sprintf("Skill '%s' not found. Use `/skills` to list available skills.", sc.name)
-				if zh {
-					msg = fmt.Sprintf("技能 '%s' 不存在。使用 `/skills` 查看可用技能。", sc.name)
-				}
-				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+				return &EngineResponse{Summary: fmt.Sprintf("Skill '%s' not found. Use `/skills` to list available skills.", sc.name), Stage: StageAct}, nil
 			}
 			// Load semantics: inject the full content once for this turn,
 			// not persistently. Consumed at the next turn start (turn.go:80-86).
@@ -585,11 +545,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 
 			taskText := extractTaskTextAfterSkillCmd(userMsg, sc.name)
 			if taskText == "" {
-				msg := fmt.Sprintf("✓ Skill `%s` loaded. Full methodology injected for this turn.", s.Name)
-				if zh {
-					msg = fmt.Sprintf("✓ 已加载 skill `%s`：方法论已注入当前回合。", s.Name)
-				}
-				return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+				return &EngineResponse{Summary: fmt.Sprintf("✓ Skill `%s` loaded. Full methodology injected for this turn.", s.Name), Stage: StageAct}, nil
 			}
 			if len(e.history) > 0 {
 				e.history[len(e.history)-1].Content = taskText
@@ -600,11 +556,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// /clear command — reset all task state and wait for new input.
 	if isClearCommand(userMsg) {
 		e.clearSessionState()
-		msg := "✓ 状态已清理。请提出新的问题。"
-		if !zh {
-			msg = "✓ State cleared. Please ask a new question."
-		}
-		return &EngineResponse{Summary: msg, Stage: StageAct}, nil
+		return &EngineResponse{Summary: "✓ State cleared. Please ask a new question.", Stage: StageAct}, nil
 	}
 
 	e.updateGoalFromFirstMessage(userMsg)
@@ -643,18 +595,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	for {
 		select {
 		case <-ctx.Done():
-			msg := "任务已取消。"
-			if !zh {
-				msg = "Task cancelled."
-			}
-			return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "cancelled", FinishReason: "cancelled"}, nil
+			return &EngineResponse{Summary: "Task cancelled.", Stage: StageAct, Blocked: true, BlockedBy: "cancelled", FinishReason: "cancelled"}, nil
 		default:
 		}
 		if turns >= maxTurns {
-			msg := "已达到最大轮次限制，Agent 未能完成任务。请缩小范围后重试。"
-			if !zh {
-				msg = "Reached maximum turn limit. The agent was unable to complete the task. Please narrow the scope and retry."
-			}
+			msg := "Reached maximum turn limit. The agent was unable to complete the task. Please narrow the scope and retry."
 			loopLog.Printf("max turns reached (%d)", maxTurns)
 			if err := e.emitEvent("max_turns", StageAct, turns); err != nil {
 				loopLog.Printf("emit max_turns event: %v", err)
@@ -670,7 +615,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 		}
 		if turnResult.Blocked {
 			e.runErrorCount++
-			summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
+			summary := buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount)
 			// The awaiting_user block's Questions already contain the model's
 			// question text. Suppress the run summary (which would re-echo
 			// the question or a stale narration) so the user sees exactly one
@@ -684,7 +629,7 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			// is consumed by handleConfirmCommand on the next Run.
 			var opts []string
 			if e.state.PendingDangerousCmd != "" {
-				opts = []string{"确认执行", "取消"}
+				opts = []string{"Confirm", "Cancel"}
 			}
 			return &EngineResponse{
 				Summary:      summary,
@@ -716,11 +661,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 			action := e.progressLoop.Check("", turnResult.MadeProgress)
 			switch action.Type {
 			case GuardDiagnose:
-				nudge := buildProgressNudge(zh)
+				nudge := buildProgressNudge()
 				e.pendingPinnedMessages = append(e.pendingPinnedMessages, nudge)
 				loopLog.Printf("progress-loop nudge pinned")
 			case GuardBlock:
-				msg := buildProgressBlockMsg(zh)
+				msg := buildProgressBlockMsg()
 				loopLog.Printf("progress-loop block")
 				return &EngineResponse{
 					Summary:      msg,
@@ -756,11 +701,11 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	e.persistMemory()
 
 	// Record efficiency eval at end of Run()
-	e.recordRunEval(zh)
+	e.recordRunEval()
 
 	summary := completionSummary
 	if summary == "" {
-		summary = buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount, zh)
+		summary = buildRunSummary(e.history, e.runStartHistoryLen, e.runToolCallCount)
 	}
 	loopLog.Printf("Run done: turns=%d total=%s tool_calls=%d errors=%d usage prompt=%d completion=%d cache_hit=%d cache_miss=%d",
 		e.state.TurnNumber, time.Since(e.runStartAt), e.runToolCallCount, e.runErrorCount,
@@ -883,7 +828,7 @@ func (e *Engine) dropAskUserFor(runIDs map[string]bool) {
 //     as output — better than a fake "Done").
 //  3. A diagnostic string naming the tool-call count, so the user can see the
 //     agent stalled instead of being told it "completed".
-func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool) string {
+func buildRunSummary(history []Message, startIdx int, toolCallCount int) string {
 	summary := ""
 	for i := len(history) - 1; i >= startIdx; i-- {
 		if history[i].Role == "assistant" && history[i].Content != "" {
@@ -904,9 +849,6 @@ func buildRunSummary(history []Message, startIdx int, toolCallCount int, zh bool
 		return summary
 	}
 	// No textual output of any kind. Report honestly instead of claiming "Done".
-	if zh {
-		return fmt.Sprintf("（本轮未生成回复文本，已执行 %d 次工具调用）", toolCallCount)
-	}
 	return fmt.Sprintf("(no text reply generated; %d tool calls executed this run)", toolCallCount)
 }
 
@@ -993,7 +935,7 @@ func (e *Engine) verifyAndCompact(ctx context.Context) error {
 
 // recordRunEval writes an efficiency EvalRecord for the current Run().
 // Phase is "main_agent" to distinguish from conference-phase scorecard records.
-func (e *Engine) recordRunEval(_ bool) {
+func (e *Engine) recordRunEval() {
 	if e.evalStore == nil {
 		return
 	}
@@ -1059,14 +1001,7 @@ func (e *Engine) accumulateUsage(usage *ModelUsage) {
 	e.usageMu.Unlock()
 }
 
-func msgIsChinese(msg string) bool {
-	for _, r := range msg {
-		if unicode.Is(unicode.Han, r) {
-			return true
-		}
-	}
-	return false
-}
+// msgIsChinese is gone: the engine no longer selects prompts by session language.
 
 // skillCommand represents a parsed /skill or /skills command.
 type skillCommand struct {
@@ -1183,15 +1118,8 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 			// command passes, then inject the user confirmation + re-issue
 			// hint so the agent knows to retry the previously blocked command.
 			e.guards.scope.ConfirmDangerous(confirmedCmd)
-			msg := "✓ Dangerous command confirmed, proceeding..."
-			if e.isChinese {
-				msg = "✓ 危险命令已确认，继续执行..."
-			}
-			e.history = append(e.history, Message{Role: "user", Content: msg, Timestamp: time.Now()})
+			e.history = append(e.history, Message{Role: "user", Content: "✓ Dangerous command confirmed, proceeding...", Timestamp: time.Now()})
 			reissueHint := fmt.Sprintf("The user confirmed the dangerous command. Please re-issue the previously blocked command: `%s`", confirmedCmd)
-			if e.isChinese {
-				reissueHint = fmt.Sprintf("用户已确认执行危险命令。请重新执行之前被阻断的命令: `%s`", confirmedCmd)
-			}
 			e.history = append(e.history, Message{Role: "user", Content: reissueHint, Timestamp: time.Now()})
 		}
 		// /confirm 2 (or any other N) cancels: consume the presented question,
@@ -1208,12 +1136,12 @@ func (e *Engine) handleConfirmCommand(userMsg string) bool {
 		case head != nil && len(head.Options) > 0 && n >= 1 && n <= len(head.Options):
 			label := head.Options[n-1]
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"用户选择了：%s，请按该方案执行修改。", label)
+				"The user selected: %s. Proceed with that option.", label)
 		case head != nil && len(head.Options) > 0:
 			// 有声明方案但编号越界（n < 1 或 n > len(options)）：明确告知
 			// agent 用户选择无效，由其决定下一步。
 			e.history[len(e.history)-1].Content = fmt.Sprintf(
-				"用户选择了无效的方案编号 %d，请重新选择。", n)
+				"The user selected an out-of-range option number %d; ask the user again.", n)
 			loopLog.Printf("handleConfirmCommand: /confirm %d out of range (pending options=%d)", n, len(head.Options))
 		}
 	}
@@ -1377,22 +1305,14 @@ func (e *Engine) drainSteerQueue() bool {
 
 // buildProgressNudge builds the nudge message for the 4th consecutive
 // no-progress turn.
-func buildProgressNudge(zh bool) string {
-	if zh {
-		return "[进度提示] 你已连续多轮只读/规划（读取、更新 todo 等），未产生任何代码修改或结论。" +
-			"请直接执行下一步（写测试、改代码或输出结论），不要继续复述当前状态或重复读取。"
-	}
+func buildProgressNudge() string {
 	return "[PROGRESS NUDGE] You have spent several turns on read-only/planning work without any code change or conclusion. " +
 		"Take the next concrete action (write a test, modify code, or produce a conclusion) instead of re-stating state or re-reading."
 }
 
 // buildProgressBlockMsg builds the block message for the 6th consecutive
 // no-progress turn.
-func buildProgressBlockMsg(zh bool) string {
-	if zh {
-		return "检测到无进展循环：你已连续多轮只读/规划，未产生任何代码修改或结论，nudge 后仍未改善。" +
-			"Agent 可能卡住了。请澄清：是想让我基于已有内容直接给出结论，还是调整任务方向？"
-	}
+func buildProgressBlockMsg() string {
 	return "Detected a no-progress loop: you have spent many turns on read-only/planning work without a code change or conclusion, despite a nudge. " +
 		"The agent may be stuck. Please clarify: conclude from existing content, or adjust the task direction?"
 }

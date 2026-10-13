@@ -53,7 +53,7 @@ func TestSummarizeArgs(t *testing.T) {
 			name:     "read full file annotated",
 			toolName: "read",
 			input:    map[string]interface{}{"path": "/a/b/c.go"},
-			want:     "b/c.go (全文)",
+			want:     "b/c.go (whole file)",
 		},
 		{
 			name:         "read with symbol shows scope",

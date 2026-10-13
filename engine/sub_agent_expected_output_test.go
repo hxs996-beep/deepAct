@@ -9,7 +9,7 @@ import (
 // handoff_to_agent 工具 schema 必须暴露 expected_output 字段，让父代理能给
 // 子代理交代"做成什么样算好"。当前 schema 没有该字段 → 红灯。
 func TestHandoffToolSpec_ExposesExpectedOutput(t *testing.T) {
-	spec := handoffToolSpec(true)
+	spec := handoffToolSpec()
 	if !strings.Contains(string(spec.Function.Parameters), "expected_output") {
 		t.Errorf("handoff schema must expose expected_output, got %s", spec.Function.Parameters)
 	}

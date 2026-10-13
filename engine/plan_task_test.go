@@ -8,28 +8,17 @@ import (
 	"testing"
 )
 
-func TestPlanMethodology_NonEmptyBothLanguages(t *testing.T) {
-	zh := planMethodology(true)
-	en := planMethodology(false)
-	if strings.TrimSpace(zh) == "" {
-		t.Error("zh methodology should not be empty")
+func TestPlanMethodology_NonEmpty(t *testing.T) {
+	if strings.TrimSpace(planMethodology) == "" {
+		t.Error("methodology should not be empty")
 	}
-	if strings.TrimSpace(en) == "" {
-		t.Error("en methodology should not be empty")
-	}
-	if zh == en {
-		t.Error("zh and en methodologies should differ")
-	}
-	if !strings.Contains(zh, "吃透背景") || !strings.Contains(zh, "多假设") {
-		t.Error("zh methodology should cover core steps (吃透背景 / 多假设)")
-	}
-	if !strings.Contains(en, "background") || !strings.Contains(en, "hypotheses") {
-		t.Error("en methodology should cover core steps (background / hypotheses)")
+	if !strings.Contains(planMethodology, "background") || !strings.Contains(planMethodology, "hypotheses") {
+		t.Error("methodology should cover core steps (background / hypotheses)")
 	}
 }
 
 func TestPlanTaskToolSpec(t *testing.T) {
-	spec := planTaskToolSpec(true)
+	spec := planTaskToolSpec()
 	if spec.Function.Name != PlanTaskToolName {
 		t.Errorf("name = %q, want %q", spec.Function.Name, PlanTaskToolName)
 	}
@@ -56,7 +45,7 @@ func TestPlanTaskToolSpec(t *testing.T) {
 }
 
 func TestProcessPlanTaskCalls_InjectMethodology(t *testing.T) {
-	e := &Engine{state: &TaskState{}, config: EngineConfig{}, isChinese: true}
+	e := &Engine{state: &TaskState{}, config: EngineConfig{}}
 	calls := []ToolCallRequest{
 		{ID: "call_ok", Name: PlanTaskToolName, Input: json.RawMessage(`{}`)},
 	}
@@ -73,8 +62,8 @@ func TestProcessPlanTaskCalls_InjectMethodology(t *testing.T) {
 	if !strings.Contains(msgs[0].Content, "[PLAN_METHODOLOGY") {
 		t.Errorf("Content = %q, want [PLAN_METHODOLOGY marker", msgs[0].Content)
 	}
-	if !strings.Contains(msgs[0].Content, "深度分析方法论") {
-		t.Errorf("Content = %q, want zh methodology", msgs[0].Content)
+	if !strings.Contains(msgs[0].Content, "Deep-Planning Methodology") {
+		t.Errorf("Content = %q, want methodology", msgs[0].Content)
 	}
 }
 

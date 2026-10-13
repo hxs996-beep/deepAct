@@ -117,8 +117,7 @@ type SubAgentRunner struct {
 	// unique partition suffix, so parallel sub-agents get distinct prefix-cache
 	// partitions instead of overwriting each other's cached system prefix.
 	partitionSeq atomic.Int64
-	langPackZh   string // Chinese language pack (Go/Python rules in zh)
-	langPackEn   string // English language pack (Go/Python rules in en)
+	langPack     string // language-specific rules for the detected project languages
 	maxDepth     int    // absolute delegation-depth cap; 0 = default 2
 	// tokenBudget caps a run's billable tokens (cache-miss + completion).
 	// Three-state: 0 = default (2× the context window), -1 = explicit
@@ -303,13 +302,12 @@ func (r *SubAgentRunner) ClaimBudgetNotice() bool { return r.treeNudged.CompareA
 // the fail-loud refusal handed back to the delegating model: nothing ran, so it
 // carries no partial output and the summary says how to proceed.
 func (r *SubAgentRunner) admitRun(input Handoff) *HandoffResult {
-	zh := zhFromLang(input.UserLanguage)
 	limit := r.maxConcurrentSubAgents()
 	for {
 		cur := r.inFlight.Load()
 		if int(cur) >= limit {
 			return &HandoffResult{
-				Summary:      fanoutRefusalText(zh, limit),
+				Summary:      fanoutRefusalText(limit),
 				Blocked:      true,
 				BlockedBy:    HandoffReasonFanoutLimit,
 				FinishReason: HandoffReasonFanoutLimit,
@@ -324,7 +322,7 @@ func (r *SubAgentRunner) admitRun(input Handoff) *HandoffResult {
 	if budget := r.Budget(); budget > 0 && r.treeSpent.Load() >= budget {
 		r.inFlight.Add(-1)
 		return &HandoffResult{
-			Summary:      treeBudgetRefusalText(zh, r.treeSpent.Load(), budget),
+			Summary:      treeBudgetRefusalText(r.treeSpent.Load(), budget),
 			Blocked:      true,
 			BlockedBy:    HandoffReasonTreeBudgetExceeded,
 			FinishReason: HandoffReasonTreeBudgetExceeded,
@@ -338,28 +336,22 @@ func (r *SubAgentRunner) releaseRunSlot() { r.inFlight.Add(-1) }
 // fanoutRefusalText explains a width refusal. It names the limit and the ways
 // forward, because the refusal is not a dead end: the parent can collect a
 // running result or do the step itself, then delegate again.
-func fanoutRefusalText(zh bool, limit int) string {
-	if zh {
-		return fmt.Sprintf("委派被拒：整个委派树已有 %d 个子代理在跑（上限 %d）。先取一个结果（list_agents / wait_agent / agent_poll），或你自己完成这一步，然后再委派。", limit, limit)
-	}
+func fanoutRefusalText(limit int) string {
 	return fmt.Sprintf("Delegation refused: %d sub-agents are already in flight across the delegation tree (limit %d). Collect a result first (list_agents / wait_agent / agent_poll) or do this step yourself, then delegate again.", limit, limit)
 }
 
 // treeBudgetRefusalText explains a Run-budget refusal and, crucially, what is
 // still available: tokens already spent cannot be reclaimed, but results of
 // runs that are still working can.
-func treeBudgetRefusalText(zh bool, spent, budget int64) string {
-	if zh {
-		return fmt.Sprintf("委派被拒：本次 Run 的子代理 token 预算已用完（已用 %d / %d）。请基于已有结果继续；仍在运行的子代理结果仍可用 agent_poll 收取。", spent, budget)
-	}
+func treeBudgetRefusalText(spent, budget int64) string {
 	return fmt.Sprintf("Delegation refused: this Run's sub-agent token budget is exhausted (%d of %d spent). Continue from the results you already have; runs still in flight can still be collected with agent_poll.", spent, budget)
 }
 
-// SetLangPacks sets both language variants of the language-specific rules.
-// Called once at startup from cmd/run.go after language detection.
-func (r *SubAgentRunner) SetLangPacks(zh, en string) {
-	r.langPackZh = zh
-	r.langPackEn = en
+// SetLangPack sets the language-specific rules injected into the sub-agent
+// system prompt. Called once at startup from cmd/run.go after project-language
+// detection.
+func (r *SubAgentRunner) SetLangPack(en string) {
+	r.langPack = en
 }
 
 // contextLimit returns the effective context window limit.
@@ -498,7 +490,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// Role persona (extraPrompt) — appended to the system prefix so it stays
 		// constant across the sub-agent's turns → prefix cache hit per role.
 		// Volatile content (goal/context/constraints) — changes per call → cache miss (unavoidable)
-		system := r.stableSystemPrompt(input.UserLanguage)
+		system := r.stableSystemPrompt()
 		if extraPrompt != "" {
 			system += "\n\n" + extraPrompt
 		}
@@ -516,7 +508,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// only completes through a valid submission — termination never depends
 		// on an LLM judgment call (mirrors the harness structured_output).
 		if structured {
-			history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction(zhFromLang(input.UserLanguage))})
+			history = append(history, ModelMessage{Role: "user", Content: submitResultInstruction()})
 		}
 	}
 
@@ -556,10 +548,10 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 	// a role-declared text result, or tool calls that lead to them.
 	// Narration is 3-strike nudged below and ends with stalled_narration.
 
-	filteredTools := r.filterTools(input.Tools, input.UserLanguage)
+	filteredTools := r.filterTools(input.Tools)
 
 	if structured {
-		filteredTools = append(filteredTools, submitResultToolSpec(zhFromLang(input.UserLanguage)))
+		filteredTools = append(filteredTools, submitResultToolSpec())
 	}
 
 	// Execution gate set: the shared registry resolves any registered name by
@@ -652,7 +644,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		if maxIterations > 0 && iter >= budgetNudgeAt(maxIterations) && !budgetNudged {
 			history = append(history, ModelMessage{
 				Role:    "user",
-				Content: budgetTailNudge(zhFromLang(input.UserLanguage), maxIterations-iter, structured),
+				Content: budgetTailNudge(maxIterations-iter, structured),
 			})
 			budgetNudged = true
 		}
@@ -668,7 +660,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
 			history = append(history, ModelMessage{
 				Role:    "user",
-				Content: tokenBudgetNudge(zhFromLang(input.UserLanguage), budget-spent, structured),
+				Content: tokenBudgetNudge(budget-spent, structured),
 			})
 			budgetNudgedTokens = true
 			tokenNudgePending = false
@@ -804,7 +796,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 				}
 				history = append(history, ModelMessage{
 					Role:    "user",
-					Content: pickPrompt(zhFromLang(input.UserLanguage), "Continue.", "继续。"),
+					Content: "Continue.",
 				})
 				continue
 			}
@@ -823,7 +815,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 					result.Usage = &totalUsage
 					return result, nil
 				}
-				content := getSubmitResultNudge(zhFromLang(input.UserLanguage))
+				content := getSubmitResultNudge()
 				history = append(history, ModelMessage{
 					Role:    "user",
 					Content: content,
@@ -949,7 +941,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 				history = append(history, ModelMessage{
 					Role:       "tool",
 					ToolCallID: call.ID,
-					Content:    blockedToolMessage(call.Name, effectiveNames, zhFromLang(input.UserLanguage)),
+					Content:    blockedToolMessage(call.Name, effectiveNames),
 				})
 				if consecutiveBlocked >= blockedStrikeLimit {
 					return &HandoffResult{
@@ -979,14 +971,14 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 				}
 				history = append(history, ModelMessage{
 					Role: "tool", ToolCallID: call.ID,
-					Content: "✓ 已记录问题，等待用户回答。",
+					Content: "✓ Recorded the question; waiting for the user's answer.",
 				})
 				// Carry what the run established so far alongside the question:
 				// nothing persists this run's history, and the parent
 				// re-delegates after the user answers — without the findings it
 				// would restart from zero.
 				return &HandoffResult{
-					Summary:      awaitingUserSummary(zhFromLang(input.UserLanguage), q.Question, lastAssistantText(history)),
+					Summary:      awaitingUserSummary(q.Question, lastAssistantText(history)),
 					Questions:    []string{q.Question},
 					FinishReason: HandoffReasonAwaitingUser,
 					Usage:        &totalUsage,
@@ -1007,7 +999,7 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 					},
 				}, nil
 			}
-			env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID, Ctx: ctx, Depth: input.Depth + 1, UserLang: input.UserLanguage}
+			env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID, Ctx: ctx, Depth: input.Depth + 1}
 			results := r.tools.Execute(env, []ToolCallRequest{call})
 			if len(results) > 0 {
 				res := results[0]
@@ -1085,10 +1077,7 @@ func submitCallIndex(calls []ToolCallRequest) int {
 // getSubmitResultNudge directs a structured run's text-only turn to the
 // terminal tool instead of the generic "use tools" nudge: the tool call is
 // the only recognized completion for this run.
-func getSubmitResultNudge(zh bool) string {
-	if zh {
-		return "请立即调用 submit_result 提交你的最终结论（summary 必填）。不要继续输出纯文本或调用其他工具。"
-	}
+func getSubmitResultNudge() string {
 	return "Call submit_result now to report your final result (summary is required). Do not continue with plain text or further tool calls."
 }
 
@@ -1121,9 +1110,6 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 		if msg.Role == "tool" && msg.Content != "" {
 			count++
 		}
-	}
-	if msgIsChinese(goal) {
-		return fmt.Sprintf("子代理未产出最终结论（已执行 %d 次工具调用后中断）。请重试或缩小任务范围。", count)
 	}
 	return fmt.Sprintf("Sub-agent produced no final conclusion (interrupted after %d tool calls). Retry or narrow the task.", count)
 }
@@ -1208,34 +1194,25 @@ func lastAssistantText(history []ModelMessage) string {
 // separate in HandoffResult.Questions (the UI presents it); this text is what
 // the parent reads in the handoff digest. The findings section is omitted when
 // the run had not established anything yet.
-func awaitingUserSummary(zh bool, question, findings string) string {
+func awaitingUserSummary(question, findings string) string {
 	findings = strings.TrimSpace(findings)
 	if findings == "" {
-		if zh {
-			return fmt.Sprintf("问题：%s", question)
-		}
 		return fmt.Sprintf("Question: %s", question)
-	}
-	if zh {
-		return fmt.Sprintf("问题：%s\n\n已有发现：\n%s", question, findings)
 	}
 	return fmt.Sprintf("Question: %s\n\nFindings so far:\n%s", question, findings)
 }
 
 // stableSystemPrompt returns the full system prompt shared by all sub-agents.
-// Combines the main system prompt (rules, examples, language pack) with the sub-agent role suffix.
-// Identical across every sub-agent call in the session → enables prefix cache hits.
-func (r *SubAgentRunner) stableSystemPrompt(userLang UserLanguage) string {
+// Combines the main system prompt (rules, examples, language pack) with the
+// sub-agent role suffix. Identical across every sub-agent call in the session →
+// enables prefix cache hits.
+func (r *SubAgentRunner) stableSystemPrompt() string {
 	prompts := promptset.Get()
-	langPack := r.langPackEn
-	if userLang.IsChinese() {
-		langPack = r.langPackZh
-	}
 	base := prompts.System + "\n\n" + prompts.Examples
-	if langPack != "" {
+	if r.langPack != "" {
 		// Same header as the main system prompt (see ContextAssembler.Build) so
 		// one strip rule covers both.
-		base += "\n\n# Language Pack\n" + langPack
+		base += "\n\n# Language Pack\n" + r.langPack
 	}
 	return base + "\n\n" + prompts.SubAgent
 }
@@ -1243,17 +1220,16 @@ func (r *SubAgentRunner) stableSystemPrompt(userLang UserLanguage) string {
 // buildVolatilePrompt assembles the per-call variable content (goal, context, constraints).
 // This is appended as the last user message, after stable system + agent-specific prompts.
 func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
-	zh := zhFromLang(input.UserLanguage)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Goal", "## 目标"), input.Goal))
+	sb.WriteString(fmt.Sprintf("## Goal\n%s\n\n", input.Goal))
 	if input.ExpectedOutput != "" {
-		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Expected Output", "## 预期输出"), input.ExpectedOutput))
+		sb.WriteString(fmt.Sprintf("## Expected Output\n%s\n\n", input.ExpectedOutput))
 	}
 	if input.Context != "" {
-		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", pickPrompt(zh, "## Context", "## 上下文"), input.Context))
+		sb.WriteString(fmt.Sprintf("## Context\n%s\n\n", input.Context))
 	}
 	if len(input.Constraints) > 0 {
-		sb.WriteString(fmt.Sprintf("%s\n- %s\n\n", pickPrompt(zh, "## Constraints", "## 约束"), strings.Join(input.Constraints, "\n- ")))
+		sb.WriteString(fmt.Sprintf("## Constraints\n- %s\n\n", strings.Join(input.Constraints, "\n- ")))
 	}
 	return sb.String()
 }
@@ -1266,12 +1242,12 @@ func (r *SubAgentRunner) buildVolatilePrompt(input Handoff) string {
 // Non-channel specs are additionally restricted to the read-only universe:
 // an allowList can only narrow, never widen. The constructed specs are used
 // for both so the registry copy (if present) is not duplicated.
-func (r *SubAgentRunner) filterTools(allowList []string, userLang UserLanguage) []ModelTool {
+func (r *SubAgentRunner) filterTools(allowList []string) []ModelTool {
 	all := r.tools.Specs()
 	// Prefer the registered SubAgentTool spec (dynamic role enum) so sub-agents
 	// see the same roles as the main agent when they delegate further. Fall back
 	// to the static handoffToolSpec if the tool is not registered.
-	handoffSpec := handoffToolSpec(zhFromLang(userLang))
+	handoffSpec := handoffToolSpec()
 	for _, spec := range all {
 		if spec.Function.Name == HandoffToolName {
 			handoffSpec = spec
@@ -1279,7 +1255,7 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang UserLanguage) 
 		}
 	}
 	result := []ModelTool{handoffSpec}
-	result = append(result, askUserToolSpec(zhFromLang(userLang)))
+	result = append(result, askUserToolSpec())
 
 	if len(allowList) == 0 {
 		for _, spec := range all {
@@ -1315,11 +1291,8 @@ func (r *SubAgentRunner) filterTools(allowList []string, userLang UserLanguage) 
 // blockedToolMessage composes the tool-result text for a call refused by the
 // execution gate. It is educational: naming this run's effective tools stops
 // the model from burning turns probing other out-of-set names.
-func blockedToolMessage(name string, effective []string, zh bool) string {
+func blockedToolMessage(name string, effective []string) string {
 	avail := strings.Join(effective, ", ")
-	if zh {
-		return fmt.Sprintf("Blocked: %s 对子代理不可用。子代理是只读的；本 run 可用工具：%s。修改类操作属于主代理。", name, avail)
-	}
 	return fmt.Sprintf("Blocked: %s is not available to sub-agents. Sub-agents are read-only; tools available in this run: %s. Modification work belongs to the main agent.", name, avail)
 }
 
@@ -1471,13 +1444,7 @@ func budgetNudgeAt(maxIterations int) int {
 // on tools and falls into the "(analysis timed out, partial result)" fallback
 // with no real conclusion. The structured variant directs the model to the
 // submit_result terminal tool (plain text never completes a structured run).
-func budgetTailNudge(zh bool, remaining int, structured bool) string {
-	if zh {
-		if structured {
-			return fmt.Sprintf("你的子代理迭代预算只剩 %d 轮。请立即停止新的探索，基于已有发现总结最终结论，并调用 submit_result 提交（summary 必填）。", remaining)
-		}
-		return fmt.Sprintf("你的子代理迭代预算只剩 %d 轮。请立即停止新的探索，基于已有发现直接产出最终结论。", remaining)
-	}
+func budgetTailNudge(remaining int, structured bool) string {
 	if structured {
 		return fmt.Sprintf("You have only %d iterations left. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
 	}
@@ -1512,13 +1479,7 @@ func tokenBudgetFor(input Handoff, r *SubAgentRunner) int {
 // The structured variant directs the model to submit_result: a plain text reply
 // never completes a structured run, so a nudge that only says "deliver your
 // conclusion" would cost the run a turn it may not have.
-func tokenBudgetNudge(zh bool, remaining int, structured bool) string {
-	if zh {
-		if structured {
-			return fmt.Sprintf("注意：本 run 的 token 预算只剩约 %d。请立即停止新的探索，基于已有发现总结最终结论，并调用 submit_result 提交（summary 必填）。", remaining)
-		}
-		return fmt.Sprintf("注意：本 run 的 token 预算只剩约 %d。请停止新的探索，基于已有发现直接产出最终结论并交付。", remaining)
-	}
+func tokenBudgetNudge(remaining int, structured bool) string {
 	if structured {
 		return fmt.Sprintf("Note: only about %d tokens remain in this run's budget. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
 	}
@@ -1528,9 +1489,6 @@ func tokenBudgetNudge(zh bool, remaining int, structured bool) string {
 // getNudgeMessage returns a language-appropriate nudge when the sub-agent
 // keeps producing text without tool calls.
 func getNudgeMessage(goal string) string {
-	if msgIsChinese(goal) {
-		return "请直接使用工具执行下一步，完成目标后给出最终结论。不要只描述计划。"
-	}
 	return "Use tools to take the next action. Complete the goal and give your final conclusions. Do not just describe a plan."
 }
 

@@ -1,46 +1,46 @@
 ---
 name: ratd
-description: 反向测试驱动开发（Red-Team-Then-Drive）：由红队写对抗测试，再驱动实现。需要严格验证实现、防止过度自信时使用。
-when_to_use: 用户要求"先写测试再实现"、需要对抗性验证、或明确使用 /ratd 时
+description: Reverse test-driven development (Red-Team-Then-Drive) — a red team writes adversarial tests first, then they drive the implementation. Use when strict verification of an implementation is needed and overconfidence must be prevented.
+when_to_use: the user asks to "write tests before implementing", wants adversarial verification, or explicitly uses /ratd
 disable-model-invocation: true
-argument-hint: "<需求>"
+argument-hint: "<requirement>"
 ---
 
-# 反向测试驱动（/ratd）
+# Reverse test-driven (/ratd)
 
-## 角色与编排（模型自主按此剧本编排，非硬流程）
+## Roles and orchestration (the model follows this script; it is not a hard pipeline)
 
-你是编排者，用 `handoff_to_agent` 逐角色委派，每角色一次委派、轮数上限 3 轮。三个角色均为引擎内置具名角色，角色 persona 与只读工具白名单已内置，goal 只放任务输入：
+You are the orchestrator, delegating to each role with `handoff_to_agent`, one delegation per role, at most 3 rounds each. All three roles are engine built-in named roles — their personas and read-only tool allowlists are built in, so `goal` carries only the task input:
 
-### 1. Proposer（提议者）
-`handoff_to_agent`（**agent="proposer"**），goal 放需求描述（含约束、验收标准）。角色输出 CodePayload JSON：
+### 1. Proposer
+`handoff_to_agent` (**agent="proposer"**), with the requirement as `goal` (including constraints and acceptance criteria). The role outputs a CodePayload JSON:
 ```json
-{"language":"go","files":[{"path":"相对路径","content":"完整代码"}],"design_notes":"设计说明"}
+{"language":"go","files":[{"path":"relative/path","content":"full code"}],"design_notes":"design notes"}
 ```
-拿到 JSON 后由你（编排者）用 edit/write 把 `files` 落盘到对应路径。
+After receiving the JSON, you (the orchestrator) write `files` to their paths with edit/write.
 
-### 2. RedTeam（红队）
-`handoff_to_agent`（**agent="redteam"**），goal 放实现文件清单 + 落盘路径，请其针对性产出对抗测试。角色输出 TestPayload JSON：
+### 2. RedTeam
+`handoff_to_agent` (**agent="redteam"**), with the implementation file list + on-disk paths as `goal`, asking for targeted adversarial tests. The role outputs a TestPayload JSON:
 ```json
-{"tests":[{"path":"相对路径","content":"测试代码"}],"no_issues":false}
+{"tests":[{"path":"relative/path","content":"test code"}],"no_issues":false}
 ```
-若无问题则输出 `{"tests":[],"no_issues":true}`。拿到 JSON 后由你把 `tests` 落盘。
+With no issues it outputs `{"tests":[],"no_issues":true}`. After receiving the JSON, you write `tests` to disk.
 
-### 3. Sandbox（引擎侧执行）
-- 由你（编排者）用 `bash` 执行测试命令，语言映射：go→`go test -timeout 60s ./...`。
-- 失败时收集输出。
+### 3. Sandbox (engine-side execution)
+- You (the orchestrator) run the test command with `bash`; language mapping: go→`go test -timeout 60s ./...`.
+- On failure, collect the output.
 
-### 4. Arbitrator（仲裁员）
-`handoff_to_agent`（**agent="arbitrator"**），goal 放失败测试输出 + 实现/测试文件路径，请其判定。角色输出 decision JSON：
+### 4. Arbitrator
+`handoff_to_agent` (**agent="arbitrator"**), with the failing test output + implementation/test file paths as `goal`, asking it to judge. The role outputs a decision JSON:
 ```json
-{"decision":"ACCEPT","feedback":"重构方向"} 或 {"decision":"REJECT","feedback":"红队测试缺陷"}
+{"decision":"ACCEPT","feedback":"rework direction"} or {"decision":"REJECT","feedback":"red-team test defect"}
 ```
-ACCEPT=实现有问题，回到 Proposer 重构；REJECT=测试本身有问题，删除该测试文件回到 RedTeam。
+ACCEPT = the implementation is faulty; return to the Proposer. REJECT = the tests are faulty; delete the test file and return to the RedTeam.
 
-## 完成判据
-- 沙箱通过且红队无问题（no_issues=true）→ `task_complete`，交付摘要含：改动文件清单 + 最终测试结果。
-- 循环由你按纪律控制（≤3 轮），`LoopTracker` 兜底防角色循环。
+## Completion criterion
+- Sandbox passes and the red team reports no issues (no_issues=true) → `task_complete`, delivering a summary with the changed file list + final test result.
+- You control the loop by discipline (≤3 rounds); `LoopTracker` is the backstop against role loops.
 
-## 注意
-- 会话语言为中文时，goal 用中文描述任务输入；英文时译为英文。
-- 角色 persona 已内置中英双语 JSON 契约，编排者无需重复角色提示。
+## Caveats
+- Write the `goal` in the user's language; keep the tool calls themselves as described.
+- The role personas already include the English JSON contract; the orchestrator must not repeat the role prompt.

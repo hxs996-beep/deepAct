@@ -212,16 +212,10 @@ func ruleMatches(rule ApprovalRule, call approvalCommand) bool {
 // why, and how to stop being asked. The last part matters because remembered
 // approvals are deliberately exact — without it, "you will be asked again for a
 // slightly different command" reads as a dead end.
-func approvalAskMessage(zh bool, reason, cmd string) string {
+func approvalAskMessage(reason, cmd string) string {
 	example := "\n\nTo stop being asked for a whole command family, declare a rule in config.toml:\n" +
 		"[[approval.rules]]\nprogram = \"<command>\"\nargs = [\"<token prefix>\"]\ndecision = \"allow\"  # or prompt / forbidden"
-	if zh {
-		example = "\n\n要长期放行同类命令，在 config.toml 声明规则：\n" +
-			"[[approval.rules]]\nprogram = \"<命令>\"\nargs = [\"<token 前缀>\"]\ndecision = \"allow\"  # 或 prompt / forbidden"
-	}
-	return pickPrompt(zh,
-		fmt.Sprintf("⚠ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider%s", reason, cmd, example),
-		fmt.Sprintf("⚠ 危险命令: %s\n> `%s`\n\n[Y] 确认执行  [N] 取消，或输入其他建议让 AI 重新处理%s", reason, cmd, example))
+	return fmt.Sprintf("⚠ Dangerous command: %s\n> `%s`\n\n[Y] confirm  [N] cancel, or type an alternative suggestion for the AI to reconsider%s", reason, cmd, example)
 }
 
 // approvalBlockMessage reports a rule-driven hard block, naming the rule so the

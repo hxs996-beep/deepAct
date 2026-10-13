@@ -123,7 +123,7 @@ func TestResearcherRole_ProseAnswerIsRedirectedToSubmitResult(t *testing.T) {
 	runner := NewSubAgentRunner(model, &recordingToolExecutor{}, NewAgentRegistry(), "test")
 	a := &specSubAgent{runner: runner, spec: researcherSpec()}
 
-	result, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研某个方向", UserLanguage: "中文"})
+	result, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研某个方向", })
 	if err != nil {
 		t.Fatalf("researcher run: %v", err)
 	}
@@ -166,8 +166,7 @@ func TestSubAgent_NoSyntheticPerCallDeadline(t *testing.T) {
 	model := &deadlineProbeModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", TextResult: true, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "审查", TextResult: true, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -189,8 +188,7 @@ func TestSubAgent_BudgetTailNudge_ConvergesToConclusion(t *testing.T) {
 	model := &researchUntilNudgedModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研 codex 与 deepact 的区别", MaxIterations: 6, TextResult: true, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研 codex 与 deepact 的区别", MaxIterations: 6, TextResult: true, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -217,8 +215,7 @@ func TestSubAgent_BudgetTailNudge_StructuredNamesSubmitResult(t *testing.T) {
 	model := &researchUntilNudgedModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", MaxIterations: 5, StructuredResult: true, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "审查", MaxIterations: 5, StructuredResult: true, })
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}

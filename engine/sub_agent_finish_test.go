@@ -349,7 +349,7 @@ func TestFormatHandoffResult_ReasonAwareHeading(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			digest := formatHandoffResult(&HandoffResult{Summary: "s", FinishReason: tt.reason}, false)
+			digest := formatHandoffResult(&HandoffResult{Summary: "s", FinishReason: tt.reason})
 			if !strings.Contains(digest, tt.wantEnglish) {
 				t.Errorf("digest for %q = %q, want substring %q", tt.reason, digest, tt.wantEnglish)
 			}
@@ -378,8 +378,7 @@ func TestExecuteTurn_LengthTruncationDropsToolCalls(t *testing.T) {
 		state:     &TaskState{TurnNumber: 0},
 		history:   []Message{{Role: "user", Content: "执行方案"}},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
-	}
+		}
 
 	result, err := e.executeTurn(context.Background())
 	if err != nil {
@@ -391,8 +390,8 @@ func TestExecuteTurn_LengthTruncationDropsToolCalls(t *testing.T) {
 	if result.Done {
 		t.Errorf("expected Done=false (truncated turn resumes), got Done=true")
 	}
-	if len(e.pendingPinnedMessages) != 1 || e.pendingPinnedMessages[0] != "继续" {
-		t.Errorf("expected pinned \"继续\" to resume the turn, got %v", e.pendingPinnedMessages)
+	if len(e.pendingPinnedMessages) != 1 || e.pendingPinnedMessages[0] != "Continue." {
+		t.Errorf("expected a pinned \"Continue.\" to resume the turn, got %v", e.pendingPinnedMessages)
 	}
 }
 

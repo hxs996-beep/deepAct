@@ -128,7 +128,7 @@ func TestBuildRunSummary(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		got := buildRunSummary(tt.history, tt.startIdx, tt.toolCallCount, tt.zh)
+		got := buildRunSummary(tt.history, tt.startIdx, tt.toolCallCount)
 		switch {
 		case tt.want != "" && got != tt.want:
 			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)

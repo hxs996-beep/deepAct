@@ -71,17 +71,13 @@ func TestProgressLoopState_Reset(t *testing.T) {
 }
 
 func TestBuildProgressMessages(t *testing.T) {
-	zh := buildProgressNudge(true)
-	if !strings.Contains(zh, "未产生任何代码修改") {
-		t.Errorf("zh nudge missing directive: %s", zh)
+	nudge := buildProgressNudge()
+	if !strings.Contains(nudge, "PROGRESS NUDGE") {
+		t.Errorf("nudge missing directive: %s", nudge)
 	}
-	zhBlock := buildProgressBlockMsg(true)
-	if !strings.Contains(zhBlock, "无进展循环") || !strings.Contains(zhBlock, "请澄清") {
-		t.Errorf("zh block missing clarify: %s", zhBlock)
-	}
-	en := buildProgressNudge(false)
-	if strings.Contains(en, "未产生任何代码修改") {
-		t.Errorf("en nudge should be English: %s", en)
+	block := buildProgressBlockMsg()
+	if !strings.Contains(block, "no-progress loop") || !strings.Contains(block, "clarify") {
+		t.Errorf("block missing clarify: %s", block)
 	}
 }
 
@@ -444,8 +440,7 @@ func TestRun_ProgressLoop_NovelReadsAllowed(t *testing.T) {
 			scope: NewScopeGuard(),
 		},
 		progressLoop: NewLoopTracker(4, 6, true),
-		isChinese:    true,
-	}
+		}
 	resp, err := e.Run(context.Background(), "排查问题")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -478,8 +473,7 @@ func TestRun_ProgressLoop_NoNovelReadBlocked(t *testing.T) {
 			scope: NewScopeGuard(),
 		},
 		progressLoop: NewLoopTracker(4, 6, true),
-		isChinese:    true,
-	}
+		}
 	resp, err := e.Run(context.Background(), "实现功能")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -490,7 +484,7 @@ func TestRun_ProgressLoop_NoNovelReadBlocked(t *testing.T) {
 	if resp.BlockedBy != "loop_guard" || resp.FinishReason != "loop_detected" {
 		t.Errorf("expected BlockedBy=loop_guard FinishReason=loop_detected, got %q/%q", resp.BlockedBy, resp.FinishReason)
 	}
-	if !strings.Contains(resp.Summary, "无进展循环") {
+	if !strings.Contains(resp.Summary, "no-progress loop") {
 		t.Errorf("expected no-progress block message, got %q", resp.Summary)
 	}
 }
@@ -524,8 +518,7 @@ func TestRun_ProgressLoop_EditResetsStreak(t *testing.T) {
 			scope: NewScopeGuard(),
 		},
 		progressLoop: NewLoopTracker(4, 6, true),
-		isChinese:    true,
-	}
+		}
 	resp, err := e.Run(context.Background(), "实现功能")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)

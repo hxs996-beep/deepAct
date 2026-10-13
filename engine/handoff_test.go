@@ -27,11 +27,11 @@ func TestRunSubAgent_EngineBackend_Completed(t *testing.T) {
 	reg.Register(&mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
 		Summary: "分析完成", FinishReason: HandoffReasonCompleted,
 	}})
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "分析 X",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -47,10 +47,10 @@ func TestRunSubAgent_EngineBackend_Completed(t *testing.T) {
 }
 
 func TestRunSubAgent_EngineBackend_AgentNotFound(t *testing.T) {
-	e := &Engine{agents: NewAgentRegistry(), isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: NewAgentRegistry(), state: &TaskState{}}
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "nope", Goal: "x",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -60,10 +60,10 @@ func TestRunSubAgent_EngineBackend_AgentNotFound(t *testing.T) {
 }
 
 func TestRunSubAgent_EngineBackend_NilRegistry(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "x",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -78,11 +78,11 @@ func TestRunSubAgent_EngineBackend_BubblesQuestions(t *testing.T) {
 		Summary: "需要信息", FinishReason: HandoffReasonAwaitingUser,
 		Questions: []string{"数据库连接串是什么？"},
 	}})
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "配置 DB",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -106,28 +106,28 @@ func TestSubAgentRunnerRunSubAgent_Nested(t *testing.T) {
 
 	res, err := runner.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "子任务",
-	}, 1, "中文")
+	}, 1)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
 	if res.Status != "ok" {
 		t.Errorf("Status = %q, want ok", res.Status)
 	}
-	if res.Digest != "代理完成： 嵌套完成\n" {
-		t.Errorf("Digest = %q, want Chinese completed digest", res.Digest)
+	if res.Digest != "Agent completed: 嵌套完成\n" {
+		t.Errorf("Digest = %q, want English completed digest", res.Digest)
 	}
 }
 
 func TestHandoffToAgentParams_AsyncField(t *testing.T) {
 	// async 字段必须存在于 handoff spec 的 parameters JSON 中。
-	spec := handoffToolSpec(false)
+	spec := handoffToolSpec()
 	if !strings.Contains(string(spec.Function.Parameters), `"async"`) {
 		t.Fatalf("handoff spec parameters must contain async field, got: %s", spec.Function.Parameters)
 	}
 }
 
 func TestAgentPollToolSpec_Exists(t *testing.T) {
-	spec := agentPollToolSpec(false)
+	spec := agentPollToolSpec()
 	if spec.Function.Name != AgentPollToolName {
 		t.Fatalf("Name = %q, want %q", spec.Function.Name, AgentPollToolName)
 	}
@@ -167,12 +167,12 @@ func TestRunSubAgent_AsyncDispatch_RegistersAndRuns(t *testing.T) {
 	a := &blockingAgent{id: AgentSub, start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "后台调研", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -203,12 +203,12 @@ func TestCancelBackgroundTasks_OnRunEnd(t *testing.T) {
 	a := &blockingAgent{id: AgentSub, start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	_, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "后台任务", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -234,7 +234,6 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			eventsMu.Lock()
@@ -246,7 +245,7 @@ func TestRunSubAgent_AsyncDispatch_AgentDoneEvent(t *testing.T) {
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -312,7 +311,6 @@ func TestAsyncDispatchAgentStartCarriesJobID(t *testing.T) {
 	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			eventsMu.Lock()
@@ -324,7 +322,7 @@ func TestAsyncDispatchAgentStartCarriesJobID(t *testing.T) {
 
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研", Async: true, Step: "dir-1",
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
 	<-a.start // 确保后台 goroutine 已进入 Run

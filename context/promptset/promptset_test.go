@@ -11,7 +11,7 @@ import (
 // 当前 sub_agent.md 输出契约未提及预期输出 → 红灯。
 func TestSubAgentPrompt_MentionsExpectedOutput(t *testing.T) {
 	p := Get().SubAgent
-	if !strings.Contains(p, "预期输出") {
+	if !strings.Contains(p, "Expected Output") {
 		t.Errorf("sub-agent prompt must instruct following the parent's expected-output acceptance criteria, got %q", p)
 	}
 }
@@ -33,7 +33,7 @@ func TestSubAgentPrompt_StructuredJSONTakesPrecedence(t *testing.T) {
 // hatches are listed.
 func TestSystemPrompt_MandatorySkillRule(t *testing.T) {
 	p := Get().System
-	for _, want := range []string{"你没有选择", "不得用以下理由跳过技能匹配"} {
+	for _, want := range []string{"you have no choice but to use it", "Do not skip skill matching"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("system prompt must carry the mandatory skill rule (missing %q)", want)
 		}
@@ -48,7 +48,7 @@ func TestSystemPrompt_MandatorySkillRule(t *testing.T) {
 // first step even though the run is done.
 func TestSystemPrompt_TodoProgressIsLive(t *testing.T) {
 	p := Get().System
-	for _, want := range []string{"todo_write", "子代理已返回", "收尾前先发一份"} {
+	for _, want := range []string{"todo_write", "the sub-agent returned", "Before wrapping up"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("system prompt must carry the live step-reporting rule (missing %q)", want)
 		}

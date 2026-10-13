@@ -147,7 +147,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				return TurnResult{
 					Blocked:      true,
 					BlockedBy:    "model_error",
-					Questions:    []string{fmt.Sprintf("模型 API 持续限流，请稍后重试。\n\n具体原因：%v\n\nThe model API is rate-limited. Please retry later.\n\nReason: %v", err, err)},
+					Questions:    []string{fmt.Sprintf("The model API is persistently rate-limited; retry later.\n\nReason: %v", err)},
 					FinishReason: "model_error",
 				}, nil
 			}
@@ -157,7 +157,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "model_error",
-				Questions:    []string{"模型 API 余额不足，请充值后重试。\n\nInsufficient model API balance. Please top up and retry."},
+				Questions:    []string{"Insufficient model API balance. Please top up and retry."},
 				FinishReason: "model_error",
 			}, nil
 		} else {
@@ -167,7 +167,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "model_error",
-				Questions:    []string{fmt.Sprintf("模型 API 请求失败，任务已中断。请检查网络与 API Key 配置后重新发起。\n\n具体原因：%v\n\nModel API request failed and the task was interrupted. Check your network and API key, then retry.\n\nReason: %v", err, err)},
+				Questions:    []string{fmt.Sprintf("Model API request failed and the task was interrupted. Check your network and API key, then retry.\n\nReason: %v", err)},
 				FinishReason: "model_error",
 			}, nil
 		}
@@ -287,14 +287,14 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				return TurnResult{
 					Blocked:      true,
 					BlockedBy:    "stream_error",
-					Questions:    []string{"模型 API 余额不足，请充值后重试。\n\nInsufficient model API balance. Please top up and retry."},
+					Questions:    []string{"Insufficient model API balance. Please top up and retry."},
 					FinishReason: "stream_error",
 				}, nil
 			}
 			return TurnResult{
 				Blocked:      true,
 				BlockedBy:    "stream_error",
-				Questions:    []string{fmt.Sprintf("模型响应中断，自动重试已耗尽，任务终止。请检查网络后重新发起。\n\n具体原因：%v\n\nModel response was interrupted after automatic retries were exhausted. Check your network and retry.\n\nReason: %v", chunk.Err, chunk.Err)},
+				Questions:    []string{fmt.Sprintf("Model response was interrupted after automatic retries were exhausted. Check your network and retry.\n\nReason: %v", chunk.Err)},
 				FinishReason: "stream_error",
 			}, nil
 		}
@@ -428,7 +428,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			if assistant.Content != "" {
 				e.history = append(e.history, assistant)
 			}
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "继续")
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, "Continue.")
 			return TurnResult{Done: false, FinishReason: finish}, nil
 		}
 		// A model turn that produced only reasoning (thinking, no answer) must
@@ -453,7 +453,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			FinishReason:       finish,
 			StopHookActive:     e.stopHookActive,
 			StopHookRetryCount: e.stopHookRetryCount,
-			IsChinese:          e.isChinese,
 			Goal:               e.state.Goal,
 		})
 		// The model asked the user a question. Stop the loop and present the
@@ -485,10 +484,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		// block because the content is a genuine conclusion (not
 		// exhaustion), Exhausted is false and we correctly return Done.
 		if hookResult.Exhausted {
-			msg := "Agent 在叙述循环中卡住了：已多次引导模型直接执行操作，但模型持续输出中间计划而非调用工具。请提供更具体的指令或缩小任务范围。"
-			if !e.isChinese {
-				msg = "The agent is stuck in a narration loop: guided nudges were tried but the model kept describing steps without executing them. Please provide a more specific instruction or narrow the task scope."
-			}
+			msg := "The agent is stuck in a narration loop: guided nudges were tried but the model kept describing steps without executing them. Please provide a more specific instruction or narrow the task scope."
 			turnLog.Printf("stop hook exhausted after %d retries", e.stopHookRetryCount)
 			return TurnResult{
 				Blocked:      true,
@@ -558,7 +554,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 				for _, c := range calls {
 					content := "Skipped: task_complete was called."
 					if c.ID == call.ID {
-						content = todoNudgeMessage(e.isChinese, n)
+						content = todoNudgeMessage(n)
 					}
 					e.history = append(e.history, Message{
 						Role:       "tool",
@@ -657,7 +653,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 
 	// Execute handoff calls through the registered SubAgentTool.
 	if len(handoffCalls) > 0 {
-		userLang := UserLanguageFor(e.isChinese)
 		// agent_start events for UI. Only the synchronous path reports here:
 		// an async dispatch reports its own start inside dispatchAsync, once
 		// the job id it must carry has been allocated. Emitting one here too
@@ -677,7 +672,7 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 		}
 		execCtx := ToolExecContext{
 			WorkDir: e.config.WorkDir, SessionID: e.config.SessionID, TurnNumber: e.state.TurnNumber,
-			Ctx: ctx, Depth: 0, UserLang: userLang,
+			Ctx: ctx, Depth: 0,
 		}
 		results := e.tools.Execute(execCtx, handoffCalls)
 		// agent_done events for UI. Execute preserves order, so results[i]
@@ -855,17 +850,17 @@ func usageOrZero(u *ModelUsage, get func(*ModelUsage) int) int {
 func (e *Engine) toolSpecsWithHandoff() []ModelTool {
 	specs := e.tools.Specs()
 	specs = append(specs, loadSkillToolSpec())
-	specs = append(specs, planTaskToolSpec(e.isChinese))
-	specs = append(specs, taskCompleteToolSpec(e.isChinese))
+	specs = append(specs, planTaskToolSpec())
+	specs = append(specs, taskCompleteToolSpec())
 	specs = append(specs, todoWriteToolSpec())
-	specs = append(specs, askUserToolSpec(e.isChinese))
-	specs = append(specs, agentPollToolSpec(e.isChinese))
-	specs = append(specs, agentResumeToolSpec(e.isChinese))
-	specs = append(specs, listAgentsToolSpec(e.isChinese))
-	specs = append(specs, waitAgentToolSpec(e.isChinese))
-	specs = append(specs, sendMessageToolSpec(e.isChinese))
-	specs = append(specs, interruptAgentToolSpec(e.isChinese))
-	specs = append(specs, closeAgentToolSpec(e.isChinese))
+	specs = append(specs, askUserToolSpec())
+	specs = append(specs, agentPollToolSpec())
+	specs = append(specs, agentResumeToolSpec())
+	specs = append(specs, listAgentsToolSpec())
+	specs = append(specs, waitAgentToolSpec())
+	specs = append(specs, sendMessageToolSpec())
+	specs = append(specs, interruptAgentToolSpec())
+	specs = append(specs, closeAgentToolSpec())
 	return specs
 }
 
@@ -963,7 +958,7 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 	switch toolName {
 	case "todo_write":
 		if todos, ok := m["todos"].([]interface{}); ok {
-			return fmt.Sprintf("update todos: %d 项", len(todos))
+			return fmt.Sprintf("update todos: %d", len(todos))
 		}
 		return "update todos"
 	case "plan_task":
@@ -1015,7 +1010,7 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 	// targeted read in the UI. Without this every read renders as a bare path,
 	// so repeated full-file reads (a loop symptom) look identical to targeted
 	// reads and can't be diagnosed. Formats:
-	//   full file    -> "path (全文)"
+	//   full file    -> "path (whole file)"
 	//   symbol       -> "path (symbol:Run)"
 	//   offset/limit -> "path (L52-101)"  (end line computed to avoid the
 	//                                       ambiguous "L52-50" offset/limit form)
@@ -1026,7 +1021,7 @@ func summarizeArgs(toolName string, input json.RawMessage, cwd string) string {
 		offset, _ := m["offset"].(float64)
 		limit, _ := m["limit"].(float64)
 		if int(offset) == 0 && int(limit) == 0 {
-			return relPath(path, cwd) + " (全文)"
+			return relPath(path, cwd) + " (whole file)"
 		}
 		start := int(offset)
 		if start == 0 {
@@ -1690,7 +1685,7 @@ func (e *Engine) processPlanTaskCalls(calls []ToolCallRequest) []Message {
 		msgs = append(msgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    fmt.Sprintf("[PLAN_METHODOLOGY]\n\n%s", planMethodology(e.isChinese)),
+			Content:    fmt.Sprintf("[PLAN_METHODOLOGY]\n\n%s", planMethodology),
 			Timestamp:  time.Now(),
 		})
 	}
@@ -1783,7 +1778,7 @@ func (e *Engine) processTodoWriteCalls(calls []ToolCallRequest) []Message {
 		msgs = append(msgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    fmt.Sprintf("✓ 已更新 %d 项 todo", len(params.Todos)),
+			Content:    fmt.Sprintf("✓ Updated %d todo(s)", len(params.Todos)),
 			Timestamp:  time.Now(),
 		})
 	}
@@ -1864,7 +1859,7 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			if result == nil {
 				result = &HandoffResult{Summary: "(no result)"}
 			}
-			content := fmt.Sprintf("Job %s done.\n%s", params.JobID, formatHandoffResult(result, e.isChinese))
+			content := fmt.Sprintf("Job %s done.\n%s", params.JobID, formatHandoffResult(result))
 			msgs = append(msgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
@@ -1951,11 +1946,6 @@ func (e *Engine) injectSubAgentBudgetNotice() {
 	if remaining < 0 {
 		remaining = 0
 	}
-	if e.isChinese {
-		e.pendingPinnedMessages = append(e.pendingPinnedMessages, fmt.Sprintf(
-			"注意：本次 Run 的子代理 token 总量已用 %d / %d（剩余约 %d）。请基于已有结果收敛，或用你自己的工具完成剩余工作。", spent, budget, remaining))
-		return
-	}
 	e.pendingPinnedMessages = append(e.pendingPinnedMessages, fmt.Sprintf(
 		"Note: this Run's sub-agent token total is at %d / %d (~%d left). Converge on the results you have, or do the remaining work with your own tools.", spent, budget, remaining))
 }
@@ -2027,7 +2017,7 @@ func (e *Engine) processAskUserCalls(calls []ToolCallRequest) []Message {
 		msgs = append(msgs, Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    "✓ 已记录问题，等待用户回答。",
+			Content:    "✓ Recorded the question; waiting for the user's answer.",
 			Timestamp:  time.Now(),
 		})
 	}
@@ -2057,7 +2047,7 @@ func (e *Engine) processHandoffResults(handoffCalls []ToolCallRequest, results [
 		// the parent auto-continues within the same Run: it reads the partial
 		// result, fills gaps, and either completes or re-delegates.
 		if isHandoffFollowUpReason(result.FinishReason) {
-			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(result.FinishReason, e.isChinese))
+			e.pendingPinnedMessages = append(e.pendingPinnedMessages, buildHandoffFollowUp(result.FinishReason))
 		}
 	}
 	return messages
@@ -2077,15 +2067,9 @@ func isHandoffFollowUpReason(reason string) bool {
 
 // buildHandoffFollowUp returns the pinned instruction that tells the parent
 // to continue after a sub-agent failed to deliver a complete result.
-func buildHandoffFollowUp(reason string, zh bool) string {
+func buildHandoffFollowUp(reason string) string {
 	if reason == HandoffReasonAwaitingUser {
-		if zh {
-			return "以上子代理需要用户输入。若用户这条消息正是在回答它，请用 agent_resume(<句柄>, 回答) 让它带着原有上下文继续；否则基于它的部分结果自行继续或重新委派。"
-		}
 		return "The sub-agent above is waiting for user input. If the user's latest message answers it, call agent_resume(<handle>, <answer>) so it continues with its original context; otherwise continue from its partial findings or re-delegate."
-	}
-	if zh {
-		return "以上子代理未给出完整结论。请基于其部分结果继续处理：补充缺失信息后给出最终结论，或重新委派合适的子代理。不要停在这里等待用户输入。"
 	}
 	return "The sub-agent above did not deliver a complete result. Continue from its partial findings: complete the remaining work and give your final conclusion, or re-delegate to a more suitable sub-agent. Do not stop and wait for user input."
 }

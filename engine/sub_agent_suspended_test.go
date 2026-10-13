@@ -23,7 +23,7 @@ func TestSuspendedCapturedOnLeafAskUser(t *testing.T) {
 	}}
 	runner := budgetRunner(model, &recordingToolExecutor{})
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, UserLanguage: "中文"})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -197,8 +197,7 @@ func TestAgentResumeContinuesSameRun(t *testing.T) {
 	runner.SetSubAgentPartitionURL(func(p string) string { return "http://example.invalid/" + p })
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", StructuredResult: true, UserLanguage: "中文",
-	})
+		Agent: AgentSub, Goal: "调研", StructuredResult: true, })
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -320,7 +319,7 @@ func TestSubAgentRunnerWiresRegistrar(t *testing.T) {
 		return "bg-9"
 	})
 
-	res, err := runner.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "g"}, 1, "中文")
+	res, err := runner.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "g"}, 1)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -342,7 +341,7 @@ func TestSubAgentRunnerWithoutRegistrarKeepsTodayBehaviour(t *testing.T) {
 		FinishReason: HandoffReasonAwaitingUser, Suspended: &SuspendedRun{Input: Handoff{Goal: "g"}},
 	}})
 	runner := &SubAgentRunner{registry: reg, modelName: "test"}
-	res, err := runner.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "g"}, 1, "中文")
+	res, err := runner.RunSubAgent(context.Background(), HandoffToAgentParams{Agent: "sub", Goal: "g"}, 1)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}

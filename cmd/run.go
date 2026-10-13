@@ -169,8 +169,8 @@ func buildSkillsBlock(all []*skill.Skill) string {
 	}
 	var b strings.Builder
 	b.WriteString("## Available Skills\n")
-	b.WriteString("**必须：只要当前任务有哪怕 1% 的可能适用下面某个技能，就先调用 `load_skill` 加载它，再动手。这不是可选项——不能用「这题简单 / 先看代码更快 / 我记得这个技能」来跳过。**\n\n")
-	b.WriteString("判断依据是**任务属于什么类型**，不是用户用没用某个词。候选不止一个时选**最贴切**的；请求围绕**具体错误 / 失败 / 异常**时，优先选调试/根因类技能。摘要不含完整指令，加载前不得按摘要执行。加载后发现不适用可以不用它。用户也可用 `/<name>` 直接加载；若当前技能到达终态需切换，调用 `load_skill` 加载下一个技能。\n\n")
+	b.WriteString("**Mandatory: if there is even a 1% chance a skill below applies to the current task, call `load_skill` to load it before acting. This is not optional — you may not skip it because \"the task looks simple / reading the code is faster / you remember the skill\".**\n\n")
+	b.WriteString("Judge by **what type of task this is**, not by whether the user used a particular word. When several candidates exist, pick the **most fitting** one; for a **specific error / failure / exception / why something broke**, prefer a debugging / root-cause skill. The catalog carries summaries only — do not act on a summary before loading the skill. Loading one and finding it does not apply lets you skip it. The user may also load directly with `/<name>`; when a loaded skill reaches its terminal state and you must switch, call `load_skill` for the next one.\n\n")
 	for _, s := range all {
 		if s.DisableModelInvocation {
 			continue
@@ -273,13 +273,9 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
 
-	// Pre-compute language packs for sub-agent system prompt (zh + en).
-	// User language is detected per-session, so both variants are cached here.
+	// Pre-compute the language pack for the sub-agent system prompt.
 	projLangs := deeplogcontext.DetectLanguages(workDir)
-	runner.SetLangPacks(
-		deeplogcontext.GetLangPacks(projLangs, engine.LangChinese),
-		deeplogcontext.GetLangPacks(projLangs, engine.LangEnglish),
-	)
+	runner.SetLangPack(deeplogcontext.GetLangPacks(projLangs))
 
 	contextAssembler := deeplogcontext.NewContextAssembler(workDir, estimator)
 
@@ -400,11 +396,11 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		// registrar here. Without it a nested suspension could never be resumed.
 		runner.SetSuspendedRegistrar(e.RegisterSuspended)
 		registry.Register(tools.NewSubAgentTool(
-			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang engine.UserLanguage) (engine.ToolResult, error) {
-				return e.RunSubAgent(ctx, p, depth, lang)
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int) (engine.ToolResult, error) {
+				return e.RunSubAgent(ctx, p, depth)
 			},
-			func(ctx context.Context, p engine.HandoffToAgentParams, depth int, lang engine.UserLanguage) (engine.ToolResult, error) {
-				return runner.RunSubAgent(ctx, p, depth, lang)
+			func(ctx context.Context, p engine.HandoffToAgentParams, depth int) (engine.ToolResult, error) {
+				return runner.RunSubAgent(ctx, p, depth)
 			},
 			func() []tools.AgentInfo {
 				specs := agentReg.AgentSpecs()

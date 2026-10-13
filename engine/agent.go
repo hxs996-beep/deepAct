@@ -109,9 +109,6 @@ type Handoff struct {
 	// which the engine routes here) and never serialized. nil for sync/nested
 	// runs, which have no job handle to address.
 	Inbox <-chan string `json:"-"`
-	// UserLanguage is the session language (see UserLanguage), set by the engine
-	// before delegating. Used to inject language directives into sub-agent context.
-	UserLanguage UserLanguage `json:"-"`
 }
 
 // HandoffResult is returned by a sub-agent after execution.
@@ -276,13 +273,9 @@ type SubmitResultParams struct {
 
 // taskCompleteToolSpec returns the tool definition for signaling task completion.
 // The model calls this to submit its final output to the user.
-func taskCompleteToolSpec(zh bool) ModelTool {
+func taskCompleteToolSpec() ModelTool {
 	desc := "Submit your final conclusion or reply to the user. Call this when the user's goal is fully accomplished. This is the ONLY way to return output to the user. If your step panel (todo_write) still lists a step as in_progress, this call is deferred once and answered with a reminder to send the final snapshot first."
 	summaryDesc := "Your final conclusion, analysis result, or reply to the user"
-	if zh {
-		desc = "提交最终结论或回复给用户。目标全部完成后调用此工具。这是向用户返回输出的唯一方式。若你的步骤面板（todo_write）仍把某步标为 in_progress，本次调用会被推迟一次，并提示你先下发最终快照。"
-		summaryDesc = "你的最终结论、分析结果或给用户的回复"
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -337,11 +330,8 @@ func loadSkillToolSpec() ModelTool {
 // deep-planning on complex tasks. Mirrors load_skill: the engine intercepts
 // the call and injects the built-in planning methodology as the tool result.
 // No parameters. The model decides when a task is complex enough to plan.
-func planTaskToolSpec(zh bool) ModelTool {
+func planTaskToolSpec() ModelTool {
 	desc := "When you judge the current task to be complex, multi-step, or requiring deep analysis before acting, call this tool to receive a deep-planning methodology. The engine injects a planning framework; follow it to understand the background, decompose, analyze, and produce a plan before executing. For simple tasks, use todo_write directly instead."
-	if zh {
-		desc = "当你判断当前任务复杂、多步骤、需要先深度分析再动手时，调用本工具获得深度分析方法论。引擎会注入规划框架，请先理解背景、拆解、多假设验证、产出计划，再开始执行。简单任务请直接用 todo_write，不必调用本工具。"
-	}
 	params := `{"type":"object","properties":{},"required":[]}`
 	return ModelTool{
 		Type: "function",
@@ -357,7 +347,7 @@ func planTaskToolSpec(zh bool) ModelTool {
 // Tool description and parameter descriptions are localized to match the session language,
 // preventing the English tool schema from biasing the LLM toward generating English goals
 // in an otherwise Chinese session.
-func handoffToolSpec(zh bool) ModelTool {
+func handoffToolSpec() ModelTool {
 	desc := "Delegate a sub-task to a specialized agent. Sub-agents are read-only: they research code, brainstorm solutions, or critically review decisions, but cannot modify files or run commands; the main agent applies changes itself."
 	agentDesc := "Target agent (role): sub (general read-only analysis), researcher (read-only investigation), critic (adversarial review), proposer/redteam/arbitrator (ratd pipeline roles)"
 	goalDesc := "What the agent should accomplish"
@@ -368,18 +358,6 @@ func handoffToolSpec(zh bool) ModelTool {
 	asyncDesc := "true = run the sub-agent in the background and return immediately with a job_id; you can continue other work and later query the result with agent_poll(job_id). false/omitted = synchronous wait (default). Prefer async for long-running independent read-only tasks (large-scope research, parallel review)."
 	forkTurnsDesc := `How much of YOUR conversation to copy into the sub-agent as starting context: "none" (default, independent run), "all", or a number of preceding user turns as a string, e.g. "2". Only the first-level delegation can fork.`
 	stepDesc := `Optional id of the todo_write step this sub-agent executes (that step's "id" field). It is echoed back on the sub-agent's progress events, and the UI nests the sub-agent under that step. Omit it when this delegation does not correspond to a step.`
-	if zh {
-		desc = "将子任务委派给专门的代理。子代理是只读的：研究代码、头脑风暴方案、批判性审查；不能修改文件或运行命令，修改由主代理执行。"
-		agentDesc = "目标代理（角色）：sub（通用只读分析）、researcher（只读调研）、critic（对抗审查）、proposer/redteam/arbitrator（ratd 管道角色）"
-		goalDesc = "代理需要完成的目标"
-		ctxDesc = "提供给子代理的相关上下文"
-		toolsDesc = "允许子代理使用的只读工具（可选；默认用角色的工具集——只能收窄，不能放宽）"
-		constraintsDesc = "对子代理的约束（可选）"
-		expectedOutputDesc = "什么样的结果算完成——验收标准、输出结构或子代理必须交付的格式（可选）"
-		asyncDesc = "true = 后台运行子代理并立即返回 job_id；你可以继续其他工作，稍后用 agent_poll(job_id) 查询结果。false/省略 = 同步等待（默认）。长耗时的独立只读任务（大范围调研、并行审查）优先用 async。"
-		forkTurnsDesc = `把你自己对话的多少内容复制给子代理作为起始上下文："none"（默认，独立运行）、"all"，或前面 N 轮用户消息的数字字符串，如 "2"。只有第一层委派可以 fork。`
-		stepDesc = `（可选）本子代理执行的 todo_write 步骤 id（该步骤的 "id" 字段）。它会随进度事件回传，UI 据此把子代理嵌到该步骤下。若本次委派不对应任何步骤则省略。`
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -482,15 +460,10 @@ func todoWriteToolSpec() ModelTool {
 // determined from the codebase — covering config gaps, external facts, user
 // preferences, tradeoff choices, etc. Provide 2-6 candidate answers to present
 // them as selectable options; omit options for an open-ended question.
-func askUserToolSpec(zh bool) ModelTool {
+func askUserToolSpec() ModelTool {
 	desc := "Call this tool when you need the user to provide information or make a decision that you cannot determine yourself (missing configuration, external facts, user preferences, tradeoff choices). If you have 2-6 mutually exclusive candidate answers, provide them as options; otherwise omit options for an open-ended question. Do NOT call it for information you can verify yourself by searching the code or using tools. Additionally, before you start modifying code, if your planned changes involve tradeoffs or design choices the user should weigh in on, consider confirming with the user first via this tool (you can provide plan options). This is a suggestion, not a requirement — decide based on the task."
 	questionDesc := "The question to present to the user."
 	optionsDesc := "Optional candidate answers (2-6 non-empty strings). When provided, the engine presents them as selectable options; when omitted, the user answers freely."
-	if zh {
-		desc = "当你需要用户提供无法自行确定的信息或做决定时（配置缺失、外部事实、用户偏好、权衡选择等），调用本工具。若有 2~6 个互斥的候选答案，作为 options 提供；否则省略 options 呈现开放式问题。能通过搜索代码或工具自行验证的信息不要调用。另外，在开始修改代码之前，若你的改动计划存在需用户取舍的权衡或方案选择，建议先用本工具向用户确认（可提供方案选项）。这是建议而非强制，是否确认由你根据任务自主决定。"
-		questionDesc = "呈现给用户的问题。"
-		optionsDesc = "可选候选答案（2~6 个非空字符串）。提供时引擎以可选项呈现；省略时用户自由输入。"
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -522,13 +495,9 @@ func askUserToolSpec(zh bool) ModelTool {
 // async sub-agent task. The engine intercepts the call and returns the
 // task's current status (running/done/error); a done task delivers its
 // result and is removed.
-func agentPollToolSpec(zh bool) ModelTool {
+func agentPollToolSpec() ModelTool {
 	desc := "Query the status and result of a background async sub-agent task (started with handoff_to_agent async:true). Returns running / done / error; a done task returns its result and is removed."
 	jobDesc := "The job_id returned by the async handoff dispatch"
-	if zh {
-		desc = "查询后台异步子代理任务（通过 handoff_to_agent async:true 启动）的状态与结果。返回 running / done / error；done 时返回结果并移除该任务。"
-		jobDesc = "异步委派返回的 job_id"
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -552,15 +521,10 @@ func agentPollToolSpec(zh bool) ModelTool {
 // agentResumeToolSpec returns the tool definition for resuming a sub-agent that
 // stopped to ask the user. The engine intercepts the call, drills down to the
 // leaf of that delegation chain and continues it with the answer.
-func agentResumeToolSpec(zh bool) ModelTool {
+func agentResumeToolSpec() ModelTool {
 	desc := "Resume a sub-agent that stopped to ask the user (see agent_poll: waiting for user input). Non-blocking: the run continues in the background, fetch its result later with agent_poll(run_id). Use it only when the user's latest message is answering that question."
 	runDesc := "The job handle shown in the sub-agent's digest, e.g. bg-3"
 	answerDesc := "The user's answer, verbatim"
-	if zh {
-		desc = "让停下提问的子代理继续（见 agent_poll 的 waiting for user input）。非阻塞：run 在后台继续，之后用 agent_poll(run_id) 取结果。仅当用户这条消息正是在回答该问题时使用。"
-		runDesc = "子代理 digest 里显示的句柄，例如 bg-3"
-		answerDesc = "用户的回答原文"
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -583,15 +547,10 @@ func agentResumeToolSpec(zh bool) ModelTool {
 // sub-agent run. The model must report its final result through this call —
 // plain text never completes a structured run (mirrors the harness
 // structured_output tool).
-func submitResultToolSpec(zh bool) ModelTool {
+func submitResultToolSpec() ModelTool {
 	desc := "Report your final result. When your work is complete you MUST call this tool — only a submit_result call counts as your result, a plain text reply does not. Call it exactly once."
 	summaryDesc := "Your final conclusion, analysis result, or reply to the parent agent"
 	conclusionsDesc := "Key findings (optional)"
-	if zh {
-		desc = "提交最终结果。工作完成后必须调用此工具——只有 submit_result 调用算作完成，纯文本回复不算。只能调用一次。"
-		summaryDesc = "你的最终结论、分析结果或给父代理的回复"
-		conclusionsDesc = "关键发现（可选）"
-	}
 	params := fmt.Sprintf(`{
 				"type": "object",
 				"properties": {
@@ -620,10 +579,7 @@ func submitResultToolSpec(zh bool) ModelTool {
 // submitResultInstruction is appended as the trailing user message of a
 // structured run, so the requirement is visible at the highest recency
 // position (mirrors the harness structured-output instruction section).
-func submitResultInstruction(zh bool) string {
-	if zh {
-		return "当你得到最终答案时，必须调用 submit_result 工具提交结果（参数必须符合其 schema）。不要以纯文本结束：只有 submit_result 调用才算你的结果。"
-	}
+func submitResultInstruction() string {
 	return "When you have your final answer, you MUST report it by calling the submit_result tool with arguments matching its parameter schema exactly. Do not finish with a plain text answer: only the submit_result call counts as your result."
 }
 
@@ -631,74 +587,72 @@ func submitResultInstruction(zh bool) string {
 // The heading is reason-aware: a run that ended without delivering a result
 // must never claim "Agent completed" (the parent model decides based on the
 // heading, so this is a deterministic signal, not a text-prefix heuristic).
-func formatHandoffResult(result *HandoffResult, zh bool) string {
+func formatHandoffResult(result *HandoffResult) string {
 	var sb strings.Builder
-	cancelled := pickPrompt(zh, "Sub-agent was cancelled.", "子代理已取消。")
+	cancelled := "Sub-agent was cancelled."
 	switch result.FinishReason {
 	case HandoffReasonCompleted, "":
-		sb.WriteString(fmt.Sprintf("%s %s\n", pickPrompt(zh, "Agent completed:", "代理完成："), result.Summary))
+		sb.WriteString(fmt.Sprintf("Agent completed: %s\n", result.Summary))
 	case HandoffReasonCancelled:
 		sb.WriteString(cancelled + "\n")
 	default:
-		sb.WriteString(handoffReasonHeading(result.FinishReason, result.RunID, zh))
+		sb.WriteString(handoffReasonHeading(result.FinishReason, result.RunID))
 		sb.WriteString("\n")
 		if result.Summary != "" {
 			sb.WriteString(result.Summary + "\n")
 		}
 	}
 	if len(result.Conclusions) > 0 {
-		sb.WriteString(pickPrompt(zh, "Key findings:\n", "关键发现：\n"))
+		sb.WriteString("Key findings:\n")
 		for _, c := range result.Conclusions {
 			sb.WriteString(fmt.Sprintf("- %s\n", c))
 		}
 	}
 	if len(result.Artifacts) > 0 {
-		sb.WriteString(pickPrompt(zh, "Artifacts:\n", "产出物：\n"))
+		sb.WriteString("Artifacts:\n")
 		for _, a := range result.Artifacts {
 			sb.WriteString(fmt.Sprintf("  %s\n", a))
 		}
 	}
 	if result.Blocked {
-		sb.WriteString(fmt.Sprintf("%s %s\n", pickPrompt(zh, "Blocked:", "受阻："), result.BlockedBy))
+		sb.WriteString(fmt.Sprintf("Blocked: %s\n", result.BlockedBy))
 	}
 	return sb.String()
 }
 
 // handoffReasonHeading renders the reason-specific heading line for a run
 // that did not deliver a result. Must not contain "completed" wording.
-func handoffReasonHeading(reason string, runID string, zh bool) string {
+func handoffReasonHeading(reason string, runID string) string {
 	switch reason {
 	case HandoffReasonMaxTokens:
-		return pickPrompt(zh, "Agent hit the response token limit (partial result):", "子代理达到输出上限（部分结果）：")
+		return "Agent hit the response token limit (partial result):"
 	case HandoffReasonError:
-		return pickPrompt(zh, "Sub-agent failed:", "子代理失败：")
+		return "Sub-agent failed:"
 	case HandoffReasonMaxIterations:
-		return pickPrompt(zh, "Sub-agent exceeded the turn limit (partial result):", "子代理超出轮次上限（部分结果）：")
+		return "Sub-agent exceeded the turn limit (partial result):"
 	case HandoffReasonLoopDetected:
-		return pickPrompt(zh, "Sub-agent stopped for repeating the same operation:", "子代理因重复同一操作被终止：")
+		return "Sub-agent stopped for repeating the same operation:"
 	case HandoffReasonStalledNarration:
-		return pickPrompt(zh, "Sub-agent kept narrating without acting (partial result):", "子代理持续叙述未执行（部分结果）：")
+		return "Sub-agent kept narrating without acting (partial result):"
 	case HandoffReasonNoResult:
-		return pickPrompt(zh, "Sub-agent ended without submitting a result (partial answer below):", "子代理未提交结果（下方为部分答案）：")
+		return "Sub-agent ended without submitting a result (partial answer below):"
 	case HandoffReasonMaxDepth:
-		return pickPrompt(zh, "Sub-agent stopped: max nesting depth reached.", "子代理停止：达到最大嵌套深度。")
+		return "Sub-agent stopped: max nesting depth reached."
 	case HandoffReasonBudgetExceeded:
-		return pickPrompt(zh, "Sub-agent exceeded its token budget (partial result):", "子代理超出 token 预算（部分结果）：")
+		return "Sub-agent exceeded its token budget (partial result):"
 	case HandoffReasonFanoutLimit:
-		return pickPrompt(zh, "Delegation refused: too many sub-agents are already in flight.", "委派被拒：同时在跑的子代理已达上限。")
+		return "Delegation refused: too many sub-agents are already in flight."
 	case HandoffReasonTreeBudgetExceeded:
-		return pickPrompt(zh, "Delegation refused: this Run's sub-agent token budget is exhausted.", "委派被拒：本次 Run 的子代理 token 预算已用完。")
+		return "Delegation refused: this Run's sub-agent token budget is exhausted."
 	case HandoffReasonAwaitingUser:
 		// Not a failure: the run stopped because it needs input the user must
 		// give. The handle is appended when the suspension was registered (top
 		// level only), so the parent knows which job to resume.
 		if runID != "" {
-			return pickPrompt(zh,
-				fmt.Sprintf("Sub-agent needs user input (%s):", runID),
-				fmt.Sprintf("子代理需要用户输入（%s）：", runID))
+			return fmt.Sprintf("Sub-agent needs user input (%s):", runID)
 		}
-		return pickPrompt(zh, "Sub-agent needs user input:", "子代理需要用户输入：")
+		return "Sub-agent needs user input:"
 	default:
-		return pickPrompt(zh, "Sub-agent ended abnormally:", "子代理异常结束：")
+		return "Sub-agent ended abnormally:"
 	}
 }

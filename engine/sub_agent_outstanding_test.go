@@ -18,7 +18,6 @@ func newOutstandingTestEngine(cap int, agent Agent) *Engine {
 	reg.Register(agent)
 	return &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config:    EngineConfig{MaxOutstandingAsyncSubAgents: cap},
 	}
@@ -59,7 +58,6 @@ func TestAsyncOutstanding_FailLoudAtCap(t *testing.T) {
 	reg.Register(a2)
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config:    EngineConfig{MaxOutstandingAsyncSubAgents: 2},
 	}
@@ -67,7 +65,7 @@ func TestAsyncOutstanding_FailLoudAtCap(t *testing.T) {
 	for _, id := range []string{"one", "two"} {
 		res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 			Agent: id, Goal: "任务", Async: true,
-		}, 0, "中文")
+		}, 0)
 		if err != nil || res.Status != "ok" {
 			t.Fatalf("dispatch %s should succeed, got res=%+v err=%v", id, res, err)
 		}
@@ -75,7 +73,7 @@ func TestAsyncOutstanding_FailLoudAtCap(t *testing.T) {
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "任务", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -103,12 +101,12 @@ func TestAsyncOutstanding_PollFreesSlot(t *testing.T) {
 	// Fill both slots with instantly-completing jobs (done but unpolled —
 	// they still hold their slot).
 	for i := 1; i <= 2; i++ {
-		res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0, "中文")
+		res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0)
 		if err != nil || res.Status != "ok" {
 			t.Fatalf("dispatch %d should succeed, got res=%+v err=%v", i, res, err)
 		}
 	}
-	res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0, "中文")
+	res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0)
 	if err != nil || res.Status != "error" {
 		t.Fatalf("third dispatch must fail at cap (done-but-unpolled still occupies), got res=%+v err=%v", res, err)
 	}
@@ -127,7 +125,7 @@ func TestAsyncOutstanding_PollFreesSlot(t *testing.T) {
 	}
 
 	// The freed slot admits a new dispatch.
-	res, err = e.RunSubAgent(context.Background(), asyncDispatchParams("新任务"), 0, "中文")
+	res, err = e.RunSubAgent(context.Background(), asyncDispatchParams("新任务"), 0)
 	if err != nil || res.Status != "ok" || res.FinishReason != HandoffReasonAsyncRunning {
 		t.Fatalf("dispatch after poll must succeed, got res=%+v err=%v", res, err)
 	}
@@ -147,18 +145,18 @@ func TestAsyncOutstanding_DefaultCapWhenUnset(t *testing.T) {
 		reg := NewAgentRegistry()
 		reg.Register(a)
 		return reg
-	}(), isChinese: true, state: &TaskState{}}
+	}(), state: &TaskState{}}
 	if got := e.maxOutstandingAsyncSubAgents(); got != defaultMaxOutstandingAsyncSubAgents {
 		t.Fatalf("bare engine must resolve the default cap, got %d", got)
 	}
 	e.initBackgroundTasks()
 	for i := 1; i <= defaultMaxOutstandingAsyncSubAgents; i++ {
-		res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0, "中文")
+		res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0)
 		if err != nil || res.Status != "ok" {
 			t.Fatalf("dispatch %d within the default cap must succeed, got res=%+v err=%v", i, res, err)
 		}
 	}
-	res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0, "中文")
+	res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("任务"), 0)
 	if err != nil || res.Status != "error" {
 		t.Fatalf("dispatch past the default cap must fail loud, got res=%+v err=%v", res, err)
 	}
@@ -182,7 +180,7 @@ func TestAsyncOutstanding_ConcurrentDispatch(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("并发任务"), 0, "中文")
+			res, err := e.RunSubAgent(context.Background(), asyncDispatchParams("并发任务"), 0)
 			switch {
 			case err != nil:
 				statuses[i] = "err"

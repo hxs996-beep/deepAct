@@ -5,9 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode"
-
-	"github.com/deepact/deepact/engine"
 )
 
 type Language string
@@ -106,92 +103,5 @@ func packageHasTypeScript(path string) bool {
 	return strings.Contains(string(data), "\"typescript\"")
 }
 
-// detectUserLanguage determines the response language from the user's FIRST
-// message in the session. It deliberately ignores later messages so that
-// short English confirmations ("ok", "yes", "确认") or English-heavy tool
-// output cannot flip the language away from what the user originally wrote.
-// The result is locked for the whole session (see ContextAssembler.userLang).
-//
-// Callers only invoke this once history holds a non-empty user message
-// (see hasFirstUserMessage), so LangUnset is unreachable in practice.
-func detectUserLanguage(history []engine.Message) engine.UserLanguage {
-	for i := 0; i < len(history); i++ {
-		if history[i].Role == "user" && strings.TrimSpace(history[i].Content) != "" {
-			return classifyTextLanguage(history[i].Content)
-		}
-	}
-	return engine.LangUnset
-}
-
-func classifyTextLanguage(text string) engine.UserLanguage {
-	// Strip markdown code fences (```...```) and inline code (`...`) before
-	// counting, so that pasted code snippets don't skew language detection.
-	text = stripMarkdownCode(text)
-
-	var cjk, latin int
-	for _, r := range text {
-		if unicode.Is(unicode.Han, r) {
-			cjk++
-		} else if unicode.Is(unicode.Latin, r) {
-			latin++
-		}
-	}
-	// Aligned with engine.msgIsChinese: any CJK character → Chinese.
-	// This ensures ContextBuilder and Engine use the same detection threshold,
-	// preventing mixed-language output when the user's message contains both
-	// Chinese and English (e.g., "帮我 fix the bug").
-	if cjk > 0 {
-		return engine.LangChinese
-	}
-	runes := []rune(text)
-	if len(runes) > 0 {
-		if unicode.Is(unicode.Hiragana, runes[0]) || unicode.Is(unicode.Katakana, runes[0]) {
-			return engine.LangJapanese
-		}
-	}
-	return engine.LangEnglish
-}
-
-// stripMarkdownCode removes markdown fenced code blocks (```...```) and inline
-// code spans (`...`) from s, returning only the natural-language content.
-func stripMarkdownCode(s string) string {
-	// Phase 1: strip fenced code blocks (```...```), including language tag.
-	var buf strings.Builder
-	i := 0
-	for i < len(s) {
-		if i+2 < len(s) && s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
-			// Skip opening fence
-			i += 3
-			// Skip until end of line (language tag)
-			for i < len(s) && s[i] != '\n' {
-				i++
-			}
-			// Skip until closing fence
-			for i+2 < len(s) {
-				if s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
-					i += 3
-					break
-				}
-				i++
-			}
-			continue
-		}
-		buf.WriteByte(s[i])
-		i++
-	}
-	s = buf.String()
-
-	// Phase 2: strip inline code spans (`...`).
-	var buf2 strings.Builder
-	inInline := false
-	for _, r := range s {
-		if r == '`' {
-			inInline = !inInline
-			continue
-		}
-		if !inInline {
-			buf2.WriteRune(r)
-		}
-	}
-	return buf2.String()
-}
+// detectUserLanguage / classifyTextLanguage are gone: the model-facing prompt
+// is English-only, so the session language no longer selects a prompt.

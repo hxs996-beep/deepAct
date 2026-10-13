@@ -12,7 +12,7 @@ import (
 // 而不是把残缺结论直接抛给用户、等用户输入"继续"。
 // 当前实现不 pin 任何 follow-up → 红灯。
 func TestProcessHandoffResults_FailedReasonPinsFollowUp(t *testing.T) {
-	e := &Engine{isChinese: true}
+	e := &Engine{}
 	handoffCalls := []ToolCallRequest{{
 		ID: "h1", Name: HandoffToolName,
 		Input: json.RawMessage(`{"agent":"sub","goal":"审查实现"}`),
@@ -42,7 +42,7 @@ func TestProcessHandoffResults_FailedReasonPinsFollowUp(t *testing.T) {
 // TestProcessHandoffResults_CompletedNoFollowUp 锁定 C6 的反面：
 // 子代理正常完成（completed）时不得 pin follow-up——那是正常路径，不需要父代理干预。
 func TestProcessHandoffResults_CompletedNoFollowUp(t *testing.T) {
-	e := &Engine{isChinese: true}
+	e := &Engine{}
 	handoffCalls := []ToolCallRequest{{
 		ID: "h1", Name: HandoffToolName,
 		Input: json.RawMessage(`{"agent":"sub","goal":"审查实现"}`),
@@ -67,7 +67,7 @@ func TestProcessHandoffResults_CompletedNoFollowUp(t *testing.T) {
 // TestProcessHandoffResults_CancelledNoFollowUp 锁定 C6 的边界：
 // 子代理被取消（cancelled）时同样不 pin follow-up——取消是用户/上下文决定，不是失败。
 func TestProcessHandoffResults_CancelledNoFollowUp(t *testing.T) {
-	e := &Engine{isChinese: true}
+	e := &Engine{}
 	handoffCalls := []ToolCallRequest{{
 		ID: "h1", Name: HandoffToolName,
 		Input: json.RawMessage(`{"agent":"sub","goal":"审查实现"}`),

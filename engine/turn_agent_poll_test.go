@@ -25,12 +25,12 @@ func TestProcessAgentPollCalls_StatusFlow(t *testing.T) {
 	reg.Register(&mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
 		Summary: "结果A", FinishReason: HandoffReasonCompleted,
 	}})
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	_, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "g", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -79,7 +79,7 @@ done:
 }
 
 func TestProcessAgentPollCalls_NotFound(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	msgs := e.processAgentPollCalls([]ToolCallRequest{{
 		ID: "tc1", Name: AgentPollToolName, Input: mustJSON(map[string]string{"job_id": "bg-999"}),
 	}})
@@ -92,7 +92,7 @@ func TestProcessAgentPollCalls_NotFound(t *testing.T) {
 }
 
 func TestBackgroundJobsPinnedInjection(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{id: "bg-1", agent: "researcher", goal: "调研缓存"}
@@ -114,12 +114,12 @@ func TestProcessAgentPollCalls_RunningThenDone(t *testing.T) {
 	}}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	_, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "慢任务", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}

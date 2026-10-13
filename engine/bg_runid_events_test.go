@@ -20,7 +20,6 @@ func TestBackgroundDoneCarriesJobID(t *testing.T) {
 	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			eventsMu.Lock()
@@ -32,7 +31,7 @@ func TestBackgroundDoneCarriesJobID(t *testing.T) {
 
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研", Async: true, Step: "dir-1",
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
 
@@ -69,7 +68,6 @@ func TestCloseAgentEmitsTerminalEventWithRunID(t *testing.T) {
 	var events []ProgressEvent
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			events = append(events, ev)
@@ -79,7 +77,7 @@ func TestCloseAgentEmitsTerminalEventWithRunID(t *testing.T) {
 
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研", Async: true, Step: "dir-2",
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
 	<-a.start
@@ -137,7 +135,6 @@ func TestSyncSuspensionEmitsStartForTheParkedJob(t *testing.T) {
 	var eventsMu sync.Mutex
 	e := &Engine{
 		agents:    reg,
-		isChinese: true,
 		state:     &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) {
 			eventsMu.Lock()
@@ -150,7 +147,7 @@ func TestSyncSuspensionEmitsStartForTheParkedJob(t *testing.T) {
 	// 同步：不传 Async
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研", Step: "dir-7",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -189,12 +186,12 @@ func TestBlockedSyncHandoffReportsError(t *testing.T) {
 	}}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}
@@ -221,11 +218,11 @@ func TestBlockedSyncHandoffReportsError(t *testing.T) {
 	}}
 	errReg := NewAgentRegistry()
 	errReg.Register(errAgent)
-	errEngine := &Engine{agents: errReg, isChinese: true, state: &TaskState{}}
+	errEngine := &Engine{agents: errReg, state: &TaskState{}}
 	errEngine.initBackgroundTasks()
 	errRes, err := errEngine.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "调研",
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}

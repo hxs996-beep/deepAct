@@ -73,7 +73,7 @@ func TestAsyncCapIgnoresSuspendedEntries(t *testing.T) {
 	}}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	// Fill the table with suspended entries only; cap is the default 8, so a
@@ -86,7 +86,7 @@ func TestAsyncCapIgnoresSuspendedEntries(t *testing.T) {
 
 	res, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "任务", Async: true,
-	}, 0, "中文")
+	}, 0)
 	if err != nil {
 		t.Fatalf("RunSubAgent error: %v", err)
 	}

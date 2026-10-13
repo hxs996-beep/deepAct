@@ -31,8 +31,7 @@ const (
 	// yields nothing new. This is information, not a block — the content is
 	// still returned in full and the model decides what to do with it.
 	unchangedReadHint = "File unchanged since your last read — its content is already in the conversation. " +
-		"Do not re-read it; act on what you already have or read a different section. " +
-		"文件自上次读取后未变更，内容已在对话中，请勿重读；请基于已有内容行动或读取其他部分。\n\n"
+		"Do not re-read it; act on what you already have or read a different section.\n\n"
 )
 
 type ReadTool struct {

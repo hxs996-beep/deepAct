@@ -46,8 +46,7 @@ func TestExecuteTurn_SkillHardGateRemoved_EditProceeds(t *testing.T) {
 		state:     &TaskState{TurnNumber: 5},
 		history:   []Message{{Role: "user", Content: "修改代码"}},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
-	}
+		}
 
 	_, err := e.executeTurn(context.Background())
 	if err != nil {

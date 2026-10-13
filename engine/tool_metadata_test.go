@@ -183,7 +183,7 @@ func withExtra(specs map[string]ModelTool, name string, mutates, novelInfo bool)
 // response. This derives the requirement from the spec list the engine actually
 // offers, so adding an inline tool without a table entry fails here.
 func TestInterceptedTools_CoversEveryEngineInlineTool(t *testing.T) {
-	e := &Engine{tools: stubToolExecutor{}, isChinese: true}
+	e := &Engine{tools: stubToolExecutor{}}
 	intercepted := interceptedToolNames()
 	for _, spec := range e.toolSpecsWithHandoff() {
 		name := spec.Function.Name

@@ -268,9 +268,6 @@ type ToolExecContext struct {
 	// Depth is the depth of the NEW sub-agent this handoff produces:
 	// 0 = main agent delegating the first level; d+1 = a sub-agent at depth d.
 	Depth int
-	// UserLang is the session language for localized tool output (see
-	// UserLanguage); LangUnset before the first user message is processed.
-	UserLang UserLanguage
 }
 
 type ToolCallRequest struct {

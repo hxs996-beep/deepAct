@@ -163,7 +163,7 @@ func RenderAgentsBlock(files []AgentsFile) string {
 	}
 	var b strings.Builder
 	b.WriteString("\n## Project Conventions (AGENTS.md)\n")
-	b.WriteString("以下内容来自 AGENTS.md 约定文件，作为固定上下文生效。\n")
+	b.WriteString("The following comes from AGENTS.md convention files and applies as fixed context.\n")
 	for _, f := range files {
 		fmt.Fprintf(&b, "\n### %s\n\n%s\n", f.Source, f.Content)
 	}

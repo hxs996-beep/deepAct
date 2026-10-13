@@ -44,10 +44,10 @@ func TestBuildSkillsBlock_MustLoadDirective(t *testing.T) {
 
 	got := buildSkillsBlock(reg.All())
 
-	if !strings.Contains(got, "这不是可选项") {
+	if !strings.Contains(got, "This is not optional") {
 		t.Errorf("catalog must carry a non-optional MUST directive, got %q", got)
 	}
-	mu := strings.Index(got, "必须")
+	mu := strings.Index(got, "Mandatory")
 	li := strings.Index(got, "- **")
 	if mu < 0 || li < 0 || mu > li {
 		t.Errorf("MUST directive must precede the skill list: must@%d list@%d", mu, li)

@@ -4,11 +4,9 @@ import (
 	"embed"
 	"fmt"
 	"strings"
-
-	"github.com/deepact/deepact/engine"
 )
 
-//go:embed langpacks/*.md langpacks/zh/*.md
+//go:embed langpacks/*.md
 var langpackFS embed.FS
 
 // GetLangPacks assembles the language-rules block for a project: a header
@@ -23,20 +21,11 @@ var langpackFS embed.FS
 // Detection is a heuristic, so the marker is stated explicitly: the model can
 // see the basis and trust the code over the list when the guess is wrong (e.g.
 // a Go repository whose task is actually in its TypeScript frontend).
-func GetLangPacks(hits []LanguageHit, userLang engine.UserLanguage) string {
-	zh := userLang.IsChinese()
+func GetLangPacks(hits []LanguageHit) string {
 	var b strings.Builder
-	if zh {
-		b.WriteString("检测到的项目语言（启发式判定，括号内为触发文件；如与实际不符，以代码为准）：\n")
-	} else {
-		b.WriteString("Detected project languages (heuristic; the file that triggered each — trust the code over this list):\n")
-	}
+	b.WriteString("Detected project languages (heuristic; the file that triggered each — trust the code over this list):\n")
 	if len(hits) == 0 {
-		if zh {
-			b.WriteString("- 未识别出特定语言（仅通用规则）\n")
-		} else {
-			b.WriteString("- none detected (generic rules only)\n")
-		}
+		b.WriteString("- none detected (generic rules only)\n")
 	}
 	for _, h := range hits {
 		if h.Marker == "" {
@@ -58,22 +47,17 @@ func GetLangPacks(hits []LanguageHit, userLang engine.UserLanguage) string {
 			continue
 		}
 		seen[lang] = true
-		if p := langPack(lang, userLang); p != "" {
+		if p := langPack(lang); p != "" {
 			b.WriteString("\n" + p + "\n")
 		}
 	}
 	return strings.TrimSpace(b.String())
 }
 
-// langPack reads the pack for one language, preferring the user's language
-// variant and falling back to English when that variant does not exist (only
-// generic and go have a Chinese translation).
-func langPack(lang Language, userLang engine.UserLanguage) string {
-	if userLang.IsChinese() {
-		if data, err := langpackFS.ReadFile("langpacks/zh/" + string(lang) + ".md"); err == nil {
-			return string(data)
-		}
-	}
+// langPack reads the pack for one language. There is a single language pack
+// per project language; the prompt is English-only, so no per-session variant
+// is selected.
+func langPack(lang Language) string {
 	data, err := langpackFS.ReadFile("langpacks/" + string(lang) + ".md")
 	if err != nil {
 		return ""

@@ -90,17 +90,10 @@ func TestBuildStableSessionContext_IncludesDirTree(t *testing.T) {
 		Date:    "2026-01-01",
 		DirTree: buildDirTree(root, treeMaxDepth, treeMaxEntries),
 	}
-	s := BuildStableSessionContext(env, "中文")
-	for _, want := range []string{"# Block S", "## 代码库结构", "main.go", "internal/"} {
+	s := BuildStableSessionContext(env)
+	for _, want := range []string{"# Block S", "## Codebase", "main.go", "internal/"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("stable context missing %q:\n%s", want, s)
-		}
-	}
-
-	en := BuildStableSessionContext(env, "en")
-	for _, want := range []string{"## Codebase", "main.go"} {
-		if !strings.Contains(en, want) {
-			t.Errorf("english stable context missing %q:\n%s", want, en)
 		}
 	}
 }

@@ -28,12 +28,12 @@ func TestFinishBackgroundJob_ClosesDoneAndSetsBrief(t *testing.T) {
 	reg.Register(&mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
 		Summary: "结果A", FinishReason: HandoffReasonCompleted,
 	}})
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "g", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestListAgentsToolSpec_Registered(t *testing.T) {
 }
 
 func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -147,7 +147,7 @@ func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
 }
 
 func TestProcessListAgentsCalls_Empty(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processListAgentsCalls([]ToolCallRequest{{ID: "tc1", Name: ListAgentsToolName}})
 	if len(msgs) != 1 {
@@ -162,7 +162,7 @@ func TestProcessListAgentsCalls_Empty(t *testing.T) {
 // finished-but-uncollected job (state still bgStateRunning, done closed) must
 // be reported as done in the pinned summary, exactly as list_agents does.
 func TestBackgroundJobsPinnedInjection_ReportsDone(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	done := &bgTask{
 		id: "bg-1", agent: "researcher", goal: "调研", state: bgStateRunning,
@@ -187,7 +187,7 @@ func TestBackgroundJobsPinnedInjection_ReportsDone(t *testing.T) {
 // miss — the done marker and the result brief — and pins the one-line contract
 // for a model-supplied goal that contains newlines.
 func TestRenderAgentList_DoneJobLine(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	done := &bgTask{
 		id: "bg-3", agent: "sub", goal: "总结\n要点", state: bgStateRunning,
@@ -220,11 +220,11 @@ func TestWaitAgent_ReturnsImmediatelyWhenDone(t *testing.T) {
 	reg.Register(&mockAgentForHandoff{id: AgentSub, result: &HandoffResult{
 		Summary: "结果A", FinishReason: HandoffReasonCompleted,
 	}})
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "sub", Goal: "g", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	jobID := firstJobID(t, e)
@@ -273,11 +273,11 @@ func TestWaitAgent_TimesOutOnRunningJob(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -300,11 +300,11 @@ func TestWaitAgent_WakesOnCompletion(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -330,11 +330,11 @@ func TestWaitAgent_CancelledContext(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -355,7 +355,7 @@ func TestWaitAgent_CancelledContext(t *testing.T) {
 }
 
 func TestWaitAgent_EmptyTable(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processWaitAgentCalls(context.Background(), []ToolCallRequest{{
 		ID: "tc1", Name: WaitAgentToolName, Input: mustJSON(map[string]any{}),
@@ -369,7 +369,7 @@ func TestWaitAgent_EmptyTable(t *testing.T) {
 // settled, so wait returns at once — and its closing line must point at
 // agent_resume, not agent_poll.
 func TestWaitAgent_ReportsWaitingJob(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -396,11 +396,11 @@ func TestWaitAgent_SkipsRemovedJob(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -477,11 +477,11 @@ func TestProcessSendMessageCalls_DeliversToRunningJob(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -507,7 +507,7 @@ func TestProcessSendMessageCalls_DeliversToRunningJob(t *testing.T) {
 }
 
 func TestProcessSendMessageCalls_UnknownJob(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processSendMessageCalls([]ToolCallRequest{{
 		ID: "tc1", Name: SendMessageToolName,
@@ -519,7 +519,7 @@ func TestProcessSendMessageCalls_UnknownJob(t *testing.T) {
 }
 
 func TestProcessSendMessageCalls_RejectsSuspendedJob(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -541,7 +541,7 @@ func TestProcessSendMessageCalls_RejectsSuspendedJob(t *testing.T) {
 }
 
 func TestProcessSendMessageCalls_RejectsFullInbox(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	full := make(chan string, 1)
 	full <- "占位"
@@ -562,7 +562,7 @@ func TestProcessSendMessageCalls_RejectsFullInbox(t *testing.T) {
 }
 
 func TestProcessSendMessageCalls_RequiresBothFields(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processSendMessageCalls([]ToolCallRequest{{
 		ID: "tc1", Name: SendMessageToolName,
@@ -597,11 +597,11 @@ func TestSendMessage_ReachesTheSubAgentRun(t *testing.T) {
 	a := &inboxCaptureAgent{id: "cap", got: make(chan Handoff, 1), release: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "cap", Goal: "g", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	runInput := <-a.got
@@ -698,11 +698,11 @@ func TestInterruptAgent_StopsRunningJob(t *testing.T) {
 	a := &ctxWaitAgent{id: "one", start: make(chan struct{}), cancel: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -732,7 +732,7 @@ func TestInterruptAgent_StopsRunningJob(t *testing.T) {
 }
 
 func TestInterruptAgent_UnknownJob(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processInterruptAgentCalls([]ToolCallRequest{{
 		ID: "tc1", Name: InterruptAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-999"}),
@@ -743,7 +743,7 @@ func TestInterruptAgent_UnknownJob(t *testing.T) {
 }
 
 func TestInterruptAgent_SuspendedJobIsNotRunning(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -767,7 +767,7 @@ func TestInterruptAgent_SuspendedJobIsNotRunning(t *testing.T) {
 // still holds an async slot, so interrupting it must send the model to
 // agent_poll (which frees it) instead of just saying "nothing to interrupt".
 func TestInterruptAgent_FinishedJobPointsAtPoll(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	fin := &bgTask{
 		id: "bg-1", agent: "sub", goal: "g", state: bgStateRunning,
@@ -790,7 +790,7 @@ func TestInterruptAgent_FinishedJobPointsAtPoll(t *testing.T) {
 // points from a waiting parent DOWN to its pending child, so closing a job must
 // follow that chain and leave unrelated jobs alone.
 func TestCloseAgent_RemovesJobAndDescendants(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -827,7 +827,7 @@ func TestCloseAgent_RemovesJobAndDescendants(t *testing.T) {
 }
 
 func TestCloseAgent_DropsSuspendedWithWarning(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -847,7 +847,7 @@ func TestCloseAgent_DropsSuspendedWithWarning(t *testing.T) {
 // TestCloseAgent_DropsPendingQuestion: the question a closed job was waiting on
 // must stop being presented — otherwise the user answers a handle that is gone.
 func TestCloseAgent_DropsPendingQuestion(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.pushAskUser(&AskUserRequest{Question: "选哪个？", RunID: "bg-1"})
 	e.bgMu.Lock()
@@ -872,7 +872,7 @@ func TestCloseAgent_DropsPendingQuestion(t *testing.T) {
 // parent waiting on a child that no longer exists can never be resumed, so
 // closing the child must take the parent too.
 func TestCloseAgent_ClosesWaitingParent(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	e.bgMu.Lock()
 	e.bgTasks["bg-1"] = &bgTask{
@@ -901,7 +901,7 @@ func TestCloseAgent_ClosesWaitingParent(t *testing.T) {
 }
 
 func TestCloseAgent_UnknownJob(t *testing.T) {
-	e := &Engine{isChinese: true, state: &TaskState{}}
+	e := &Engine{state: &TaskState{}}
 	e.initBackgroundTasks()
 	msgs := e.processCloseAgentCalls([]ToolCallRequest{{
 		ID: "tc1", Name: CloseAgentToolName, Input: mustJSON(map[string]string{"job_id": "bg-999"}),
@@ -919,12 +919,12 @@ func TestCloseAgent_CancelsRunningJob(t *testing.T) {
 	reg := NewAgentRegistry()
 	reg.Register(a)
 	var events []ProgressEvent
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{},
+	e := &Engine{agents: reg, state: &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -963,7 +963,7 @@ func TestCloseAgent_CancelsRunningJob(t *testing.T) {
 // say so — and must NOT emit a second agent_done (the job already got one).
 func TestCloseAgent_WarnsAboutDiscardedResult(t *testing.T) {
 	var events []ProgressEvent
-	e := &Engine{isChinese: true, state: &TaskState{},
+	e := &Engine{state: &TaskState{},
 		config: EngineConfig{OnProgress: func(ev ProgressEvent) { events = append(events, ev) }}}
 	e.initBackgroundTasks()
 	finished := &bgTask{
@@ -994,12 +994,12 @@ func TestAgentManagement_EndToEnd(t *testing.T) {
 	a := &ctxWaitAgent{id: "one", start: make(chan struct{}), cancel: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "长调研", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start
@@ -1059,11 +1059,11 @@ func TestAgentManagement_EndToEnd_CloseFlow(t *testing.T) {
 	a := &blockingAgent{id: "one", start: make(chan struct{}), released: make(chan struct{})}
 	reg := NewAgentRegistry()
 	reg.Register(a)
-	e := &Engine{agents: reg, isChinese: true, state: &TaskState{}}
+	e := &Engine{agents: reg, state: &TaskState{}}
 	e.initBackgroundTasks()
 	if _, err := e.RunSubAgent(context.Background(), HandoffToAgentParams{
 		Agent: "one", Goal: "慢任务", Async: true,
-	}, 0, "中文"); err != nil {
+	}, 0); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	<-a.start

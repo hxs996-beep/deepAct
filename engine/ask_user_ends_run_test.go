@@ -38,7 +38,6 @@ func TestAskUser_EndsRunWithOptions(t *testing.T) {
 		context:   steerContextBuilder{},
 		state:     &TaskState{TaskID: "test"},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
 		guards:    &GuardSystem{scope: NewScopeGuard()},
 	}
 
@@ -91,7 +90,6 @@ func TestAskUser_NoOptions_EndsRunBlockedAwaitingUser(t *testing.T) {
 		context:   steerContextBuilder{},
 		state:     &TaskState{TaskID: "test"},
 		config:    EngineConfig{ModelName: "test-model"},
-		isChinese: true,
 		guards:    &GuardSystem{scope: NewScopeGuard()},
 	}
 

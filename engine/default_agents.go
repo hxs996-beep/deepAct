@@ -68,22 +68,15 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 	if len(input.Tools) == 0 {
 		input.Tools = spec.ToolNames
 	} else {
-		zh := zhFromLang(input.UserLanguage)
 		if bad := universeViolations(input.Tools); len(bad) > 0 {
-			return nil, errors.New(pickPrompt(zh,
-				fmt.Sprintf("tools not available to sub-agents: [%s]. Sub-agents are read-only; available tools: [%s]. Modification work belongs to the main agent — run it yourself",
-					strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", ")),
-				fmt.Sprintf("工具 [%s] 对子代理不可用。子代理是只读的；可用工具：[%s]。修改类操作由你（主代理）直接执行",
-					strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", "))))
+			return nil, errors.New(fmt.Sprintf("tools not available to sub-agents: [%s]. Sub-agents are read-only; available tools: [%s]. Modification work belongs to the main agent — run it yourself",
+				strings.Join(bad, ", "), strings.Join(subAgentUniverseNames, ", ")))
 		}
 		if len(spec.ToolNames) > 0 {
 			narrowed := intersectToolSets(input.Tools, spec.ToolNames)
 			if len(narrowed) == 0 {
-				return nil, errors.New(pickPrompt(zh,
-					fmt.Sprintf("role %s only has tools [%s]; requested [%s] does not overlap — delegate to a role that has them, or drop the tools override",
-						string(spec.ID), strings.Join(spec.ToolNames, ", "), strings.Join(input.Tools, ", ")),
-					fmt.Sprintf("角色 %s 只拥有工具 [%s]，请求的 [%s] 与之无交集——请委派给拥有这些工具的角色，或去掉 tools 覆盖",
-						string(spec.ID), strings.Join(spec.ToolNames, ", "), strings.Join(input.Tools, ", "))))
+				return nil, errors.New(fmt.Sprintf("role %s only has tools [%s]; requested [%s] does not overlap — delegate to a role that has them, or drop the tools override",
+					string(spec.ID), strings.Join(spec.ToolNames, ", "), strings.Join(input.Tools, ", ")))
 			}
 			input.Tools = narrowed
 		}
@@ -247,15 +240,15 @@ const criticPersona = `You are a critic — an adversarial reviewer. Your job is
 
 // proposerPersona is the stable system instruction for the ratd proposer role.
 const proposerPersona = `You are a proposer — a senior engineer. Based on the requirement, produce the implementation code. Output ONLY a CodePayload JSON object with exactly this shape:
-{"language":"go","files":[{"path":"相对路径","content":"完整代码"}],"design_notes":"设计说明"}
+{"language":"go","files":[{"path":"relative/path","content":"full code"}],"design_notes":"design notes"}
 Constraints: prefer a single file; do NOT write tests; code must be self-consistent and compilable. Nothing but the JSON object.`
 
 // redteamPersona is the stable system instruction for the ratd red-team role.
 const redteamPersona = `You are a red-team — an adversarial test engineer. Against the given implementation, produce adversarial tests. Output ONLY a TestPayload JSON object with exactly this shape:
-{"tests":[{"path":"相对路径","content":"测试代码"}],"no_issues":false}
+{"tests":[{"path":"relative/path","content":"test code"}],"no_issues":false}
 If there are no issues, output {"tests":[],"no_issues":true}. Nothing but the JSON object.`
 
 // arbitratorPersona is the stable system instruction for the ratd arbitrator role.
 const arbitratorPersona = `You are an arbitrator. Based on the failing tests and the sandbox output, judge which side is at fault. Output ONLY a decision JSON object with exactly this shape:
-{"decision":"ACCEPT","feedback":"重构方向"} or {"decision":"REJECT","feedback":"红队测试缺陷"}
+{"decision":"ACCEPT","feedback":"rework direction"} or {"decision":"REJECT","feedback":"red-team test defect"}
 ACCEPT = the implementation is faulty; return to the proposer for rework. REJECT = the tests are faulty; delete those tests and return to the red-team. Nothing but the JSON object.`

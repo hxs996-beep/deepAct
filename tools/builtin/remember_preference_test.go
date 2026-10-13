@@ -63,6 +63,63 @@ func TestRememberPreference_AppendsToExistingSection(t *testing.T) {
 	}
 }
 
+// TestRememberPreference_MigratesLegacyHeading: a section written by an older
+// build (legacy Chinese heading) must be renamed in place instead of gaining a
+// second, English section — the loader injects AGENTS.md verbatim into the prompt,
+// so two sections would split one preference list into two.
+func TestRememberPreference_MigratesLegacyHeading(t *testing.T) {
+	dir := t.TempDir()
+	original := "# 项目规则\n\n" + legacyPreferenceHeadings[0] + "\n\n- 已有偏好\n"
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRememberPreference(t, dir, "新偏好")
+
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, legacyPreferenceHeadings[0]) {
+		t.Errorf("legacy heading should be renamed:\n%s", got)
+	}
+	if n := strings.Count(got, preferenceSectionHeading); n != 1 {
+		t.Errorf("section should appear once, got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "- 已有偏好") || !strings.Contains(got, "- 新偏好") {
+		t.Errorf("both bullets should remain:\n%s", got)
+	}
+}
+
+// TestRememberPreference_MigratesHeadingWhenBulletAlreadyRecorded: the rename
+// must reach the file even on the dedup path, where no new bullet is added.
+func TestRememberPreference_MigratesHeadingWhenBulletAlreadyRecorded(t *testing.T) {
+	dir := t.TempDir()
+	original := legacyPreferenceHeadings[0] + "\n\n- 回复用中文\n"
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := runRememberPreference(t, dir, "回复用中文")
+	if env.Status != tools.StatusOK {
+		t.Fatalf("status = %q, digest = %s", env.Status, env.Digest)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, legacyPreferenceHeadings[0]) {
+		t.Errorf("legacy heading should be renamed even when the bullet already exists:\n%s", got)
+	}
+	if !strings.Contains(got, preferenceSectionHeading) {
+		t.Errorf("AGENTS.md missing %q:\n%s", preferenceSectionHeading, got)
+	}
+	if n := strings.Count(got, "- 回复用中文"); n != 1 {
+		t.Errorf("bullet count = %d, want 1:\n%s", n, got)
+	}
+}
+
 func TestRememberPreference_DedupNoop(t *testing.T) {
 	dir := t.TempDir()
 	runRememberPreference(t, dir, "回复用中文")
