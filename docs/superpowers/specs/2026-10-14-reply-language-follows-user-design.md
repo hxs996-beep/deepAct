@@ -46,16 +46,16 @@
   the language of this prompt or of tool output.
 ```
 
-子代理的流会渲染进 UI（`ProgressEvent{Type:"stream_delta"}`），其 summary 由父代理转述给用户。子代理 system 提示词为 `prompts.System + Examples + Language Pack + sub_agent.md`（`engine/sub_agent.go:1207-1217`），主提示词的规则本已继承，但同样埋在英文语料中部，故就近补一条锚点。
+子代理的流会渲染进 UI（`ProgressEvent{Type:"stream_delta"}`），其 summary 由父代理转述给用户。子代理 system 提示词为 `prompts.System + Examples + Language Pack + sub_agent.md`（`engine/sub_agent.go:1209-1217`），主提示词的规则本已继承，但同样埋在英文语料中部，故就近补一条锚点。
 
 ### 3. 守卫测试 `context/promptset/promptset_test.go`
 
 按 TDD 顺序：先加断言（红灯），再改提示词（转绿）。
 
-- `TestSystemPrompt_RepliesInUserLanguage`：断言 `System` 含 `Reply in the user's language` 与 `everything the user reads`；并断言**不含** `locked from the user's first message`（把"删除不实陈述"一并锁住）。
-- `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含该语言规则。
+- `TestSystemPrompt_RepliesInUserLanguage`：断言 `System` 含 `Reply in the user's language`、`not from injected context blocks`、`` `todo_write` step text ``、`` `ask_user` questions and options ``、`sub-agent reports you relay`；并断言**不含** `" locked"`（带前导空格，避免误命中 `blocked`）。
+- `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含 `Write your report in the user's language` 与 `not the language of this prompt or of tool output`。
 
-只断言**短锚点**，不锁长散文，沿用 2026-10-13 审查 Issue #8 的结论（降低提示词润色造成的假失败）。
+锚点选取原则（初版写错，已按代码质量审查修订）：每个锚点取自**只能由它所守护的子句产生**的最小片段。裸短语若在改动前就已存在、或全文多处出现（如 `Reply in the user's language`、裸 `todo_write`），就是恒真断言、不具守护力。2026-10-13 审查 Issue #8 的「避免锁长散文」是**降低假失败**，不是放弃有效性。
 
 ## 已决策项
 

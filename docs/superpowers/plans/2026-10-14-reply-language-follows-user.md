@@ -24,7 +24,7 @@
 
 **已核实的约束（不要偏离）：**
 - 全仓无任何现有测试断言旧句子文本（`grep -rn "locked from the user\|Reply in the user" --include=*_test.go .` 零命中），因此替换是安全的。
-- `engine/sub_agent.go:1207-1217` 的 `stableSystemPrompt()` 拼接顺序为 `prompts.System + Examples + Language Pack + sub_agent.md`，主提示词规则已被子代理继承；本次是在尾部就近补锚点，不是补缺口。
+- `engine/sub_agent.go:1209-1217` 的 `stableSystemPrompt()` 拼接顺序为 `prompts.System + Examples + Language Pack + sub_agent.md`，主提示词规则已被子代理继承；本次是在尾部就近补锚点，不是补缺口。
 - 规则中嵌套的反引号标识符（`todo_write`、`ask_user`）在 `system.md` 里是普通文本，不参与 Go 语法，无需转义。
 
 ---
@@ -226,3 +226,42 @@ go test -count=1 ./...
 **占位符扫描：** 无"待定/TODO/后续实现"；每个代码步骤都给出了完整文本与确切命令。
 
 **类型一致性：** 本计划不新增或修改任何 Go 符号、类型、函数签名；测试只调用既有导出项 `Get()`（`context/promptset/promptset.go:29`）的 `System`/`SubAgent` 字段。无命名漂移风险。
+
+---
+
+## 执行偏差记录（2026-10-14，实施后补记）
+
+本计划任务 1/2 中给出的**测试代码块与预期输出**已被实施过程推翻，由 `subagent-driven-development` 的两阶段审查触发。**以实际提交为准，上方任务 1/2 的测试代码块视为历史版本。**
+
+| 项 | 计划原文 | 实际落地 | 原因 |
+|---|---|---|---|
+| 任务 1 测试断言 | `{"Reply in the user's language", "everything the user reads"}`，且不含 `"locked from the user's first message"` | 5 条片段锚点（见下），且不含 `" locked"` | 代码质量审查第一轮**不通过**：`Reply in the user's language` 在改动前就已存在（红灯只报另外两条，正好印证），属恒真断言，对本修复零保护；`everything the user reads` 是软散文，删掉渠道枚举后仍然为真 |
+| 任务 2 测试断言 | 单条 `"in the user's language"` | 两条片段锚点（见下） | 沿用任务 1 确立的同一判据，避免重犯 |
+
+实际落地（`context/promptset/promptset_test.go`）：
+
+- `TestSystemPrompt_RepliesInUserLanguage` 断言 `System` 含 `Reply in the user's language`、`not from injected context blocks`、`` `todo_write` step text ``、`` `ask_user` questions and options ``、`sub-agent reports you relay`；不含 `" locked"`（前导空格以避开 `blocked`，因为 `blocked` 含子串 `locked`）。
+- `TestSubAgentPrompt_RepliesInUserLanguage` 断言 `SubAgent` 含 `Write your report in the user's language` 与 `not the language of this prompt or of tool output`。
+- 每个锚点都核实过「只能由它所守护的子句产生」，且两条用例都做了变异验证：删掉所守护的子句 → 必然转红（实测输出见下）。
+
+提交（均在 `main`，用户明确同意直接在主分支实施）：
+
+- `dcc7619 fix(prompt): anchor reply language on the user's own messages`（任务 1。曾以 `9103611` 提交，因上述审查结论落在同一任务边界内，用 `--amend` 修订）
+- `a35b734 fix(prompt): make sub-agents report in the user's language`（任务 2）
+
+验证实跑输出：
+
+```
+$ grep -rn "locked from the user's first message" --include=*.go --include=*.md . | grep -v "^./docs/"
+# 无输出、exit 1（生产代码零残留）
+$ go build ./... && go vet ./...
+# exit 0，无输出
+$ make test
+# go test ./... -count=1 -race -timeout=120s → 16 个包全部 ok
+
+# 变异验证（两次，均已回滚）
+$ 删除 system.md:95 的 "not from injected context blocks …" 段 → FAIL: missing "not from injected context blocks"
+$ 删除 sub_agent.md:7 整条 bullet → FAIL: missing 两条锚点
+```
+
+尚未完成：任务 3 步骤 4 的**人工双语冒烟**（模型行为无法由单元测试覆盖，需真实会话验证）。
