@@ -10,7 +10,6 @@ import (
 // Built-in agent IDs (AgentSub is declared in agent.go).
 const (
 	AgentResearcher AgentID = "researcher" // read-only codebase investigator
-	AgentCritic     AgentID = "critic"     // adversarial reviewer
 	AgentProposer   AgentID = "proposer"   // ratd: produce implementation (CodePayload JSON)
 	AgentRedTeam    AgentID = "redteam"    // ratd: produce adversarial tests (TestPayload JSON)
 	AgentArbitrator AgentID = "arbitrator" // ratd: judge ACCEPT/REJECT (decision JSON)
@@ -24,7 +23,6 @@ func NewDefaultRegistry(runner *SubAgentRunner, userSpecs ...[]AgentSpec) *Agent
 	// Built-in roles first (lowest priority).
 	reg.Register(&specSubAgent{runner: runner, spec: subSpec()})
 	reg.Register(&specSubAgent{runner: runner, spec: researcherSpec()})
-	reg.Register(&specSubAgent{runner: runner, spec: criticSpec()})
 	reg.Register(&specSubAgent{runner: runner, spec: proposerSpec()})
 	reg.Register(&specSubAgent{runner: runner, spec: redteamSpec()})
 	reg.Register(&specSubAgent{runner: runner, spec: arbitratorSpec()})
@@ -135,10 +133,10 @@ func intersectToolSets(a, b []string) []string {
 
 // subSpec is the general-purpose read-only analyst: no persona, the full
 // read-only universe. It is distinct from researcher (evidence-driven
-// investigation with file:line citations) and critic (adversarial review):
-// sub is the one-shot analyst to feed a large context into and get a
-// structured conclusion back from. Sub-agents cannot modify files or run
-// commands; the main agent applies changes itself.
+// investigation with file:line citations): sub is the one-shot analyst to feed
+// a large context into and get a structured conclusion back from — including
+// the independent reviewer the /review skill delegates to. Sub-agents cannot
+// modify files or run commands; the main agent applies changes itself.
 func subSpec() AgentSpec {
 	return AgentSpec{
 		ID:               AgentSub,
@@ -168,19 +166,6 @@ func researcherSpec() AgentSpec {
 		MaxIterations:    15,
 		StructuredResult: true,
 		Persona:          researcherPersona,
-	}
-}
-
-// criticSpec is an adversarial reviewer that checks work for blind spots.
-// Tool-restricted to read-only; turn-capped so it converges quickly.
-func criticSpec() AgentSpec {
-	return AgentSpec{
-		ID:               AgentCritic,
-		Description:      "Adversarial reviewer: critically examine code or a plan for defects, blind spots, and edge cases. Returns findings, does not edit.",
-		ToolNames:        []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations:    15,
-		StructuredResult: true,
-		Persona:          criticPersona,
 	}
 }
 
@@ -234,9 +219,6 @@ func arbitratorSpec() AgentSpec {
 // an instruction to exhaust the budget, and runaway researchers did exactly that.
 const researcherPersona = `You are a researcher — an independent investigator. Your job is to investigate one research direction using read-only tools and produce a concise research note with concrete evidence (file:line references). Do not modify any files.
 Stop as soon as you can answer the direction you were given: report what you have found instead of exploring exhaustively. When your note is ready, submit it with submit_result — only that call counts as your result.`
-
-// criticPersona is the stable system instruction for the critic role.
-const criticPersona = `You are a critic — an adversarial reviewer. Your job is to examine the provided code or plan for defects, blind spots, and edge cases, and report findings. You do not edit files; you only report. Be rigorous and specific, citing file:line evidence.`
 
 // proposerPersona is the stable system instruction for the ratd proposer role.
 const proposerPersona = `You are a proposer — a senior engineer. Based on the requirement, produce the implementation code. Output ONLY a CodePayload JSON object with exactly this shape:

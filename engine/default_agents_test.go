@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestNewDefaultRegistry_BuiltinRoles(t *testing.T) {
 		got[s.ID] = s
 	}
 
-	for _, id := range []AgentID{AgentSub, AgentResearcher, AgentCritic, AgentProposer, AgentRedTeam, AgentArbitrator} {
+	for _, id := range []AgentID{AgentSub, AgentResearcher, AgentProposer, AgentRedTeam, AgentArbitrator} {
 		if _, ok := got[id]; !ok {
 			t.Errorf("missing built-in role %q; specs=%+v", id, got)
 		}
@@ -48,13 +49,6 @@ func TestNewDefaultRegistry_BuiltinRoles(t *testing.T) {
 	// wording) reads as an instruction to exhaust the budget.
 	if !strings.Contains(r.Persona, "Stop as soon as") {
 		t.Errorf("researcher persona must state a stopping rule, got %q", r.Persona)
-	}
-	c := got[AgentCritic]
-	if c.MaxIterations == 0 {
-		t.Error("critic should have a turn cap")
-	}
-	if !c.StructuredResult {
-		t.Error("critic should use structured result")
 	}
 	// ratd roles must carry their JSON-contract persona (stable system prefix)
 	for _, id := range []AgentID{AgentProposer, AgentRedTeam, AgentArbitrator} {
@@ -104,8 +98,8 @@ func TestNewDefaultRegistry_UserOverridesBuiltin(t *testing.T) {
 		t.Errorf("researcher model = %q, want user override", spec.ModelName)
 	}
 	// Registry still has the other built-ins.
-	if _, err := reg.Get(AgentCritic); err != nil {
-		t.Errorf("critic should remain registered: %v", err)
+	if _, err := reg.Get(AgentProposer); err != nil {
+		t.Errorf("proposer should remain registered: %v", err)
 	}
 }
 
@@ -152,3 +146,37 @@ func (c *captureSubRunner) Run(_ context.Context, input Handoff) (*HandoffResult
 }
 
 func (c *captureSubRunner) SetOnProgress(ProgressFunc) {}
+
+// TestNoCriticRole locks the removal decision: review is a user-invoked skill
+// (/review) whose rubric lives in skill/builtin/review/SKILL.md, not a built-in
+// role with a thin persona the delegating model can pick on its own. A role the
+// model may choose costs a full sub-agent run every time it guesses; the skill
+// costs one only when the user asks.
+func TestNoCriticRole(t *testing.T) {
+	reg := NewDefaultRegistry(&SubAgentRunner{})
+	if _, err := reg.Get("critic"); err == nil {
+		t.Error(`role "critic" must not be registered: review is /review, a user-invoked skill`)
+	}
+	// The static fallback schema is the one the model sees when the registered
+	// SubAgentTool is absent (engine/sub_agent.go:1250), so its enum must drop
+	// critic too, or the model can still ask for a role that no longer exists.
+	spec := handoffToolSpec()
+	var params struct {
+		Properties struct {
+			Agent struct {
+				Enum []string `json:"enum"`
+			} `json:"agent"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(spec.Function.Parameters, &params); err != nil {
+		t.Fatalf("unmarshal handoff parameters: %v", err)
+	}
+	for _, id := range params.Properties.Agent.Enum {
+		if id == "critic" {
+			t.Errorf("handoff schema enum must not offer %q, got %v", "critic", params.Properties.Agent.Enum)
+		}
+	}
+	if !strings.Contains(string(spec.Function.Parameters), `"researcher"`) {
+		t.Errorf("sanity: enum should still carry the roles that remain, got %v", params.Properties.Agent.Enum)
+	}
+}

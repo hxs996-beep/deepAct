@@ -190,7 +190,7 @@ type AgentSpec struct {
 	Description   string
 	ToolNames     []string // default tool allowlist (empty = all tools)
 	ModelName     string   // if set, overrides runner's default model for this agent
-	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. critic: 15).
+	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. researcher: 15).
 	// TokenBudget is the role-level token budget merged into Handoff when the
 	// delegating harness does not set one. Same three-state semantics as
 	// Handoff.TokenBudget (0 = inherit, -1 = unlimited, >0 = explicit cap).
@@ -354,7 +354,7 @@ func planTaskToolSpec() ModelTool {
 // user-authored message, so the handed request is its only language evidence.
 func handoffToolSpec() ModelTool {
 	desc := "Delegate a sub-task to a specialized agent. Sub-agents are read-only: they research code, brainstorm solutions, or critically review decisions, but cannot modify files or run commands; the main agent applies changes itself. Write the goal, context, constraints and expected output in the user's language — the sub-agent mirrors the language it is handed, and the goal is shown to the user."
-	agentDesc := "Target agent (role): sub (general read-only analysis), researcher (read-only investigation), critic (adversarial review), proposer/redteam/arbitrator (ratd pipeline roles)"
+	agentDesc := "Target agent (role): sub (general read-only analysis), researcher (read-only investigation), proposer/redteam/arbitrator (ratd pipeline roles)"
 	goalDesc := "What the agent should accomplish, written in the user's language (the user sees this goal)"
 	ctxDesc := "Relevant context for the sub-agent, written in the user's language"
 	toolsDesc := "Read-only tools the sub-agent may use (optional; defaults to the role's set — you may only narrow it)"
@@ -368,7 +368,7 @@ func handoffToolSpec() ModelTool {
 				"properties": {
 				"agent": {
 					"type": "string",
-					"enum": ["sub", "researcher", "critic", "proposer", "redteam", "arbitrator"],
+					"enum": ["sub", "researcher", "proposer", "redteam", "arbitrator"],
 					"description": %q
 				},
 					"goal": {
