@@ -77,7 +77,7 @@ type SubAgentStatus struct {
 	// pair by Agent name — concurrent agents of the same role would close each
 	// other's rows.
 	RunID   string
-	Agent   string // agent type e.g. "sub", "critic", "searcher"
+	Agent   string // agent type e.g. "sub", "researcher"
 	Goal    string // what the sub-agent is dispatched to do
 	Step    string // TodoItem.ID this run executes; "" = not linked to a step
 	Status  string // "running", "done", "error", "cancelled"

@@ -114,7 +114,7 @@ func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
 		state: bgStateRunning, startAt: time.Now(), done: make(chan struct{}),
 	}
 	e.bgTasks["bg-2"] = &bgTask{
-		id: "bg-2", agent: "critic", goal: "审查方案",
+		id: "bg-2", agent: "proposer", goal: "提出方案",
 		state: bgStateAwaitingUser, startAt: time.Now(), done: make(chan struct{}),
 	}
 	e.bgMu.Unlock()
@@ -133,15 +133,15 @@ func TestProcessListAgentsCalls_ShowsJobs(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "bg-1 | researcher | running") {
 		t.Errorf("line 0 = %q, want the running researcher job first", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], "bg-2 | critic | awaiting_user") {
-		t.Errorf("line 1 = %q, want the awaiting_user critic job second", lines[1])
+	if !strings.HasPrefix(lines[1], "bg-2 | proposer | awaiting_user") {
+		t.Errorf("line 1 = %q, want the awaiting_user proposer job second", lines[1])
 	}
 	// A waiting job must point somewhere useful; agent_poll knows whether the
 	// leaf or an intermediate node is the answerable one.
 	if !strings.Contains(lines[1], AgentPollToolName) {
 		t.Errorf("a waiting job's line must point at %s, got %q", AgentPollToolName, lines[1])
 	}
-	if !strings.Contains(lines[0], "调研缓存") || !strings.Contains(lines[1], "审查方案") {
+	if !strings.Contains(lines[0], "调研缓存") || !strings.Contains(lines[1], "提出方案") {
 		t.Errorf("each line must carry its own goal:\n%s", msgs[0].Content)
 	}
 }

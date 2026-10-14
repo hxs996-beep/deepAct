@@ -60,7 +60,7 @@ func TestRenderStepsPanel_NestsByStepID(t *testing.T) {
 	}
 	agents := []SubAgentStatus{
 		{RunID: "bg-1", Agent: "researcher", Goal: "调研方向1", Step: "dir-1", Status: "running"},
-		{RunID: "bg-2", Agent: "critic", Goal: "审查", Status: "running"},
+		{RunID: "bg-2", Agent: "researcher", Goal: "审查", Status: "running"},
 		{RunID: "bg-3", Agent: "researcher", Goal: "失配", Step: "gone", Status: "done", Summary: "小结"},
 	}
 	lines := renderStepsPanel(items, agents, 80, true)

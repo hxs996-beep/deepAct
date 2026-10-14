@@ -1611,7 +1611,7 @@ func (e *Engine) processLoadSkillCalls(calls []ToolCallRequest) []Message {
 		}
 
 		// A model-hidden skill (disable-model-invocation, e.g. the builtin
-		// multi-agent skills collab/ratd) is user-invocable only, via /name. The
+		// collab/ratd/review) is user-invocable only, via /name. The
 		// catalog already omits it; refusing here keeps that policy true even if
 		// the model guesses the name.
 		if s.DisableModelInvocation {
