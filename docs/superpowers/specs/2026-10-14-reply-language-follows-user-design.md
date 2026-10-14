@@ -42,18 +42,22 @@
 ### 2. `context/promptset/en/sub_agent.md` 的 `## How to work` 末尾
 
 ```markdown
-- Write your report in the user's language — the language of the user's own messages — not
-  the language of this prompt or of tool output.
+- Write your report in the user's language — the language of the goal and context you were
+  given — not the language of this prompt or of tool output.
 ```
 
 子代理的流会渲染进 UI（`ProgressEvent{Type:"stream_delta"}`），其 summary 由父代理转述给用户。子代理 system 提示词为 `prompts.System + Examples + Language Pack + sub_agent.md`（`engine/sub_agent.go:1209-1217`），主提示词的规则本已继承，但同样埋在英文语料中部，故就近补一条锚点。
 
-### 3. 守卫测试 `context/promptset/promptset_test.go`
+**锚点必须指向子代理可观测的证据**：默认 `fork_turns=none`（`engine/agent.go:359`）时子代理看不到任何**用户书写的**消息，它唯一收到的 user-role 内容是 `buildVolatilePrompt` 生成的 goal/context 块（`engine/sub_agent.go:503-505`、`:1222-1235`）。因此这里锚定为“交给你的 goal/context 的语言”，而非子代理看不到的用户消息。
+
+### 3. 守卫测试
 
 按 TDD 顺序：先加断言（红灯），再改提示词（转绿）。
 
-- `TestSystemPrompt_RepliesInUserLanguage`：断言 `System` 含 `Reply in the user's language`、`not from injected context blocks`、`` `todo_write` step text ``、`` `ask_user` questions and options ``、`sub-agent reports you relay`；并断言**不含** `" locked"`（带前导空格，避免误命中 `blocked`）。
-- `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含 `Write your report in the user's language` 与 `not the language of this prompt or of tool output`。
+- `context/promptset/promptset_test.go`：
+  - `TestSystemPrompt_RepliesInUserLanguage`：断言 `System` 含 `Reply in the user's language`、`not from injected context blocks`、`` `todo_write` step text ``、`` `ask_user` questions and options ``、`goal and context you hand to a sub-agent`、`sub-agent reports you relay`；并断言**不含** `" locked"`（带前导空格，避免误命中 `blocked`）。
+  - `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含 `Write your report in the user's language`、`the language of the goal and context you were given`、`not the language of this prompt or of tool output`；并断言**不含** `user's own messages`（把“锚点不得指向子代理看不到的东西”锁住）。
+- `engine/handoff_test.go` 与 `tools/subagent_test.go`：各新增一个用例，**逐字段**断言 handoff schema 的 `properties.goal.description` 与 `properties.context.description` 各自含 `written in the user's language`。用字段级断言而非 `strings.Count(...)==2`：计数在“词组落到错字段”时假绿、在“无关字段也加上同句”时假红（已用变异实验证实两种失真）。
 
 锚点选取原则（初版写错，已按代码质量审查修订）：每个锚点取自**只能由它所守护的子句产生**的最小片段。裸短语若在改动前就已存在、或全文多处出现（如 `Reply in the user's language`、裸 `todo_write`），就是恒真断言、不具守护力。2026-10-13 审查 Issue #8 的「避免锁长散文」是**降低假失败**，不是放弃有效性。
 
@@ -78,11 +82,24 @@
 
 | 文件 | 变更 |
 |---|---|
-| `context/promptset/en/system.md` | `# Reply format` 中一条 bullet 拆写为两条（锚点消歧 + 去不实陈述 + 扩覆盖面） |
-| `context/promptset/en/sub_agent.md` | `## How to work` 末尾新增一条语言规则 |
+| `context/promptset/en/system.md` | `# Reply format` 中一条 bullet 拆写为两条（锚点消歧 + 去不实陈述 + 扩覆盖面）；覆盖面枚举补入“递给子代理的 goal/context”（第三次修订） |
+| `context/promptset/en/sub_agent.md` | `## How to work` 末尾新增一条语言规则（第三次修订把锚点改为子代理可观测的 goal/context） |
 | `context/promptset/promptset_test.go` | 新增 2 个守卫用例 |
+| `tools/subagent.go`、`engine/agent.go` | handoff 工具 schema 的 goal/context 描述各加 `written in the user's language`（**两份副本必须同步**） |
+| `engine/handoff_test.go`、`tools/subagent_test.go` | 各新增 1 个字段级守卫用例 |
 
-约 15 行。
+约 90 行（含测试）。
+
+## 第三次修订（2026-10-14）：handoff 的 goal/context
+
+首轮修订只覆盖了模型对用户的直接输出，漏掉了**父代理递给子代理的 goal/context**。经代码核实：
+
+- goal 会被渲染进 UI 的子代理行：`engine/turn.go:669`（`agent_start` 的 `Detail: params.Goal`）、`engine/handoff.go:123`/`:358` → `ui/model.go:573-579` → `ui/model.go:2906-2910`（running 态渲染 `a.Goal`）；`ui/model.go:567` 另把 goal 放进 toolTree 节点。
+- 默认 `fork_turns=none` 时子代理看不到用户消息，只能镜像交给它的 goal/context。
+- handoff schema 有**两份副本**：`tools/subagent.go:40`（`cmd/run.go:398` 注册，经 `e.tools.Specs()` 进主代理工具列表）与 `engine/agent.go:350`（`engine/sub_agent.go:1250` 的回退，子代理未注册时使用）。只改一份要么修复不生效、要么回退分支与注册版不一致，故两份同步。
+- **待查（未决）**：本次会话实际收到的 `handoff_to_agent` schema 同时带有 `tools/subagent.go:75` 的描述文本（含 "(role)" 与并发预算句）与**只存在于 `engine/agent.go:403` 的 `step` 参数**，无法用当前 HEAD 的调用路径解释；会话所用 `deepact` 二进制经核对为旧构建（不含本次改动串）。两份副本早已漂移：`step`、`tools` 字段清单、`expected_output` 文案、工具级描述均不同。本次修复覆盖两份，故不受影响，但该漂移值得单独排查。
+
+**不允许的修法**（已排除）：恢复按会话语言本地化工具描述 —— 那是 `76f90f2` 主动删除的机制，且需要引擎侧会话语言通道。本次只改提示词与工具描述**文本**，不引入任何语言分支。
 
 ## 验证
 

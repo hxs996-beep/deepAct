@@ -265,3 +265,14 @@ $ 删除 sub_agent.md:7 整条 bullet → FAIL: missing 两条锚点
 ```
 
 尚未完成：任务 3 步骤 4 的**人工双语冒烟**（模型行为无法由单元测试覆盖，需真实会话验证）。
+
+---
+
+### 第三轮（2026-10-14）：外部审查发现的 handoff goal 缺口
+
+计划之外追加的一轮：用户带来一份外部审查结论，指出**父代理写给子代理的 `goal` 无人管**。其引用行号经逐条代码核实**全部属实**，判定成立，遂追加修复 —— 提交 `a05c63c fix(prompt): write handoff goals in the user's language`（7 文件）。
+
+- 缺口机制：`goal` 会被渲染进 UI 的子代理行（`engine/turn.go:669`、`engine/handoff.go:123`/`:358` → `ui/model.go:573-579` → `ui/model.go:2906-2910`），但语言规则未覆盖它；且默认 `fork_turns=none` 时子代理看不到用户消息，只能镜像交给它的 goal/context。
+- 修法（只改提示词与工具描述**文本**，不恢复任何语言分支）：`system.md:96` 的覆盖面枚举补入 goal/context；`sub_agent.md:7` 的锚点由"用户自己的消息"改为"交给你的 goal/context"；handoff schema 的 goal/context 描述各加 `written in the user's language`（`tools/subagent.go:58-59` 与 `engine/agent.go:356-357`，**两份副本同步**）。
+- **本轮的偏差**：计划未列 `tools/subagent.go`（主代理实际看到的那份 schema，`cmd/run.go:398` 注册）与 `engine/agent.go` 的注释改写；两处均经规格合规审查判定为"必要同步 / 紧邻必要修正"。**另：任务 2 步骤 3 给出的 `sub_agent.md` bullet 文本已被本轮再次改写，以 `context/promptset/en/sub_agent.md:7` 的实际内容为准。**
+- 守卫由 `strings.Count(...)==2` 改为**字段级断言**：变异实验证实计数写法双向失真 —— "词组落到错字段"时假绿（goal 丢短语、`tools` 字段补上同句，计数仍为 2），"无关字段加同句"时假红。
