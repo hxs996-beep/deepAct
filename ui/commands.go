@@ -51,6 +51,7 @@ func builtinCommands() []Command {
 		{Name: "/clear", Description: "Reset session state (clear messages and context)"},
 		{Name: "/ratd", Args: "<需求>", Description: "反向测试驱动：内置技能（红队写对抗测试驱动实现）"},
 		{Name: "/collab", Args: "<需求>", Description: "并行研究：内置技能（拆解→并行委派调研→汇总）"},
+		{Name: "/review", Args: "<范围>", Description: "独立复核：内置技能（对抗式审查指定范围的改动，输出带优先级与证据的发现）"},
 		{Name: "/resume", Description: "恢复之前的会话", Handle: handleResumeCommand},
 	}
 }

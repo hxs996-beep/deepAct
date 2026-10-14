@@ -35,6 +35,8 @@
 | M7 | 声称 reviewer 是纯独立上下文 | 改为不夸大：引擎会注入 "Main Agent Context (Review Starting Point)"（working set / memory markers / modified files，`engine/handoff.go:436-458`），技能无法关闭；技能只控制"不再叠加自己的结论" | 质量审查 P1：`engine/handoff.go:167-171` 对每次 depth-0 handoff 无条件注入 |
 | M8 | 测试里的 `strings.Contains(spec.Function.Parameters, ...)` | 改为 `string(spec.Function.Parameters)` | `json.RawMessage` 不能直接传给 `strings.Contains`，原规格的测试代码块编译不过 |
 | M9 | 未提及陈旧注释 | 顺手更新 `skill/builtin.go` 与 `skill/builtin_test.go` 里只提 "ratd/collab" 的注释 | 质量审查列为“偏好”项 |
+| M10 | 欢迎语 `Use \`/review <范围>\` for an independent review **of your changes**` | 去掉 "of your changes" | 质量审查 D2：技能接受任意范围（commit / 分支 / 文档），欢迎语把范围说窄了会给出错误预期 |
+| M11 | `/review` 插在 `/collab` 之后（即 `/resume` 之前） | 保留不改 | 质量审查 P1：输入 `/re` 时补全首选由 `/resume` 变为 `/review`。选择保留——三个内置技能命令放在一起是更清晰的注册表不变量，且 `/re` 首选指向哪一条都不算错。这是明确接受的取舍，不是遗漏 |
 
 ## 文件结构
 

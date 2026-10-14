@@ -3273,6 +3273,7 @@ func buildHelpText(commands []Command, tools []Suggestion) string {
 
 	b.WriteString("Type a natural language request to start, or use `/ratd <需求>` for reverse-test-driven harness.\n")
 	b.WriteString("Use `/collab <需求>` for parallel research — via built-in skills.\n")
+	b.WriteString("Use `/review <范围>` for an independent review — via built-in skills.\n")
 	return b.String()
 }
 

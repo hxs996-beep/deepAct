@@ -17,6 +17,7 @@ func TestBuiltinCommandsCoverDocumentedSlashCommands(t *testing.T) {
 		"/clear":  "",
 		"/ratd":   "<需求>",
 		"/collab": "<需求>",
+		"/review": "<范围>",
 		"/resume": "",
 	}
 	builtins := builtinCommands()
