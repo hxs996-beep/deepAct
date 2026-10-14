@@ -22,6 +22,20 @@
 
 ---
 
+## 实施修正记录（执行期间偏离原规格的地方）
+
+| # | 原规格 | 实际 | 原因 |
+|---|---|---|---|
+| M1 | 技能文件用中文写 | 改为**英文** | 仓库已决策内置技能文档英文化（`docs/code-review-report/deepact-2026-10-13-提示词英文单语-语言影响系统分析.md:74-75,138`），且技能正文会注入模型上下文，与 `context/promptset/en/*` 同属模型可见提示词。语言规则写在正文里（`Write goal/context and the final report in the user's language`），报告仍随用户语言 |
+| M2 | 默认范围 = 未提交改动，`/review` 可裸调 | 改为**必须带范围**（`argument-hint: "<range>"`），技能正文写明裸调用不启动复核 | 质量审查发现的 P0：`engine/loop.go:547-549` 在无 task text 时直接 `return`，只回一句 "Skill loaded"，与提示文案「injected for this turn」及 2026-09-11 规格的「当轮注入全文」都不符。用户拍板不改引擎 |
+| M3 | 未提及 `sub` 的完成语义 | 技能正文写明 `sub` 是结构化角色、只能用 `submit_result` 交结果，空 digest 不等于"无发现" | 质量审查 P1：同级技能 `collab/SKILL.md:28` 已明写这一点，缺失会导致空结果被误判 |
+| M4 | 范围步骤只有 `git status` + `git diff HEAD` | 补上未跟踪文件处理 | 质量审查 P2：`git diff HEAD` 不含 `??` 新文件（本次新增的 SKILL.md 自己就是未跟踪文件） |
+| M5 | "不报作者故意为之的改动" | 改为"**diff 中可见地**故意为之的改动"，并写明不得从推测的意图判断 | 质量审查 P1：原措辞要求 reviewer 判断它拿不到的信息（技能又刻意不传作者意图）——限定为可从 diff 判定后自相矛盾消失 |
+| M6 | "宁缺毋滥"无过程证据要求 | 补上：报"无发现"时必须列出检查过的文件与行区间 | 质量审查 P2：否则"截断的运行"与"真正干净"不可区分 |
+| M7 | 声称 reviewer 是纯独立上下文 | 改为不夸大：引擎会注入 "Main Agent Context (Review Starting Point)"（working set / memory markers / modified files，`engine/handoff.go:436-458`），技能无法关闭；技能只控制"不再叠加自己的结论" | 质量审查 P1：`engine/handoff.go:167-171` 对每次 depth-0 handoff 无条件注入 |
+| M8 | 测试里的 `strings.Contains(spec.Function.Parameters, ...)` | 改为 `string(spec.Function.Parameters)` | `json.RawMessage` 不能直接传给 `strings.Contains`，原规格的测试代码块编译不过 |
+| M9 | 未提及陈旧注释 | 顺手更新 `skill/builtin.go` 与 `skill/builtin_test.go` 里只提 "ratd/collab" 的注释 | 质量审查列为“偏好”项 |
+
 ## 文件结构
 
 | 文件 | 动作 | 职责 |
@@ -360,6 +374,8 @@ diff 很大时不要把全文塞进上下文：给出 `git diff --stat HEAD` 与
 - 一次复核 = 一次子代理运行。用户没要求就不要重复跑。
 ````
 
+> **实施修正**：上面的技能文件实际用**英文**写成，且本节其余细节在执行中被质量审查改写（必须带范围、`sub` 的结构化完成语义、未跟踪文件、无发现需说明检查范围、"故意改动"限定为 diff 中可见、独立性表述不夸大）。逐条见本文件顶部的**实施修正记录**表。
+
 - [ ] **步骤 4：运行测试确认通过**
 
 运行：`go test ./skill/ -v -run TestBuiltinSkills`
@@ -411,7 +427,7 @@ git commit -m "feat(skill): add the user-invoked /review skill"
 		"/clear":  "",
 		"/ratd":   "<需求>",
 		"/collab": "<需求>",
-		"/review": "[范围]",
+		"/review": "<范围>",
 		"/resume": "",
 	}
 ```
@@ -435,7 +451,7 @@ git commit -m "feat(skill): add the user-invoked /review skill"
 在 `/collab` 之后插入一行（`Handle` 为 nil = 由引擎接管，与 `/ratd`、`/collab` 同型）：
 
 ```go
-		{Name: "/review", Args: "[范围]", Description: "独立复核：内置技能（对抗式审查当前改动，输出带优先级与证据的发现）"},
+		{Name: "/review", Args: "<范围>", Description: "独立复核：内置技能（对抗式审查指定范围的改动，输出带优先级与证据的发现）"},
 ```
 
 - [ ] **步骤 4：更新 `updateSuggestions` 之外的欢迎语**
@@ -452,7 +468,7 @@ git commit -m "feat(skill): add the user-invoked /review skill"
 ```go
 	b.WriteString("Type a natural language request to start, or use `/ratd <需求>` for reverse-test-driven harness.\n")
 	b.WriteString("Use `/collab <需求>` for parallel research — via built-in skills.\n")
-	b.WriteString("Use `/review [范围]` for an independent review of your changes — via built-in skills.\n")
+	b.WriteString("Use `/review <范围>` for an independent review of your changes — via built-in skills.\n")
 ```
 
 - [ ] **步骤 5：运行测试确认通过**
@@ -595,12 +611,12 @@ git commit -m "chore: drop the remaining critic references"
 ### Independent Review (/review)
 
 ```bash
-deepact exec "/review"
+deepact exec "/review 当前改动"
 deepact exec "/review 只复核 prompt 改动"
 deepact exec "/review 对比 main 分支"
 ```
 
-`/review` is a built-in skill you invoke, not something the agent starts on its own (it is excluded from the model-facing skill catalog). It fixes a scope (uncommitted changes by default), hands the diff plus a review rubric to an **independent** `sub` sub-agent — a fresh context with no memory of the author's plan — then verifies each finding against the code before reporting. The reviewer is read-only: findings carry a priority (P0–P3), a confidence score and a `file:line` citation, and nothing is fixed until you ask.
+`/review` is a built-in skill you invoke, not something the agent starts on its own (it is excluded from the model-facing skill catalog). The text after the command is the range — the command needs one, because a bare `/review` only loads the skill and starts no run. It maps the range to facts (`git status` + `git diff HEAD`, a commit, a branch, a document), hands the diff plus a review rubric to an **independent** `sub` sub-agent — a fresh context with no memory of the author's plan — then verifies each finding against the code before reporting. The reviewer is read-only: findings carry a priority (P0–P3), a confidence score and a `file:line` citation, and nothing is fixed until you ask.
 ```
 
 - [ ] **步骤 4：README.zh.md 同步三处**
@@ -619,12 +635,12 @@ deepact exec "/review 对比 main 分支"
 ### 独立复核（/review）
 
 ```bash
-deepact exec "/review"
+deepact exec "/review 当前改动"
 deepact exec "/review 只复核 prompt 改动"
 deepact exec "/review 对比 main 分支"
 ```
 
-`/review` 是**你主动调用**的内置技能，agent 不会自己发起（它被排除在模型可见的技能目录之外）。它先定范围（默认未提交改动），把 diff 加一份评审要求交给**独立**的 `sub` 子代理——一份没有作者计划记忆的新上下文——然后逐条核验发现再报告。复核者只读：每条发现带优先级（P0–P3）、置信度与 `file:line` 证据，未经你同意不改任何代码。
+`/review` 是**你主动调用**的内置技能，agent 不会自己发起（它被排除在模型可见的技能目录之外）。命令后面的文字就是复核范围——必须给，因为裸 `/review` 只会加载技能、不启动任何运行。它把范围映射成事实（`git status` + `git diff HEAD`、某个 commit、某个分支、或某个文档），将 diff 加一份评审要求交给**独立**的 `sub` 子代理——一份没有作者计划记忆的新上下文——然后逐条核验发现再报告。复核者只读：每条发现带优先级（P0–P3）、置信度与 `file:line` 证据，未经你同意不改任何代码。
 ```
 
 - [ ] **步骤 5：Commit**

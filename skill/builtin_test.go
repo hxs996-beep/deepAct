@@ -10,7 +10,7 @@ func TestBuiltinSkills_Parsable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuiltinSkills() error: %v", err)
 	}
-	want := map[string]bool{"ratd": false, "collab": false}
+	want := map[string]bool{"ratd": false, "collab": false, "review": false}
 	for _, s := range skills {
 		if _, ok := want[s.Name]; !ok {
 			t.Errorf("unexpected builtin skill %q", s.Name)
@@ -39,11 +39,11 @@ func TestBuiltinSkills_Parsable(t *testing.T) {
 	}
 }
 
-// TestBuiltinSkills_NotModelInvocable locks the policy that the builtin
-// multi-agent skills (collab, ratd) are user-invocable only. They must stay out
-// of the model-facing catalog so the model never auto-starts a multi-agent run
-// the user did not ask for (token cost the user did not opt into). Manual /name
-// invocation remains available.
+// TestBuiltinSkills_NotModelInvocable locks the policy that every builtin skill
+// is user-invocable only. They must stay out of the model-facing catalog so the
+// model never auto-starts work the user did not ask for — a multi-agent run
+// (collab, ratd) or a review run (/review) — because either one costs the user
+// tokens they did not opt into. Manual /name invocation remains available.
 func TestBuiltinSkills_NotModelInvocable(t *testing.T) {
 	skills, err := BuiltinSkills()
 	if err != nil {
