@@ -54,3 +54,30 @@ func TestSystemPrompt_TodoProgressIsLive(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemPrompt_RepliesInUserLanguage locks the reply-language rule. Each
+// anchor below is the smallest fragment that only the clause it guards can
+// produce, so removing that clause goes red. The bare "Reply in the user's
+// language" phrasing existed before this fix as well, so on its own it guards
+// nothing — it is kept only to pin the rule's existence. The comment claims no
+// more than that: a partial rewrite of a summary sentence is out of reach.
+func TestSystemPrompt_RepliesInUserLanguage(t *testing.T) {
+	p := Get().System
+	for _, want := range []string{
+		"Reply in the user's language",
+		"not from injected context blocks",
+		"`todo_write` step text",
+		"`ask_user` questions and options",
+		"sub-agent reports you relay",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("system prompt must carry the reply-language rule (missing %q)", want)
+		}
+	}
+	// The session-language lock mechanism was removed in 76f90f2, so a claim
+	// about it must not come back — including a reworded one. The leading space
+	// keeps "blocked" out of the match.
+	if strings.Contains(p, " locked") {
+		t.Error("system prompt must not claim a session-language lock: that mechanism was removed, so the claim is false")
+	}
+}
