@@ -81,3 +81,20 @@ func TestSystemPrompt_RepliesInUserLanguage(t *testing.T) {
 		t.Error("system prompt must not claim a session-language lock: that mechanism was removed, so the claim is false")
 	}
 }
+
+// TestSubAgentPrompt_RepliesInUserLanguage locks the sub-agent language rule:
+// sub-agent streams render in the UI and their summaries are relayed to the user
+// by the parent, so they must follow the user's language rather than the English
+// prompt and tool output they work with. Both anchors are fragments only this
+// rule can produce — sub_agent.md carries no other language text.
+func TestSubAgentPrompt_RepliesInUserLanguage(t *testing.T) {
+	p := Get().SubAgent
+	for _, want := range []string{
+		"Write your report in the user's language",
+		"not the language of this prompt or of tool output",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("sub-agent prompt must carry the reply-language rule (missing %q)", want)
+		}
+	}
+}
