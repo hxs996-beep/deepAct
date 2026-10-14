@@ -42,13 +42,13 @@
 ### 2. `context/promptset/en/sub_agent.md` 的 `## How to work` 末尾
 
 ```markdown
-- Write your report in the user's language — the language of the goal and context you were
-  given — not the language of this prompt or of tool output.
+- Write your report in the user's language — the language of the request your parent handed
+  you — not the language of this prompt or of tool output.
 ```
 
 子代理的流会渲染进 UI（`ProgressEvent{Type:"stream_delta"}`），其 summary 由父代理转述给用户。子代理 system 提示词为 `prompts.System + Examples + Language Pack + sub_agent.md`（`engine/sub_agent.go:1209-1217`），主提示词的规则本已继承，但同样埋在英文语料中部，故就近补一条锚点。
 
-**锚点必须指向子代理可观测的证据**：默认 `fork_turns=none`（`engine/agent.go:359`）时子代理看不到任何**用户书写的**消息，它唯一收到的 user-role 内容是 `buildVolatilePrompt` 生成的 goal/context 块（`engine/sub_agent.go:503-505`、`:1222-1235`）。因此这里锚定为“交给你的 goal/context 的语言”，而非子代理看不到的用户消息。
+**锚点必须指向子代理可观测的证据，且必须覆盖整份委托**：默认 `fork_turns=none`（`engine/agent.go:359`）时子代理看不到任何**用户书写的**消息，它唯一收到的 user-role 内容是 `buildVolatilePrompt` 生成的委托块（`engine/sub_agent.go:503-505`、`:1222-1235`）。因此锚定为“交给你的整份委托（request）的语言”，而非子代理看不到的用户消息。**不写字段枚举**：该块注入四个字段（`## Goal` / `## Expected Output` / `## Context` / `## Constraints`），写 “goal and context” 必然漏掉后两个，故第四次修订改为原则式表述。
 
 ### 3. 守卫测试
 
@@ -56,8 +56,8 @@
 
 - `context/promptset/promptset_test.go`：
   - `TestSystemPrompt_RepliesInUserLanguage`：断言 `System` 含 `Reply in the user's language`、`not from injected context blocks`、`` `todo_write` step text ``、`` `ask_user` questions and options ``、`goal and context you hand to a sub-agent`、`sub-agent reports you relay`；并断言**不含** `" locked"`（带前导空格，避免误命中 `blocked`）。
-  - `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含 `Write your report in the user's language`、`the language of the goal and context you were given`、`not the language of this prompt or of tool output`；并断言**不含** `user's own messages`（把“锚点不得指向子代理看不到的东西”锁住）。
-- `engine/handoff_test.go` 与 `tools/subagent_test.go`：各新增一个用例，**逐字段**断言 handoff schema 的 `properties.goal.description` 与 `properties.context.description` 各自含 `written in the user's language`。用字段级断言而非 `strings.Count(...)==2`：计数在“词组落到错字段”时假绿、在“无关字段也加上同句”时假红（已用变异实验证实两种失真）。
+  - `TestSubAgentPrompt_RepliesInUserLanguage`：断言 `SubAgent` 含 `Write your report in the user's language`、`the language of the request your parent handed you`、`not the language of this prompt or of tool output`；并断言**不含** `user's own messages`（把“锚点不得指向子代理看不到的东西”锁住）与**不含** `the goal and context you were given`（把“锚点不得退化为字段枚举”锁住）。
+- `engine/handoff_test.go` 与 `tools/subagent_test.go`：各一个用例，**逐字段**断言 handoff schema 的 `properties.goal.description` 与 `properties.context.description` 各自含 `written in the user's language`；并断言**工具级** `description`（`Function.Description` / `Spec().Description`）含 `the goal, context, constraints and expected output in the user's language` —— 字段级断言能发现“短语落到错字段”，工具级一句则覆盖全部散文字段（含将来新增的），两者互补。用字段级断言而非 `strings.Count(...)==2`：计数在“词组落到错字段”时假绿、在“无关字段也加上同句”时假红（已用变异实验证实两种失真）。
 
 锚点选取原则（初版写错，已按代码质量审查修订）：每个锚点取自**只能由它所守护的子句产生**的最小片段。裸短语若在改动前就已存在、或全文多处出现（如 `Reply in the user's language`、裸 `todo_write`），就是恒真断言、不具守护力。2026-10-13 审查 Issue #8 的「避免锁长散文」是**降低假失败**，不是放弃有效性。
 
@@ -83,10 +83,10 @@
 | 文件 | 变更 |
 |---|---|
 | `context/promptset/en/system.md` | `# Reply format` 中一条 bullet 拆写为两条（锚点消歧 + 去不实陈述 + 扩覆盖面）；覆盖面枚举补入“递给子代理的 goal/context”（第三次修订） |
-| `context/promptset/en/sub_agent.md` | `## How to work` 末尾新增一条语言规则（第三次修订把锚点改为子代理可观测的 goal/context） |
-| `context/promptset/promptset_test.go` | 新增 2 个守卫用例 |
-| `tools/subagent.go`、`engine/agent.go` | handoff 工具 schema 的 goal/context 描述各加 `written in the user's language`（**两份副本必须同步**） |
-| `engine/handoff_test.go`、`tools/subagent_test.go` | 各新增 1 个字段级守卫用例 |
+| `context/promptset/en/sub_agent.md` | `## How to work` 末尾新增一条语言规则（第三次修订把锚点改为子代理可观测的 goal/context；第四次修订改为覆盖整份委托的原则式表述） |
+| `context/promptset/promptset_test.go` | 新增 2 个守卫用例（第四次修订增加“不得退化为字段枚举”的反向断言） |
+| `tools/subagent.go`、`engine/agent.go` | handoff 工具 schema 的 goal/context 描述各加 `written in the user's language`（**两份副本必须同步**）；第四次修订给两处**工具级** description 各加一句覆盖全部散文字段 |
+| `engine/handoff_test.go`、`tools/subagent_test.go` | 各新增 1 个字段级守卫用例（第四次修订扩为字段级 + 工具级断言） |
 
 约 90 行（含测试）。
 
@@ -100,6 +100,17 @@
 - **待查（未决）**：本次会话实际收到的 `handoff_to_agent` schema 同时带有 `tools/subagent.go:75` 的描述文本（含 "(role)" 与并发预算句）与**只存在于 `engine/agent.go:403` 的 `step` 参数**，无法用当前 HEAD 的调用路径解释；会话所用 `deepact` 二进制经核对为旧构建（不含本次改动串）。两份副本早已漂移：`step`、`tools` 字段清单、`expected_output` 文案、工具级描述均不同。本次修复覆盖两份，故不受影响，但该漂移值得单独排查。
 
 **不允许的修法**（已排除）：恢复按会话语言本地化工具描述 —— 那是 `76f90f2` 主动删除的机制，且需要引擎侧会话语言通道。本次只改提示词与工具描述**文本**，不引入任何语言分支。
+
+## 第四次修订（2026-10-14）：从字段枚举改为原则式表述
+
+第二次代码审查指出：`buildVolatilePrompt` 注入的是**四个**字段（`## Goal`、`## Expected Output`、`## Context`、`## Constraints`，`engine/sub_agent.go:1222-1235`），而第三轮的语言要求只落在 goal/context 上 —— `sub_agent.md:7` 写的是 "the goal and context you were given"，两份 schema 的 `constraints`/`expected_output` 描述也没加要求。父代理若用英文写这两项，子代理仍可能被拉向英文。这与第三次修订同类：**用枚举表达覆盖面，枚举必然漏下未被点名的项**。
+
+修法（仍只改文本、不新增语言分支）：
+
+- `sub_agent.md:7` 锚点改为原则式 "the language of the request your parent handed you" —— 覆盖委托的全部字段，含将来新增的。
+- 两份 handoff schema 的**工具级 description** 各加一句："Write the goal, context, constraints and expected output in the user's language — the sub-agent mirrors the language it is handed, and the goal is shown to the user." 工具级一句天然覆盖全部散文字段，避免“逐个字段点名→下次又漏”。
+- 守卫：`promptset_test.go` 增加反向断言（不得再出现 `the goal and context you were given`，即锚点不得退化为枚举）；两个 schema 用例增加工具级 description 断言。
+- 字段级 `goal`/`context` 描述**保留**：`goal` 那条另注明“用户会看到这个 goal”，它是父代理该用用户语言的动机之一，与工具级要求不重复（一个说为什么、一个说全部字段）。
 
 ## 验证
 

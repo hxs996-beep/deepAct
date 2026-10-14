@@ -276,3 +276,14 @@ $ 删除 sub_agent.md:7 整条 bullet → FAIL: missing 两条锚点
 - 修法（只改提示词与工具描述**文本**，不恢复任何语言分支）：`system.md:96` 的覆盖面枚举补入 goal/context；`sub_agent.md:7` 的锚点由"用户自己的消息"改为"交给你的 goal/context"；handoff schema 的 goal/context 描述各加 `written in the user's language`（`tools/subagent.go:58-59` 与 `engine/agent.go:356-357`，**两份副本同步**）。
 - **本轮的偏差**：计划未列 `tools/subagent.go`（主代理实际看到的那份 schema，`cmd/run.go:398` 注册）与 `engine/agent.go` 的注释改写；两处均经规格合规审查判定为"必要同步 / 紧邻必要修正"。**另：任务 2 步骤 3 给出的 `sub_agent.md` bullet 文本已被本轮再次改写，以 `context/promptset/en/sub_agent.md:7` 的实际内容为准。**
 - 守卫由 `strings.Count(...)==2` 改为**字段级断言**：变异实验证实计数写法双向失真 —— "词组落到错字段"时假绿（goal 丢短语、`tools` 字段补上同句，计数仍为 2），"无关字段加同句"时假红。
+
+---
+
+### 第四轮（2026-10-14）：从字段枚举改为原则式表述
+
+第二轮审查（`docs/code-review-report/deepact-2026-10-14-handoff目标语言修复.md`）发现：第三轮只覆盖 goal/context，而 `buildVolatilePrompt`（`engine/sub_agent.go:1222-1235`）还注入 `## Expected Output` 与 `## Constraints`，两份 schema 的这两个字段也没加语言要求 —— 与第三轮同类的“枚举漏项”。
+
+- 修法（仍只改文本）：`sub_agent.md:7` 锚点改为原则式 `the language of the request your parent handed you`；`tools/subagent.go:75-77` 与 `engine/agent.go:354-356` 的**工具级 description** 各加 "Write the goal, context, constraints and expected output in the user's language — …"，一句覆盖全部散文字段。
+- 守卫：`promptset_test.go` 加反向断言（不得出现 `the goal and context you were given`）；两个 schema 用例加工具级 description 断言（片段常量 `langProseFieldsAnchor` 在两份用例中各自定义，因 `tools` 与 `engine` 互相 import、无法共享）。
+- 实施按 TDD：先改断言 → 4 处红（`context/promptset` 2 处、`engine` 1 处、`tools` 1 处，均因预期原因失败）→ 改文本转绿。实跑：`go build ./...` exit 0、`go vet ./...` 无输出、`go test -count=1 ./...` 15 个包全 ok。
+- 仍未完成：人工双语冒烟；`stableSystemPrompt` 装配断言；`sub_agent.md:7` 只提 report、未含 running narration；`engine/sub_agent.go:1489` 与 `promptset_test.go:11` 的失效注释。
