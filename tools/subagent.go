@@ -73,6 +73,7 @@ func (t *SubAgentTool) Spec() ToolSpec {
 	return ToolSpec{
 		Name: engine.HandoffToolName,
 		Description: "Delegate a sub-task to a specialized agent (role). Sub-agents are read-only: they research code, brainstorm solutions, and critically review decisions, but cannot modify files or run commands; the main agent applies changes itself. " +
+			"Write the goal, context, constraints and expected output in the user's language — the sub-agent mirrors the language it is handed, and the goal is shown to the user. " +
 			"A bounded number of sub-agents run in flight at once across the whole delegation tree, and nesting counts against the same budget: plan the split (parallel directions vs. nested delegation) before you delegate, and collect results before exceeding it.",
 		Parameters: json.RawMessage(params),
 	}

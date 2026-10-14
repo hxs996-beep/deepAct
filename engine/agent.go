@@ -348,11 +348,12 @@ func planTaskToolSpec() ModelTool {
 // registered in cmd/run.go) is absent; filterTools prefers the registered one, so
 // the two copies must stay in sync.
 // The goal and context descriptions tell the delegating model to write them in the
-// user's language: the goal is rendered in the UI's sub-agent row, and a run
-// without fork_turns has no user-authored message, so the handed goal/context
-// block is its only language evidence.
+// user's language, and the tool description carries the same rule for every prose
+// field (a field added later is covered without touching either one): the goal is
+// rendered in the UI's sub-agent row, and a run without fork_turns has no
+// user-authored message, so the handed request is its only language evidence.
 func handoffToolSpec() ModelTool {
-	desc := "Delegate a sub-task to a specialized agent. Sub-agents are read-only: they research code, brainstorm solutions, or critically review decisions, but cannot modify files or run commands; the main agent applies changes itself."
+	desc := "Delegate a sub-task to a specialized agent. Sub-agents are read-only: they research code, brainstorm solutions, or critically review decisions, but cannot modify files or run commands; the main agent applies changes itself. Write the goal, context, constraints and expected output in the user's language — the sub-agent mirrors the language it is handed, and the goal is shown to the user."
 	agentDesc := "Target agent (role): sub (general read-only analysis), researcher (read-only investigation), critic (adversarial review), proposer/redteam/arbitrator (ratd pipeline roles)"
 	goalDesc := "What the agent should accomplish, written in the user's language (the user sees this goal)"
 	ctxDesc := "Relevant context for the sub-agent, written in the user's language"

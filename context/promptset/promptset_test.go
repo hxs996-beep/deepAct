@@ -93,7 +93,7 @@ func TestSubAgentPrompt_RepliesInUserLanguage(t *testing.T) {
 	p := Get().SubAgent
 	for _, want := range []string{
 		"Write your report in the user's language",
-		"the language of the goal and context you were given",
+		"the language of the request your parent handed you",
 		"not the language of this prompt or of tool output",
 	} {
 		if !strings.Contains(p, want) {
@@ -102,5 +102,11 @@ func TestSubAgentPrompt_RepliesInUserLanguage(t *testing.T) {
 	}
 	if strings.Contains(p, "user's own messages") {
 		t.Error("sub-agent prompt must not anchor its language on messages the sub-agent cannot see")
+	}
+	// Naming fields one at a time always leaves the unnamed ones out: the anchor
+	// used to say "goal and context", while buildVolatilePrompt also injects the
+	// expected output and the constraints (engine/sub_agent.go:1222-1235).
+	if strings.Contains(p, "the goal and context you were given") {
+		t.Error("sub-agent prompt must anchor the language on the whole handed request, not on an enumeration of its fields")
 	}
 }

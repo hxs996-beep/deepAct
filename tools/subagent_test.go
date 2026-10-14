@@ -41,11 +41,18 @@ func TestSubAgentTool_Spec_DynamicEnum(t *testing.T) {
 	}
 }
 
+// langProseFieldsAnchor is the tool-level sentence that covers every prose field
+// of the handoff schema, including the ones with no description of their own.
+// Engine's static fallback carries the same sentence (see TestHandoffToolSpec_
+// GoalAndContextLanguage); the two copies must not drift.
+const langProseFieldsAnchor = "the goal, context, constraints and expected output in the user's language"
+
 // TestSubAgentTool_Spec_GoalAndContextLanguage locks the same rule on the schema
 // the delegating model actually sees: filterTools prefers the registered
 // SubAgentTool spec over engine's static fallback, so both copies must carry the
 // instruction or they drift apart. Asserted per field (see the engine twin) rather
-// than by counting the phrase.
+// than by counting the phrase. The tool-level description carries the rule for
+// every prose field, so a field added later is covered without editing this test.
 func TestSubAgentTool_Spec_GoalAndContextLanguage(t *testing.T) {
 	var params struct {
 		Properties struct {
@@ -53,7 +60,8 @@ func TestSubAgentTool_Spec_GoalAndContextLanguage(t *testing.T) {
 			Context struct{ Description string } `json:"context"`
 		} `json:"properties"`
 	}
-	if err := json.Unmarshal(NewSubAgentTool(nil, nil, nil, 2).Spec().Parameters, &params); err != nil {
+	spec := NewSubAgentTool(nil, nil, nil, 2).Spec()
+	if err := json.Unmarshal(spec.Parameters, &params); err != nil {
 		t.Fatalf("unmarshal handoff parameters: %v", err)
 	}
 	for _, f := range []struct{ name, desc string }{
@@ -63,6 +71,9 @@ func TestSubAgentTool_Spec_GoalAndContextLanguage(t *testing.T) {
 		if !strings.Contains(f.desc, "written in the user's language") {
 			t.Errorf("handoff schema: %s description must tell the delegating model to write it in the user's language, got %q", f.name, f.desc)
 		}
+	}
+	if !strings.Contains(spec.Description, langProseFieldsAnchor) {
+		t.Errorf("handoff tool description must require the user's language for every prose field (missing %q), got %q", langProseFieldsAnchor, spec.Description)
 	}
 }
 
