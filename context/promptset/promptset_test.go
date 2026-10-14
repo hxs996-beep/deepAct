@@ -68,6 +68,7 @@ func TestSystemPrompt_RepliesInUserLanguage(t *testing.T) {
 		"not from injected context blocks",
 		"`todo_write` step text",
 		"`ask_user` questions and options",
+		"goal and context you hand to a sub-agent",
 		"sub-agent reports you relay",
 	} {
 		if !strings.Contains(p, want) {
@@ -85,16 +86,21 @@ func TestSystemPrompt_RepliesInUserLanguage(t *testing.T) {
 // TestSubAgentPrompt_RepliesInUserLanguage locks the sub-agent language rule:
 // sub-agent streams render in the UI and their summaries are relayed to the user
 // by the parent, so they must follow the user's language rather than the English
-// prompt and tool output they work with. Both anchors are fragments only this
-// rule can produce — sub_agent.md carries no other language text.
+// prompt and tool output they work with. The anchors are fragments only this rule
+// can produce, and the rule must point at evidence the sub-agent actually has:
+// a run with fork_turns=none (the default) never sees a user message.
 func TestSubAgentPrompt_RepliesInUserLanguage(t *testing.T) {
 	p := Get().SubAgent
 	for _, want := range []string{
 		"Write your report in the user's language",
+		"the language of the goal and context you were given",
 		"not the language of this prompt or of tool output",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("sub-agent prompt must carry the reply-language rule (missing %q)", want)
 		}
+	}
+	if strings.Contains(p, "user's own messages") {
+		t.Error("sub-agent prompt must not anchor its language on messages the sub-agent cannot see")
 	}
 }

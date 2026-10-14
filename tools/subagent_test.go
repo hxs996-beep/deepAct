@@ -41,6 +41,31 @@ func TestSubAgentTool_Spec_DynamicEnum(t *testing.T) {
 	}
 }
 
+// TestSubAgentTool_Spec_GoalAndContextLanguage locks the same rule on the schema
+// the delegating model actually sees: filterTools prefers the registered
+// SubAgentTool spec over engine's static fallback, so both copies must carry the
+// instruction or they drift apart. Asserted per field (see the engine twin) rather
+// than by counting the phrase.
+func TestSubAgentTool_Spec_GoalAndContextLanguage(t *testing.T) {
+	var params struct {
+		Properties struct {
+			Goal    struct{ Description string } `json:"goal"`
+			Context struct{ Description string } `json:"context"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(NewSubAgentTool(nil, nil, nil, 2).Spec().Parameters, &params); err != nil {
+		t.Fatalf("unmarshal handoff parameters: %v", err)
+	}
+	for _, f := range []struct{ name, desc string }{
+		{"goal", params.Properties.Goal.Description},
+		{"context", params.Properties.Context.Description},
+	} {
+		if !strings.Contains(f.desc, "written in the user's language") {
+			t.Errorf("handoff schema: %s description must tell the delegating model to write it in the user's language, got %q", f.name, f.desc)
+		}
+	}
+}
+
 func TestSubAgentTool_Spec_FallbackEnum(t *testing.T) {
 	// nil agents callback → fallback single "sub"
 	tool := NewSubAgentTool(

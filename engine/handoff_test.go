@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -123,6 +124,33 @@ func TestHandoffToAgentParams_AsyncField(t *testing.T) {
 	spec := handoffToolSpec()
 	if !strings.Contains(string(spec.Function.Parameters), `"async"`) {
 		t.Fatalf("handoff spec parameters must contain async field, got: %s", spec.Function.Parameters)
+	}
+}
+
+// TestHandoffToolSpec_GoalAndContextLanguage locks the delegating-language rule on
+// the static handoff schema: the goal is rendered in the UI's sub-agent row, and a
+// run without fork_turns has no user-authored message to read a language from, so
+// both fields must tell the delegating model which language to write in.
+// Asserted per field rather than by counting the phrase: a count turns red when an
+// unrelated field gains the same phrase, and stays green when the phrase lands in
+// the wrong field.
+func TestHandoffToolSpec_GoalAndContextLanguage(t *testing.T) {
+	var params struct {
+		Properties struct {
+			Goal    struct{ Description string } `json:"goal"`
+			Context struct{ Description string } `json:"context"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(handoffToolSpec().Function.Parameters, &params); err != nil {
+		t.Fatalf("unmarshal handoff parameters: %v", err)
+	}
+	for _, f := range []struct{ name, desc string }{
+		{"goal", params.Properties.Goal.Description},
+		{"context", params.Properties.Context.Description},
+	} {
+		if !strings.Contains(f.desc, "written in the user's language") {
+			t.Errorf("handoff schema: %s description must tell the delegating model to write it in the user's language, got %q", f.name, f.desc)
+		}
 	}
 }
 

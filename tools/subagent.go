@@ -55,8 +55,8 @@ func (t *SubAgentTool) Spec() ToolSpec {
 		"properties": {
 			"agent": {"type": "string", "enum": %s,
 				"description": "Target agent (role). Roles are registered agents with a stable persona, default tool set, and optional model/turn config."},
-			"goal": {"type": "string", "description": "What the agent should accomplish"},
-			"context": {"type": "string", "description": "Relevant context for the sub-agent"},
+			"goal": {"type": "string", "description": "What the agent should accomplish, written in the user's language (the user sees this goal)"},
+			"context": {"type": "string", "description": "Relevant context for the sub-agent, written in the user's language"},
 			"tools": {"type": "array", "items": {"type": "string"},
 				"description": "Read-only tools the sub-agent may use (optional; defaults to the role's set — you may only narrow it). Available: read, read_multi, grep, glob, lsp, web_search, fetch. Sub-agents cannot run bash/write/edit/revert or MCP tools; the main agent applies changes itself."},
 			"constraints": {"type": "array", "items": {"type": "string"},

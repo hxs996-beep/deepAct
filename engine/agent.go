@@ -343,15 +343,19 @@ func planTaskToolSpec() ModelTool {
 	}
 }
 
-// handoffToolSpec returns the tool definition exposed to LLMs for delegating to sub-agents.
-// Tool description and parameter descriptions are localized to match the session language,
-// preventing the English tool schema from biasing the LLM toward generating English goals
-// in an otherwise Chinese session.
+// handoffToolSpec returns the static fallback tool definition for delegating to
+// sub-agents, used when the registered spec (tools/subagent.go's SubAgentTool,
+// registered in cmd/run.go) is absent; filterTools prefers the registered one, so
+// the two copies must stay in sync.
+// The goal and context descriptions tell the delegating model to write them in the
+// user's language: the goal is rendered in the UI's sub-agent row, and a run
+// without fork_turns has no user-authored message, so the handed goal/context
+// block is its only language evidence.
 func handoffToolSpec() ModelTool {
 	desc := "Delegate a sub-task to a specialized agent. Sub-agents are read-only: they research code, brainstorm solutions, or critically review decisions, but cannot modify files or run commands; the main agent applies changes itself."
 	agentDesc := "Target agent (role): sub (general read-only analysis), researcher (read-only investigation), critic (adversarial review), proposer/redteam/arbitrator (ratd pipeline roles)"
-	goalDesc := "What the agent should accomplish"
-	ctxDesc := "Relevant context for the sub-agent"
+	goalDesc := "What the agent should accomplish, written in the user's language (the user sees this goal)"
+	ctxDesc := "Relevant context for the sub-agent, written in the user's language"
 	toolsDesc := "Read-only tools the sub-agent may use (optional; defaults to the role's set — you may only narrow it)"
 	constraintsDesc := "Constraints for the sub-agent (optional)"
 	expectedOutputDesc := "What a successful result looks like — acceptance criteria, output shape, or format the sub-agent must deliver (optional)"
