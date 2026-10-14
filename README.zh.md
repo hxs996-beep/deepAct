@@ -83,11 +83,21 @@ deepact exec "/collab 加一个缓存层"
 
 `/collab` 是内置协作技能，由 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给 `researcher` 子代理（只读工具），再把各方向发现合并成一份结构化报告——需要快速摸清广度时，比串行调研更快。
 
+### 独立复核（/review）
+
+```bash
+deepact exec "/review 当前改动"
+deepact exec "/review 只复核 prompt 改动"
+deepact exec "/review 对比 main 分支"
+```
+
+`/review` 是**你主动调用**的内置技能——它被排除在模型可见的技能目录之外，agent 不会自己发起复核。命令后面的文字就是复核范围，且**必须给**：裸 `/review` 会让引擎拿不到任务，只加载技能、不启动任何运行。范围会被映射成事实（`git status` + `git diff HEAD`、某个 commit、某个分支、或某个文档），diff 加一份评审要求交给**独立**的 `sub` 子代理——它有自己的一份上下文，而不是作者那段对话——然后每条发现都要先对着代码核验再报告。发现带优先级（P0–P3）、置信度与 `file:line` 证据；复核者只读，未经你同意不改任何代码。
+
 ### 项目规范与技能（Skills）
 
 项目规范、工作流、领域知识通过**技能**注入系统提示：技能列表渲染进稳定区，Agent 在任务明显匹配某技能描述时调用 `load_skill` 工具加载其全文再遵循，也可用 `/<name>` 直接加载。
 
-内置技能（`skill/builtin/`，go:embed：`ratd` / `collab`）最先注册、优先级最低；用户技能从常见 agent 技能目录加载（`~/.claude/skills/`、`~/.agent/skills/`、`<项目>/.claude/skills/`、`~/.deepact/skills/`），同名冲突时 `~/.deepact/skills/` 覆盖。也可用 `skill_install` 工具从社区仓库安装技能。
+内置技能（`skill/builtin/`，go:embed：`ratd` / `collab` / `review`）最先注册、优先级最低；用户技能从常见 agent 技能目录加载（`~/.claude/skills/`、`~/.agent/skills/`、`<项目>/.claude/skills/`、`~/.deepact/skills/`），同名冲突时 `~/.deepact/skills/` 覆盖。也可用 `skill_install` 工具从社区仓库安装技能。
 
 格式为 `<name>/SKILL.md`（Claude Code 布局，YAML frontmatter）：
 
@@ -160,7 +170,7 @@ reason   = "生产环境禁地"
 
 ### 子代理并行
 
-`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用只读分析）、`researcher`（只读调研）、`critic`（对抗式审查），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。
+`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用只读分析）、`researcher`（只读调研），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。代码复核不是角色：它是用户主动调用的 `/review` 技能（见上），所以你要求时才付一次子代理运行的成本。
 
 子代理是**只读的**：可以读、搜、分析（`read`、`read_multi`、`grep`、`glob`、`lsp`、`web_search`、`fetch`），不能修改文件或运行命令——`bash`/`write`/`edit`/`revert`、`skill_install` 与 MCP 工具在任何委派深度都被排除，per-call 的 `tools` 覆盖只能收窄角色工具集、不能放宽。修改属于主代理（其 bash 仍经过危险命令守卫）。`config.toml` 里 `[agents]` 角色声明写类工具会在启动时报错并给出迁移指引。
 
@@ -189,7 +199,7 @@ engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
 tools/    内置工具（builtin/）+ MCP（mcp/）   router/   模型路由
 session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
-skill/    内置（ratd/collab）+ 外部技能加载    config/   共享配置
+skill/    内置（ratd/collab/review）+ 外部技能加载    config/   共享配置
 memory/   跨会话持久记忆
 ```
 

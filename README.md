@@ -83,11 +83,21 @@ deepact exec "/collab add a cache layer"
 
 `/collab` is a built-in collaboration skill driven by `handoff_to_agent`: the main agent decomposes the goal into 2-6 research directions, then delegates each direction to a `researcher` sub-agent **in parallel** (read-only tools) and merges their findings into one structured report — faster than serial investigation when you need breadth quickly.
 
+### Independent Review (/review)
+
+```bash
+deepact exec "/review the current changes"
+deepact exec "/review only the prompt changes"
+deepact exec "/review against main"
+```
+
+`/review` is a built-in skill **you** invoke — it is excluded from the model-facing skill catalog, so the agent never starts a review on its own. The text after the command is the range, and it is required: a bare `/review` leaves the engine with no task, so it only loads the skill and starts nothing. The range is mapped to facts (`git status` + `git diff HEAD`, one commit, a branch, or a document), the diff plus a review rubric goes to an **independent** `sub` sub-agent — its own context, not the author's conversation — and each finding is verified against the code before it is reported. Findings carry a priority (P0–P3), a confidence score and a `file:line` citation; the reviewer is read-only, and nothing is fixed until you ask.
+
 ### Project Rules & Skills
 
 Project conventions, workflows, and domain knowledge are injected into the system prompt via **skills**: the skill list is rendered into the stable zone, and the agent loads a skill's full instructions via the `load_skill` tool when your message names or clearly matches that skill. You can also load a skill directly with `/<name>`.
 
-Built-in skills (`skill/builtin/`, go:embed: `ratd` / `collab`) load first at the lowest priority; user skills are loaded from common agent skill directories (`~/.claude/skills/`, `~/.agent/skills/`, `<project>/.claude/skills/`, `~/.deepact/skills/`), with `~/.deepact/skills/` winning on name conflicts. Skills are also installable from the community registry with `deepact`'s `skill_install` tool.
+Built-in skills (`skill/builtin/`, go:embed: `ratd` / `collab` / `review`) load first at the lowest priority; user skills are loaded from common agent skill directories (`~/.claude/skills/`, `~/.agent/skills/`, `<project>/.claude/skills/`, `~/.deepact/skills/`), with `~/.deepact/skills/` winning on name conflicts. Skills are also installable from the community registry with `deepact`'s `skill_install` tool.
 
 Format: `<name>/SKILL.md` (Claude Code layout, YAML frontmatter):
 
@@ -160,7 +170,7 @@ reason   = "production only"
 
 ### Parallel Subagents
 
-`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general read-only analysis), `researcher` (read-only investigation), `critic` (adversarial review), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy.
+`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general read-only analysis), `researcher` (read-only investigation), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy. Code review is not a role: it is the user-invoked `/review` skill (see above), so a review costs a sub-agent run only when you ask for one.
 
 Sub-agents are **read-only**: they can read, search, and analyze (`read`, `read_multi`, `grep`, `glob`, `lsp`, `web_search`, `fetch`) but cannot modify files or run commands — `bash`/`write`/`edit`/`revert`, `skill_install`, and MCP tools are excluded at every delegation depth, and the per-call `tools` override can only narrow a role's set, never widen it. Modification work belongs to the main agent, whose bash calls still pass the danger guard. A `[agents]` role in `config.toml` naming a write-class tool fails at startup with migration guidance.
 
@@ -189,7 +199,7 @@ engine/   agent loop · subagents · shared type hub
 context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
 tools/    built-in tools (builtin/) + MCP (mcp/)      router/    model routing
 session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
-skill/    built-in (ratd/collab) + external skill loading    config/    shared config
+skill/    built-in (ratd/collab/review) + external skill loading    config/    shared config
 memory/   cross-session persistent memory
 ```
 
