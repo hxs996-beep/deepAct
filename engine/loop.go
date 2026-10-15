@@ -469,6 +469,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	defer e.persistHistory()
 	// Background async sub-agent tasks never outlive this Run.
 	defer e.cancelBackgroundTasks()
+	// Registered AFTER persistHistory on purpose: defers run LIFO, so this one
+	// runs FIRST — the interrupt record is appended to history and is then
+	// persisted by the persistHistory defer, keeping the request and the
+	// session transcript in sync. Swapping the order silently drops the marker
+	// from both.
+	defer e.noteUserInterrupt(ctx)
 	// Ensure the background task table exists for this Run (paired with the
 	// cancelBackgroundTasks defer on exit).
 	e.initBackgroundTasks()
@@ -1312,4 +1318,35 @@ func buildProgressNudge() string {
 func buildProgressBlockMsg() string {
 	return "Detected a no-progress loop: you have spent many turns on read-only/planning work without a code change or conclusion, despite a nudge. " +
 		"The agent may be stuck. Please clarify: conclude from existing content, or adjust the task direction?"
+}
+
+// noteUserInterrupt records that the user aborted this Run (Esc → ctx cancel),
+// so the next request's model knows the previous turn was interrupted on
+// purpose. Without it the model only sees its own partial output and may treat
+// a half-finished plan as accepted, or overlook that an aborted command may have
+// executed partially. The judgement is ctx alone, which covers every cancel
+// shape (mid-stream, mid-tool, between turns) without per-case branches.
+//
+// The record is a plain "user" message: the system prompt is injected only at
+// session start and a tool message requires a tool_call_id, so "user" is the
+// only appendable channel. It goes into history (not pendingPinnedMessages) so
+// persistHistory writes it to the session transcript and /resume rebuilds it.
+func (e *Engine) noteUserInterrupt(ctx context.Context) {
+	if ctx.Err() == nil {
+		return
+	}
+	e.history = append(e.history, Message{
+		Role:      "user",
+		Content:   buildUserInterruptMarker(),
+		Timestamp: time.Now(),
+	})
+}
+
+// buildUserInterruptMarker is the model-facing text of the interrupt record.
+// English (prompts are English-only) and <turn_aborted>-tagged, matching the
+// marker codex writes when a turn is aborted.
+func buildUserInterruptMarker() string {
+	return "<turn_aborted>\nThe user interrupted the previous turn on purpose. " +
+		"Any running tools may still be running in the background. " +
+		"If any tools/commands were aborted, they may have partially executed.\n</turn_aborted>"
 }
