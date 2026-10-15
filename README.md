@@ -116,7 +116,7 @@ next_skills: [writing-plans]
 
 ### MCP Support
 
-Register any MCP server in `.deepact/mcp.json` (or `~/.deepact/mcp.json`); its tools join the available tool set automatically, no code changes needed.
+Register any MCP server in `~/.deepact/mcp.json`; its tools join the available tool set automatically, no code changes needed. A server whose `env` carries a credential belongs in this user-level file: a project-level `.deepact/mcp.json` is applied *instead of* it, never merged with it, so keep tokens out of the repo:
 
 ```json
 {
@@ -136,7 +136,7 @@ DeepAct is built for DeepSeek from the ground up — it does not compromise for 
 - **Dual-model routing** — the main loop's `selectModel()` always returns the configured primary model (a stable model field keeps DeepSeek's per-model prefix cache warm); `flash` is used only for sub-agents and the compaction path. Pay the right price per task.
 - **Retry & rate limiting** — degrades gracefully on DeepSeek-specific error patterns (rate limits / timeouts / truncation) instead of spinning.
 
-Config example (`~/.deepact/config.toml`, or project-level `.deepact/config.toml`):
+Config example (`~/.deepact/config.toml`). API keys belong in this user-level file: a project-level `.deepact/config.toml` is applied *instead of* it, never merged with it, so if you keep project settings in the repo, pass the key through `DEEPSEEK_API_KEY` instead:
 
 ```toml
 [model]

@@ -116,7 +116,7 @@ next_skills: [writing-plans]
 
 ### MCP 扩展
 
-在 `.deepact/mcp.json`（或 `~/.deepact/mcp.json`）注册外部 MCP 服务器，其工具自动并入可用工具集，无需改代码。
+在 `~/.deepact/mcp.json` 注册外部 MCP 服务器，其工具自动并入可用工具集，无需改代码。`env` 里带凭据的服务器只放这个用户级文件：项目级 `.deepact/mcp.json` 是**取代**它而非与其合并，不要把 token 放进仓库：
 
 ```json
 {
@@ -136,7 +136,7 @@ DeepAct 从零为 DeepSeek 构建，不为"通用模型"妥协：
 - **双模型路由** —— 主循环的 `selectModel()` 固定返回主模型（稳定的 model 字段保 DeepSeek per-model 前缀缓存命中）；`flash` 仅用于子代理与压缩路径，性价比按需分配。
 - **重试与限速** —— 按 DeepSeek 错误特征（限流 / 超时 / 截断）自动降级，不空转。
 
-配置示例（`~/.deepact/config.toml` 或项目级 `.deepact/config.toml`）：
+配置示例（`~/.deepact/config.toml`）。key 只放这个用户级文件：项目级 `.deepact/config.toml` 是**取代**它而非与其合并，所以仓库里若保留项目级配置，请改用 `DEEPSEEK_API_KEY` 环境变量传 key：
 
 ```toml
 [model]
