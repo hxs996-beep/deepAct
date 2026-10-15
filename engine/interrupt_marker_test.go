@@ -112,6 +112,10 @@ func TestRun_InterruptMidStreamAppendsMarker(t *testing.T) {
 	if got := countInterruptMarkers(e); got != 1 {
 		t.Fatalf("interrupt markers in history = %d, want 1 (history=%+v)", got, e.history)
 	}
+	last := e.history[len(e.history)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "<turn_aborted>") {
+		t.Errorf("last message = %+v, want the interrupt marker", last)
+	}
 }
 
 // TestRun_InterruptMarkerPersistedToSession：标记必须随同一 Run 的落盘路径写入
