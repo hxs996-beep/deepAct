@@ -68,28 +68,6 @@ func agentJobState(t *bgTask) string {
 	}
 }
 
-// noteAgentState records one async sub-agent status observation made this turn
-// as a novel-info key ("agent:<job>::<state>"). Keyed by (job, state), so the
-// first sighting of a job — or a job moving to a new state
-// (running→done/awaiting_user) — counts as progress for the progress guard,
-// while re-observing the same unchanged state does not. This extends the same
-// "new information = progress" rule already applied to reads, searches, lsp
-// and web fetches to the async sub-agent surface.
-func (e *Engine) noteAgentState(jobID, state string) {
-	if jobID == "" || state == "" {
-		return
-	}
-	e.observedAgentStates = append(e.observedAgentStates, "agent:"+jobID+"::"+state)
-}
-
-// noteAgentStatesLocked records the current state of every background job.
-// Callers MUST hold bgMu (it calls agentJobState, which reads t.state).
-func (e *Engine) noteAgentStatesLocked() {
-	for id, t := range e.bgTasks {
-		e.noteAgentState(id, agentJobState(t))
-	}
-}
-
 // agentJobLine renders one job as a single line. Callers must hold bgMu.
 func agentJobLine(t *bgTask, now time.Time) string {
 	if t == nil {
@@ -163,7 +141,6 @@ func (e *Engine) processListAgentsCalls(calls []ToolCallRequest) []Message {
 			continue
 		}
 		e.bgMu.Lock()
-		e.noteAgentStatesLocked()
 		e.bgMu.Unlock()
 		msgs = append(msgs, agentToolMessage(call.ID, e.renderAgentList()))
 	}
@@ -309,7 +286,6 @@ func (e *Engine) waitForAgents(ctx context.Context, params WaitAgentParams) stri
 		if state == "awaiting_user" {
 			waiting = true
 		}
-		e.noteAgentState(t.id, state)
 		b.WriteString(agentJobLine(t, now))
 		b.WriteByte('\n')
 	}

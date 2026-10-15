@@ -31,6 +31,16 @@ func budgetRunner(model ModelClient, exec ToolExecutor) *SubAgentRunner {
 	return &SubAgentRunner{model: model, tools: exec, modelName: "test"}
 }
 
+// budgetRunnerFor builds a runner whose engine-computed per-run budget is
+// `budget` billable tokens. The budget is no longer settable per role or per
+// call: it is derived from the run's own context window (2 × window), so a test
+// picks the number by choosing the window.
+func budgetRunnerFor(model ModelClient, exec ToolExecutor, budget int) *SubAgentRunner {
+	r := budgetRunner(model, exec)
+	r.maxContextTokens = budget / 2
+	return r
+}
+
 func readSpecExec() *scriptToolExecutor {
 	return &scriptToolExecutor{specs: []ModelTool{specNamed("read")}}
 }
@@ -42,10 +52,10 @@ func readSpecExec() *scriptToolExecutor {
 // stay 0 and this test would never terminate at the budget.
 func TestSubAgentBudget_HardStopCountsMissOnly(t *testing.T) {
 	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(400, 0, 0)}}
-	runner := budgetRunner(model, readSpecExec())
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
+		Agent: AgentSub, Goal: "调研"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -68,10 +78,10 @@ func TestSubAgentBudget_HardStopCountsMissOnly(t *testing.T) {
 // amount (information the model can act on).
 func TestSubAgentBudget_NudgeOnceBeforeStop(t *testing.T) {
 	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(400, 0, 0)}}
-	runner := budgetRunner(model, readSpecExec())
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
 
 	_, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
+		Agent: AgentSub, Goal: "调研"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -156,13 +166,13 @@ func (m *tokenNudgeProbeModel) Complete(_ context.Context, req ModelRequest) (*M
 // guard just told it to wrap up within.
 func TestSubAgentBudget_NudgeStructuredNamesSubmitResult(t *testing.T) {
 	model := &tokenNudgeProbeModel{}
-	runner := budgetRunner(model, readSpecExec())
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
 
 	// 100 tokens per turn, budget 1000: the nudge is armed at 800 (turn 8) and
 	// injected into turn 9's request, so the submission lands at 900 — below the
 	// cap. (Right at the cap the hard stop returns before the submit branch.)
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, StructuredResult: true, })
+		Agent: AgentSub, Goal: "调研", StructuredResult: true})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -184,10 +194,10 @@ func TestSubAgentBudget_NudgeStructuredNamesSubmitResult(t *testing.T) {
 // completion tokens alone drive the budget.
 func TestSubAgentBudget_CompletionTokensCount(t *testing.T) {
 	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(0, 600, 0)}}
-	runner := budgetRunner(model, readSpecExec())
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 1000, })
+		Agent: AgentSub, Goal: "调研"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -200,15 +210,15 @@ func TestSubAgentBudget_CompletionTokensCount(t *testing.T) {
 }
 
 // TestSubAgentBudget_CacheHitsFree: 100k cache-hit tokens per turn must not
-// count toward the budget; only the 10 miss tokens do. With budget=15 the
-// run stops on turn 2 (20 >= 15) — if hits were counted, it would stop on
-// turn 1.
+// count toward the budget; only the 10 miss tokens do. With a 16-token budget
+// (a 8-token window) the run stops on turn 2 (20 >= 16) — if hits were counted,
+// it would stop on turn 1.
 func TestSubAgentBudget_CacheHitsFree(t *testing.T) {
 	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(10, 0, 100000)}}
-	runner := budgetRunner(model, readSpecExec())
+	runner := budgetRunnerFor(model, readSpecExec(), 16)
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: 15, })
+		Agent: AgentSub, Goal: "调研"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -217,90 +227,6 @@ func TestSubAgentBudget_CacheHitsFree(t *testing.T) {
 	}
 	if model.calls != 2 {
 		t.Errorf("hits must be free: stop at turn 2 (10+10>=15), got %d calls", model.calls)
-	}
-}
-
-// TestSubAgentBudget_ThreeStateResolution: tokenBudgetFor resolves the
-// three-state semantics at every level — 0 inherits downward, -1 is explicit
-// unlimited (never falls through to a default), >0 is an explicit cap.
-func TestSubAgentBudget_ThreeStateResolution(t *testing.T) {
-	// Handoff level: explicit values win; -1 means unlimited (0 = no check).
-	runner := &SubAgentRunner{modelName: "test"}
-	if got := tokenBudgetFor(Handoff{TokenBudget: 500}, runner); got != 500 {
-		t.Errorf("explicit handoff budget: got %d, want 500", got)
-	}
-	if got := tokenBudgetFor(Handoff{TokenBudget: -1}, runner); got != 0 {
-		t.Errorf("handoff -1 must resolve to unlimited (0), got %d", got)
-	}
-	// Runner level: same three states when the handoff inherits (0).
-	if got := tokenBudgetFor(Handoff{}, &SubAgentRunner{tokenBudget: -1}); got != 0 {
-		t.Errorf("runner -1 must resolve to unlimited (0), got %d", got)
-	}
-	if got := tokenBudgetFor(Handoff{}, &SubAgentRunner{tokenBudget: 700}); got != 700 {
-		t.Errorf("runner explicit: got %d, want 700", got)
-	}
-	// Default: 2× the effective context window.
-	r := &SubAgentRunner{maxContextTokens: 100}
-	if got := tokenBudgetFor(Handoff{}, r); got != 200 {
-		t.Errorf("default budget must be 2× context window, got %d, want 200", got)
-	}
-}
-
-// TestSubAgentBudget_SpecMerge: specSubAgent merges the role budget into the
-// handoff (0 = not set), and an explicit handoff value — including -1 — is
-// never overwritten by the spec.
-func TestSubAgentBudget_SpecMerge(t *testing.T) {
-	spec := AgentSpec{ID: AgentSub, TokenBudget: 500}
-
-	capture := &captureSubRunner{}
-	a := &specSubAgent{runner: capture, spec: spec}
-	if _, err := a.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"}); err != nil {
-		t.Fatalf("Run error: %v", err)
-	}
-	if capture.input.TokenBudget != 500 {
-		t.Errorf("spec budget must merge into handoff, got %d", capture.input.TokenBudget)
-	}
-
-	capture = &captureSubRunner{}
-	a = &specSubAgent{runner: capture, spec: spec}
-	if _, err := a.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", TokenBudget: -1}); err != nil {
-		t.Fatalf("Run error: %v", err)
-	}
-	if capture.input.TokenBudget != -1 {
-		t.Errorf("handoff -1 must survive the spec merge, got %d", capture.input.TokenBudget)
-	}
-
-	// A spec-level -1 flows into the handoff unchanged (explicit unlimited
-	// can never be silently replaced by a default).
-	capture = &captureSubRunner{}
-	a = &specSubAgent{runner: capture, spec: AgentSpec{ID: AgentSub, TokenBudget: -1}}
-	if _, err := a.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"}); err != nil {
-		t.Fatalf("Run error: %v", err)
-	}
-	if capture.input.TokenBudget != -1 {
-		t.Errorf("spec -1 must merge as -1, got %d", capture.input.TokenBudget)
-	}
-}
-
-// TestSubAgentBudget_ExplicitUnlimitedRunsPastBudget: Handoff{TokenBudget:-1}
-// must disable the check end-to-end — a run burning 1e9 miss tokens per turn
-// still ends via max_iterations, never budget_exceeded. Locks the N1 fix: a
-// ">0 only" resolution would silently re-enable the runner default.
-func TestSubAgentBudget_ExplicitUnlimitedRunsPastBudget(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(1_000_000_000, 0, 0)}}
-	runner := budgetRunner(model, readSpecExec())
-	runner.SetSubAgentTokenBudget(500)
-
-	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", TokenBudget: -1, MaxIterations: 3, })
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-	if result.FinishReason == HandoffReasonBudgetExceeded {
-		t.Fatal("TokenBudget:-1 is explicit unlimited; the budget gate must not fire")
-	}
-	if result.FinishReason != HandoffReasonMaxIterations {
-		t.Fatalf("expected max_iterations, got %q", result.FinishReason)
 	}
 }
 
@@ -326,23 +252,28 @@ func TestSubAgentBudget_FollowUpPinned(t *testing.T) {
 	}
 }
 
-// TestSubAgentBudget_MaxIterationsCarriesUsage: the max-iterations fallback
-// must carry the accumulated usage — the parent's cost accounting must not
-// lose the run's last segment.
-func TestSubAgentBudget_MaxIterationsCarriesUsage(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{budgetTurnResponse(10, 20, 0)}}
+// TestSubAgentBudget_GuardExitCarriesUsage: a run that ends on a guard instead of
+// a submission must carry the accumulated usage — the parent's cost accounting
+// must not lose the run's last segment.
+func TestSubAgentBudget_GuardExitCarriesUsage(t *testing.T) {
+	narration := ModelResponse{
+		Message:      ModelMessage{Role: "assistant", Content: "还在调研……"},
+		FinishReason: "stop",
+		Usage:        ModelUsage{CacheMissTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+	}
+	model := &stubSeqModel{responses: []ModelResponse{narration}}
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", MaxIterations: 3, })
+		Agent: AgentSub, Goal: "调研"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
-	if result.FinishReason != HandoffReasonMaxIterations {
-		t.Fatalf("expected max_iterations, got %q", result.FinishReason)
+	if result.FinishReason != HandoffReasonStalledNarration {
+		t.Fatalf("expected the narration guard (%q), got %q", HandoffReasonStalledNarration, result.FinishReason)
 	}
 	if result.Usage == nil || result.Usage.TotalTokens != 90 {
-		t.Errorf("expected Usage.TotalTokens=90 (3×30) on the fallback path, got %+v", result.Usage)
+		t.Errorf("expected Usage.TotalTokens=90 (3×30) on the guard path, got %+v", result.Usage)
 	}
 }
 
@@ -352,7 +283,7 @@ func TestSubAgentBudget_MaxIterationsCarriesUsage(t *testing.T) {
 func TestSubAgentBudget_ConcurrentRuns(t *testing.T) {
 	exec := readSpecExec()
 	runner := budgetRunner(&threadSafeSubmitModel{}, exec)
-	runner.SetSubAgentTokenBudget(10_000)
+	runner.maxContextTokens = 5000
 
 	const n = 8
 	// Above the delegation-tree default (6) on purpose: this test is about the
@@ -366,7 +297,7 @@ func TestSubAgentBudget_ConcurrentRuns(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			result, err := runner.Run(context.Background(), Handoff{
-				Agent: AgentSub, Goal: "调研", StructuredResult: true, })
+				Agent: AgentSub, Goal: "调研", StructuredResult: true})
 			if err != nil {
 				reasons[i] = "error: " + err.Error()
 				return

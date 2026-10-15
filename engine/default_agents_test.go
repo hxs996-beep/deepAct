@@ -34,17 +34,15 @@ func TestNewDefaultRegistry_BuiltinRoles(t *testing.T) {
 	// must terminate through submit_result like every other structured role.
 	// As a non-structured role its finished report was treated as "narration":
 	// the engine nudged it to "use tools", it kept going, and the run ended as
-	// stalled_narration / max_iterations with a misleading "partial result"
-	// heading. That was the observed failure mode for 4 of 6 collab researchers.
+	// stalled_narration with a misleading "partial result" heading. That was the
+	// observed failure mode for 4 of 6 collab researchers.
 	if !r.StructuredResult {
 		t.Error("researcher must be structured: its prose report has to terminate via submit_result, not the narration guard")
 	}
-	// A pointedly tight cap: 30 turns of 1M-context reads per direction is what
-	// made one /collab round cost ~15M prompt tokens. One direction needs far
-	// fewer turns; the wrap-up nudge (see budgetNudgeAt) covers the tail.
-	if r.MaxIterations != 15 {
-		t.Errorf("researcher MaxIterations = %d, want 15 (a single direction must not be allowed 30 turns)", r.MaxIterations)
-	}
+	// No role carries a turn cap: convergence is the run's token budget (see
+	// tokenBudgetFor) plus the 80% wrap-up nudge. A hardcoded number of turns
+	// answered a question only the model can answer, and truncated a direction
+	// that needed more turns than the number guessed.
 	// The persona must state a stopping rule: "thoroughly investigate" (the old
 	// wording) reads as an instruction to exhaust the budget.
 	if !strings.Contains(r.Persona, "Stop as soon as") {
@@ -110,7 +108,6 @@ func TestSpecSubAgent_Run_AppliesSpec(t *testing.T) {
 		Persona:          "研究员",
 		ToolNames:        []string{"read", "grep"},
 		ModelName:        "flash",
-		MaxIterations:    12,
 		StructuredResult: true,
 	}}
 	_, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研"})
@@ -126,9 +123,6 @@ func TestSpecSubAgent_Run_AppliesSpec(t *testing.T) {
 	}
 	if capture.input.ModelOverride != "flash" {
 		t.Errorf("ModelOverride = %q, want flash", capture.input.ModelOverride)
-	}
-	if capture.input.MaxIterations != 12 {
-		t.Errorf("MaxIterations = %d, want 12", capture.input.MaxIterations)
 	}
 	if !capture.input.StructuredResult {
 		t.Error("StructuredResult should be true from spec")

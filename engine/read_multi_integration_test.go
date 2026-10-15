@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -68,18 +69,20 @@ func TestParseReadMultiTargets(t *testing.T) {
 	}
 }
 
-func TestLoopGuard_ReadMultiPerTargetBlocks(t *testing.T) {
-	// read_multi of the same (path, scope) repeatedly must be blocked by the
-	// loop guard, just like repeated single reads — read_multi must not bypass.
-	g := NewLoopTracker(0, 3, false)
-	tgt := readMultiTargetView{Path: "a.go", Symbol: "Run"}
-	key := "read:" + normalizePath(tgt.Path, "") + "::" + readMultiTargetScope(tgt)
-
-	var lastAction GuardAction
-	for i := 0; i < 3; i++ {
-		lastAction = g.Check(key, false)
+func TestRepeats_ReadMultiPerTarget(t *testing.T) {
+	// read_multi of the same (path, scope) repeatedly must be counted as repeats
+	// of the same target — read_multi must not bypass the repeat reporting that
+	// single reads get.
+	e := &Engine{config: EngineConfig{WorkDir: ""}}
+	call := ToolCallRequest{
+		Name:  "read_multi",
+		Input: json.RawMessage(`{"targets":[{"path":"a.go","symbol":"Run"}]}`),
 	}
-	if lastAction.Type != GuardBlock {
-		t.Fatalf("after 3 repeated read_multi targets, action = %v, want GuardBlock", lastAction.Type)
+	last := ""
+	for i := 0; i < 3; i++ {
+		last = e.annotateRepeats(call, "digest")
+	}
+	if !strings.Contains(last, "[repeat 3×") {
+		t.Fatalf("after 3 repeated read_multi targets, annotation = %q, want a repeat count", last)
 	}
 }

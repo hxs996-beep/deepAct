@@ -27,29 +27,14 @@ const (
 	DefaultMaxOutputTokens = 128 * 1024
 )
 
-// SubAgentBudget is the delegation-tree budget surface the Engine owns across a
-// Run: it clears the Run-scoped aggregate at Run start and reports the spend for
-// the near-limit notice. *SubAgentRunner implements it; cmd/run.go injects it
-// through EngineDeps. nil = no aggregate (tests, embeddings) and the notice
-// stays silent.
-type SubAgentBudget interface {
-	StartRun()
-	Spent() int64
-	Budget() int64
-	ClaimBudgetNotice() bool
-}
-
 type EngineDeps struct {
-	Model      ModelClient
-	Tools      ToolExecutor
-	Context    ContextBuilder
-	Compressor Compressor
-	Session    SessionStore
-	Memory     MemoryStore
-	Agents     *AgentRegistry
-	// SubAgents, when set, is the shared sub-agent budget surface. Optional:
-	// nil means the Engine neither resets nor reports the Run aggregate.
-	SubAgents   SubAgentBudget
+	Model       ModelClient
+	Tools       ToolExecutor
+	Context     ContextBuilder
+	Compressor  Compressor
+	Session     SessionStore
+	Memory      MemoryStore
+	Agents      *AgentRegistry
 	Skills      *skill.Registry
 	MCPManagers []io.Closer // MCP server connections to close on shutdown
 
@@ -67,12 +52,10 @@ type Engine struct {
 	session    SessionStore
 	memory     MemoryStore
 	agents     *AgentRegistry
-	// subBudget is the shared delegation-tree budget (nil when not wired).
-	subBudget SubAgentBudget
-	skills    *skill.Registry
-	config    EngineConfig
-	state     *TaskState
-	history   []Message
+	skills     *skill.Registry
+	config     EngineConfig
+	state      *TaskState
+	history    []Message
 	// contextRetryDone caps the reactive context-length retry to once per Run:
 	// a 400 after the pre-send estimate is rare, and retrying forever would just
 	// re-trim and re-fail (see executeTurn).
@@ -84,24 +67,6 @@ type Engine struct {
 	steerMu            sync.Mutex
 	steerQueue         []string
 	guards             *GuardSystem
-	// progressLoop is the single no-progress breaker — the only loop guard that
-	// can still end a Run. Per-target repetition is no longer blocked: it is
-	// reported to the model as a fact (see noteRepeats), so the model decides
-	// whether to change approach or conclude.
-	progressLoop *LoopTracker
-	// progressKeys tracks "new information" keys already seen this Run
-	// ("read:path::scope", "grep:<pattern>:<path>", "glob:<pattern>:<path>").
-	// A novel key counts as progress for the progress LoopTracker
-	// (progressLoop), so legitimate investigation — reading or searching new
-	// content — is not mistaken for a no-progress loop. Reset each Run.
-	progressKeys map[string]bool
-	// observedAgentStates collects the async sub-agent status observations made
-	// during the CURRENT turn as novel-info keys ("agent:<job>::<state>"), for
-	// the progress signal at the end of executeTurn. A job seen for the first
-	// time, or moving to a new state (running→done/awaiting_user), is new
-	// information = progress; re-observing the same unchanged state is not.
-	// Rebuilt every turn (see executeTurn).
-	observedAgentStates []string
 	// repeatCounts counts per-target tool invocations within the current Run
 	// ("read:path::scope", "edit:path#sig", "grep:pattern:path", ...). A repeat
 	// is reported to the model as a fact alongside the tool result — it never
@@ -349,19 +314,37 @@ func (e *Engine) finishBackgroundJob(t *bgTask, result *HandoffResult) {
 	}
 }
 
-// handoffResultStatus maps a finished background result to the status the UI
-// shows. Cancellation wins over failure, and a blocked run is a failure — a
-// finished run must never render as a success when it did not deliver.
+// handoffResultStatus maps a finished sub-agent run onto the status the UI and
+// the delegating model see. Two orthogonal facts decide it, and both are read:
+//
+//   - Blocked / BlockedBy: the run was refused or interrupted (BlockedBy
+//     "cancelled" wins over everything);
+//   - FinishReason: how it ended. "completed" is the only delivery; a run parked
+//     on a question or still running in the background is not a failure either;
+//     everything else — max_tokens, no_result, stalled_narration, loop_detected,
+//     budget_exceeded, error, max_depth — stopped without delivering.
+//
+// The vocabulary is shared with isHandoffFollowUpReason (engine/turn.go): a run
+// that did not deliver must never render as a ✓ while its own digest says
+// "partial result".
 func handoffResultStatus(r *HandoffResult) string {
-	switch {
-	case r == nil:
+	if r == nil {
 		return "error"
-	case r.BlockedBy == "cancelled":
+	}
+	if r.BlockedBy == HandoffReasonCancelled || r.FinishReason == HandoffReasonCancelled {
 		return "cancelled"
-	case r.Blocked || r.FinishReason == HandoffReasonError:
+	}
+	if r.Blocked {
 		return "error"
-	default:
+	}
+	switch r.FinishReason {
+	case HandoffReasonCompleted, "":
 		return "ok"
+	case HandoffReasonAwaitingUser, HandoffReasonAsyncRunning:
+		// Not failures: one needs the user's answer, the other is still working.
+		return "ok"
+	default:
+		return "error"
 	}
 }
 
@@ -383,20 +366,18 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		OnLearned: cfg.OnApprovalLearned,
 	})
 	e := &Engine{
-		model:        deps.Model,
-		tools:        deps.Tools,
-		context:      deps.Context,
-		compressor:   deps.Compressor,
-		session:      deps.Session,
-		memory:       deps.Memory,
-		agents:       deps.Agents,
-		subBudget:    deps.SubAgents,
-		skills:       deps.Skills,
-		config:       cfg,
-		state:        &TaskState{TaskID: cfg.SessionID},
-		history:      make([]Message, 0),
-		guards:       guard,
-		progressLoop: NewLoopTracker(4, 6, true), // 4th nudge / 6th block, progress resets
+		model:      deps.Model,
+		tools:      deps.Tools,
+		context:    deps.Context,
+		compressor: deps.Compressor,
+		session:    deps.Session,
+		memory:     deps.Memory,
+		agents:     deps.Agents,
+		skills:     deps.Skills,
+		config:     cfg,
+		state:      &TaskState{TaskID: cfg.SessionID},
+		history:    make([]Message, 0),
+		guards:     guard,
 	}
 
 	// Persistent memory (memory_markers, decisions, open_questions,
@@ -489,18 +470,9 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// Reset the no-progress breaker and the repeat counters on each Run: a user
 	// retrying or revisiting a task legitimately re-reads the same core files,
 	// so cross-Run accumulation would misreport normal work as a loop.
-	if e.progressLoop != nil {
-		e.progressLoop.Reset()
-	}
-	e.progressKeys = make(map[string]bool)
 	e.repeatCounts = make(map[string]int)
 	e.runStartAt = time.Now()
 	e.runUsageAccum = ModelUsage{}
-	// The delegation tree's token aggregate is per-Run, exactly like the
-	// background tasks that feed it: a new Run starts with a fresh budget.
-	if e.subBudget != nil {
-		e.subBudget.StartRun()
-	}
 	e.runToolCallCount = 0
 	e.runErrorCount = 0
 	e.stopHookActive = false
@@ -590,24 +562,12 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 	// This prevents duplicate turn numbers in AccumulatedBlocks when Run() is
 	// called multiple times (e.g., across user messages in the same session).
 	turns := e.state.TurnNumber
-	maxTurns := e.config.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 50 // safe default to prevent infinite loops
-	}
 	var completionSummary string
 	for {
 		select {
 		case <-ctx.Done():
 			return &EngineResponse{Summary: "Task cancelled.", Stage: StageAct, Blocked: true, BlockedBy: "cancelled", FinishReason: "cancelled"}, nil
 		default:
-		}
-		if turns >= maxTurns {
-			msg := "Reached maximum turn limit. The agent was unable to complete the task. Please narrow the scope and retry."
-			loopLog.Printf("max turns reached (%d)", maxTurns)
-			if err := e.emitEvent("max_turns", StageAct, turns); err != nil {
-				loopLog.Printf("emit max_turns event: %v", err)
-			}
-			return &EngineResponse{Summary: msg, Stage: StageAct, Blocked: true, BlockedBy: "max_turns", FinishReason: "max_turns"}, nil
 		}
 		e.state.TurnNumber = turns
 		turnResult, err := e.executeTurn(ctx)
@@ -653,31 +613,6 @@ func (e *Engine) Run(ctx context.Context, userMsg string) (*EngineResponse, erro
 				continue
 			}
 			break
-		}
-
-		// Progress guard — the only loop guard that can end a Run: N consecutive
-		// turns without a progress signal (novel read/search, successful
-		// edit/write/revert/bash, handoff, novel lsp query) → nudge then block.
-		// It catches the "narration + repeat" loop where every turn is a
-		// different call, which per-target counting alone would not see.
-		if e.progressLoop != nil {
-			action := e.progressLoop.Check("", turnResult.MadeProgress)
-			switch action.Type {
-			case GuardDiagnose:
-				nudge := buildProgressNudge()
-				e.pendingPinnedMessages = append(e.pendingPinnedMessages, nudge)
-				loopLog.Printf("progress-loop nudge pinned")
-			case GuardBlock:
-				msg := buildProgressBlockMsg()
-				loopLog.Printf("progress-loop block")
-				return &EngineResponse{
-					Summary:      msg,
-					Stage:        StageAct,
-					Blocked:      true,
-					BlockedBy:    "loop_guard",
-					FinishReason: "loop_detected",
-				}, nil
-			}
 		}
 
 		// Drain steer queue before next turn: injects user messages queued
@@ -1304,20 +1239,6 @@ func (e *Engine) drainSteerQueue() bool {
 	}
 	loopLog.Printf("steer: injected %d message(s)", len(pending))
 	return true
-}
-
-// buildProgressNudge builds the nudge message for the 4th consecutive
-// no-progress turn.
-func buildProgressNudge() string {
-	return "[PROGRESS NUDGE] You have spent several turns on read-only/planning work without any code change or conclusion. " +
-		"Take the next concrete action (write a test, modify code, or produce a conclusion) instead of re-stating state or re-reading."
-}
-
-// buildProgressBlockMsg builds the block message for the 6th consecutive
-// no-progress turn.
-func buildProgressBlockMsg() string {
-	return "Detected a no-progress loop: you have spent many turns on read-only/planning work without a code change or conclusion, despite a nudge. " +
-		"The agent may be stuck. Please clarify: conclude from existing content, or adjust the task direction?"
 }
 
 // noteUserInterrupt records that the user aborted this Run (Esc → ctx cancel),

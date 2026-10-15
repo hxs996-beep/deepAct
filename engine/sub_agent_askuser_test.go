@@ -20,7 +20,7 @@ func TestSubAgentAskUser_BubblesAndEnds(t *testing.T) {
 	}
 	runner.SetMaxDepth(2)
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestSubAgentAskUser_CarriesPartialFindings(t *testing.T) {
 	}}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSubAgentAskUser_NoFindingsMeansNoFallbackNoise(t *testing.T) {
 	}}
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestSubAgentNestedBubble(t *testing.T) {
 	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test", registry: NewAgentRegistry()}
 	runner.SetMaxDepth(2)
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

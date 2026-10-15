@@ -230,7 +230,7 @@ func leafSuspended(t *testing.T, model ModelClient) *SuspendedRun {
 	return &SuspendedRun{
 		Question:      "选哪个缓存？",
 		PendingToolID: "ask1",
-		Input:         Handoff{Agent: AgentSub, Goal: "g", StructuredResult: true, MaxIterations: 5},
+		Input:         Handoff{Agent: AgentSub, Goal: "g", StructuredResult: true},
 		Model:         model,
 		History: []ModelMessage{
 			{Role: "system", Content: "sys"},
@@ -301,9 +301,10 @@ func TestAgentResumeFailLoud(t *testing.T) {
 	}
 }
 
-// TestAgentResumeIterationBudgetNotReset: the resumed loop continues from the
-// breakpoint's iteration, so a capped run does not get a fresh budget.
-func TestAgentResumeIterationBudgetNotReset(t *testing.T) {
+// TestAgentResumeIterationCounterContinues: the resumed loop continues from the
+// breakpoint's iteration count instead of restarting at 0 — the run's progress
+// reporting picks up where it stopped.
+func TestAgentResumeIterationCounterContinues(t *testing.T) {
 	read := ModelResponse{
 		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{
 			{ID: "r", Type: "function", Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`}},
@@ -317,9 +318,9 @@ func TestAgentResumeIterationBudgetNotReset(t *testing.T) {
 	runner := budgetRunner(model, readSpecExec())
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "g", MaxIterations: 3, })
+		Agent: AgentSub, Goal: "g"})
 	if err != nil || result.Suspended == nil {
-		t.Fatalf("expected a suspension at the last allowed turn, got %+v err=%v", result, err)
+		t.Fatalf("expected a suspension on the ask_user turn, got %+v err=%v", result, err)
 	}
 	if result.Suspended.Iter != 2 {
 		t.Fatalf("Iter = %d, want 2 (third turn)", result.Suspended.Iter)
@@ -332,11 +333,16 @@ func TestAgentResumeIterationBudgetNotReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runLoopResume error: %v", err)
 	}
-	if resumed.FinishReason != HandoffReasonMaxIterations {
-		t.Errorf("FinishReason = %q, want max_iterations (budget carried, not reset)", resumed.FinishReason)
+	// The script cycles, so the resumed run reaches ask_user two turns later:
+	// iteration 4, not 1 — the counter was carried, not reset.
+	if resumed.Suspended == nil || resumed.Suspended.Iter != 4 {
+		t.Fatalf("resumed suspension = %+v, want a suspension at iteration 4 (counter carried)", resumed.Suspended)
 	}
-	if model.calls != 4 {
-		t.Errorf("model.calls = %d, want 4 (exactly one more turn available)", model.calls)
+	if resumed.FinishReason != HandoffReasonAwaitingUser {
+		t.Errorf("FinishReason = %q, want %q", resumed.FinishReason, HandoffReasonAwaitingUser)
+	}
+	if model.calls != 6 {
+		t.Errorf("model.calls = %d, want 6", model.calls)
 	}
 }
 
@@ -356,7 +362,7 @@ func TestAgentResumeNestedCascade(t *testing.T) {
 		PendingToolID:      "h1",
 		PendingToolMissing: true,
 		ChildRunID:         leaf,
-		Input:              Handoff{Agent: AgentSub, Goal: "g", StructuredResult: true, MaxIterations: 5},
+		Input:              Handoff{Agent: AgentSub, Goal: "g", StructuredResult: true},
 		Model:              topModel,
 		History: []ModelMessage{
 			{Role: "system", Content: "sys"},
@@ -530,7 +536,7 @@ func TestFollowUpPinPointsAtResume(t *testing.T) {
 	if !strings.Contains(en, "agent_resume") {
 		t.Errorf("english awaiting_user pin must mention agent_resume, got %q", en)
 	}
-	other := buildHandoffFollowUp(HandoffReasonMaxIterations)
+	other := buildHandoffFollowUp(HandoffReasonLoopDetected)
 	if strings.Contains(other, "agent_resume") {
 		t.Errorf("other reasons keep the re-delegate wording, got %q", other)
 	}

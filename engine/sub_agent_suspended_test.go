@@ -23,7 +23,7 @@ func TestSuspendedCapturedOnLeafAskUser(t *testing.T) {
 	}}
 	runner := budgetRunner(model, &recordingToolExecutor{})
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5, })
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestSuspendedCapturedOnNestedBubble(t *testing.T) {
 	exec := &questionExecutor{questions: []string{"数据库连接串是什么？"}}
 	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestSuspendedNestedWithSiblingToolCall(t *testing.T) {
 	exec := &readThenQuestionExecutor{questions: []string{"选哪个？"}}
 	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test"}
 
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -193,11 +193,11 @@ func TestAgentResumeContinuesSameRun(t *testing.T) {
 		}}},
 	}}}
 	runner := budgetRunner(model, readSpecExec())
-	runner.SetSubAgentTokenBudget(1000)
+	runner.maxContextTokens = 500
 	runner.SetSubAgentPartitionURL(func(p string) string { return "http://example.invalid/" + p })
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研", StructuredResult: true, })
+		Agent: AgentSub, Goal: "调研", StructuredResult: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

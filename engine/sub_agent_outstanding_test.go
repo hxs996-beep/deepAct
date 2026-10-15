@@ -17,9 +17,9 @@ func newOutstandingTestEngine(cap int, agent Agent) *Engine {
 	reg := NewAgentRegistry()
 	reg.Register(agent)
 	return &Engine{
-		agents:    reg,
-		state:     &TaskState{},
-		config:    EngineConfig{MaxOutstandingAsyncSubAgents: cap},
+		agents: reg,
+		state:  &TaskState{},
+		config: EngineConfig{MaxOutstandingAsyncSubAgents: cap},
 	}
 }
 
@@ -57,9 +57,9 @@ func TestAsyncOutstanding_FailLoudAtCap(t *testing.T) {
 	reg.Register(a1)
 	reg.Register(a2)
 	e := &Engine{
-		agents:    reg,
-		state:     &TaskState{},
-		config:    EngineConfig{MaxOutstandingAsyncSubAgents: 2},
+		agents: reg,
+		state:  &TaskState{},
+		config: EngineConfig{MaxOutstandingAsyncSubAgents: 2},
 	}
 
 	for _, id := range []string{"one", "two"} {

@@ -21,10 +21,12 @@ const (
 	// unaffected; how that budget is split between width and nesting is the
 	// model's call.
 	defaultMaxConcurrentSubAgents = 6
-	// defaultTreeBudgetWindows is the Run-level token cap expressed in
-	// sub-agent context windows (~20M with a 1M window). Its job is to bound a
-	// runaway Run, not to be a daily budget.
-	defaultTreeBudgetWindows = 20
+	// defaultSubAgentBudgetWindows is a sub-agent run's billable-token budget,
+	// expressed in its own context windows (2 × 1M ≈ 2M billable by default).
+	// The engine computes it, and no layer can inherit, widen or disable it: this
+	// budget IS the run's convergence mechanism. Expressing it in windows keeps it
+	// scaled to the model instead of being a fixed number of turns.
+	defaultSubAgentBudgetWindows = 2
 
 	// narrationStrikeLimit is how many consecutive text-only replies (no tool
 	// calls) a non-structured run may produce before the engine ends it as
@@ -119,10 +121,6 @@ type SubAgentRunner struct {
 	partitionSeq atomic.Int64
 	langPack     string // language-specific rules for the detected project languages
 	maxDepth     int    // absolute delegation-depth cap; 0 = default 2
-	// tokenBudget caps a run's billable tokens (cache-miss + completion).
-	// Three-state: 0 = default (2× the context window), -1 = explicit
-	// unlimited, >0 = explicit cap. Set from [context].sub_agent_token_budget.
-	tokenBudget int
 
 	// --- Delegation-tree invariants --------------------------------------
 	// Every delegation path (sync depth 0, async, nested, resumed) runs
@@ -132,16 +130,8 @@ type SubAgentRunner struct {
 	// leaves runLoopFrom and therefore holds no slot — the same rule the async
 	// outstanding cap uses (see dispatchAsync).
 	inFlight atomic.Int64
-	// treeSpent is the billable token total (cache-miss + completion) of every
-	// sub-agent run in the CURRENT Run, nested children included. Reset by the
-	// Engine at Run start via StartRun; never model-settable.
-	treeSpent atomic.Int64
-	// treeBudget caps treeSpent: 0 = default, -1 = unlimited, >0 = explicit.
-	treeBudget atomic.Int64
 	// maxConcurrent caps inFlight: 0 = defaultMaxConcurrentSubAgents.
 	maxConcurrent atomic.Int64
-	// treeNudged marks the one-shot near-limit notice for the current Run.
-	treeNudged atomic.Bool
 }
 
 // NewSubAgentRunner creates a runner with the given LLM client, tool executor, and agent registry.
@@ -233,14 +223,6 @@ func (r *SubAgentRunner) SetMaxDepth(d int) {
 	r.maxDepth = d
 }
 
-// SetSubAgentTokenBudget sets the runner-level token budget for sub-agent
-// runs. Three-state: 0 = default (2× the effective context window), -1 =
-// unlimited, >0 = explicit cap. A Handoff/AgentSpec value takes precedence
-// over this runner default (see tokenBudgetFor).
-func (r *SubAgentRunner) SetSubAgentTokenBudget(b int) {
-	r.tokenBudget = b
-}
-
 // MaxDepth returns the current nesting cap.
 func (r *SubAgentRunner) MaxDepth() int {
 	if r.maxDepth <= 0 {
@@ -262,45 +244,10 @@ func (r *SubAgentRunner) maxConcurrentSubAgents() int {
 	return defaultMaxConcurrentSubAgents
 }
 
-// SetRunTokenBudget caps the billable tokens of every sub-agent run in one Run
-// (the whole delegation tree). Three-state: 0 = default (20 context windows),
-// -1 = explicit unlimited, >0 = explicit cap. The model can neither set nor
-// widen it — it only ever sees the remaining amount in the near-limit notice.
-func (r *SubAgentRunner) SetRunTokenBudget(n int) {
-	r.treeBudget.Store(int64(n))
-}
-
-// Budget resolves the effective Run-level cap; 0 means unlimited.
-func (r *SubAgentRunner) Budget() int64 {
-	switch n := r.treeBudget.Load(); {
-	case n > 0:
-		return n
-	case n < 0:
-		return 0
-	default:
-		return int64(defaultTreeBudgetWindows) * int64(r.contextLimit())
-	}
-}
-
-// Spent reports the billable tokens the current Run's delegation tree has used.
-func (r *SubAgentRunner) Spent() int64 { return r.treeSpent.Load() }
-
-// StartRun resets the Run-scoped aggregate and its one-shot notice. Called by
-// the Engine at Run start so the cap covers exactly one Run.
-func (r *SubAgentRunner) StartRun() {
-	r.treeSpent.Store(0)
-	r.treeNudged.Store(false)
-}
-
-// ClaimBudgetNotice reports whether the near-limit notice still has to be
-// emitted this Run, and consumes it. One-shot by design: the notice is
-// information the model acts on, not a per-turn banner.
-func (r *SubAgentRunner) ClaimBudgetNotice() bool { return r.treeNudged.CompareAndSwap(false, true) }
-
-// admitRun reserves an in-flight slot and checks the Run-level token budget.
-// nil = admitted, and the caller MUST defer releaseRunSlot. A non-nil result is
-// the fail-loud refusal handed back to the delegating model: nothing ran, so it
-// carries no partial output and the summary says how to proceed.
+// admitRun reserves an in-flight slot for the run. nil = admitted, and the
+// caller MUST defer releaseRunSlot. A non-nil result is the fail-loud refusal
+// handed back to the delegating model: nothing ran, so it carries no partial
+// output and the summary says how to proceed.
 func (r *SubAgentRunner) admitRun(input Handoff) *HandoffResult {
 	limit := r.maxConcurrentSubAgents()
 	for {
@@ -317,17 +264,6 @@ func (r *SubAgentRunner) admitRun(input Handoff) *HandoffResult {
 			break
 		}
 	}
-	// Checked AFTER taking the slot so the refusal cannot be raced past by two
-	// runs entering together; the slot is released before returning.
-	if budget := r.Budget(); budget > 0 && r.treeSpent.Load() >= budget {
-		r.inFlight.Add(-1)
-		return &HandoffResult{
-			Summary:      treeBudgetRefusalText(r.treeSpent.Load(), budget),
-			Blocked:      true,
-			BlockedBy:    HandoffReasonTreeBudgetExceeded,
-			FinishReason: HandoffReasonTreeBudgetExceeded,
-		}
-	}
 	return nil
 }
 
@@ -338,13 +274,6 @@ func (r *SubAgentRunner) releaseRunSlot() { r.inFlight.Add(-1) }
 // running result or do the step itself, then delegate again.
 func fanoutRefusalText(limit int) string {
 	return fmt.Sprintf("Delegation refused: %d sub-agents are already in flight across the delegation tree (limit %d). Collect a result first (list_agents / wait_agent / agent_poll) or do this step yourself, then delegate again.", limit, limit)
-}
-
-// treeBudgetRefusalText explains a Run-budget refusal and, crucially, what is
-// still available: tokens already spent cannot be reclaimed, but results of
-// runs that are still working can.
-func treeBudgetRefusalText(spent, budget int64) string {
-	return fmt.Sprintf("Delegation refused: this Run's sub-agent token budget is exhausted (%d of %d spent). Continue from the results you already have; runs still in flight can still be collected with agent_poll.", spent, budget)
 }
 
 // SetLangPack sets the language-specific rules injected into the sub-agent
@@ -362,19 +291,19 @@ func (r *SubAgentRunner) contextLimit() int {
 	return defaultSubAgentContext
 }
 
-// Run executes a generic sub-agent with the given handoff.
-// MaxIterations <= 0 means no turn cap — the loop runs until a normal
-// completion or a built-in guard (stalled narration, loop detection, etc.).
+// Run executes a generic sub-agent with the given handoff. There is no turn
+// cap: the loop runs until a normal completion (submit_result, or the text reply
+// a role declared as its result) or one of the general guards (token budget,
+// stalled narration, loop detection, output truncation).
 func (r *SubAgentRunner) Run(ctx context.Context, input Handoff) (*HandoffResult, error) {
 	// The role's stable persona (codex-style developer instructions) is
 	// injected as part of the stable system prefix, not the volatile goal,
 	// so it stays constant across turns and keeps the prefix cache hot.
-	return r.runLoop(ctx, input, input.Persona, input.MaxIterations, input.ModelOverride)
+	return r.runLoop(ctx, input, input.Persona, input.ModelOverride)
 }
 
 // runLoop is the core sub-agent execution loop.
 // extraPrompt is additional system-level instructions injected for specialist agents.
-// maxIterations caps the number of LLM turns for this agent; 0 = no cap.
 // modelOverride, if non-empty, overrides the runner's default model for this run.
 // subAgentStreamer guards sub-agent stream_delta emission. Sub-agents use
 // non-streaming Complete, so resp.Message.Content is the full response text.
@@ -397,8 +326,8 @@ func (s *subAgentStreamer) maybeEmit(onProgress ProgressFunc, agentName, content
 }
 
 // runLoop is the fresh-run entry point: it builds the run's state from scratch.
-func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, modelOverride ...string) (*HandoffResult, error) {
-	return r.runLoopFrom(ctx, input, extraPrompt, maxIterations, nil, modelOverride...)
+func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt string, modelOverride ...string) (*HandoffResult, error) {
+	return r.runLoopFrom(ctx, input, extraPrompt, nil, modelOverride...)
 }
 
 // runLoopResume continues a SUSPENDED run from its breakpoint (agent_resume).
@@ -410,7 +339,7 @@ func (r *SubAgentRunner) runLoop(ctx context.Context, input Handoff, extraPrompt
 func (r *SubAgentRunner) runLoopResume(ctx context.Context, s *SuspendedRun, answer string) (*HandoffResult, error) {
 	rs := *s
 	rs.History = fillPendingToolResponse(s, answer)
-	return r.runLoopFrom(ctx, rs.Input, rs.Input.Persona, rs.Input.MaxIterations, &rs)
+	return r.runLoopFrom(ctx, rs.Input, rs.Input.Persona, &rs)
 }
 
 // RunSuspended continues a suspended run on behalf of the engine (which reaches
@@ -422,7 +351,7 @@ func (r *SubAgentRunner) RunSuspended(ctx context.Context, s *SuspendedRun, answ
 // runLoopFrom is the shared loop. resume == nil builds a fresh run; otherwise
 // the run continues from the breakpoint, and everything derivable from it is
 // reused instead of re-derived (see the prologue).
-func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPrompt string, maxIterations int, resume *SuspendedRun, modelOverride ...string) (*HandoffResult, error) {
+func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPrompt string, resume *SuspendedRun, modelOverride ...string) (*HandoffResult, error) {
 	if input.Depth > r.MaxDepth() {
 		return &HandoffResult{
 			Summary:      fmt.Sprintf("Max agent nesting depth (%d) exceeded. Cannot delegate further.", r.MaxDepth()),
@@ -512,18 +441,6 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		}
 	}
 
-	// Tree accounting: this run's billable tokens join the Run aggregate on
-	// EVERY exit path. A resumed run already contributed everything it spent
-	// before parking, so only the delta since the breakpoint counts — without
-	// the subtraction each resume would double-count its pre-suspension spend.
-	baseSpent := 0
-	if resume != nil {
-		baseSpent = resume.Spent.CacheMissTokens + resume.Spent.CompletionTokens
-	}
-	defer func() {
-		r.treeSpent.Add(int64(totalUsage.CacheMissTokens + totalUsage.CompletionTokens - baseSpent))
-	}()
-
 	// Model resolution. A fresh run derives it from the role's override; a
 	// resumed run keeps the effective model it had at the breakpoint (it may
 	// already have escalated flash→Pro), and re-derives only isFlashAgent from
@@ -578,20 +495,36 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 	consecutiveTruncation := 0
 	// consecutiveBlocked counts gate-refused calls with no real dispatch in
 	// between; 3 in a row ends the run with loop_detected. A real dispatch
-	// anywhere resets it. Blocked turns still count toward MaxIterations.
+	// anywhere resets it.
 	consecutiveBlocked := 0
+	// consecutiveInvalidCalls counts calls that failed parameter validation
+	// (submit_result without a summary, ask_user without a question) with no real
+	// dispatch in between. 3 in a row ends the run like any other no-progress
+	// streak — without it, a model that keeps re-sending one invalid call has no
+	// exit but the token budget.
+	consecutiveInvalidCalls := 0
 	streamer := subAgentStreamer{}
-	budgetNudged := false // 预算尾段收尾提示只注入一次（见下方循环内）
 	// contextRetried caps the reactive context-length retry to once per run.
 	contextRetried := false
 	// tokenNudgePending 标记 80% 已越线，提示延迟到下一轮迭代顶部注入：累加
 	// 点位于 assistant(tool_calls) 与其 tool 结果之间，在那里插入 user 消息会
 	// 破坏"tool 响应紧跟其请求消息"的相邻性。
 	tokenNudgePending := false
-	// 0 = no turn cap (default); >0 = explicit cap set by the delegating agent.
-	// A resumed run continues from the breakpoint's iteration count, so a capped
-	// run does NOT get a fresh MaxIterations budget.
-	for ; maxIterations <= 0 || iter < maxIterations; iter++ {
+	// estSpent is the engine's own billable-token estimate for this run. The
+	// budget gate must not depend on the provider reporting usage: a gateway that
+	// reports none (or zero) would leave it permanently unarmed, and this budget
+	// is a run's convergence mechanism. The growth of the request history IS what
+	// a provider bills as cache-miss tokens, so measuring the growth (not the
+	// whole history) keeps the estimate on the same scale — and it is live from
+	// the first turn. A resumed run measures growth from its breakpoint, while
+	// the provider total still carries everything spent before parking.
+	estSpent := 0
+	prevHistoryTokens := estimateModelHistoryTokens(history)
+	// No turn cap: every exit from this loop is a `return` inside it (there is no
+	// break), so the loop condition is not a budget — a run ends on its completion
+	// contract or on a guard (token budget, 3-strike guards). A resumed run
+	// continues from the breakpoint's iteration count.
+	for ; ; iter++ {
 		select {
 		case <-ctx.Done():
 			return &HandoffResult{
@@ -632,22 +565,14 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			r.onProgress(ProgressEvent{Type: "thinking", Name: agentName, Detail: fmt.Sprintf("%s: turn %d", agentName, iter)})
 		}
 
-		// Budget-tail wrap-up nudge: when the run has a finite iteration cap, a
-		// research-type sub-agent that keeps exploring with tools will otherwise
-		// exhaust the budget into a fallback "(analysis timed out, partial
-		// result)" / "子代理未产出最终结论" summary with no real conclusion.
-		// Near the end of the budget, tell it to stop exploring and wrap up so
-		// it converges before the hard cap. Injected at most once; the message
-		// stays in history for the remaining turns. The structured variant
-		// directs the model to submit_result (plain text never completes a
-		// structured run).
-		if maxIterations > 0 && iter >= budgetNudgeAt(maxIterations) && !budgetNudged {
-			history = append(history, ModelMessage{
-				Role:    "user",
-				Content: budgetTailNudge(maxIterations-iter, structured),
-			})
-			budgetNudged = true
+		// Billable-token estimate for this turn (see estSpent): the growth of the
+		// request since the last measurement is the new prompt content, i.e. what
+		// the provider bills as cache-miss tokens.
+		curTokens := estimateModelHistoryTokens(history)
+		if curTokens > prevHistoryTokens {
+			estSpent += curTokens - prevHistoryTokens
 		}
+		prevHistoryTokens = curTokens
 
 		// Token-budget wrap-up nudge: armed at the 80% crossing below and
 		// injected here, at the top of the next iteration. It must NOT be
@@ -656,8 +581,11 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// requires tool responses to follow the message that requested them.
 		// Injected at most once.
 		if tokenNudgePending {
-			budget := tokenBudgetFor(input, r)
+			budget := r.runTokenBudget()
 			spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
+			if estSpent > spent {
+				spent = estSpent
+			}
 			history = append(history, ModelMessage{
 				Role:    "user",
 				Content: tokenBudgetNudge(budget-spent, structured),
@@ -767,21 +695,25 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 		// before any branch — a run can neither spend nor loop past it. The
 		// check is soft at the call boundary (at most one LLM call of
 		// overshoot); the partial history is already in place, so the
-		// summarizeHistory below carries the run's findings so far.
-		if budget := tokenBudgetFor(input, r); budget > 0 {
-			spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
-			if spent >= budget {
-				return &HandoffResult{
-					Summary:      r.summarizeHistory(history, input.Goal),
-					FinishReason: HandoffReasonBudgetExceeded,
-					Usage:        &totalUsage,
-				}, nil
-			}
-			if !budgetNudgedTokens && spent >= budget*80/100 {
-				// Arm only; the message is injected at the top of the next
-				// iteration so tool responses stay adjacent to their request.
-				tokenNudgePending = true
-			}
+		// summarizeHistory below carries the run's findings so far. The number is
+		// max(provider-reported, engine estimate) so a provider that reports no
+		// usage cannot leave the gate unarmed.
+		budget := r.runTokenBudget()
+		spent := totalUsage.CacheMissTokens + totalUsage.CompletionTokens
+		if estSpent > spent {
+			spent = estSpent
+		}
+		if spent >= budget {
+			return &HandoffResult{
+				Summary:      r.summarizeHistory(history, input.Goal),
+				FinishReason: HandoffReasonBudgetExceeded,
+				Usage:        &totalUsage,
+			}, nil
+		}
+		if !budgetNudgedTokens && spent >= budget*80/100 {
+			// Arm only; the message is injected at the top of the next
+			// iteration so tool responses stay adjacent to their request.
+			tokenNudgePending = true
 		}
 
 		// No tool calls → agent may be done
@@ -905,6 +837,17 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 							Content:    content,
 						})
 					}
+					// Repeated invalid submissions are the same no-progress streak as
+					// repeated refused calls: a structured run that keeps re-sending a
+					// summary-less submit never delivers, so it must not be able to loop
+					// forever.
+					if consecutiveInvalidCalls++; consecutiveInvalidCalls >= blockedStrikeLimit {
+						return &HandoffResult{
+							Summary:      r.summarizeHistory(history, input.Goal),
+							FinishReason: HandoffReasonNoResult,
+							Usage:        &totalUsage,
+						}, nil
+					}
 					continue
 				}
 				for _, c := range calls {
@@ -967,6 +910,16 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 						Role: "tool", ToolCallID: call.ID,
 						Content: "Error: ask_user requires a non-empty question (options 2-6 when provided).",
 					})
+					// A question-less ask_user cannot park the run and is not progress:
+					// count it like any other invalid call so a model stuck on it
+					// converges instead of relying on the budget alone.
+					if consecutiveInvalidCalls++; consecutiveInvalidCalls >= blockedStrikeLimit {
+						return &HandoffResult{
+							Summary:      r.summarizeHistory(history, input.Goal),
+							FinishReason: HandoffReasonLoopDetected,
+							Usage:        &totalUsage,
+						}, nil
+					}
 					continue
 				}
 				history = append(history, ModelMessage{
@@ -1001,6 +954,8 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			}
 			env := ToolExecContext{WorkDir: r.workDir, SessionID: r.sessionID, Ctx: ctx, Depth: input.Depth + 1}
 			results := r.tools.Execute(env, []ToolCallRequest{call})
+			// A legitimately dispatched call breaks the invalid-call streak.
+			consecutiveInvalidCalls = 0
 			if len(results) > 0 {
 				res := results[0]
 				if r.onProgress != nil {
@@ -1047,21 +1002,6 @@ func (r *SubAgentRunner) runLoopFrom(ctx context.Context, input Handoff, extraPr
 			consecutiveIntermediate = 0
 		}
 	}
-
-	// Max iterations reached — extract whatever findings the agent accumulated
-	summary := r.summarizeHistory(history, input.Goal)
-	reason := HandoffReasonMaxIterations
-	if structured {
-		// A structured run that burned its whole budget without submitting a
-		// result delivered nothing — report that explicitly.
-		reason = HandoffReasonNoResult
-	}
-	return &HandoffResult{
-		Summary:      summary,
-		TimedOut:     true,
-		FinishReason: reason,
-		Usage:        &totalUsage,
-	}, nil
 }
 
 // submitCallIndex returns the index of the submit_result call in calls, or -1.
@@ -1093,7 +1033,7 @@ func firstLine(s string, max int) string {
 }
 
 func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) string {
-	// On an interruption (per-call timeout, loop guard, or iteration cap) the
+	// On an interruption (per-call timeout, loop guard, or token budget) the
 	// model's last real text is its output, so it is returned verbatim as the
 	// partial result — no length or shape heuristic decides what counts as a
 	// conclusion.
@@ -1101,7 +1041,7 @@ func (r *SubAgentRunner) summarizeHistory(history []ModelMessage, goal string) s
 		return "(analysis timed out, partial result)\n" + text
 	}
 	// Fallback: no substantive assistant text was produced (per-call timeout,
-	// loop guard, or iteration cap). Return a concise readable failure instead
+	// loop guard, or token budget). Return a concise readable failure instead
 	// of dumping the first line of every raw tool result — those file paths
 	// and code lines flooded /collab's stage outputs and summary, making them
 	// unreadable.
@@ -1415,67 +1355,16 @@ func truncateToolResult(msg ModelMessage) ModelMessage {
 	return msg
 }
 
-// budgetNudgeFraction is the share of the iteration budget that must be spent
-// before the wrap-up nudge fires (3/5 = 60%).
-const budgetNudgeFraction = 3
-
-// budgetNudgeAt returns the iteration at which the wrap-up nudge fires for a
-// given cap.
-//
-// It used to be maxIterations-2, which for the researcher's old 30-turn cap
-// meant turn 28: the warning arrived with nothing left to act on, and runaway
-// runs simply burned the whole cap. 60% leaves ~40% of the budget to converge.
-// Two bounds keep it honest: never later than cap-2 (a warning with no room to
-// act is useless) and never before iteration 1.
-func budgetNudgeAt(maxIterations int) int {
-	at := maxIterations * budgetNudgeFraction / 5
-	if at > maxIterations-2 {
-		at = maxIterations - 2
-	}
-	if at < 1 {
-		at = 1
-	}
-	return at
-}
-
-// budgetTailNudge returns a user message telling a research sub-agent to stop
-// exploring and wrap up with its findings when the iteration budget is about
-// to run out. Without it, a finite-budget research agent burns all its turns
-// on tools and falls into the "(analysis timed out, partial result)" fallback
-// with no real conclusion. The structured variant directs the model to the
-// submit_result terminal tool (plain text never completes a structured run).
-func budgetTailNudge(remaining int, structured bool) string {
-	if structured {
-		return fmt.Sprintf("You have only %d iterations left. Stop exploring now, summarize your final findings, and call submit_result to report them (summary is required).", remaining)
-	}
-	return fmt.Sprintf("You have only %d iterations left. Stop exploring now and produce your final conclusion from what you have found.", remaining)
-}
-
-// tokenBudgetFor resolves the run's token budget: cache-miss + completion
-// tokens. Three-state at every level — 0 = inherit from the next level down,
-// -1 = explicit unlimited, >0 = explicit cap — so an explicit unlimited
-// (-1) can never silently fall through to a default (the fail-loud intent
-// behind "giving up the protection must be written down deliberately").
-// Returns 0 for unlimited; the caller treats 0 as "no check".
-func tokenBudgetFor(input Handoff, r *SubAgentRunner) int {
-	if input.TokenBudget != 0 {
-		if input.TokenBudget < 0 {
-			return 0
-		}
-		return input.TokenBudget
-	}
-	switch {
-	case r.tokenBudget < 0:
-		return 0
-	case r.tokenBudget > 0:
-		return r.tokenBudget
-	default:
-		return 2 * r.contextLimit()
-	}
+// runTokenBudget is the one budget a sub-agent run gets: the engine computes it
+// from the run's own context window. There is no inherit / unlimited / cap
+// three-state and no per-role or per-call override — a run's convergence must
+// not be something any layer can silently widen or switch off.
+func (r *SubAgentRunner) runTokenBudget() int {
+	return defaultSubAgentBudgetWindows * r.contextLimit()
 }
 
 // tokenBudgetNudge tells the model how much budget remains and to converge —
-// information the model can act on, mirroring budgetTailNudge for iterations.
+// the run's only wrap-up signal now that no turn cap exists.
 // The structured variant directs the model to submit_result: a plain text reply
 // never completes a structured run, so a nudge that only says "deliver your
 // conclusion" would cost the run a turn it may not have.

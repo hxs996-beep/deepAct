@@ -22,11 +22,11 @@ func (readStubExecutor) Specs() []ModelTool {
 	return []ModelTool{{Type: "function", Function: ModelToolFunction{Name: "read"}}}
 }
 
-// TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes 锁定移除默认 99 轮上限：
-// MaxIterations=0（默认）时子代理可跑超过 99 轮工具调用，最终经 submit_result
-// 正常完成（FinishReason=completed），绝不因轮次上限被截断。
-// 改动前：MaxIterations=0 回退到 99 → 第 100 次 submit_result 永不触达，
-// 循环尾部以 NoResult 结束 → 本测试红灯。
+// TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes 锁定“代码里不再有任何轮次
+// 上限”：子代理可跑超过 99 轮工具调用，最终经 submit_result 正常完成
+// （FinishReason=completed），绝不会因轮数被截断。收敛由 token 预算 + 三击守卫 +
+// 结构化完成契约负责，不由写死的轮数负责。
+// 历史：曾默认回退到 99 轮 → 第 100 次 submit_result 永不触达。
 func TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes(t *testing.T) {
 	const toolRounds = 100 // > 旧默认上限 99
 	responses := make([]ModelResponse, 0, toolRounds+1)
@@ -55,7 +55,8 @@ func TestSubAgent_NoTurnLimit_RunsPastOldCapAndCompletes(t *testing.T) {
 		Agent:            AgentSub,
 		Goal:             "g",
 		StructuredResult: true, // 与生产 generic sub 一致：结构化 run，submit_result 唯一完成路径
-		// MaxIterations 省略 = 0 → 无上限（本次改动的核心断言）
+		// 无轮次上限（字段已从代码中删除）：100 轮之后仍能 submit_result
+		// 正常完成，这就是本次改动的核心断言。
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)

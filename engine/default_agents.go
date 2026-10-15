@@ -57,7 +57,7 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 	spec := a.spec
 	// Apply the role's structural configuration (codex-style): stable persona
 	// injected as system instructions, default tool allowlist, model override,
-	// turn cap, and structured-result completion. The delegating model may
+	// and structured-result completion. The delegating model may
 	// only NARROW the tool set per call: the read-only universe and the role's
 	// own allowlist are invariants a per-call tools override cannot widen.
 	if input.Persona == "" {
@@ -81,15 +81,6 @@ func (a *specSubAgent) Run(ctx context.Context, input Handoff) (*HandoffResult, 
 	}
 	if input.ModelOverride == "" {
 		input.ModelOverride = spec.ModelName
-	}
-	if input.MaxIterations == 0 {
-		input.MaxIterations = spec.MaxIterations
-	}
-	// Token budget merge: 0 means "harness did not set one" — take the role's.
-	// A spec-level -1 (explicit unlimited) flows into input unchanged, so an
-	// explicit opt-out can never be silently replaced by a default.
-	if input.TokenBudget == 0 {
-		input.TokenBudget = spec.TokenBudget
 	}
 	input.StructuredResult = spec.StructuredResult
 	// Completion semantics are a role invariant, so the spec — not the caller —
@@ -148,22 +139,21 @@ func subSpec() AgentSpec {
 // researcherSpec is a read-only investigator for codebase questions. It mirrors
 // codex's explorer role: fast, authoritative, tool-restricted to read-only.
 //
-// It is STRUCTURED and tightly capped ON PURPOSE:
-//   - structured — a researcher's deliverable is prose, so as a non-structured
-//     role its finished report was classified as "narration": the engine nudged
-//     it to "use tools", it kept going, and the run ended as stalled_narration /
-//     max_iterations under a misleading "partial result" heading. 4 of 6
-//     researchers in one /collab round ended exactly that way. Structured runs
-//     are nudged toward submit_result instead, which is actionable.
-//   - capped at 15 — one direction used to get 30 turns of 1M-context reads; a
-//     six-direction round therefore cost ~15M prompt tokens. The wrap-up nudge
-//     now fires at ~60% of the budget (see budgetNudgeAt), so the tail is covered.
+// It is STRUCTURED on purpose: a researcher's deliverable is prose, so as a
+// non-structured role its finished report was classified as "narration": the
+// engine nudged it to "use tools", it kept going, and the run ended as
+// stalled_narration under a misleading "partial result" heading. 4 of 6
+// researchers in one /collab round ended exactly that way. Structured runs are
+// nudged toward submit_result instead, which is actionable.
+//
+// No turn cap and no budget knob: convergence is the run's own token budget —
+// computed by the engine from the context window, never inherited or disabled —
+// plus the 80% wrap-up nudge.
 func researcherSpec() AgentSpec {
 	return AgentSpec{
 		ID:               AgentResearcher,
 		Description:      "Read-only codebase investigator: answer specific, well-scoped questions with file:line evidence. Use for research, not edits.",
 		ToolNames:        []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations:    15,
 		StructuredResult: true,
 		Persona:          researcherPersona,
 	}
@@ -174,11 +164,10 @@ func researcherSpec() AgentSpec {
 // text; the orchestrator (not the proposer) applies it to disk.
 func proposerSpec() AgentSpec {
 	return AgentSpec{
-		ID:            AgentProposer,
-		Description:   "ratd implementation role: produce complete implementation code for a requirement, output only a CodePayload JSON object.",
-		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations: 20,
-		Persona:       proposerPersona,
+		ID:          AgentProposer,
+		Description: "ratd implementation role: produce complete implementation code for a requirement, output only a CodePayload JSON object.",
+		ToolNames:   []string{"read", "read_multi", "grep", "glob", "lsp"},
+		Persona:     proposerPersona,
 		// Its contract IS a text payload ("Nothing but the JSON object"), so its
 		// text reply is the result — not narration.
 		TextResult: true,
@@ -189,11 +178,10 @@ func proposerSpec() AgentSpec {
 // the implementation, output only a TestPayload JSON object.
 func redteamSpec() AgentSpec {
 	return AgentSpec{
-		ID:            AgentRedTeam,
-		Description:   "ratd red-team role: produce adversarial tests against an implementation, output only a TestPayload JSON object.",
-		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations: 20,
-		Persona:       redteamPersona,
+		ID:          AgentRedTeam,
+		Description: "ratd red-team role: produce adversarial tests against an implementation, output only a TestPayload JSON object.",
+		ToolNames:   []string{"read", "read_multi", "grep", "glob", "lsp"},
+		Persona:     redteamPersona,
 		// Delivers TestPayload JSON as text (see proposerSpec).
 		TextResult: true,
 	}
@@ -204,11 +192,10 @@ func redteamSpec() AgentSpec {
 // decision JSON object.
 func arbitratorSpec() AgentSpec {
 	return AgentSpec{
-		ID:            AgentArbitrator,
-		Description:   "ratd arbitrator role: judge whether the implementation or the tests are at fault, output only a decision JSON object.",
-		ToolNames:     []string{"read", "read_multi", "grep", "glob", "lsp"},
-		MaxIterations: 5,
-		Persona:       arbitratorPersona,
+		ID:          AgentArbitrator,
+		Description: "ratd arbitrator role: judge whether the implementation or the tests are at fault, output only a decision JSON object.",
+		ToolNames:   []string{"read", "read_multi", "grep", "glob", "lsp"},
+		Persona:     arbitratorPersona,
 		// Delivers the decision as a JSON text reply (see proposerSpec).
 		TextResult: true,
 	}

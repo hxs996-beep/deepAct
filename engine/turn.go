@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,15 +32,6 @@ type TurnResult struct {
 	// CompletionSummary holds the summary from the task_complete tool call,
 	// set when the model explicitly signals task completion.
 	CompletionSummary string
-	// MadeProgress is true when this turn produced a progress signal: a
-	// successful edit/write/revert/bash call, a handoff, a novel read (a
-	// (path, scope) not yet read this Run), a novel search (grep/glob with a
-	// new pattern/path key), or a novel lsp query. Repeated reads, repeated
-	// searches and repeated lsp queries, todo_write, ask_user and narration
-	// are NOT progress. The progressLoop breaker uses it to detect "N turns
-	// without progress" loops while leaving legitimate investigation — reading,
-	// searching or inspecting new content — alone.
-	MadeProgress bool
 }
 
 func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
@@ -53,10 +43,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	defer func() {
 		turnLog.Printf("turn %d total=%s", e.state.TurnNumber, time.Since(turnStart))
 	}()
-
-	// Status observations from this turn's async sub-agent tool calls are
-	// collected here and folded into the progress signal at the end of the turn.
-	e.observedAgentStates = nil
 
 	if e.config.OnProgress != nil {
 		e.config.OnProgress(ProgressEvent{Type: "thinking", Name: "deepact", Detail: "analyzing..."})
@@ -92,7 +78,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 	// turns within the same Run() call don't repeat them.
 	// Remind the model about outstanding background async sub-agent tasks.
 	e.injectBackgroundJobsSummary()
-	e.injectSubAgentBudgetNotice()
 	// injectedBlocks collects every block this turn injects besides history
 	// (system prompt, stable session context, skills, pinned messages). The
 	// echoed-block stripper derives its headers from them, so it always
@@ -791,30 +776,6 @@ func (e *Engine) executeTurn(ctx context.Context) (TurnResult, error) {
 			result.Questions = []string{req.Question}
 		}
 	}
-	// Progress signal for the progressLoop breaker: this is what tells a run
-	// that is investigating from one that is spinning. It reads each tool's own
-	// declarations (Mutates / NovelInfo) instead of a tool-name list, so a tool
-	// the engine has never heard of is judged on its declared semantics rather
-	// than silently ignored.
-	if e.madeProgressFromCalls(regularCalls, statusByID, e.specsByName()) {
-		result.MadeProgress = true
-	}
-	if !result.MadeProgress && len(handoffCalls) > 0 {
-		result.MadeProgress = true
-	}
-	// Async sub-agent status observations made this turn are new information
-	// too: a job seen for the first time, or a job that moved to a new state
-	// (running→done/awaiting_user), counts as progress; re-observing the same
-	// unchanged state does not. Without this, a parent legitimately waiting on
-	// or collecting async jobs is misjudged as a no-progress loop and blocked.
-	// Keys are recorded regardless (like read keys) so a later repeat is never
-	// mistaken for a first sighting.
-	for _, key := range e.observedAgentStates {
-		if !e.progressKeys[key] {
-			e.progressKeys[key] = true
-			result.MadeProgress = true
-		}
-	}
 	return result, nil
 }
 
@@ -1262,107 +1223,6 @@ func splitCallsByExecution(calls []ToolCallRequest, specs map[string]ModelTool) 
 		batch = append(batch, call)
 	}
 	return batch, sequential
-}
-
-// madeProgressFromCalls decides whether a turn advanced the run. It replaces
-// the per-tool-name switch that used to hold this knowledge, and answers from
-// the tools' own declarations:
-//
-//   - Mutates: a successful modification is progress by definition;
-//   - NovelInfo: information the run has not seen yet is progress, a repeat is
-//     not (that is what distinguishes investigation from spinning);
-//   - a tool that declares neither (or is not in the spec list at all, e.g. an
-//     MCP tool) is TRUSTED: the engine has no basis to call a call it cannot
-//     classify "no progress", and a false no-progress block ends the run.
-//
-// Novelty keys are recorded for every call even once the turn already counts as
-// progress, or a later repeat would look like a first sighting and wrongly
-// reset the streak.
-func (e *Engine) madeProgressFromCalls(calls []ToolCallRequest, statusByID map[string]string, specs map[string]ModelTool) bool {
-	if e.progressKeys == nil {
-		e.progressKeys = make(map[string]bool)
-	}
-	progress := false
-	for _, c := range calls {
-		spec, declared := specs[c.Name]
-		unclassifiable := !declared || !toolSemanticsKnown(spec)
-		switch {
-		case c.Name == "read_multi":
-			// One call, several targets: every new (path, scope) is progress.
-			// This is the one call that needs more than one key, which a single
-			// declared field cannot express, so it keeps its own shape.
-			for _, tgt := range parseReadMultiTargets(c.Input) {
-				if tgt.Path == "" {
-					continue
-				}
-				key := "read:" + normalizePath(tgt.Path, e.config.WorkDir) + "::" + readMultiTargetScope(tgt)
-				if !e.progressKeys[key] {
-					e.progressKeys[key] = true
-					progress = true
-				}
-			}
-		case declared && spec.Mutates:
-			if statusByID[c.ID] == "ok" {
-				progress = true
-			}
-		case declared && spec.NovelInfo:
-			key := infoKeyFor(c, e.config.WorkDir)
-			if key != "" && !e.progressKeys[key] {
-				e.progressKeys[key] = true
-				progress = true
-			}
-		case unclassifiable:
-			// Same predicate the scheduler uses: a tool that declares nothing
-			// cannot be judged, so it is trusted rather than starved.
-			progress = true
-		}
-	}
-	return progress
-}
-
-// infoKeyFor builds the novelty key for an information-returning call. The
-// per-tool key shapes are the ones the engine always used (read scope, search
-// pattern, lsp query, web query) — only the dispatch moved here. A declared
-// NovelInfo tool with no known shape falls back to its canonical arguments, so a
-// new information tool is novel exactly once per distinct call with no per-tool
-// code.
-func infoKeyFor(call ToolCallRequest, workDir string) string {
-	switch call.Name {
-	case "read":
-		if path := extractPathFromArgs(call.Input, workDir); path != "" {
-			return "read:" + path + "::" + extractReadScope(call.Input)
-		}
-		return ""
-	case "read_multi":
-		return "" // per-target keys are recorded by madeProgressFromCalls
-	case "grep", "glob":
-		return searchKey(call, workDir)
-	case "lsp":
-		return lspKey(call, workDir)
-	case "web_search", "fetch":
-		return infoQueryKey(call)
-	default:
-		return call.Name + ":" + canonicalArgs(call.Input)
-	}
-}
-
-// canonicalArgs renders a call's arguments deterministically (object keys
-// sorted) so the same call always yields the same novelty key.
-func canonicalArgs(input json.RawMessage) string {
-	var m map[string]interface{}
-	if err := json.Unmarshal(input, &m); err != nil {
-		return string(input)
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var sb strings.Builder
-	for _, k := range keys {
-		fmt.Fprintf(&sb, "%s=%v;", k, m[k])
-	}
-	return sb.String()
 }
 
 // parseReadMultiDigestScopes extracts per-target ReadRecords from a read_multi
@@ -1823,7 +1683,6 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			continue
 		}
 		if e.suspendedJobExpiredLocked(task) {
-			e.noteAgentState(params.JobID, "expired")
 			delete(e.bgTasks, params.JobID)
 			e.bgMu.Unlock()
 			msgs = append(msgs, Message{
@@ -1837,7 +1696,6 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 		if task.state == bgStateAwaitingUser {
 			// Suspended: nothing is running, so the channel would always read as
 			// "still running". Report the question and how to answer it.
-			e.noteAgentState(params.JobID, agentJobState(task))
 			e.bgMu.Unlock()
 			msgs = append(msgs, Message{
 				Role:       "tool",
@@ -1853,7 +1711,6 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 		case result := <-task.result:
 			// Done: remove from table and return the result.
 			e.bgMu.Lock()
-			e.noteAgentState(params.JobID, "done")
 			delete(e.bgTasks, params.JobID)
 			e.bgMu.Unlock()
 			if result == nil {
@@ -1868,7 +1725,6 @@ func (e *Engine) processAgentPollCalls(calls []ToolCallRequest) []Message {
 			})
 		default:
 			// Still running.
-			e.noteAgentState(params.JobID, "running")
 			msgs = append(msgs, Message{
 				Role:       "tool",
 				ToolCallID: call.ID,
@@ -1918,36 +1774,6 @@ func (e *Engine) injectBackgroundJobsSummary() {
 	e.bgMu.Unlock()
 	b.WriteString(". Continue your work; use agent_poll(job_id) to fetch results.")
 	e.pendingPinnedMessages = append(e.pendingPinnedMessages, b.String())
-}
-
-// injectSubAgentBudgetNotice appends a one-shot pinned notice when this Run's
-// delegation tree has spent 80% of its token budget, so the model knows the
-// remaining total BEFORE it delegates again. This is information, not a guard:
-// the same principle as the per-run tokenBudgetNudge — the model decides how to
-// converge, the engine only reports. No-op when no budget surface is wired,
-// when the cap is unlimited, when the threshold is not reached, or when the
-// notice already fired this Run.
-func (e *Engine) injectSubAgentBudgetNotice() {
-	if e.subBudget == nil {
-		return
-	}
-	budget := e.subBudget.Budget()
-	if budget <= 0 {
-		return
-	}
-	spent := e.subBudget.Spent()
-	if spent*5 < budget*4 { // below 80%
-		return
-	}
-	if !e.subBudget.ClaimBudgetNotice() {
-		return
-	}
-	remaining := budget - spent
-	if remaining < 0 {
-		remaining = 0
-	}
-	e.pendingPinnedMessages = append(e.pendingPinnedMessages, fmt.Sprintf(
-		"Note: this Run's sub-agent token total is at %d / %d (~%d left). Converge on the results you have, or do the remaining work with your own tools.", spent, budget, remaining))
 }
 
 // processAskUserCalls intercepts ask_user tool calls from the assistant's

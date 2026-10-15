@@ -3,7 +3,6 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"sync"
 )
 
 type GuardAction struct {
@@ -12,76 +11,10 @@ type GuardAction struct {
 }
 
 const (
-	GuardAllow    = "allow"
-	GuardBlock    = "block"
-	GuardDiagnose = "diagnose"
-	GuardAskUser  = "ask_user"
+	GuardAllow   = "allow"
+	GuardBlock   = "block"
+	GuardAskUser = "ask_user"
 )
-
-// LoopTracker is the unified counting core for all loop guards. Four
-// configured instances replace LoopGuard / ReadLoopState / ErrorLoopState /
-// ProgressLoopState: they differ only in key granularity, thresholds, and
-// whether a success resets the streak. A new loop variant = a new instance +
-// key construction, never a new struct.
-type LoopTracker struct {
-	mu             sync.Mutex
-	counts         map[string]int
-	nudgeAt        int // 0 = no nudge tier
-	blockAt        int
-	resetOnSuccess bool // error/progress semantics: a success clears the key
-}
-
-// NewLoopTracker creates a LoopTracker. blockAt<=0 defaults to 4; a nudgeAt
-// >= blockAt is treated as no nudge tier.
-func NewLoopTracker(nudgeAt, blockAt int, resetOnSuccess bool) *LoopTracker {
-	if blockAt <= 0 {
-		blockAt = 4
-	}
-	if nudgeAt >= blockAt {
-		nudgeAt = 0
-	}
-	return &LoopTracker{
-		counts:         make(map[string]int),
-		nudgeAt:        nudgeAt,
-		blockAt:        blockAt,
-		resetOnSuccess: resetOnSuccess,
-	}
-}
-
-// Check records a key occurrence and returns GuardAllow, GuardDiagnose
-// (nudge, when count == nudgeAt), or GuardBlock (when count >= blockAt).
-// For progress/error instances, success=true clears the streak for key
-// (progress uses key="" as a global single counter).
-func (t *LoopTracker) Check(key string, success bool) GuardAction {
-	if t == nil {
-		return GuardAction{Type: GuardAllow}
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if success && t.resetOnSuccess {
-		delete(t.counts, key)
-		return GuardAction{Type: GuardAllow}
-	}
-	t.counts[key]++
-	switch {
-	case t.nudgeAt > 0 && t.counts[key] == t.nudgeAt:
-		return GuardAction{Type: GuardDiagnose, Message: "loop-nudge"}
-	case t.counts[key] >= t.blockAt:
-		return GuardAction{Type: GuardBlock, Message: "loop-block"}
-	default:
-		return GuardAction{Type: GuardAllow}
-	}
-}
-
-// Reset clears all tracking state (e.g., on new user message / new Run).
-func (t *LoopTracker) Reset() {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.counts = make(map[string]int)
-}
 
 type GuardSystem struct {
 	scope *ScopeGuard

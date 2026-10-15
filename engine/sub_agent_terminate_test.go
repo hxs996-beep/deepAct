@@ -12,9 +12,9 @@ import (
 // between tool calls and text.
 type stubSeqModel struct {
 	responses       []ModelResponse
-	classifierResp  string // returned on JsonMode=true calls (ConclusionClassifier probes)
-	calls           int    // counts non-classifier (scripted) calls only
-	classifierCalls int    // counts ConclusionClassifier (JsonMode) probes
+	classifierResp  string       // returned on JsonMode=true calls (ConclusionClassifier probes)
+	calls           int          // counts non-classifier (scripted) calls only
+	classifierCalls int          // counts ConclusionClassifier (JsonMode) probes
 	lastReq         ModelRequest // most recent request, for tool-spec assertions
 }
 
@@ -61,9 +61,8 @@ func TestSubAgentRunLoop_NudgesOnNextStepNarration(t *testing.T) {
 	}
 
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent:         AgentSub,
-		Goal:          "分析截断问题",
-		MaxIterations: 8,
+		Agent: AgentSub,
+		Goal:  "分析截断问题",
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)

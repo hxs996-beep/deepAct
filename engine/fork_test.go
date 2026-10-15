@@ -95,7 +95,7 @@ func TestRunLoopFrom_InjectsForkBeforeVolatileGoal(t *testing.T) {
 		Goal:          "总结上面的讨论",
 		TextResult:    true,
 		ForkedHistory: []ModelMessage{{Role: "user", Content: "第一个请求"}, {Role: "assistant", Content: "结论一"}},
-	}, "", 3); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
 

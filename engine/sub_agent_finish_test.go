@@ -40,7 +40,7 @@ func TestSubAgentTruncation_NeverEndsOnPartialText(t *testing.T) {
 	}}
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestSubAgentTruncation_DropsTruncatedToolCalls(t *testing.T) {
 	}}
 
 	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSubAgentTruncation_RecoversOnNextTurn(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "修复", MaxIterations: 5, StructuredResult: true,
+		Agent: AgentSub, Goal: "修复", StructuredResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -123,36 +123,6 @@ func TestSubAgentTruncation_RecoversOnNextTurn(t *testing.T) {
 	}
 }
 
-// TestSubAgentRunLoop_MaxIterationsReason: hitting the iteration cap must be
-// reported as reason="max_iterations" (with TimedOut=true), not "completed".
-func TestSubAgentRunLoop_MaxIterationsReason(t *testing.T) {
-	exec := &recordingToolExecutor{}
-	model := &stubSeqModel{responses: []ModelResponse{
-		{
-			Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
-				ID: "c1", Type: "function",
-				Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
-			}}},
-			FinishReason: "tool_calls",
-		},
-	}}
-
-	runner := &SubAgentRunner{model: model, tools: exec, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 3})
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-	if !result.TimedOut {
-		t.Errorf("expected TimedOut=true at max iterations, got false")
-	}
-	if result.FinishReason != HandoffReasonMaxIterations {
-		t.Errorf("expected FinishReason=%q, got %q", HandoffReasonMaxIterations, result.FinishReason)
-	}
-	if len(exec.executed) != 3 {
-		t.Errorf("expected 3 executed tool turns, got %v", exec.executed)
-	}
-}
-
 // TestSubAgentRunLoop_CancelledReason: a cancelled run reports
 // reason="cancelled".
 func TestSubAgentRunLoop_CancelledReason(t *testing.T) {
@@ -163,7 +133,7 @@ func TestSubAgentRunLoop_CancelledReason(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result, err := runner.Run(ctx, Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 5})
+	result, err := runner.Run(ctx, Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -192,7 +162,7 @@ func TestSubAgentStructured_SubmitsResult(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", MaxIterations: 5, StructuredResult: true,
+		Agent: AgentSub, Goal: "审查", StructuredResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -231,7 +201,7 @@ func TestSubAgentStructured_TextOnlyNeverCompletes(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", MaxIterations: 8, StructuredResult: true,
+		Agent: AgentSub, Goal: "审查", StructuredResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -252,6 +222,58 @@ func TestSubAgentStructured_TextOnlyNeverCompletes(t *testing.T) {
 		!strings.Contains(model.lastReq.Messages[len(model.lastReq.Messages)-1].Content, "submit_result") {
 		t.Errorf("expected the nudge to name submit_result, last message=%q",
 			model.lastReq.Messages[len(model.lastReq.Messages)-1].Content)
+	}
+}
+
+// TestSubAgentInvalidSubmit_ThreeStrikesEndsRun: a structured run that keeps
+// re-sending a summary-less submit_result never delivers, so it must end on the
+// same no-progress streak rule as any other repeated invalid call — without it
+// the only exit left is the token budget.
+func TestSubAgentInvalidSubmit_ThreeStrikesEndsRun(t *testing.T) {
+	model := &stubSeqModel{responses: []ModelResponse{{
+		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+			ID: "s1", Type: "function",
+			Function: ModelFunctionCall{Name: SubmitResultToolName, Arguments: `{"summary":""}`},
+		}}},
+		FinishReason: "tool_calls",
+	}}}
+	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
+
+	result, err := runner.Run(context.Background(), Handoff{
+		Agent: AgentSub, Goal: "审查", StructuredResult: true})
+	if err != nil {
+		t.Fatalf("runLoop error: %v", err)
+	}
+	if result.FinishReason != HandoffReasonNoResult {
+		t.Errorf("FinishReason = %q, want %q after three invalid submissions", result.FinishReason, HandoffReasonNoResult)
+	}
+	if model.calls != blockedStrikeLimit {
+		t.Errorf("expected the run to end on the %dth invalid submission, got %d calls", blockedStrikeLimit, model.calls)
+	}
+}
+
+// TestSubAgentInvalidAskUser_ThreeStrikesEndsRun: an ask_user with no question
+// cannot park the run and is not progress, so repeating it must end the run
+// rather than loop until the budget runs out.
+func TestSubAgentInvalidAskUser_ThreeStrikesEndsRun(t *testing.T) {
+	model := &stubSeqModel{responses: []ModelResponse{{
+		Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+			ID: "a1", Type: "function",
+			Function: ModelFunctionCall{Name: AskUserToolName, Arguments: `{"question":""}`},
+		}}},
+		FinishReason: "tool_calls",
+	}}}
+	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
+
+	result, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
+	if err != nil {
+		t.Fatalf("runLoop error: %v", err)
+	}
+	if result.FinishReason != HandoffReasonLoopDetected {
+		t.Errorf("FinishReason = %q, want %q after three invalid ask_user calls", result.FinishReason, HandoffReasonLoopDetected)
+	}
+	if model.calls != blockedStrikeLimit {
+		t.Errorf("expected the run to end on the %dth invalid call, got %d calls", blockedStrikeLimit, model.calls)
 	}
 }
 
@@ -278,7 +300,7 @@ func TestSubAgentStructured_InvalidSubmitRetries(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", MaxIterations: 5, StructuredResult: true,
+		Agent: AgentSub, Goal: "审查", StructuredResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -310,7 +332,7 @@ func TestSubAgentStructured_TextResultDoesNotShortCircuit(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "拆解", MaxIterations: 8, StructuredResult: true, TextResult: true,
+		Agent: AgentSub, Goal: "拆解", StructuredResult: true, TextResult: true,
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
@@ -342,7 +364,6 @@ func TestFormatHandoffResult_ReasonAwareHeading(t *testing.T) {
 		{"max_tokens", HandoffReasonMaxTokens, "token limit"},
 		{"no_result", HandoffReasonNoResult, "without submitting"},
 		{"stalled_narration", HandoffReasonStalledNarration, "narrating"},
-		{"max_iterations", HandoffReasonMaxIterations, "turn limit"},
 		{"loop_detected", HandoffReasonLoopDetected, "repeating"},
 		{"cancelled", HandoffReasonCancelled, "cancelled"},
 		{"awaiting_user", HandoffReasonAwaitingUser, "needs user input"},
@@ -373,12 +394,12 @@ func TestExecuteTurn_LengthTruncationDropsToolCalls(t *testing.T) {
 			}}},
 			{FinishReason: "length"},
 		}},
-		context:   &stubContextBuilder{},
-		tools:     exec,
-		state:     &TaskState{TurnNumber: 0},
-		history:   []Message{{Role: "user", Content: "执行方案"}},
-		config:    EngineConfig{ModelName: "test-model"},
-		}
+		context: &stubContextBuilder{},
+		tools:   exec,
+		state:   &TaskState{TurnNumber: 0},
+		history: []Message{{Role: "user", Content: "执行方案"}},
+		config:  EngineConfig{ModelName: "test-model"},
+	}
 
 	result, err := e.executeTurn(context.Background())
 	if err != nil {

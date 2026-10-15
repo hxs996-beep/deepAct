@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -34,26 +35,25 @@ func TestExtractToolKey_NormalizesPathVariations(t *testing.T) {
 	}
 }
 
-// TestLoopGuard_NormalizedPathsAccumulate confirms that after normalization,
-// reads of the same file via different path forms accumulate into one count
-// and trip the guard at maxRepeats — the behavior that was broken before.
-func TestLoopGuard_NormalizedPathsAccumulate(t *testing.T) {
+// TestRepeats_NormalizedPathsAccumulate confirms that after normalization, reads
+// of the same file via different path forms accumulate into ONE repeat count —
+// the behavior that makes the reported "[repeat N× …]" fact meaningful. Repeats
+// are reported to the model, never blocked (see Engine.annotateRepeats).
+func TestRepeats_NormalizedPathsAccumulate(t *testing.T) {
 	workDir := "/Users/x/deepact"
-	g := NewLoopTracker(0, 4, false)
+	e := &Engine{config: EngineConfig{WorkDir: workDir}}
 	calls := []ToolCallRequest{
 		{Name: "read", Input: json.RawMessage(`{"path":"ui/model.go"}`)},
 		{Name: "read", Input: json.RawMessage(`{"path":"./ui/model.go"}`)},
 		{Name: "read", Input: json.RawMessage(`{"file_path":"/Users/x/deepact/ui/model.go"}`)},
-		{Name: "read", Input: json.RawMessage(`{"path":"/Users/x/deepact/ui/model.go"}`)}, // 4th → block
+		{Name: "read", Input: json.RawMessage(`{"path":"/Users/x/deepact/ui/model.go"}`)},
 	}
-	for i, c := range calls {
-		a := g.Check(extractToolKey(c, workDir), false)
-		if i < 3 && a.Type != GuardAllow {
-			t.Fatalf("call %d: want allow, got %s (%s)", i, a.Type, a.Message)
-		}
-		if i == 3 && a.Type != GuardBlock {
-			t.Fatalf("call %d: want block (accumulated across path forms), got %s", i, a.Type)
-		}
+	last := ""
+	for _, c := range calls {
+		last = e.annotateRepeats(c, "digest")
+	}
+	if !strings.Contains(last, "[repeat 4×") {
+		t.Fatalf("expected all four path forms to collapse into one repeat count, got %q", last)
 	}
 }
 

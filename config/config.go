@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,22 +63,17 @@ type approvalRuleConfig struct {
 //	persona     = "你是研究员……"
 //	tools       = ["read", "grep", "glob", "lsp"]   # 或 ["*"] 全部工具
 //	model       = "flash"                            # 可选，per-role 模型覆盖
-//	max_iterations = 15                              # 可选，轮次上限
 //	structured_result = true                         # 可选，结构化完成
 type agentRoleConfig struct {
 	Description      string   `toml:"description"`
 	Persona          string   `toml:"persona"`
 	Tools            []string `toml:"tools"`
 	Model            string   `toml:"model"`
-	MaxIterations    int      `toml:"max_iterations"`
 	StructuredResult *bool    `toml:"structured_result"`
 	// TextResult declares that this role's text-only reply IS its result (a
 	// text-payload contract, e.g. ratd's JSON). Mutually exclusive with
 	// structured_result: a structured role completes only via submit_result.
 	TextResult *bool `toml:"text_result"`
-	// TokenBudget caps this role's runs (cache-miss + completion tokens).
-	// 0 = inherit the runner default, -1 = unlimited, >0 = explicit cap.
-	TokenBudget int `toml:"token_budget"`
 }
 
 // searchConfig configures the native web_search tool.
@@ -133,11 +129,6 @@ type contextConfig struct {
 	// completions; a generous budget lets the model emit full code edits in one
 	// turn instead of being cut off and forced to continue piecemeal.
 	MaxOutputTokens int `toml:"max_output_tokens"`
-	// SubAgentTokenBudget caps a sub-agent run's billable tokens (cache-miss +
-	// completion; cache hits are free). 0 = default (2× the sub-agent context
-	// window), -1 = unlimited, >0 = explicit cap. Values below -1 fail loud
-	// at startup — giving up the protection must be written down deliberately.
-	SubAgentTokenBudget int `toml:"sub_agent_token_budget"`
 	// MaxOutstandingAsyncSubAgents caps dispatched-but-uncollected async
 	// sub-agent jobs (a slot frees when agent_poll consumes a done result).
 	// 0 = default 8.
@@ -151,16 +142,18 @@ type contextConfig struct {
 	MaxConcurrentSubAgents int `toml:"max_concurrent_subagents"`
 	// MaxSubAgentDepth caps sub-agent nesting. 0 = default 2.
 	MaxSubAgentDepth int `toml:"max_subagent_depth"`
-	// RunSubAgentTokenBudget caps the billable tokens of all sub-agent runs in
-	// one Run (the whole delegation tree). 0 = default (20× the sub-agent
-	// context window), -1 = unlimited, >0 = explicit cap.
-	RunSubAgentTokenBudget int `toml:"run_sub_agent_token_budget"`
 }
 
 // conferenceConfig struct removed — ConferenceEnabled was dead code (never read by engine).
 
 // Load reads the TOML file at the given path. Returns nil if the file
 // doesn't exist — callers should use Apply with their defaults.
+//
+// Decoding is STRICT: a key the struct does not know about is an error, not a
+// silent no-op. A config key that stops working without saying so is the worst
+// kind of failure — the user believes a guard is in place when it is not (this
+// is how removed keys such as max_iterations / token_budget / max_turns would
+// otherwise behave). Removed keys get a message that says what replaced them.
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -170,10 +163,39 @@ func Load(path string) (*File, error) {
 		return nil, err
 	}
 	var f File
-	if err := toml.Unmarshal(data, &f); err != nil {
+	md, err := toml.Decode(string(data), &f)
+	if err != nil {
 		return nil, err
 	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		return nil, unknownKeyError(path, undecoded)
+	}
 	return &f, nil
+}
+
+// removedConfigKeys maps keys that no longer exist to what took their place, so
+// a stale config file fails loud with a fix instead of guessing.
+var removedConfigKeys = map[string]string{
+	"max_iterations":             "removed: a sub-agent run's convergence is its engine-computed token budget plus the 3-strike guards",
+	"max_turns":                  "removed: the main agent has no turn cap",
+	"token_budget":               "removed: no role can set or widen a run's budget",
+	"sub_agent_token_budget":     "removed: the engine computes a run's budget from its context window (2×)",
+	"run_sub_agent_token_budget": "removed: the delegation tree has no Run-level spend cap",
+}
+
+// unknownKeyError names every key the config file set that nothing reads.
+func unknownKeyError(path string, keys []toml.Key) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: unknown configuration key(s) — nothing reads them, so they would silently do nothing:", path)
+	for _, k := range keys {
+		name := k.String()
+		if why, ok := removedConfigKeys[k[len(k)-1]]; ok {
+			fmt.Fprintf(&b, "\n  - %s (%s)", name, why)
+			continue
+		}
+		fmt.Fprintf(&b, "\n  - %s (no such option; check the spelling)", name)
+	}
+	return errors.New(b.String())
 }
 
 // LoadProject reads .deepact/config.toml relative to the given work directory,
@@ -420,14 +442,6 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 	if f.Context.MaxOutputTokens > 0 {
 		cfg.MaxOutputTokens = f.Context.MaxOutputTokens
 	}
-	// Token budget: -1 (unlimited) and >0 (explicit) both apply; 0 keeps the
-	// runner default. Below -1 is a typo — fail loud rather than guess.
-	if f.Context.SubAgentTokenBudget != 0 {
-		if f.Context.SubAgentTokenBudget < -1 {
-			return fmt.Errorf("[context] sub_agent_token_budget must be -1 (unlimited), 0 (default), or positive, got %d", f.Context.SubAgentTokenBudget)
-		}
-		cfg.SubAgentTokenBudget = f.Context.SubAgentTokenBudget
-	}
 	if f.Context.MaxOutstandingAsyncSubAgents > 0 {
 		cfg.MaxOutstandingAsyncSubAgents = f.Context.MaxOutstandingAsyncSubAgents
 	}
@@ -451,12 +465,6 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 		}
 		cfg.MaxSubAgentDepth = f.Context.MaxSubAgentDepth
 	}
-	if f.Context.RunSubAgentTokenBudget != 0 {
-		if f.Context.RunSubAgentTokenBudget < -1 {
-			return fmt.Errorf("[context] run_sub_agent_token_budget must be -1 (unlimited), 0 (default), or positive, got %d", f.Context.RunSubAgentTokenBudget)
-		}
-		cfg.RunSubAgentTokenBudget = f.Context.RunSubAgentTokenBudget
-	}
 	if err := applyApproval(cfg, f.Approval); err != nil {
 		return err
 	}
@@ -468,17 +476,10 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 			continue
 		}
 		spec := engine.AgentSpec{
-			ID:            engine.AgentID(name),
-			Description:   rc.Description,
-			Persona:       rc.Persona,
-			ModelName:     rc.Model,
-			MaxIterations: rc.MaxIterations,
-			TokenBudget:   rc.TokenBudget,
-		}
-		// Same three-state semantics as [context].sub_agent_token_budget;
-		// below -1 fails loud (a typo must not silently become a cap).
-		if rc.TokenBudget < -1 {
-			return fmt.Errorf("[agents.%s] token_budget must be -1 (unlimited), 0 (default), or positive, got %d", name, rc.TokenBudget)
+			ID:          engine.AgentID(name),
+			Description: rc.Description,
+			Persona:     rc.Persona,
+			ModelName:   rc.Model,
 		}
 		tools := make([]string, 0, len(rc.Tools))
 		for _, t := range rc.Tools {

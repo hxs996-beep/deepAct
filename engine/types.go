@@ -90,10 +90,8 @@ type EngineConfig struct {
 	// AgentSpecs are user-defined sub-agent roles loaded from config.toml
 	// [agents] section. Registered alongside built-ins; user roles override
 	// built-ins with the same name.
-	AgentSpecs           []AgentSpec
-	MaxTurns             int
-	MaxIterationsPerTurn int
-	MaxContextTokens     int
+	AgentSpecs       []AgentSpec
+	MaxContextTokens int
 	// MaxOutputTokens caps the LLM completion length per turn (max_tokens).
 	// DeepSeek's 1M context window supports large completions; a generous
 	// budget lets the model emit full code edits in one turn. 0 = use the
@@ -101,11 +99,6 @@ type EngineConfig struct {
 	MaxOutputTokens        int
 	PlanningEnabled        bool
 	PlanningThresholdChars int
-	// SubAgentTokenBudget caps a sub-agent run's billable tokens (cache-miss
-	// + completion; cache hits are free). Three-state: 0 = default (2× the
-	// sub-agent context window), -1 = unlimited, >0 = explicit cap. Wired via
-	// [context].sub_agent_token_budget.
-	SubAgentTokenBudget int
 	// MaxOutstandingAsyncSubAgents caps dispatched-but-uncollected async
 	// sub-agent jobs (a slot frees when agent_poll consumes a done result).
 	// 0 = default 8. Wired via [context].max_outstanding_async_subagents.
@@ -123,13 +116,7 @@ type EngineConfig struct {
 	// MaxSubAgentDepth caps sub-agent nesting. 0 = default 2. Wired via
 	// [context].max_subagent_depth.
 	MaxSubAgentDepth int
-	// RunSubAgentTokenBudget caps the billable tokens (cache-miss + completion;
-	// cache hits are free) of every sub-agent run in ONE Run, nested children
-	// included. Three-state: 0 = default (20× the sub-agent context window),
-	// -1 = unlimited, >0 = explicit cap. Wired via
-	// [context].run_sub_agent_token_budget.
-	RunSubAgentTokenBudget int
-	ShowThinking           bool // stream model reasoning/thinking to UI
+	ShowThinking     bool // stream model reasoning/thinking to UI
 	// Approval policy for bash commands (see engine/approval.go). ApprovalMode
 	// is on-request (default) or never; ApprovalRules are user-declared rules
 	// from [approval.rules]; LearnedApprovals are commands the user confirmed in

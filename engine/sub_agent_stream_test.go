@@ -32,8 +32,8 @@ func TestSubAgentStreamer_SkipsEmptyAndNil(t *testing.T) {
 	fn := func(e ProgressEvent) { calls = append(calls, e) }
 
 	s := subAgentStreamer{}
-	s.maybeEmit(fn, "sub", "")   // empty content -> no emit, streamed still false
-	s.maybeEmit(nil, "sub", "x") // nil onProgress -> no emit, no panic, streamed still false
+	s.maybeEmit(fn, "sub", "")             // empty content -> no emit, streamed still false
+	s.maybeEmit(nil, "sub", "x")           // nil onProgress -> no emit, no panic, streamed still false
 	s.maybeEmit(fn, "sub", "real content") // first valid -> emit
 	s.maybeEmit(fn, "sub", "more")         // already emitted -> no emit
 

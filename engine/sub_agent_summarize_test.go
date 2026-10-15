@@ -6,8 +6,8 @@ import (
 )
 
 // TestSummarizeHistory_NoFinalText_ReadableFallback locks the "/collab output
-// unreadable" bug: when a sub-agent hits the per-call timeout, the loop guard,
-// or the iteration cap without producing a usable final text, summarizeHistory
+// unreadable" bug: when a sub-agent hits a guard (loop detection, token budget)
+// or a failed model call without producing a usable final text, summarizeHistory
 // must return a concise readable failure line — NOT dump the first line of
 // every raw tool result (file paths, code lines, LSP hits), which flooded
 // /collab's stage outputs and summary with garbage like

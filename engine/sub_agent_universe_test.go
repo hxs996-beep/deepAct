@@ -204,6 +204,11 @@ func TestSubAgentExecutionGate_RefusesOutOfSetCall(t *testing.T) {
 	}
 }
 
+// guardedTurnUsage is the per-turn usage charged by the guard tests below: with
+// no turn cap, a scripted loop that is meant to keep running has to be bounded by
+// a token budget instead of a turn count.
+var guardedTurnUsage = ModelUsage{CacheMissTokens: 100, TotalTokens: 100}
+
 // TestSubAgentExecutionGate_ThreeStrikesEndsRun: three consecutive refused
 // calls with no real dispatch in between end the run with loop_detected; a
 // real dispatch in between resets the streak.
@@ -212,11 +217,11 @@ func TestSubAgentExecutionGate_ThreeStrikesEndsRun(t *testing.T) {
 	bashTurn := ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
 		ID: "b", Type: "function",
 		Function: ModelFunctionCall{Name: "bash", Arguments: `{"command":"x"}`},
-	}}}, FinishReason: "tool_calls"}
+	}}}, FinishReason: "tool_calls", Usage: guardedTurnUsage}
 	readTurn := ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
 		ID: "r", Type: "function",
 		Function: ModelFunctionCall{Name: "read", Arguments: `{"path":"x.go"}`},
-	}}}, FinishReason: "tool_calls"}
+	}}}, FinishReason: "tool_calls", Usage: guardedTurnUsage}
 
 	// Pure streak: blocked, blocked, blocked → loop_detected on the 3rd.
 	model := &stubSeqModel{responses: []ModelResponse{bashTurn}}
@@ -233,16 +238,23 @@ func TestSubAgentExecutionGate_ThreeStrikesEndsRun(t *testing.T) {
 	}
 
 	// A real dispatch resets the streak: blocked, dispatched, then blocked
-	// twice — still under the threshold, the run keeps going.
+	// twice — still under the threshold, the run keeps going. With no turn cap
+	// the run is bounded by its token budget instead: the engine computes it as
+	// 2 × the context window, so a 350-token window gives a 700 budget — one
+	// guardedTurnUsage per turn (100) → turns 1-6 dispatch as scripted, turn 7
+	// stops as budget_exceeded.
 	exec2 := &scriptToolExecutor{specs: []ModelTool{specNamed("read"), specNamed("bash")}}
 	model2 := &stubSeqModel{responses: []ModelResponse{bashTurn, readTurn, bashTurn, readTurn}}
-	runner2 := &SubAgentRunner{model: model2, tools: exec2, modelName: "test"}
-	result2, err := runner2.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g", MaxIterations: 6})
+	runner2 := &SubAgentRunner{model: model2, tools: exec2, modelName: "test", maxContextTokens: 350}
+	result2, err := runner2.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "g"})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
 	if result2.FinishReason == HandoffReasonLoopDetected {
 		t.Error("an interleaved real dispatch must reset the blocked streak, got loop_detected")
+	}
+	if result2.FinishReason != HandoffReasonBudgetExceeded {
+		t.Errorf("expected the token budget to end the run, got %q", result2.FinishReason)
 	}
 	if len(exec2.executed) != 3 {
 		t.Errorf("expected 3 dispatched read calls (turns 2/4/6), got %v", exec2.executed)

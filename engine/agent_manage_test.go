@@ -640,7 +640,7 @@ func TestRunLoopFrom_DrainsInboxIntoTheRequest(t *testing.T) {
 
 	if _, err := r.runLoop(context.Background(), Handoff{
 		Agent: AgentSub, Goal: "g", TextResult: true, Inbox: inbox,
-	}, "", 3); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
 	found := false

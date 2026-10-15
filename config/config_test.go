@@ -19,6 +19,48 @@ func TestLoad_FileNotFound(t *testing.T) {
 	}
 }
 
+// TestLoad_RemovedKeyFailsLoud: a config key that no longer exists must stop the
+// process with a message naming it. Silently ignoring a removed guard knob is how
+// a user ends up believing in a limit that is no longer enforced.
+func TestLoad_RemovedKeyFailsLoud(t *testing.T) {
+	for _, body := range []string{
+		"[agents.scout]\nmax_iterations = 15\n",
+		"[agents.scout]\ntoken_budget = 300\n",
+		"[context]\nsub_agent_token_budget = -1\n",
+		"[context]\nrun_sub_agent_token_budget = 2000\n",
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("a removed key must fail loud, config:\n%s", body)
+		}
+		if !strings.Contains(err.Error(), "removed") {
+			t.Errorf("error must say the key was removed, got %q", err)
+		}
+	}
+}
+
+// TestLoad_TypoKeyFailsLoud: any key nothing reads is an error, not a silent
+// no-op — the same class of bug as a removed key.
+func TestLoad_TypoKeyFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[model]\napi_ky = \"x\"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	err := func() error { _, e := Load(path); return e }()
+	if err == nil {
+		t.Fatal("a typo'd key must fail loud")
+	}
+	if !strings.Contains(err.Error(), "api_ky") {
+		t.Errorf("error must name the unknown key, got %q", err)
+	}
+}
+
 func TestLoad_ValidFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -190,57 +232,6 @@ func TestApply_AgentToolsUniverseValidation(t *testing.T) {
 	}
 	if len(cfg3.AgentSpecs[0].ToolNames) != 2 {
 		t.Errorf("expected the listed tools kept, got %+v", cfg3.AgentSpecs[0].ToolNames)
-	}
-}
-
-// TestApply_TokenBudgetThreeState: [context].sub_agent_token_budget and
-// [agents.X].token_budget accept -1 (unlimited), 0 (default/inherit), and
-// positive caps; anything below -1 is a typo and must fail loud at startup.
-func TestApply_TokenBudgetThreeState(t *testing.T) {
-	if err := Apply(&engine.EngineConfig{}, &File{Context: contextConfig{SubAgentTokenBudget: -2}}); err == nil {
-		t.Fatal("[context].sub_agent_token_budget=-2 must fail loud")
-	} else if !strings.Contains(err.Error(), "sub_agent_token_budget") {
-		t.Errorf("error must name the knob, got %q", err)
-	}
-
-	if err := Apply(&engine.EngineConfig{}, &File{Agents: map[string]agentRoleConfig{
-		"scout": {TokenBudget: -2},
-	}}); err == nil {
-		t.Fatal("[agents.scout].token_budget=-2 must fail loud")
-	} else if !strings.Contains(err.Error(), "agents.scout") {
-		t.Errorf("error must name the role, got %q", err)
-	}
-
-	cfg := &engine.EngineConfig{}
-	if err := Apply(cfg, &File{Context: contextConfig{SubAgentTokenBudget: -1}}); err != nil {
-		t.Fatalf("-1 must apply, got %v", err)
-	}
-	if cfg.SubAgentTokenBudget != -1 {
-		t.Errorf("explicit unlimited must be preserved, got %d", cfg.SubAgentTokenBudget)
-	}
-	if err := Apply(cfg, &File{Context: contextConfig{SubAgentTokenBudget: 500}}); err != nil {
-		t.Fatalf("positive cap must apply, got %v", err)
-	}
-	if cfg.SubAgentTokenBudget != 500 {
-		t.Errorf("explicit cap must be preserved, got %d", cfg.SubAgentTokenBudget)
-	}
-
-	cfg2 := &engine.EngineConfig{}
-	if err := Apply(cfg2, &File{Agents: map[string]agentRoleConfig{
-		"scout": {Description: "d", TokenBudget: 300},
-	}}); err != nil {
-		t.Fatalf("role budget must apply, got %v", err)
-	}
-	if len(cfg2.AgentSpecs) != 1 || cfg2.AgentSpecs[0].TokenBudget != 300 {
-		t.Errorf("role budget must reach the spec, got %+v", cfg2.AgentSpecs)
-	}
-
-	cfg3 := &engine.EngineConfig{}
-	if err := Apply(cfg3, &File{Context: contextConfig{MaxOutstandingAsyncSubAgents: 5}}); err != nil {
-		t.Fatalf("outstanding cap must apply, got %v", err)
-	}
-	if cfg3.MaxOutstandingAsyncSubAgents != 5 {
-		t.Errorf("outstanding cap must apply, got %d", cfg3.MaxOutstandingAsyncSubAgents)
 	}
 }
 
@@ -437,11 +428,10 @@ func TestApply_UserAgentRoles(t *testing.T) {
 	f := &File{
 		Agents: map[string]agentRoleConfig{
 			"researcher": {
-				Description:   "只读调研员",
-				Persona:       "你是研究员……",
-				Tools:         []string{"read", "grep", "glob", "lsp"},
-				Model:         "flash",
-				MaxIterations: 20,
+				Description: "只读调研员",
+				Persona:     "你是研究员……",
+				Tools:       []string{"read", "grep", "glob", "lsp"},
+				Model:       "flash",
 			},
 			"full-tool": {
 				Description: "全部工具角色",
@@ -474,9 +464,6 @@ func TestApply_UserAgentRoles(t *testing.T) {
 	}
 	if researcher.ModelName != "flash" {
 		t.Errorf("ModelName = %q, want flash", researcher.ModelName)
-	}
-	if researcher.MaxIterations != 20 {
-		t.Errorf("MaxIterations = %d, want 20", researcher.MaxIterations)
 	}
 	if fullTool == nil {
 		t.Fatal("full-tool role not found")
@@ -552,7 +539,6 @@ func TestApply_DelegationTreeLimits(t *testing.T) {
 	err := Apply(cfg, &File{Context: contextConfig{
 		MaxConcurrentSubAgents: 4,
 		MaxSubAgentDepth:       3,
-		RunSubAgentTokenBudget: 2000000,
 	}})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -563,9 +549,6 @@ func TestApply_DelegationTreeLimits(t *testing.T) {
 	if cfg.MaxSubAgentDepth != 3 {
 		t.Errorf("MaxSubAgentDepth = %d, want 3", cfg.MaxSubAgentDepth)
 	}
-	if cfg.RunSubAgentTokenBudget != 2000000 {
-		t.Errorf("RunSubAgentTokenBudget = %d, want 2000000", cfg.RunSubAgentTokenBudget)
-	}
 }
 
 // TestApply_DelegationTreeLimits_Omitted: 0 means "use the engine default", so
@@ -575,9 +558,9 @@ func TestApply_DelegationTreeLimits_Omitted(t *testing.T) {
 	if err := Apply(cfg, &File{}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if cfg.MaxConcurrentSubAgents != 0 || cfg.MaxSubAgentDepth != 0 || cfg.RunSubAgentTokenBudget != 0 {
-		t.Errorf("omitted keys must stay 0, got %d/%d/%d",
-			cfg.MaxConcurrentSubAgents, cfg.MaxSubAgentDepth, cfg.RunSubAgentTokenBudget)
+	if cfg.MaxConcurrentSubAgents != 0 || cfg.MaxSubAgentDepth != 0 {
+		t.Errorf("omitted keys must stay 0, got %d/%d",
+			cfg.MaxConcurrentSubAgents, cfg.MaxSubAgentDepth)
 	}
 }
 
@@ -592,7 +575,6 @@ func TestApply_DelegationTreeLimits_Invalid(t *testing.T) {
 	}{
 		{"negative width", &File{Context: contextConfig{MaxConcurrentSubAgents: -1}}, "max_concurrent_subagents"},
 		{"negative depth", &File{Context: contextConfig{MaxSubAgentDepth: -2}}, "max_subagent_depth"},
-		{"token below -1", &File{Context: contextConfig{RunSubAgentTokenBudget: -3}}, "run_sub_agent_token_budget"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -607,16 +589,16 @@ func TestApply_DelegationTreeLimits_Invalid(t *testing.T) {
 	}
 }
 
-// TestApply_DelegationTreeLimits_Unlimited: -1 is the explicit opt-out for the
-// Run-level token cap and must survive Apply unchanged (never mistaken for
-// "unset, use the default").
-func TestApply_DelegationTreeLimits_Unlimited(t *testing.T) {
+// TestApply_DelegationTreeLimits_Omitted_NoBudgetKey documents the removal of the
+// Run-level token budget: [context].run_sub_agent_token_budget no longer exists,
+// and the main agent has no spend cap at all.
+func TestApply_DelegationTreeLimits_Omitted_NoBudgetKey(t *testing.T) {
 	cfg := &engine.EngineConfig{}
-	if err := Apply(cfg, &File{Context: contextConfig{RunSubAgentTokenBudget: -1}}); err != nil {
+	if err := Apply(cfg, &File{}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if cfg.RunSubAgentTokenBudget != -1 {
-		t.Errorf("RunSubAgentTokenBudget = %d, want -1", cfg.RunSubAgentTokenBudget)
+	if cfg.MaxSubAgentDepth != 0 || cfg.MaxConcurrentSubAgents != 0 {
+		t.Errorf("unexpected limits: depth=%d width=%d", cfg.MaxSubAgentDepth, cfg.MaxConcurrentSubAgents)
 	}
 }
 

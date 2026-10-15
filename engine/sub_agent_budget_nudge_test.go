@@ -7,47 +7,6 @@ import (
 	"testing"
 )
 
-// researchUntilNudgedModel returns read tool calls (varying paths, so per-file
-// loop detection never fires) until the request history carries the budget-tail
-// wrap-up nudge, then produces a conclusion. It models the "/collab stage
-// times out" failure: a research sub-agent that keeps exploring with tools and,
-// without a budget-aware nudge, exhausts its iteration cap with no conclusion.
-type researchUntilNudgedModel struct {
-	calls   int
-	nudged  bool
-	lastReq ModelRequest
-}
-
-func (m *researchUntilNudgedModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
-	return nil, nil
-}
-
-func (m *researchUntilNudgedModel) Complete(_ context.Context, req ModelRequest) (*ModelResponse, error) {
-	m.calls++
-	m.lastReq = req
-	if !m.nudged {
-		for _, msg := range req.Messages {
-			if strings.Contains(msg.Content, "只剩") || strings.Contains(msg.Content, "iterations left") {
-				m.nudged = true
-				break
-			}
-		}
-	}
-	if m.nudged {
-		if toolsContain(req.Tools, SubmitResultToolName) {
-			return &ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
-				ID: "s1", Type: "function",
-				Function: ModelFunctionCall{Name: SubmitResultToolName, Arguments: `{"summary":"根因已定位：预算耗尽前收到收尾提示后收敛。"}`},
-			}}}, FinishReason: "tool_calls"}, nil
-		}
-		return &ModelResponse{Message: ModelMessage{Role: "assistant", Content: "### 结论\n根因已定位：预算耗尽前收到收尾提示后收敛。"}, FinishReason: "stop"}, nil
-	}
-	return &ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
-		ID: "c1", Type: "function",
-		Function: ModelFunctionCall{Name: "read", Arguments: fmt.Sprintf(`{"path":"x%d.go"}`, m.calls)},
-	}}}, FinishReason: "tool_calls"}, nil
-}
-
 // deadlineProbeModel records whether the ctx passed to Complete carried a
 // deadline. Locks the per-call 120s total-duration timeout removal: the
 // sub-agent loop must pass through the parent ctx with NO synthetic deadline —
@@ -66,25 +25,6 @@ func (m *deadlineProbeModel) Stream(context.Context, ModelRequest) (<-chan Model
 func (m *deadlineProbeModel) Complete(ctx context.Context, _ ModelRequest) (*ModelResponse, error) {
 	_, m.gotDeadline = ctx.Deadline()
 	return &ModelResponse{Message: ModelMessage{Role: "assistant", Content: "结论"}, FinishReason: "stop"}, nil
-}
-
-// TestBudgetNudgeAt: the wrap-up nudge used to fire at maxIterations-2, which
-// for a 30-turn researcher meant turn 28 — by then the budget was already gone
-// (both observed runaway researchers burned all 30 turns). It must fire around
-// the 60% mark, while still leaving room to act and staying usable for tiny caps.
-func TestBudgetNudgeAt(t *testing.T) {
-	cases := []struct{ cap, want int }{
-		{1, 1}, {2, 1}, {3, 1},
-		{5, 3}, {6, 3}, {10, 6}, {15, 9}, {30, 18},
-	}
-	for _, c := range cases {
-		if got := budgetNudgeAt(c.cap); got != c.want {
-			t.Errorf("budgetNudgeAt(%d) = %d, want %d", c.cap, got, c.want)
-		}
-		if got := budgetNudgeAt(c.cap); got > c.cap-2 && c.cap > 2 {
-			t.Errorf("budgetNudgeAt(%d) = %d leaves too little room to act", c.cap, got)
-		}
-	}
 }
 
 // textAfterToolsModel answers once with a read call and then ALWAYS replies in
@@ -123,7 +63,7 @@ func TestResearcherRole_ProseAnswerIsRedirectedToSubmitResult(t *testing.T) {
 	runner := NewSubAgentRunner(model, &recordingToolExecutor{}, NewAgentRegistry(), "test")
 	a := &specSubAgent{runner: runner, spec: researcherSpec()}
 
-	result, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研某个方向", })
+	result, err := a.Run(context.Background(), Handoff{Agent: AgentResearcher, Goal: "调研某个方向"})
 	if err != nil {
 		t.Fatalf("researcher run: %v", err)
 	}
@@ -166,7 +106,7 @@ func TestSubAgent_NoSyntheticPerCallDeadline(t *testing.T) {
 	model := &deadlineProbeModel{}
 	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", TextResult: true, })
+		Agent: AgentSub, Goal: "审查", TextResult: true})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
@@ -178,61 +118,128 @@ func TestSubAgent_NoSyntheticPerCallDeadline(t *testing.T) {
 	}
 }
 
-// TestSubAgent_BudgetTailNudge_ConvergesToConclusion locks the "/collab stage
-// produces '(analysis timed out, partial result)' with no conclusion" bug: a
-// research sub-agent with a finite iteration budget keeps calling read tools
-// and, without a wrap-up nudge near the end of the budget, exhausts the cap
-// into a fallback summary (FinishReason=max_iterations, TimedOut=true) instead
-// of a real conclusion.
-func TestSubAgent_BudgetTailNudge_ConvergesToConclusion(t *testing.T) {
-	model := &researchUntilNudgedModel{}
-	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
+// tokenBudgetNudgeMarker is the wrap-up nudge's stable wording (see
+// tokenBudgetNudge). With no turn cap this nudge is a run's only budget signal,
+// so the model below keys on it.
+const tokenBudgetNudgeMarker = "tokens remain in this run's budget"
+
+// tokenBudgetUntilNudgedModel keeps returning read tool calls (varying paths, so
+// per-file loop detection never fires) until the request history carries the
+// token-budget wrap-up nudge, then delivers its conclusion — through
+// submit_result when the run is structured, as plain text when the role declared
+// its text reply to be the result. It models the "/collab stage produces a
+// partial result with no conclusion" failure: a research sub-agent that keeps
+// exploring and needs to be told to wrap up when its budget runs low.
+//
+// Every turn reports usage, the terminal one included: the run must converge
+// BEFORE the budget gate (spent >= budget returns budget_exceeded ahead of the
+// submit branch), and the test must not assume a provider reports nothing for
+// the final call.
+type tokenBudgetUntilNudgedModel struct {
+	calls   int
+	nudged  bool
+	lastReq ModelRequest
+}
+
+// nudgeTurnUsage is the billable usage charged per turn: with a 1000-token
+// run budget the 80% mark is crossed at the end of turn 8, so the nudge lands
+// at turn 9.
+const nudgeTurnUsage = 100
+
+func (m *tokenBudgetUntilNudgedModel) Stream(context.Context, ModelRequest) (<-chan ModelChunk, error) {
+	return nil, nil
+}
+
+func (m *tokenBudgetUntilNudgedModel) Complete(_ context.Context, req ModelRequest) (*ModelResponse, error) {
+	m.calls++
+	m.lastReq = req
+	if !m.nudged {
+		for _, msg := range req.Messages {
+			if strings.Contains(msg.Content, tokenBudgetNudgeMarker) {
+				m.nudged = true
+				break
+			}
+		}
+	}
+	usage := ModelUsage{CacheMissTokens: nudgeTurnUsage, TotalTokens: nudgeTurnUsage}
+	if m.nudged {
+		if toolsContain(req.Tools, SubmitResultToolName) {
+			return &ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+				ID: "s1", Type: "function",
+				Function: ModelFunctionCall{Name: SubmitResultToolName, Arguments: `{"summary":"预算收尾提示后收敛。"}`},
+			}}}, FinishReason: "tool_calls", Usage: usage}, nil
+		}
+		return &ModelResponse{Message: ModelMessage{
+			Role: "assistant", Content: "结论：预算收尾提示后收敛。",
+		}, FinishReason: "stop", Usage: usage}, nil
+	}
+	return &ModelResponse{Message: ModelMessage{Role: "assistant", ToolCalls: []ModelToolCall{{
+		ID: "c1", Type: "function",
+		Function: ModelFunctionCall{Name: "read", Arguments: fmt.Sprintf(`{"path":"x%d.go"}`, m.calls)},
+	}}}, FinishReason: "tool_calls", Usage: usage}, nil
+}
+
+// TestSubAgent_TokenBudgetNudge_StructuredNamesSubmitResult locks the wrap-up
+// nudge that replaced the turn-cap nudge: a structured run crossing 80% of its
+// token budget must be told to stop exploring and call submit_result (plain text
+// never completes a structured run), and it must converge BEFORE the budget gate
+// ends the run as budget_exceeded.
+func TestSubAgent_TokenBudgetNudge_StructuredNamesSubmitResult(t *testing.T) {
+	model := &tokenBudgetUntilNudgedModel{}
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "调研 codex 与 deepact 的区别", MaxIterations: 6, TextResult: true, })
+		Agent: AgentSub, Goal: "审查", StructuredResult: true})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)
 	}
 	if result.FinishReason != HandoffReasonCompleted {
 		t.Errorf("expected FinishReason=%q (converged), got %q", HandoffReasonCompleted, result.FinishReason)
 	}
-	if result.TimedOut {
-		t.Errorf("expected TimedOut=false, got true")
-	}
-	if !strings.Contains(result.Summary, "根因已定位") {
-		t.Errorf("expected the model's conclusion as Summary, got %q", result.Summary)
-	}
-	// The run must conclude within the budget, not at the hard cap.
-	if model.calls >= 6 {
-		t.Errorf("expected conclusion before exhausting the 6-turn budget, used %d calls", model.calls)
-	}
-}
-
-// TestSubAgent_BudgetTailNudge_StructuredNamesSubmitResult: in a structured run
-// the budget-tail nudge must direct the model to submit_result, so the injected
-// wrap-up instruction is unambiguous (a plain text reply never completes a
-// structured run).
-func TestSubAgent_BudgetTailNudge_StructuredNamesSubmitResult(t *testing.T) {
-	model := &researchUntilNudgedModel{}
-	runner := &SubAgentRunner{model: model, tools: &recordingToolExecutor{}, modelName: "test"}
-	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "审查", MaxIterations: 5, StructuredResult: true, })
-	if err != nil {
-		t.Fatalf("runLoop error: %v", err)
-	}
-	if result.FinishReason != HandoffReasonCompleted {
-		t.Errorf("expected FinishReason=%q, got %q", HandoffReasonCompleted, result.FinishReason)
-	}
-	if model.calls >= 5 {
-		t.Errorf("expected conclusion before exhausting the 5-turn budget, used %d calls", model.calls)
+	// 100 spent per turn: 80% of 1000 is crossed at the end of turn 8, so the
+	// nudge is injected at the top of turn 9 and the run submits there (900 of
+	// 1000 spent, still under the hard gate).
+	if model.calls != 9 {
+		t.Errorf("expected 9 calls (8 exploring + 1 after the nudge), got %d", model.calls)
 	}
 	found := false
 	for _, msg := range model.lastReq.Messages {
-		if strings.Contains(msg.Content, "submit_result") &&
-			(strings.Contains(msg.Content, "只剩") || strings.Contains(msg.Content, "iterations left")) {
+		if strings.Contains(msg.Content, tokenBudgetNudgeMarker) &&
+			strings.Contains(msg.Content, SubmitResultToolName) {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("structured budget-tail nudge must name submit_result, last request messages: %q", model.lastReq.Messages)
+		t.Errorf("the token-budget nudge must name submit_result, last request messages: %q", model.lastReq.Messages)
+	}
+}
+
+// TestSubAgent_TokenBudgetNudge_TextResultConverges locks the other half of the
+// same nudge: for a role that declared its text reply to be the result
+// (TextResult), the nudge must NOT name submit_result (that tool is not even
+// offered) and the run must still converge on a real result before the budget
+// gate. This is the path that lost its coverage when the old turn-cap
+// budget-tail test was removed.
+func TestSubAgent_TokenBudgetNudge_TextResultConverges(t *testing.T) {
+	model := &tokenBudgetUntilNudgedModel{}
+	runner := budgetRunnerFor(model, readSpecExec(), 1000)
+	result, err := runner.Run(context.Background(), Handoff{
+		Agent: AgentSub, Goal: "调研", TextResult: true})
+	if err != nil {
+		t.Fatalf("runLoop error: %v", err)
+	}
+	if result.FinishReason != HandoffReasonCompleted {
+		t.Errorf("expected FinishReason=%q (converged), got %q", HandoffReasonCompleted, result.FinishReason)
+	}
+	if model.calls != 9 {
+		t.Errorf("expected 9 calls (8 exploring + 1 after the nudge), got %d", model.calls)
+	}
+	if !strings.Contains(result.Summary, "预算收尾提示后收敛") {
+		t.Errorf("expected the conclusion produced after the nudge as Summary, got %q", result.Summary)
+	}
+	for _, msg := range model.lastReq.Messages {
+		if strings.Contains(msg.Content, tokenBudgetNudgeMarker) &&
+			strings.Contains(msg.Content, SubmitResultToolName) {
+			t.Errorf("a non-structured run must not be pointed at submit_result, message: %q", msg.Content)
+		}
 	}
 }

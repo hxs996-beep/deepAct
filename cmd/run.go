@@ -264,10 +264,8 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	}
 	runner.SetMaxContextTokens(config.MaxContextTokens)
 	runner.SetMaxOutputTokens(config.MaxOutputTokens)
-	runner.SetSubAgentTokenBudget(config.SubAgentTokenBudget)
 	runner.SetMaxConcurrentSubAgents(config.MaxConcurrentSubAgents)
 	runner.SetMaxDepth(config.MaxSubAgentDepth)
-	runner.SetRunTokenBudget(config.RunSubAgentTokenBudget)
 	runner.SetReasoningEffort(config.ReasoningEffort)
 	runner.SetWorkDir(workDir)
 	runner.SetSessionID(config.SessionID)
@@ -366,7 +364,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Session:    store,
 		Memory:     memStore,
 		Agents:     agentReg,
-		SubAgents:  runner,
 		Skills:     skillReg,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown
@@ -525,8 +522,6 @@ func defaultEngineConfig() engine.EngineConfig {
 			FlashModelName:         "deepseek/deepseek-chat",
 			BaseURL:                llm.DefaultOpenRouterURL,
 			ReasoningEffort:        "high",
-			MaxTurns:               999,
-			MaxIterationsPerTurn:   15,
 			MaxContextTokens:       1048576,
 			PlanningEnabled:        true,
 			PlanningThresholdChars: 120,
@@ -553,8 +548,6 @@ func defaultEngineConfig() engine.EngineConfig {
 		FlashModelName:         "deepseek-v4-flash",
 		BaseURL:                llm.DefaultDeepSeekEndpoint,
 		ReasoningEffort:        "high",
-		MaxTurns:               999,
-		MaxIterationsPerTurn:   15,
 		MaxContextTokens:       1048576,
 		PlanningEnabled:        true,
 		PlanningThresholdChars: 120,

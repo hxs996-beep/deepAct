@@ -21,7 +21,7 @@ func TestSubAgent_TextOnly_NoClassifierProbe(t *testing.T) {
 
 	runner := &SubAgentRunner{model: model, tools: stubToolExecutor{}, modelName: "test"}
 	result, err := runner.Run(context.Background(), Handoff{
-		Agent: AgentSub, Goal: "g", MaxIterations: 8,
+		Agent: AgentSub, Goal: "g",
 	})
 	if err != nil {
 		t.Fatalf("runLoop error: %v", err)

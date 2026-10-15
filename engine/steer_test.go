@@ -167,7 +167,7 @@ func TestRun_SteerInterruptsMidStream(t *testing.T) {
 		context: steerContextBuilder{},
 		state:   &TaskState{TaskID: "test"},
 		history: []Message{{Role: "user", Content: "读A", Timestamp: time.Now()}},
-		config:  EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		config:  EngineConfig{MaxContextTokens: 1000000},
 		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 
@@ -310,7 +310,7 @@ func TestRun_DoneWithSteerQueue_AutoContinue(t *testing.T) {
 		context: steerContextBuilder{},
 		state:   &TaskState{TaskID: "test"},
 		history: []Message{{Role: "user", Content: "do something", Timestamp: time.Now()}},
-		config:  EngineConfig{MaxTurns: 10, MaxContextTokens: 1000000},
+		config:  EngineConfig{MaxContextTokens: 1000000},
 		guards:  &GuardSystem{scope: NewScopeGuard()},
 	}
 

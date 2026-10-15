@@ -23,7 +23,6 @@ func TestHandoffReasonHeading_RefusalReasons(t *testing.T) {
 		want   string
 	}{
 		{HandoffReasonFanoutLimit, "refused"},
-		{HandoffReasonTreeBudgetExceeded, "refused"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.reason, func(t *testing.T) {
@@ -40,14 +39,47 @@ func TestHandoffReasonHeading_RefusalReasons(t *testing.T) {
 	}
 }
 
-// A refused delegation needs the parent to continue, exactly like a run that
-// hit its turn cap — so both reasons must be follow-up reasons.
+// TestIsHandoffFollowUpReason_Refusals: a refusal is not a delivery, so the
+// parent must be told to continue (same as any other failed run).
 func TestIsHandoffFollowUpReason_Refusals(t *testing.T) {
 	if !isHandoffFollowUpReason(HandoffReasonFanoutLimit) {
 		t.Error("fanout_limit must be a follow-up reason")
 	}
-	if !isHandoffFollowUpReason(HandoffReasonTreeBudgetExceeded) {
-		t.Error("tree_budget_exceeded must be a follow-up reason")
+}
+
+// TestHandoffResultStatus_EveryReason locks the single status mapping: the ✓/✗
+// the UI and the delegating model see is decided by FinishReason (with
+// Blocked/BlockedBy as the refusal/interrupt axis), so no partial outcome can
+// render as a success while its own digest says "partial result".
+func TestHandoffResultStatus_EveryReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		result *HandoffResult
+		want   string
+	}{
+		{"nil", nil, "error"},
+		{"completed", &HandoffResult{FinishReason: HandoffReasonCompleted}, "ok"},
+		{"no reason recorded", &HandoffResult{}, "ok"},
+		{"awaiting_user", &HandoffResult{FinishReason: HandoffReasonAwaitingUser}, "ok"},
+		{"async_running", &HandoffResult{FinishReason: HandoffReasonAsyncRunning}, "ok"},
+		{"cancelled reason", &HandoffResult{FinishReason: HandoffReasonCancelled}, "cancelled"},
+		{"blocked by cancel", &HandoffResult{BlockedBy: HandoffReasonCancelled}, "cancelled"},
+		{"blocked with no reason", &HandoffResult{Blocked: true}, "error"},
+		{"max_tokens", &HandoffResult{FinishReason: HandoffReasonMaxTokens}, "error"},
+		{"no_result", &HandoffResult{FinishReason: HandoffReasonNoResult}, "error"},
+		{"stalled_narration", &HandoffResult{FinishReason: HandoffReasonStalledNarration}, "error"},
+		{"loop_detected", &HandoffResult{FinishReason: HandoffReasonLoopDetected}, "error"},
+		{"budget_exceeded", &HandoffResult{FinishReason: HandoffReasonBudgetExceeded}, "error"},
+		{"error", &HandoffResult{FinishReason: HandoffReasonError}, "error"},
+		{"max_depth", &HandoffResult{FinishReason: HandoffReasonMaxDepth}, "error"},
+		{"fanout_limit refusal", &HandoffResult{Blocked: true, FinishReason: HandoffReasonFanoutLimit}, "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := handoffResultStatus(tc.result); got != tc.want {
+				t.Errorf("handoffResultStatus = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -174,205 +206,7 @@ func TestSubAgentDepth_Configurable(t *testing.T) {
 	}
 }
 
-// --- Run-level token aggregate ---------------------------------------------
-
-// TestSubAgentTreeBudget_RefusesAfterSpent: the aggregate spans runs, not just
-// one run — after the tree has spent its Run budget, the next delegation is
-// refused with the refusal reason, and the spend is reported on the runner.
-func TestSubAgentTreeBudget_RefusesAfterSpent(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{{
-		Message:      ModelMessage{Role: "assistant", Content: "结论"},
-		FinishReason: "stop",
-		Usage:        ModelUsage{CacheMissTokens: 600, TotalTokens: 600},
-	}}}
-	runner := &SubAgentRunner{model: model, tools: readSpecExec(), modelName: "test"}
-	runner.SetRunTokenBudget(1000)
-	runner.StartRun()
-
-	first, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", TextResult: true})
-	if err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-	if first.FinishReason != HandoffReasonCompleted {
-		t.Fatalf("first run: got %q, want completed", first.FinishReason)
-	}
-	if got := runner.Spent(); got != 600 {
-		t.Fatalf("Spent after one 600-token run = %d, want 600", got)
-	}
-
-	second, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", TextResult: true})
-	if err != nil {
-		t.Fatalf("second run: %v", err)
-	}
-	if second.FinishReason != HandoffReasonCompleted {
-		t.Fatalf("second run must still be admitted (600 < 1000): got %q", second.FinishReason)
-	}
-
-	third, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", TextResult: true})
-	if err != nil {
-		t.Fatalf("third run: %v", err)
-	}
-	if third.FinishReason != HandoffReasonTreeBudgetExceeded {
-		t.Fatalf("third run: got %q, want %q", third.FinishReason, HandoffReasonTreeBudgetExceeded)
-	}
-	if third.Summary == "" {
-		t.Error("refusal must explain itself")
-	}
-}
-
-// TestSubAgentTreeBudget_StartRunResets: the aggregate is per-Run, so a new Run
-// gets a fresh budget (otherwise the cap would silently become a session cap).
-func TestSubAgentTreeBudget_StartRunResets(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{{
-		Message:      ModelMessage{Role: "assistant", Content: "结论"},
-		FinishReason: "stop",
-		Usage:        ModelUsage{CacheMissTokens: 1500, TotalTokens: 1500},
-	}}}
-	runner := &SubAgentRunner{model: model, tools: readSpecExec(), modelName: "test"}
-	runner.SetRunTokenBudget(1000)
-
-	runner.StartRun()
-	if _, err := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "a", TextResult: true}); err != nil {
-		t.Fatal(err)
-	}
-	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "b", TextResult: true}); res.FinishReason != HandoffReasonTreeBudgetExceeded {
-		t.Fatalf("expected the cap to bite in Run 1, got %q", res.FinishReason)
-	}
-
-	runner.StartRun()
-	if res, _ := runner.Run(context.Background(), Handoff{Agent: AgentSub, Goal: "c", TextResult: true}); res.FinishReason != HandoffReasonCompleted {
-		t.Fatalf("a new Run must start with a fresh budget, got %q", res.FinishReason)
-	}
-}
-
-// TestSubAgentTreeBudget_Unlimited: -1 is an explicit opt-out and must not be
-// replaced by the default. The per-run budget is also set to unlimited here,
-// because a 9M-token run would otherwise trip the per-run cap (2× the context
-// window) first and this test would prove nothing about the Run-level cap.
-// Four runs are needed for the pin to bite if -1 ever fell back to the default
-// (20 context windows ≈ 21M): 4 × 9M crosses it on the fourth.
-func TestSubAgentTreeBudget_Unlimited(t *testing.T) {
-	model := &stubSeqModel{responses: []ModelResponse{{
-		Message:      ModelMessage{Role: "assistant", Content: "结论"},
-		FinishReason: "stop",
-		Usage:        ModelUsage{CacheMissTokens: 9_000_000, TotalTokens: 9_000_000},
-	}}}
-	runner := &SubAgentRunner{model: model, tools: readSpecExec(), modelName: "test"}
-	runner.SetRunTokenBudget(-1)
-	runner.StartRun()
-	for i := 0; i < 4; i++ {
-		res, err := runner.Run(context.Background(), Handoff{
-			Agent: AgentSub, Goal: "g", TextResult: true, TokenBudget: -1,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.FinishReason != HandoffReasonCompleted {
-			t.Fatalf("run %d: an unlimited Run budget must never refuse, got %q", i, res.FinishReason)
-		}
-	}
-}
-
-// --- engine wiring ----------------------------------------------------------
-
-// budgetStub is a scripted SubAgentBudget, so the Engine-side reset and notice
-// can be tested without a live runner.
-type budgetStub struct {
-	spent      int64
-	budget     int64
-	starts     int
-	noticeLeft int // how many ClaimBudgetNotice calls still return true
-}
-
-func (b *budgetStub) StartRun()    { b.starts++; b.spent = 0; b.noticeLeft = 1 }
-func (b *budgetStub) Spent() int64 { return b.spent }
-func (b *budgetStub) Budget() int64 {
-	return b.budget
-}
-func (b *budgetStub) ClaimBudgetNotice() bool {
-	if b.noticeLeft <= 0 {
-		return false
-	}
-	b.noticeLeft--
-	return true
-}
-
-// TestEngineRun_ResetsSubAgentBudget: every Run must start with a clean
-// delegation-tree aggregate, or the cap silently becomes a session cap.
-func TestEngineRun_ResetsSubAgentBudget(t *testing.T) {
-	budget := &budgetStub{budget: 1000, spent: 999, noticeLeft: 0}
-	e := newTestEngineWithBudget(t, budget)
-	if _, err := e.Run(context.Background(), "你好"); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if budget.starts == 0 {
-		t.Error("Run must call SubAgentBudget.StartRun")
-	}
-}
-
-// TestEngineRun_SubAgentBudgetNoticeOnce: past 80% the pinned notice fires
-// exactly once and names both numbers.
-func TestEngineRun_SubAgentBudgetNoticeOnce(t *testing.T) {
-	budget := &budgetStub{budget: 1000, spent: 900, noticeLeft: 1}
-	e := newTestEngineWithBudget(t, budget)
-
-	e.injectSubAgentBudgetNotice()
-	if len(e.pendingPinnedMessages) != 1 {
-		t.Fatalf("expected exactly one pinned notice, got %d", len(e.pendingPinnedMessages))
-	}
-	got := e.pendingPinnedMessages[0]
-	if !strings.Contains(got, "900") || !strings.Contains(got, "1000") {
-		t.Errorf("notice must name spent and budget, got %q", got)
-	}
-	e.pendingPinnedMessages = nil
-
-	// Second call: already claimed this Run → no second banner.
-	e.injectSubAgentBudgetNotice()
-	if len(e.pendingPinnedMessages) != 0 {
-		t.Errorf("the near-limit notice must be one-shot, got %d", len(e.pendingPinnedMessages))
-	}
-}
-
-// TestEngineRun_SubAgentBudgetNoticeSilent: below the threshold, when the cap
-// is unlimited, and when no budget surface is wired, the notice stays silent.
-func TestEngineRun_SubAgentBudgetNoticeSilent(t *testing.T) {
-	cases := []struct {
-		name   string
-		budget SubAgentBudget
-	}{
-		{"below threshold", &budgetStub{budget: 1000, spent: 100, noticeLeft: 1}},
-		{"unlimited", &budgetStub{budget: 0, spent: 100_000, noticeLeft: 1}},
-		{"not wired", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			e := &Engine{subBudget: tc.budget}
-			e.injectSubAgentBudgetNotice()
-			if len(e.pendingPinnedMessages) != 0 {
-				t.Errorf("expected no notice, got %v", e.pendingPinnedMessages)
-			}
-		})
-	}
-}
-
-// newTestEngineWithBudget builds a minimal Engine whose single turn answers with
-// plain text, with the given delegation-budget surface wired. The field set
-// mirrors the other Engine literals in this package (there is no shared helper):
-// Run dereferences context, state, config and guards, so all four are required.
-func newTestEngineWithBudget(t *testing.T, budget SubAgentBudget) *Engine {
-	t.Helper()
-	return &Engine{
-		model: &stubStreamModel{chunks: []ModelChunk{
-			{Delta: "任务已完成。", FinishReason: "stop"},
-		}},
-		tools:     stubToolExecutor{},
-		context:   steerContextBuilder{},
-		state:     &TaskState{TaskID: "test"},
-		config:    EngineConfig{ModelName: "test-model"},
-		guards:    &GuardSystem{scope: NewScopeGuard()},
-		subBudget: budget,
-	}
-}
+// --- width / depth caps ------------------------------------------------------
 
 // TestSubAgentWidth_SixWayFanoutStillFits: the default width (6) is chosen to
 // match the 2-6 directions a /collab round fans out, so a six-way parallel

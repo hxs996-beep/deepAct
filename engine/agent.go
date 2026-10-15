@@ -37,21 +37,18 @@ const (
 	HandoffReasonMaxTokens        = "max_tokens"        // a turn was cut off by the output cap (finish_reason=length)
 	HandoffReasonCancelled        = "cancelled"         // context cancelled mid-run
 	HandoffReasonError            = "error"             // LLM call failed
-	HandoffReasonMaxIterations    = "max_iterations"    // iteration cap reached
 	HandoffReasonLoopDetected     = "loop_detected"     // same operation repeated
 	HandoffReasonStalledNarration = "stalled_narration" // text-only narration without acting
 	HandoffReasonNoResult         = "no_result"         // structured run ended without submitting a result
 	HandoffReasonMaxDepth         = "max_depth"         // nesting depth exceeded
 	HandoffReasonAwaitingUser     = "awaiting_user"     // sub-agent asked the user; parent must present the question
 	HandoffReasonBudgetExceeded   = "budget_exceeded"   // sub-agent exhausted its token budget (cache-miss + completion)
-	// HandoffReasonFanoutLimit and HandoffReasonTreeBudgetExceeded are
-	// REFUSALS, not failures: the delegation tree was already at its limit and
-	// nothing was run, so the result carries no partial output. Their headings
-	// must therefore never use the "partial result" wording the run-that-
-	// stopped-halfway reasons use — the parent's correct move is to collect a
-	// running result or do the step itself.
-	HandoffReasonFanoutLimit        = "fanout_limit"         // in-flight width cap reached
-	HandoffReasonTreeBudgetExceeded = "tree_budget_exceeded" // this Run's sub-agent token cap exhausted
+	// HandoffReasonFanoutLimit is a REFUSAL, not a failure: the delegation tree
+	// was already at its width limit and nothing was run, so the result carries no
+	// partial output. Its heading must therefore never use the "partial result"
+	// wording the run-that-stopped-halfway reasons use — the parent's correct move
+	// is to collect a running result or do the step itself.
+	HandoffReasonFanoutLimit = "fanout_limit" // in-flight width cap reached
 	// HandoffReasonAsyncRunning is the FinishReason on the immediate dispatch
 	// result of an async handoff (handoff_to_agent async:true). It is NOT a
 	// failure: the sub-agent is still running in the background and the
@@ -86,15 +83,6 @@ type Handoff struct {
 	// non-structured run treats a text-only reply as narration
 	// (3-strike → stalled_narration).
 	TextResult bool `json:"text_result,omitempty"`
-	// MaxIterations caps the number of sub-agent turns; 0 = no cap (default).
-	MaxIterations int `json:"max_iterations,omitempty"`
-	// TokenBudget caps this run's billable tokens (cache-miss + completion;
-	// cache hits are free). Three-state, identical at every level: 0 = inherit
-	// from the next level down (spec → runner default), -1 = explicit
-	// unlimited, >0 = explicit cap. Never in the tool schema: the model can
-	// neither set nor widen it. The 80% wrap-up nudge may tell the model the
-	// remaining amount — information, not a setting.
-	TokenBudget int `json:"token_budget,omitempty"`
 	// StructuredResult turns this run into a structured run: the loop injects
 	// submit_result, and only a successful submission completes it. Set from
 	// AgentSpec.StructuredResult by the agent before Run executes.
@@ -118,7 +106,6 @@ type HandoffResult struct {
 	Artifacts   []string `json:"artifacts,omitempty"`
 	Blocked     bool     `json:"blocked"`
 	BlockedBy   string   `json:"blocked_by,omitempty"`
-	TimedOut    bool     `json:"timed_out,omitempty"` // true when max iterations reached
 	// FinishReason is the structured reason the run ended with
 	// (HandoffReason* constants). "completed" means the agent delivered a
 	// genuine result; every other value signals partial/no output and lets
@@ -168,8 +155,8 @@ type SuspendedRun struct {
 	Model     ModelClient
 	// Spent is the usage accumulated so far; the budget continues from here.
 	Spent ModelUsage
-	// Iter is the loop counter at suspension. Resume restarts the loop from here
-	// so a capped run does NOT get a fresh MaxIterations budget.
+	// Iter is the loop counter at suspension. Resume restarts the loop from
+	// here, so the run's progress reporting continues instead of resetting.
 	Iter int
 	// BudgetNudgedTokens carries the token-budget 80% nudge flag so resume does
 	// not inject the wrap-up nudge a second time.
@@ -186,15 +173,10 @@ type SuspendedRun struct {
 
 // AgentSpec describes an agent's identity and capabilities.
 type AgentSpec struct {
-	ID            AgentID
-	Description   string
-	ToolNames     []string // default tool allowlist (empty = all tools)
-	ModelName     string   // if set, overrides runner's default model for this agent
-	MaxIterations int      // 0 = no turn cap (default). Set > 0 for agents that must finish quickly (e.g. researcher: 15).
-	// TokenBudget is the role-level token budget merged into Handoff when the
-	// delegating harness does not set one. Same three-state semantics as
-	// Handoff.TokenBudget (0 = inherit, -1 = unlimited, >0 = explicit cap).
-	TokenBudget int
+	ID          AgentID
+	Description string
+	ToolNames   []string // default tool allowlist (empty = all tools)
+	ModelName   string   // if set, overrides runner's default model for this agent
 	// Persona is the role's stable system instruction (codex-style developer
 	// instructions). Injected as part of the sub-agent's stable system prefix
 	// when this agent runs, keeping the shared prefix cache hot across turns.
@@ -633,8 +615,6 @@ func handoffReasonHeading(reason string, runID string) string {
 		return "Agent hit the response token limit (partial result):"
 	case HandoffReasonError:
 		return "Sub-agent failed:"
-	case HandoffReasonMaxIterations:
-		return "Sub-agent exceeded the turn limit (partial result):"
 	case HandoffReasonLoopDetected:
 		return "Sub-agent stopped for repeating the same operation:"
 	case HandoffReasonStalledNarration:
@@ -647,8 +627,6 @@ func handoffReasonHeading(reason string, runID string) string {
 		return "Sub-agent exceeded its token budget (partial result):"
 	case HandoffReasonFanoutLimit:
 		return "Delegation refused: too many sub-agents are already in flight."
-	case HandoffReasonTreeBudgetExceeded:
-		return "Delegation refused: this Run's sub-agent token budget is exhausted."
 	case HandoffReasonAwaitingUser:
 		// Not a failure: the run stopped because it needs input the user must
 		// give. The handle is appended when the suspension was registered (top

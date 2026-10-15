@@ -173,7 +173,7 @@ func TestIsHandoffFollowUpReason_AsyncRunningExempt(t *testing.T) {
 	if isHandoffFollowUpReason(HandoffReasonAsyncRunning) {
 		t.Fatal("HandoffReasonAsyncRunning must NOT be a follow-up reason (async jobs are polled later)")
 	}
-	if !isHandoffFollowUpReason(HandoffReasonMaxIterations) {
-		t.Fatal("HandoffReasonMaxIterations should still be a follow-up reason")
+	if !isHandoffFollowUpReason(HandoffReasonLoopDetected) {
+		t.Fatal("a failed run (loop_detected) must still be a follow-up reason")
 	}
 }
