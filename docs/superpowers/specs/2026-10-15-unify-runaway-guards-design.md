@@ -70,12 +70,11 @@
 （不是失败）；`cancelled` → `cancelled`；其余 → `error`。同步路径（`handoff.go`）改调同一函数
 （消除两份判定各写一份的漂移）。附表驱动用例覆盖全部 reason。
 
-### F. 已删除配置键 fail-loud（`config/config.go`）
+### F. 配置解码与向后兼容（`config/config.go`）
 
-`Load` 改用 `toml.Decode` 取 `MetaData`，对 `Undecoded()` 报错：命中已删除的键
-（`max_iterations`、`token_budget`、`sub_agent_token_budget`、`run_sub_agent_token_budget`）时给出
-"该键已移除，收敛由引擎预算负责"的明确提示；其余未知键同样报错（消除"写了不生效"的静默类）。
-**注意**：这是行为变更——任何未知键都会让启动失败。
+**定稿：未识别的键一律忽略（不报错、不告警）**，配置照常加载。已发布用户的配置文件必须原样可用，
+多出来的键只是多余数据；只有 TOML 语法本身不合法才算错误。唯一独立保留的修正是 `LoadProject`
+改为 `(*File, error)` 且不再吞错——真语法错必须报出来，不能伪装成"没配置"（见下）。
 
 ## 已知取舍
 
@@ -126,12 +125,13 @@
   （→ `loop_detected`）各计一击，达 3 击结束，真实派发时清零。
 - **M3 `handoffResultStatus` 成为唯一实现**：`Blocked`/`BlockedBy==cancelled` 优先，其余按
   `FinishReason` 排除表；同步路径（`handoff.go`）改调同一函数，附表驱动用例覆盖全部 reason。
-- **F 配置严格解码（修正后）**：`Load` 改用 `toml.Decode` + `md.Undecoded()`，但**只对已删除的
-  5 个键**（`max_iterations`/`max_turns`/`token_budget`/`sub_agent_token_budget`/
-  `run_sub_agent_token_budget`）硬报错并给出替代机制；其余没被读取的键（历史的 `[routing]`、
-  `[guards]` 这类）只打一行 stderr WARN，配置照常加载。
-  **踩过的坑（实现后实测发现并修正）**：第一版把所有未读取的键都当致命错，而 `LoadProject`
-  历史上会吞掉错误并返回 nil——两者叠加后，存量配置里的历史段落会把整个配置（连同 api_key）
-  一起弄丢，表现为“不读 `~/.deepact/config.toml`、直接弹 API key 输入框”。修正：
-  未知键降为 WARN；`LoadProject` 改为 `(*File, error)` 且**不再吞错**，`cmd/run.go` 遇到配置
-  错误直接返回——报错就是报错，不再伪装成“没配置”。
+- **F 配置解码（最终定稿）**：`Load` 回到普通 `toml.Unmarshal`——**未识别的键一律忽略、不报错、不告警**，
+  配置照常加载。已发布用户的配置文件必须原样可用，多出来的键只是多余数据（`[routing]`/`[guards]`
+  这类历史段落、以及被删掉的 `max_iterations`/`token_budget`/… 都归为此类）。唯一会报错的情况是
+  **TOML 本身语法不合法**，因为那没有“当作空气”的余地。
+  **踩过的坑（两版才定）**：第一版把所有未读键都当致命错 → 存量配置里的历史段落直接搞挂启动，
+  最后表现为“不读 `~/.deepact/config.toml`、弹 API key 输入框”；第二版把未读键降为 WARN 但仍以
+  “已删除的键”为致命错，同样会拦住已发布用户的启动。
+  单独保留的修正：`LoadProject` 改为 `(*File, error)` 且**不再吞错**——只有真语法错才会走到这里，
+  而它必须报出来，不能伪装成“没配置”。（教训：向后兼容优先于“让死键发声”的美德；护栏变更让
+  死键静默失效，代价远小于让整份配置（连同 api_key）失效。）

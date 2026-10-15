@@ -19,47 +19,40 @@ func TestLoad_FileNotFound(t *testing.T) {
 	}
 }
 
-// TestLoad_RemovedKeyFailsLoud: a config key that no longer exists must stop the
-// process with a message naming it. Silently ignoring a removed guard knob is how
-// a user ends up believing in a limit that is no longer enforced.
-func TestLoad_RemovedKeyFailsLoud(t *testing.T) {
-	for _, body := range []string{
-		"[agents.scout]\nmax_iterations = 15\n",
-		"[agents.scout]\ntoken_budget = 300\n",
-		"[context]\nsub_agent_token_budget = -1\n",
-		"[context]\nrun_sub_agent_token_budget = 2000\n",
-	} {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.toml")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		_, err := Load(path)
-		if err == nil {
-			t.Fatalf("a removed key must fail loud, config:\n%s", body)
-		}
-		if !strings.Contains(err.Error(), "removed") {
-			t.Errorf("error must say the key was removed, got %q", err)
-		}
-	}
-}
-
-// TestLoad_UnknownKeyWarnsButLoads: a stale key nothing reads (e.g. a section
-// from an older version) must NOT take the whole config down — the rest of the
-// file, including the API key, still loads. Only removed keys are fatal.
-func TestLoad_UnknownKeyWarnsButLoads(t *testing.T) {
+// TestLoad_ExtraKeysAreIgnored: a config written for an older version must keep
+// working untouched — keys this build does not read (a removed knob, a stale
+// section) are simply not read, never fatal. This is the backward-compatibility
+// contract for already-released config files.
+func TestLoad_ExtraKeysAreIgnored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	body := "[model]\napi_key = \"k\"\n\n[routing]\nrisk_threshold = 0.5\n\n[guards]\nscope_guard = true\n"
+	body := "[model]\napi_key = \"k\"\n\n[routing]\nrisk_threshold = 0.5\n\n[guards]\nscope_guard = true\n\n[agents.scout]\nmax_iterations = 15\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	f, err := Load(path)
 	if err != nil {
-		t.Fatalf("unknown-but-not-removed keys must not fail the load: %v", err)
+		t.Fatalf("unread keys must never fail the load: %v", err)
 	}
 	if f == nil || f.Model.APIKey != "k" {
 		t.Fatalf("the rest of the config must still load, got %+v", f)
+	}
+	if _, ok := f.Agents["scout"]; !ok {
+		t.Error("the [agents.scout] role must still be read; only its removed key is ignored")
+	}
+}
+
+// TestLoad_MalformedFailsLoud: invalid TOML is the one case that is an error —
+// silently running on defaults would look like a missing API key instead of a
+// broken file.
+func TestLoad_MalformedFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[model\napi_key = \"x\"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid TOML must be reported, not ignored")
 	}
 }
 

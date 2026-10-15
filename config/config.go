@@ -148,15 +148,16 @@ type contextConfig struct {
 // Load reads the TOML file at the given path. Returns nil if the file
 // doesn't exist — callers should use Apply with their defaults.
 //
-// Decoding is strict about REMOVED keys and only warns about the rest:
+// Unrecognised keys are IGNORED, never fatal. A config written for an older
+// version must keep working untouched: keys this code no longer reads (a
+// removed knob, a section from a previous design) are simply not read. Failing
+// the load over them would break every already-released user's file, and the
+// only visible symptom would be a start-up error — or, worse, a silently
+// defaulted config that looks like a missing API key.
 //
-//   - a key this binary knows was removed (see removedConfigKeys) fails the
-//     load, because silently ignoring it would leave the user believing in a
-//     guard that no longer exists;
-//   - any other key nothing reads is reported on stderr but the rest of the
-//     file still loads: stale sections from older versions are common, and
-//     turning those into a hard failure would take the whole config (and the
-//     API key in it) down with them.
+// Only a malformed file (invalid TOML) is an error: there is nothing sensible to
+// do with it, and reporting it is the difference between "your config is
+// broken" and "you have no config".
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -166,37 +167,10 @@ func Load(path string) (*File, error) {
 		return nil, err
 	}
 	var f File
-	md, err := toml.Decode(string(data), &f)
-	if err != nil {
+	if err := toml.Unmarshal(data, &f); err != nil {
 		return nil, err
 	}
-	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		var removed, unknown []string
-		for _, k := range undecoded {
-			name := k.String()
-			if why, ok := removedConfigKeys[k[len(k)-1]]; ok {
-				removed = append(removed, fmt.Sprintf("%s (%s)", name, why))
-				continue
-			}
-			unknown = append(unknown, name)
-		}
-		if len(removed) > 0 {
-			return nil, fmt.Errorf("%s: configuration key(s) this version removed:\n  - %s", path, strings.Join(removed, "\n  - "))
-		}
-		fmt.Fprintf(os.Stderr, "%s: WARN: ignoring unknown configuration key(s) that nothing reads: %s\n", path, strings.Join(unknown, ", "))
-	}
 	return &f, nil
-}
-
-// removedConfigKeys maps keys that no longer exist to what took their place, so
-// a stale config file fails loud with a fix instead of guessing. Only these keys
-// are fatal: any other unread key is a warning (see Load).
-var removedConfigKeys = map[string]string{
-	"max_iterations":             "removed: a sub-agent run's convergence is its engine-computed token budget plus the 3-strike guards",
-	"max_turns":                  "removed: the main agent has no turn cap",
-	"token_budget":               "removed: no role can set or widen a run's budget",
-	"sub_agent_token_budget":     "removed: the engine computes a run's budget from its context window (2×)",
-	"run_sub_agent_token_budget": "removed: the delegation tree has no Run-level spend cap",
 }
 
 // LoadProject reads .deepact/config.toml relative to the given work directory,
