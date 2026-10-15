@@ -129,8 +129,7 @@ type EngineConfig struct {
 	// -1 = unlimited, >0 = explicit cap. Wired via
 	// [context].run_sub_agent_token_budget.
 	RunSubAgentTokenBudget int
-	ShowThinking           bool    // stream model reasoning/thinking to UI
-	RiskThreshold          float64 // router risk threshold for Pro/Flash escalation
+	ShowThinking           bool // stream model reasoning/thinking to UI
 	// Approval policy for bash commands (see engine/approval.go). ApprovalMode
 	// is on-request (default) or never; ApprovalRules are user-declared rules
 	// from [approval.rules]; LearnedApprovals are commands the user confirmed in

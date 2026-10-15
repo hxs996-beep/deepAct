@@ -30,9 +30,6 @@ base_url = "https://api.deepseek.com"
 
 [context]
 max_budget_tokens = 100000
-
-[routing]
-risk_threshold = 0.5
 `)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -56,9 +53,6 @@ risk_threshold = 0.5
 	}
 	if f.Context.MaxBudgetTokens != 100000 {
 		t.Errorf("Context.MaxBudgetTokens = %d, want 100000", f.Context.MaxBudgetTokens)
-	}
-	if f.Routing.RiskThreshold != 0.5 {
-		t.Errorf("Routing.RiskThreshold = %f, want 0.5", f.Routing.RiskThreshold)
 	}
 }
 
@@ -117,7 +111,6 @@ func TestApply(t *testing.T) {
 		FlashModelName:   "my-flash",
 		BaseURL:          "https://custom.api.com",
 		MaxContextTokens: 500000,
-		RiskThreshold:    0.5,
 	}
 
 	f := &File{
@@ -129,9 +122,6 @@ func TestApply(t *testing.T) {
 		},
 		Context: contextConfig{
 			MaxBudgetTokens: 200000,
-		},
-		Routing: routingConfig{
-			RiskThreshold: 0.7,
 		},
 	}
 
@@ -150,9 +140,6 @@ func TestApply(t *testing.T) {
 	}
 	if cfg.MaxContextTokens != 200000 {
 		t.Errorf("MaxContextTokens = %d, want 200000", cfg.MaxContextTokens)
-	}
-	if cfg.RiskThreshold != 0.7 {
-		t.Errorf("RiskThreshold = %f, want 0.7", cfg.RiskThreshold)
 	}
 }
 

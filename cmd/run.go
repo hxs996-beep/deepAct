@@ -20,7 +20,6 @@ import (
 	dlog "github.com/deepact/deepact/internal/log"
 	"github.com/deepact/deepact/llm"
 	"github.com/deepact/deepact/memory"
-	"github.com/deepact/deepact/router"
 	"github.com/deepact/deepact/session"
 	"github.com/deepact/deepact/skill"
 	"github.com/deepact/deepact/tools"
@@ -359,15 +358,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	agentsFiles := deeplogcontext.LoadAgentsMD(workDir)
 	contextAssembler.SetAgentsBlock(deeplogcontext.RenderAgentsBlock(agentsFiles))
 
-	// Create model router for Pro/Flash routing decisions
-	routing := router.NewRouter(config.RiskThreshold)
-	if config.ModelName != "" {
-		routing.ModelName = config.ModelName
-	}
-	if config.FlashModelName != "" {
-		routing.FlashModelName = config.FlashModelName
-	}
-
 	deps := engine.EngineDeps{
 		Model:      client,
 		Tools:      toolExecutor,
@@ -378,7 +368,6 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 		Agents:     agentReg,
 		SubAgents:  runner,
 		Skills:     skillReg,
-		Router:     routing,
 	}
 	// Store MCP managers (as io.Closer) for cleanup on shutdown
 	mcpClosers := make([]io.Closer, len(mcpManagers))
@@ -542,7 +531,6 @@ func defaultEngineConfig() engine.EngineConfig {
 			PlanningEnabled:        true,
 			PlanningThresholdChars: 120,
 			// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-			RiskThreshold: 0.55,
 			Pricing: engine.PricingConfig{
 				Models: map[string]engine.ModelPricing{
 					"deepseek/deepseek-chat": {
@@ -571,7 +559,6 @@ func defaultEngineConfig() engine.EngineConfig {
 		PlanningEnabled:        true,
 		PlanningThresholdChars: 120,
 		// ConferenceEnabled removed (dead code - Conference state managed via TaskState.Conference)
-		RiskThreshold: 0.55,
 		Pricing: engine.PricingConfig{
 			Models: map[string]engine.ModelPricing{
 				"deepseek-v4-flash": {

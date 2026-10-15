@@ -40,20 +40,3 @@ type MemoryStore interface {
 	Save(snap *MemorySnapshot) error
 	Clear() error
 }
-
-type ModelRouter interface {
-	SelectModel(ctx RouteContext) RouteDecision
-}
-
-type RouteContext struct {
-	AmbiguityScore   float64
-	ToolFailureCount int
-	EditScopeFiles   int
-	ConsecutiveFails int
-	IsReadOnly       bool
-}
-
-type RouteDecision struct {
-	Model     string
-	Reasoning string
-}

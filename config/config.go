@@ -16,7 +16,6 @@ import (
 // File mirrors the structure of .deepact/config.toml.
 type File struct {
 	Model   modelConfig   `toml:"model"`
-	Routing routingConfig `toml:"routing"`
 	Context contextConfig `toml:"context"`
 	// Agents holds user-defined sub-agent roles. Each key is a role name that
 	// becomes selectable in the handoff tool's agent enum; user roles override
@@ -125,10 +124,6 @@ type modelConfig struct {
 	// minimal/medium/xhigh/ultra accepted by the API and mapped). Empty = the
 	// engine default (high, DeepSeek's own default).
 	ReasoningEffort string `toml:"reasoning_effort"`
-}
-
-type routingConfig struct {
-	RiskThreshold float64 `toml:"risk_threshold"`
 }
 
 type contextConfig struct {
@@ -461,9 +456,6 @@ func Apply(cfg *engine.EngineConfig, f *File) error {
 			return fmt.Errorf("[context] run_sub_agent_token_budget must be -1 (unlimited), 0 (default), or positive, got %d", f.Context.RunSubAgentTokenBudget)
 		}
 		cfg.RunSubAgentTokenBudget = f.Context.RunSubAgentTokenBudget
-	}
-	if f.Routing.RiskThreshold > 0 {
-		cfg.RiskThreshold = f.Routing.RiskThreshold
 	}
 	if err := applyApproval(cfg, f.Approval); err != nil {
 		return err

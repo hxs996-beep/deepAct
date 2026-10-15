@@ -51,7 +51,6 @@ type EngineDeps struct {
 	// nil means the Engine neither resets nor reports the Run aggregate.
 	SubAgents   SubAgentBudget
 	Skills      *skill.Registry
-	Router      ModelRouter
 	MCPManagers []io.Closer // MCP server connections to close on shutdown
 
 	// AfterEngine, when set, is called at the end of NewEngine with the new
@@ -71,7 +70,6 @@ type Engine struct {
 	// subBudget is the shared delegation-tree budget (nil when not wired).
 	subBudget SubAgentBudget
 	skills    *skill.Registry
-	router    ModelRouter
 	config    EngineConfig
 	state     *TaskState
 	history   []Message
@@ -394,7 +392,6 @@ func NewEngine(cfg EngineConfig, deps EngineDeps) *Engine {
 		agents:       deps.Agents,
 		subBudget:    deps.SubAgents,
 		skills:       deps.Skills,
-		router:       deps.Router,
 		config:       cfg,
 		state:        &TaskState{TaskID: cfg.SessionID},
 		history:      make([]Message, 0),
