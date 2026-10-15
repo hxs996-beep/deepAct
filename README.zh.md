@@ -22,7 +22,7 @@
 1. [快速开始](#快速开始)
 2. [日常使用](#日常使用)
 3. [对接模型](#对接模型)
-4. [核心能力](#核心能力)
+4. [设计哲学](#设计哲学)
 5. [CLI 命令一览](#cli-命令一览)
 6. [架构](#架构)
 
@@ -111,13 +111,7 @@ next_skills: [writing-plans]
 
 ## 🔌 对接模型
 
-默认端点是 DeepSeek；`[model].base_url` 可把客户端指向任意 OpenAI 兼容端点，没有 provider 映射。以下是客户端为这个默认端点实现的 DeepSeek 专属优化：
-
-- **前缀缓存分层** —— 请求稳定区全命中、仅 volatile tail 缺失，直接省 token、降延迟。
-- **`reasoning_content` 回显** —— DeepSeek 推理过程结构化存入会话，可回放、可审计。
-- **温度分级路由** —— 依据任务类型（分析 / 编码 / 工具调用）自动调配温度，减少幻觉与无效重试。
-- **双模型路由** —— 主循环的 `selectModel()` 固定返回主模型（稳定的 model 字段保 DeepSeek per-model 前缀缓存命中）；`flash` 仅用于子代理与压缩路径，性价比按需分配。
-- **重试与限速** —— 按 DeepSeek 错误特征（限流 / 超时 / 截断）自动降级，不空转。
+`[model].base_url` 可指向任意 OpenAI 兼容端点——没有 provider 映射，DeepSeek 只是默认值。换成你的端点、配上对应的 `api_key` 即可：
 
 配置示例（`~/.deepact/config.toml`）。key 只放这个用户级文件：项目级 `.deepact/config.toml` 是**取代**它而非与其合并，所以仓库里若保留项目级配置，请改用 `DEEPSEEK_API_KEY` 环境变量传 key：
 
@@ -149,21 +143,12 @@ reason   = "生产环境禁地"
 > [!TIP]
 > 所有字段都可通过 TOML 配置：模型、上下文预算、UI、LSP、MCP 服务器、自定义子代理角色；权威列表是 `config/config.go` 里 `File` 结构体的 `toml` tag。
 
-## ✨ 核心能力
+## 🧭 设计哲学
 
-### 子代理并行
+DeepAct 的每个机制都受两条规则约束：
 
-`handoff_to_agent` 委派给不同内置角色的子代理——`sub`（通用只读分析）、`researcher`（只读调研），以及 `ratd` 流水线角色 `proposer` / `redteam` / `arbitrator`。同一轮发出的多个 handoff **并行**执行（`tools/registry.go` 每个工具调用一个 goroutine），结果汇聚回主循环——快而不乱。代码复核不是角色：它是用户主动调用的 `/review` 技能（见上），所以你要求时才付一次子代理运行的成本。
-
-子代理是**只读的**：可以读、搜、分析（`read`、`read_multi`、`grep`、`glob`、`lsp`、`web_search`、`fetch`），不能修改文件或运行命令——`bash`/`write`/`edit`/`revert`、`skill_install` 与 MCP 工具在任何委派深度都被排除，per-call 的 `tools` 覆盖只能收窄角色工具集、不能放宽。修改属于主代理（其 bash 仍经过危险命令守卫）。`config.toml` 里 `[agents]` 角色声明写类工具会在启动时报错并给出迁移指引。
-
-子代理 run 同时受**花费护栏**约束：每个 run 的计费 token（cache-miss + completion，cache hit 免费）默认上限为 2× 上下文窗（`[context].sub_agent_token_budget`，`-1` 表示显式关闭），80% 时注入收尾提示、100% 时带部分结果终止。后台（`async`）handoff 同时最多 8 个未取回任务——用 `agent_poll` 收结果释放名额。
-
-子代理遇到需要你决定的问题时会**停下提问**，而不是自行猜：问题会呈现给你，你回答后模型可调用 `agent_resume` 让**同一个 run** 带着已经建立的上下文继续——原 history、前缀缓存分区与预算都延续，不会把已经读过的内容重读一遍。挂起 run 上限 4 个（`[context].max_suspended_subagents`）、30 分钟后过期；挂起态只在进程内，退出 TUI 后回落为普通重新委派。
-
-### 会话记录
-
-每步操作写入不可变 JSONL，`/resume` 可重新打开早前的会话；工具输出内容寻址存储，落盘前自动脱敏密钥。
+- **泛化性优先** —— 机制解决的是一**类**问题，不是某个场景。出现场景枚举（一个情况一条规则、一种形态一个启发式）就是设计走偏的信号，修法是回到它下面的共同规律。
+- **能力优先** —— 凡是模型能自己决定的（何时问你、何时收敛、怎么权衡），引擎就给能力而不是写判定：一个工具、一条显式通道、一份它能读到的信息，然后不插手；固定逻辑只留给必须确定的地方——安全、数据破坏、不可逆操作。
 
 ## 📦 CLI 命令一览
 

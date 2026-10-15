@@ -22,7 +22,7 @@
 1. [Quick Start](#quick-start)
 2. [Day-to-Day Use](#day-to-day-use)
 3. [Connecting a Model](#connecting-a-model)
-4. [Core Capabilities](#core-capabilities)
+4. [Design Philosophy](#design-philosophy)
 5. [CLI Reference](#cli-reference)
 6. [Architecture](#architecture)
 
@@ -111,13 +111,7 @@ The `env` block carries non-secret values straight to the server — no `${VAR}`
 
 ## Connecting a Model
 
-The default endpoint is DeepSeek; `[model].base_url` points the client at any OpenAI-compatible endpoint, with no provider mapping. These are the DeepSeek-specific wins the client implements for that default:
-
-- **Layered prefix caching** — the stable region of a request is fully cache-hit, only the volatile tail misses, saving tokens and cutting latency.
-- **`reasoning_content` echoes** — DeepSeek's reasoning is stored structurally in the session: replayable and auditable.
-- **Tiered temperature routing** — temperature is tuned per task type (analysis / coding / tool calls), reducing hallucinations and wasted retries.
-- **Dual-model routing** — the main loop's `selectModel()` always returns the configured primary model (a stable model field keeps DeepSeek's per-model prefix cache warm); `flash` is used only for sub-agents and the compaction path. Pay the right price per task.
-- **Retry & rate limiting** — degrades gracefully on DeepSeek-specific error patterns (rate limits / timeouts / truncation) instead of spinning.
+`[model].base_url` takes any OpenAI-compatible endpoint — there is no provider mapping, and DeepSeek is simply the default. Point it at your provider and set the matching `api_key`:
 
 Config example (`~/.deepact/config.toml`). API keys belong in this user-level file: a project-level `.deepact/config.toml` is applied *instead of* it, never merged with it, so if you keep project settings in the repo, pass the key through `DEEPSEEK_API_KEY` instead:
 
@@ -149,21 +143,12 @@ reason   = "production only"
 > [!TIP]
 > Every field is TOML-configurable — model, context budget, UI, LSP, MCP servers and user-defined sub-agent roles; the authoritative list is the `toml` tags on the `File` struct in `config/config.go`.
 
-## Core Capabilities
+## Design Philosophy
 
-### Parallel Subagents
+Two rules shape every mechanism in DeepAct:
 
-`handoff_to_agent` delegates work to sub-agents with distinct built-in roles — `sub` (general read-only analysis), `researcher` (read-only investigation), plus the `ratd` pipeline roles `proposer` / `redteam` / `arbitrator`. Multiple handoffs issued in one turn run **in parallel** (`tools/registry.go` spawns one goroutine per tool call), with results merged back into the main loop — fast without getting messy. Code review is not a role: it is the user-invoked `/review` skill (see above), so a review costs a sub-agent run only when you ask for one.
-
-Sub-agents are **read-only**: they can read, search, and analyze (`read`, `read_multi`, `grep`, `glob`, `lsp`, `web_search`, `fetch`) but cannot modify files or run commands — `bash`/`write`/`edit`/`revert`, `skill_install`, and MCP tools are excluded at every delegation depth, and the per-call `tools` override can only narrow a role's set, never widen it. Modification work belongs to the main agent, whose bash calls still pass the danger guard. A `[agents]` role in `config.toml` naming a write-class tool fails at startup with migration guidance.
-
-Sub-agent runs are also **budget-bounded**: each run caps its billable tokens (cache-miss + completion; cache hits are free) at 2× the context window by default (`[context].sub_agent_token_budget`; `-1` disables the cap deliberately), with a wrap-up nudge at 80% and a partial-result termination at 100%. Background (`async`) handoffs are capped at 8 outstanding jobs — poll results with `agent_poll` to free slots.
-
-A sub-agent that needs a decision **stops and asks** instead of guessing: the question reaches you, and once you answer, the model can call `agent_resume` so the *same* run continues with the context it had already built — its history, prefix-cache partition and budgets all carry over, so it does not re-read what it had already read. Suspended runs are capped at 4 (`[context].max_suspended_subagents`) and expire after 30 minutes; they live in-process only, so quitting the TUI falls back to plain re-delegation.
-
-### Sessions
-
-Every step is written to an immutable JSONL log that `/resume` can reopen; tool output is content-addressed and secrets are auto-redacted before hitting disk.
+- **Generality first.** A mechanism answers a *class* of problems, not one scenario. Enumerating cases — a rule per situation, a heuristic per shape — is the signal that the design drifted off course, and the fix is to go back to the regularity underneath.
+- **Capability over hardcoded judgment.** Wherever the model can decide — when to ask you, when to stop, how to weigh a tradeoff — the engine hands it a capability instead: a tool, an explicit channel, information it can read, and then stays out of the way. Fixed logic is reserved for what has to be deterministic: safety, data destruction, irreversible operations.
 
 ## CLI Reference
 
