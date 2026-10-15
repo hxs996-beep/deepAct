@@ -147,3 +147,30 @@ func TestRun_InterruptMarkerPersistedToSession(t *testing.T) {
 	}
 	t.Fatalf("no <turn_aborted> message event persisted; events=%+v", store.events)
 }
+
+// TestRun_CompletedRunHasNoInterruptMarker：正常跑完的 Run 不得留下中断标记
+// ——标记只在用户取消时注入，不能污染每一次 Run。
+func TestRun_CompletedRunHasNoInterruptMarker(t *testing.T) {
+	e := newInterruptTestEngine(&stubStreamModel{chunks: []ModelChunk{
+		{Delta: "完成。", FinishReason: "stop"},
+	}})
+	if _, err := e.Run(context.Background(), "普通任务"); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := countInterruptMarkers(e); got != 0 {
+		t.Fatalf("interrupt markers in history = %d, want 0 (history=%+v)", got, e.history)
+	}
+}
+
+// TestRebuildHistoryKeepsInterruptMarker：/resume 重建后标记仍在（方案 B 的
+// 持久性目标）。
+func TestRebuildHistoryKeepsInterruptMarker(t *testing.T) {
+	payload, err := json.Marshal(Message{Role: "user", Content: buildUserInterruptMarker()})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msgs := RebuildHistory([]Event{{Type: EventTypeMessage, Payload: payload}}, 0)
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "<turn_aborted>") {
+		t.Fatalf("RebuildHistory dropped the interrupt marker: %+v", msgs)
+	}
+}
