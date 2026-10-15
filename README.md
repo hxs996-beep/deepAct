@@ -1,4 +1,4 @@
-# DeepAct — Lightweight Terminal AI Coding Agent · Built for DeepSeek
+# DeepAct — Lightweight Terminal AI Coding Agent
 
 **English** | [简体中文](README.zh.md)
 
@@ -10,10 +10,10 @@
 </p>
 
 <p align="center">
-  <b>⚡ Single binary · Zero runtime deps · DeepSeek-native</b>
+  <b>⚡ Single binary · Zero runtime deps</b>
 </p>
 
-**DeepAct is an AI coding agent that lives in your terminal** — written in Go, statically compiled, open source (MIT), and tuned end-to-end for the DeepSeek API. No Node, no Python, no Docker — just a binary and a DeepSeek API key.
+**DeepAct is an AI coding agent that lives in your terminal** — written in Go, statically compiled, open source (MIT).
 
 ---
 
@@ -21,7 +21,7 @@
 
 1. [Quick Start](#quick-start)
 2. [Day-to-Day Use](#day-to-day-use)
-3. [Connecting to DeepSeek](#connecting-to-deepseek)
+3. [Connecting a Model](#connecting-a-model)
 4. [Core Capabilities](#core-capabilities)
 5. [CLI Reference](#cli-reference)
 6. [Architecture](#architecture)
@@ -107,9 +107,9 @@ Register any MCP server in `~/.deepact/mcp.json`; its tools join the available t
 }
 ```
 
-## Connecting to DeepSeek
+## Connecting a Model
 
-DeepAct is built for DeepSeek from the ground up — it does not compromise for "generic models":
+The default endpoint is DeepSeek; `[model].base_url` points the client at any OpenAI-compatible endpoint, with no provider mapping. These are the DeepSeek-specific wins the client implements for that default:
 
 - **Layered prefix caching** — the stable region of a request is fully cache-hit, only the volatile tail misses, saving tokens and cutting latency.
 - **`reasoning_content` echoes** — DeepSeek's reasoning is stored structurally in the session: replayable and auditable.
@@ -169,7 +169,6 @@ Every step is written to an immutable JSONL log that `/resume` can reopen; tool 
 |---------|-------------|
 | `deepact` | Interactive TUI (first launch prompts for the API key) |
 | `deepact set api-key <key>` | Store the API key in `~/.deepact/config.toml` |
-| `deepact eval history` / `stats` / `compare <v1> <v2>` | Prompt-version evaluation and comparison |
 
 ## Architecture
 
@@ -177,7 +176,7 @@ Every step is written to an immutable JSONL log that `/resume` can reopen; tool 
 cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
 engine/   agent loop · subagents · shared type hub
 context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
-tools/    built-in tools (builtin/) + MCP (mcp/)      router/    model routing
+tools/    built-in tools (builtin/) + MCP (mcp/)
 session/  JSONL session log & resume  artifact/ content-addressed store·auto-redact
 skill/    built-in (ratd/collab/review) + external skill loading    config/    shared config
 memory/   cross-session persistent memory

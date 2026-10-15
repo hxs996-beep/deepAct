@@ -1,4 +1,4 @@
-# DeepAct — 轻量级终端 AI 编码代理 · 为 DeepSeek 而生
+# DeepAct — 轻量级终端 AI 编码代理
 
 **简体中文** | [English](README.md)
 
@@ -10,10 +10,10 @@
 </p>
 
 <p align="center">
-  <b>⚡ 单二进制 · 零运行时依赖 · DeepSeek 原生</b>
+  <b>⚡ 单二进制 · 零运行时依赖</b>
 </p>
 
-**DeepAct 是一个跑在终端里的 AI coding agent（AI 编码代理）**：用 Go 编写、静态编译、开源（MIT）、为 DeepSeek API 全链路调优。没有 Node、没有 Python、没有 Docker——一个二进制加一个 DeepSeek API Key 即可。
+**DeepAct 是一个跑在终端里的 AI coding agent（AI 编码代理）**：用 Go 编写、静态编译、开源（MIT）。
 
 ---
 
@@ -21,7 +21,7 @@
 
 1. [快速开始](#快速开始)
 2. [日常使用](#日常使用)
-3. [对接 DeepSeek](#对接-deepseek)
+3. [对接模型](#对接模型)
 4. [核心能力](#核心能力)
 5. [CLI 命令一览](#cli-命令一览)
 6. [架构](#架构)
@@ -107,9 +107,9 @@ next_skills: [writing-plans]
 }
 ```
 
-## 🔌 对接 DeepSeek
+## 🔌 对接模型
 
-DeepAct 从零为 DeepSeek 构建，不为"通用模型"妥协：
+默认端点是 DeepSeek；`[model].base_url` 可把客户端指向任意 OpenAI 兼容端点，没有 provider 映射。以下是客户端为这个默认端点实现的 DeepSeek 专属优化：
 
 - **前缀缓存分层** —— 请求稳定区全命中、仅 volatile tail 缺失，直接省 token、降延迟。
 - **`reasoning_content` 回显** —— DeepSeek 推理过程结构化存入会话，可回放、可审计。
@@ -169,7 +169,6 @@ reason   = "生产环境禁地"
 |------|------|
 | `deepact` | 交互式 TUI（首次启动提示输入 API Key） |
 | `deepact set api-key <key>` | 将 API Key 写入 `~/.deepact/config.toml` |
-| `deepact eval history` / `stats` / `compare <v1> <v2>` | 提示版本评估与对比 |
 
 ## 🧱 架构
 
@@ -177,7 +176,7 @@ reason   = "生产环境禁地"
 cmd/      CLI 入口（Cobra）        ui/       终端 UI（Bubble Tea）
 engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
-tools/    内置工具（builtin/）+ MCP（mcp/）   router/   模型路由
+tools/    内置工具（builtin/）+ MCP（mcp/）
 session/  JSONL 会话日志            artifact/ 内容寻址存储·自动脱敏
 skill/    内置（ratd/collab/review）+ 外部技能加载    config/   共享配置
 memory/   跨会话持久记忆
