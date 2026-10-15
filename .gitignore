@@ -43,6 +43,10 @@ package_release.ps1
 # Superpowers workflow artifacts (specs/plans drafts, SDD task files)
 .superpowers/
 
+# Code review run artifacts (super-code-review-cn temp workspace)
+.code-review-tmp-*/
+.cr-tmp-path
+
 # Runtime data (generated at runtime)
 retrieval/
 .omo/
