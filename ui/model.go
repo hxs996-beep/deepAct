@@ -1818,8 +1818,8 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 	// keep the narration (already shown during streaming) and skip the
 	// Summary to avoid duplication. If different, keep both so the user
 	// sees intermediate narration AND the final formatted Summary.
-	// Blocked responses are checked too (scope guard / loop guard /
-	// max_turns / ...): the engine's buildRunSummary returns the last
+	// Blocked responses are checked too (scope guard / guard failures /
+	// ...): the engine's buildRunSummary returns the last
 	// assistant content, which is usually the same text already streamed
 	// as narration — without dedup the user sees it twice (format 前 +
 	// format 后).
@@ -1884,7 +1884,7 @@ func (m *Model) finishStreaming(msg EngineResponseMsg) {
 			m.activeOptions = msg.Response.Options
 			m.selectedOption = 0
 		}
-		// Non-awaiting_user Blocked paths (scope guard / loop guard / max_turns /
+		// Non-awaiting_user Blocked paths (scope guard / guard failures /
 		// ...): the engine's Summary (buildRunSummary) is usually the same text
 		// already streamed and snapshotted as narration. Remove the plain-text
 		// narration snapshot so the formatted Summary in `content` below is the

@@ -293,7 +293,7 @@ func TestFinishStreaming_NonBlockedOptionsShowPopup(t *testing.T) {
 }
 
 // TestFinishStreaming_Blocked_DedupsNarrationWhenSameSummary verifies that a
-// non-awaiting_user Blocked response (scope guard, loop guard, max_turns, ...)
+// non-awaiting_user Blocked response (scope guard, loop guard, ...)
 // also dedups narration that matches the Summary. Previously only awaiting_user
 // was handled; other Blocked paths appended the formatted Summary on top of the
 // already-snapshotted plain-text narration, showing the same report twice
