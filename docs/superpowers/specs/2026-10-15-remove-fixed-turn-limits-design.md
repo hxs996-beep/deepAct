@@ -34,7 +34,7 @@
 | 机制 | 位置 | 触发 |
 |---|---|---|
 | token 预算 | `tokenBudgetFor`（默认 2×context window） | billable token 用尽 → `budget_exceeded` |
-| 80% token 收尾提示 | `sub_agent.go:780` 武装、:658 注入 | 提示模型收尾 |
+| 80% token 收尾提示 | `tokenBudgetNudge`（80% 越线处武装、下一轮顶部注入） | 提示模型收尾 |
 | 纯文本 3 击 | `narrationStrikeLimit` | `stalled_narration` |
 | 输出截断 3 击 | `truncationStrikeLimit` | `max_tokens` |
 | 越权调用 3 击 | `blockedStrikeLimit` | `loop_detected` |
@@ -85,11 +85,11 @@
 ### 3. `engine/sub_agent.go`
 
 - `runLoop` / `runLoopFrom` 去掉 `maxIterations` 参数；`Run`、`runLoopResume` 调用点同步。
-- 循环条件改为无上限：`for iter := startIter; ; iter++`（每条退出路径都是循环内的
-  `return`，无 `break`，因此循环后代码不再可达）。
+- 循环条件改为无上限：`for ; ; iter++`（`iter` 在 prologue 初始化、resume 时从断点恢复；
+  每条退出路径都是循环内的 `return`，无 `break`，因此循环后代码不再可达）。
 - 删 60% 轮次收尾提示全套：`budgetNudgeAt`、`budgetTailNudge`、`budgetNudgeFraction`、
   循环内注入分支与 `budgetNudged` 变量。
-- 删循环后的 max-iterations 兜底块（:1051-1064，不可达）。
+- 删循环后的 max-iterations 兜底块（无上限后不可达）。
 - `SuspendedRun.Iter` 保留（resume 从断点继续计数），仅更新注释。
 
 ### 4. `config/config.go`
@@ -118,8 +118,11 @@
   用例，改为用 `TokenBudget` 触发 `budget_exceeded`（同义：预算耗尽），保留"预算耗尽仍
   返回部分结论 + usage"的断言价值。
 - **删参数**：其余测试中作为"stub 保险丝"的 `MaxIterations: N`（`sub_agent_askuser_test.go`
-  等 10 个文件）。已验证 `stubSeqModel` 脚本耗尽后返回空响应 → 走 3 击守卫收敛，
-  不会死循环；仍以 `-timeout=120s` 全量跑确认。
+  等 10 个文件）。这些脚本仍能确定性终止：`stubSeqModel` 在脚本非空时是**循环复用**
+  （`m.calls % len(responses)`），只有空脚本才返回空响应，所以收敛靠的是脚本自身的真实出口
+  （ask_user / submit_result / 3 击守卫）；**需要靠 token 预算收尾的用例必须显式给
+  `Usage` 或 `TokenBudget`**（范式见 `sub_agent_universe_test.go` 的 `guardedTurnUsage`），
+  否则预算门对零 usage 永不触发。已以 `-timeout=120s` 全量跑确认无挂起。
 - `sub_agent_remove_turn_limit_test.go` 保留，作为"无轮数上限"的回归锁。
 
 ## 已知取舍

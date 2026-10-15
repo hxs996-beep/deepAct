@@ -1,5 +1,9 @@
 # 子 Agent 定制与自我进化设计
 
+> ⚠️ **配置字段变更（2026-10-15）**：本文示例中的 `max_iterations` 已从代码中移除
+> （`Handoff` / `AgentSpec` / `[agents.X]` 全部删除），该键现在被静默忽略；收敛交给
+> token 预算 + 三击守卫，见 `docs/superpowers/specs/2026-10-15-remove-fixed-turn-limits-design.md`。
+
 > 目标：让 DeepAct 的子 agent 能力**超过 pi/其他 harness**，而不只是对齐。
 > 覆盖三种定制方式：① 固定提示词的定制子 agent；② skill 用文字描述子 agent 性格；③ agent 自我进化（干完事后形成自己的内容，回写 skill / agent md）。
 >

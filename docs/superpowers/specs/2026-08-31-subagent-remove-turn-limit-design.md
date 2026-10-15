@@ -3,6 +3,12 @@
 日期：2026-08-31
 状态：已批准（方案 A：默认放开，保留显式上限）
 
+> **已被取代（2026-10-15）**：显式轮数上限已整体移除（`Handoff.MaxIterations`、
+> `AgentSpec.MaxIterations`、`[agents.X] max_iterations`、`HandoffReasonMaxIterations`、
+> `HandoffResult.TimedOut` 全部删除），收敛统一交给 token 预算 + 三击守卫。
+> 本文描述的"保留显式上限"不再是当前行为，以
+> `docs/superpowers/specs/2026-10-15-remove-fixed-turn-limits-design.md` 为准。
+
 ## 背景与问题
 
 调研型 subagent（走 `handoff_to_agent` 委派的 `sub`）在长调研任务中会明确报
