@@ -97,12 +97,14 @@ next_skills: [writing-plans]
 
 ### MCP Support
 
-Register any MCP server in `~/.deepact/mcp.json`; its tools join the available tool set automatically, no code changes needed. A server whose `env` carries a credential belongs in this user-level file: a project-level `.deepact/mcp.json` is applied *instead of* it, never merged with it, so keep tokens out of the repo:
+Register MCP servers in the project's `.deepact/mcp.json` — the one under the directory you run DeepAct in — falling back to `~/.deepact/mcp.json` only when that file is absent. Their tools join the available tool set automatically, no code changes needed; the two files are never merged, so just the first one found is used.
+
+The `env` block carries non-secret values straight to the server — no `${VAR}` expansion applies — and the server already inherits your shell environment, so export tokens instead of writing them into the file:
 
 ```json
 {
   "servers": [
-    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } }
+    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] }
   ]
 }
 ```

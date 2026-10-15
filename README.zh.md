@@ -97,12 +97,14 @@ next_skills: [writing-plans]
 
 ### MCP 扩展
 
-在 `~/.deepact/mcp.json` 注册外部 MCP 服务器，其工具自动并入可用工具集，无需改代码。`env` 里带凭据的服务器只放这个用户级文件：项目级 `.deepact/mcp.json` 是**取代**它而非与其合并，不要把 token 放进仓库：
+在项目目录下的 `.deepact/mcp.json` 注册外部 MCP 服务器——**你运行 DeepAct 的那个目录里的这份优先**，该文件不存在时才回落到 `~/.deepact/mcp.json`。其工具自动并入可用工具集，无需改代码；两份文件不会合并，只用找到的第一份。
+
+`env` 块用于传非敏感值，会原样交给 server（不做 `${VAR}` 展开）；而 server 本就继承你的 shell 环境，所以 token 改为在 shell 里 export，不要写进文件：
 
 ```json
 {
   "servers": [
-    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } }
+    { "name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] }
   ]
 }
 ```
