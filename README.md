@@ -3,7 +3,7 @@
 **English** | [简体中文](README.zh.md)
 
 <p align="center">
-  <a href="https://goreportcard.com/report/github.com/deepact/deepact"><img src="https://img.shields.io/badge/go_report-A-brightgreen?style=flat-square" alt="Go Report"></a>
+  <a href="https://goreportcard.com/report/github.com/hxs996-beep/deepAct"><img src="https://img.shields.io/badge/go_report-A-brightgreen?style=flat-square" alt="Go Report"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go 1.24+"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms">
@@ -39,8 +39,8 @@
 # macOS / Linux one-liner
 curl -sSfL https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.sh | sh
 
-# or Go
-go install github.com/deepact/deepact@latest
+# or build from source
+git clone https://github.com/hxs996-beep/deepAct && cd deepAct && make install
 ```
 
 Windows users: see [Releases](https://github.com/hxs996-beep/deepAct/releases) (PowerShell or manual download).
@@ -49,7 +49,6 @@ Windows users: see [Releases](https://github.com/hxs996-beep/deepAct/releases) (
 
 ```bash
 deepact                      # interactive TUI (Windows / macOS / Linux)
-deepact exec "fix the connection-pool race"   # non-interactive / CI mode
 ```
 
 The environment variable `DEEPSEEK_API_KEY` takes priority; a project-level `.deepact/config.toml` overrides the global config.
@@ -67,31 +66,13 @@ The environment variable `DEEPSEEK_API_KEY` takes priority; a project-level `.de
 | `Tab` | Complete |
 | `↑` | Recall the last submitted input (empty box) |
 
-### One-Line Tasks (from the shell)
-
-```bash
-deepact exec "add timeout and circuit breaker to LoginHandler"
-deepact exec "migrate the user table to Postgres and fix all compile errors"
-deepact exec "review the last 5 commits for potential bugs"
-```
-
 ### Parallel Research (/collab)
 
-```bash
-deepact exec "/collab add a cache layer"
-```
-
-`/collab` is a built-in collaboration skill driven by `handoff_to_agent`: the main agent decomposes the goal into 2-6 research directions, then delegates each direction to a `researcher` sub-agent **in parallel** (read-only tools) and merges their findings into one structured report — faster than serial investigation when you need breadth quickly.
+Type `/collab add a cache layer` in the TUI. `/collab` is a built-in collaboration skill driven by `handoff_to_agent`: the main agent decomposes the goal into 2-6 research directions, then delegates each direction to a `researcher` sub-agent **in parallel** (read-only tools) and merges their findings into one structured report — faster than serial investigation when you need breadth quickly.
 
 ### Independent Review (/review)
 
-```bash
-deepact exec "/review the current changes"
-deepact exec "/review only the prompt changes"
-deepact exec "/review against main"
-```
-
-`/review` is a built-in skill **you** invoke — it is excluded from the model-facing skill catalog, so the agent never starts a review on its own. The text after the command is the range, and it is required: a bare `/review` leaves the engine with no task, so it only loads the skill and starts nothing. The range is mapped to facts (`git status` + `git diff HEAD`, one commit, a branch, or a document), the diff plus a review rubric goes to an **independent** `sub` sub-agent — its own context, not the author's conversation — and each finding is verified against the code before it is reported. Findings carry a priority (P0–P3), a confidence score and a `file:line` citation; the reviewer is read-only, and nothing is fixed until you ask.
+Type `/review the current changes` in the TUI — or narrow the range, e.g. `/review against main`. `/review` is a built-in skill **you** invoke — it is excluded from the model-facing skill catalog, so the agent never starts a review on its own. The text after the command is the range, and it is required: a bare `/review` leaves the engine with no task, so it only loads the skill and starts nothing. The range is mapped to facts (`git status` + `git diff HEAD`, one commit, a branch, or a document), the diff plus a review rubric goes to an **independent** `sub` sub-agent — its own context, not the author's conversation — and each finding is verified against the code before it is reported. Findings carry a priority (P0–P3), a confidence score and a `file:line` citation; the reviewer is read-only, and nothing is fixed until you ask.
 
 ### Project Rules & Skills
 
@@ -141,8 +122,8 @@ Config example (`~/.deepact/config.toml`). API keys belong in this user-level fi
 ```toml
 [model]
 api_key = "sk-..."        # or: DEEPSEEK_API_KEY env var / first-launch TUI prompt
-default = "flash"         # model used for the main loop
-escalation = "pro"        # model used for complex tasks (optional)
+default = "deepseek-v4-flash"  # model for sub-agents and compaction
+escalation = "<main-loop model>"  # model for the main loop (optional; unset = the flash model)
 reasoning_effort = "high" # thinking effort: none | low | high | max (optional; default high)
 
 [search]
@@ -164,7 +145,7 @@ reason   = "production only"
 > Dangerous commands pass four judgement layers, most authoritative first: (1) irreversible system-level operations — hard-blocked, no rule can unlock them; (2) `decision = "forbidden"` rules; (3) `decision = "allow"` rules and commands you confirmed in a session; (4) project-level danger and `decision = "prompt"` rules, which ask unless `mode = "never"`. A command you confirm in the popup is remembered **verbatim** and survives restarts (stored in `~/.deepact/approvals.toml`); to allow a whole family of commands, declare `[[approval.rules]]` explicitly instead of expecting one confirmation to widen itself.
 
 > [!TIP]
-> See the comments inside the config file for the full field list: model & routing, context budget, UI, LSP, MCP servers, and user-defined sub-agent roles are all TOML-configurable.
+> Every field is TOML-configurable — model, context budget, UI, LSP, MCP servers and user-defined sub-agent roles; the authoritative list is the `toml` tags on the `File` struct in `config/config.go`.
 
 ## Core Capabilities
 
@@ -178,16 +159,15 @@ Sub-agent runs are also **budget-bounded**: each run caps its billable tokens (c
 
 A sub-agent that needs a decision **stops and asks** instead of guessing: the question reaches you, and once you answer, the model can call `agent_resume` so the *same* run continues with the context it had already built — its history, prefix-cache partition and budgets all carry over, so it does not re-read what it had already read. Suspended runs are capped at 4 (`[context].max_suspended_subagents`) and expire after 30 minutes; they live in-process only, so quitting the TUI falls back to plain re-delegation.
 
-### Rewindable Sessions
+### Sessions
 
-Every step is written to an immutable JSONL log: rewind to any step, fork a new branch; tool output is content-addressed and secrets are auto-redacted before hitting disk.
+Every step is written to an immutable JSONL log that `/resume` can reopen; tool output is content-addressed and secrets are auto-redacted before hitting disk.
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `deepact` | Interactive TUI (first launch prompts for the API key) |
-| `deepact exec <prompt>` | Non-interactive / CI mode |
 | `deepact set api-key <key>` | Store the API key in `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | Prompt-version evaluation and comparison |
 
@@ -198,7 +178,7 @@ cmd/      CLI entry (Cobra)         ui/       Terminal UI (Bubble Tea)
 engine/   agent loop · subagents · shared type hub
 context/  prompt build · tree snapshot · compaction   llm/      DeepSeek client (stream·retry·rate)
 tools/    built-in tools (builtin/) + MCP (mcp/)      router/    model routing
-session/  JSONL sessions·fork·rewind  artifact/ content-addressed store·auto-redact
+session/  JSONL session log & resume  artifact/ content-addressed store·auto-redact
 skill/    built-in (ratd/collab/review) + external skill loading    config/    shared config
 memory/   cross-session persistent memory
 ```

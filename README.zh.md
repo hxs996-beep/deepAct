@@ -3,7 +3,7 @@
 **简体中文** | [English](README.md)
 
 <p align="center">
-  <a href="https://goreportcard.com/report/github.com/deepact/deepact"><img src="https://img.shields.io/badge/go_report-A-brightgreen?style=flat-square" alt="Go Report"></a>
+  <a href="https://goreportcard.com/report/github.com/hxs996-beep/deepAct"><img src="https://img.shields.io/badge/go_report-A-brightgreen?style=flat-square" alt="Go Report"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go 1.24+"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Platforms">
@@ -39,8 +39,8 @@
 # macOS / Linux 一键安装
 curl -sSfL https://raw.githubusercontent.com/hxs996-beep/deepAct/main/install.sh | sh
 
-# 或 Go
-go install github.com/deepact/deepact@latest
+# 或从源码构建
+git clone https://github.com/hxs996-beep/deepAct && cd deepAct && make install
 ```
 
 Windows 用户见 [Releases](https://github.com/hxs996-beep/deepAct/releases)（PowerShell 或手动下载）。
@@ -49,7 +49,6 @@ Windows 用户见 [Releases](https://github.com/hxs996-beep/deepAct/releases)（
 
 ```bash
 deepact                      # 启动交互式 TUI（Windows / macOS / Linux 通用）
-deepact exec "修复连接池竞态"  # 非交互 / CI 模式
 ```
 
 环境变量 `DEEPSEEK_API_KEY` 优先级最高；项目级配置 `.deepact/config.toml` 覆盖全局配置。
@@ -67,31 +66,13 @@ deepact exec "修复连接池竞态"  # 非交互 / CI 模式
 | `Tab` | 补全 |
 | `↑` | 召回上次提交的内容（输入框为空时） |
 
-### 一句话开工（命令行直出）
-
-```bash
-deepact exec "给 LoginHandler 加超时和熔断"
-deepact exec "把 user 表迁移到 Postgres 并修好所有编译错误"
-deepact exec "review 最近 5 个 commit 的潜在 bug"
-```
-
 ### 并行研究（/collab）
 
-```bash
-deepact exec "/collab 加一个缓存层"
-```
-
-`/collab` 是内置协作技能，由 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给 `researcher` 子代理（只读工具），再把各方向发现合并成一份结构化报告——需要快速摸清广度时，比串行调研更快。
+在 TUI 里输入 `/collab 加一个缓存层`。`/collab` 是内置协作技能，由 `handoff_to_agent` 编排：主 agent 自己把目标拆成 2~6 个研究方向，然后**并行**把每个方向委派给 `researcher` 子代理（只读工具），再把各方向发现合并成一份结构化报告——需要快速摸清广度时，比串行调研更快。
 
 ### 独立复核（/review）
 
-```bash
-deepact exec "/review 当前改动"
-deepact exec "/review 只复核 prompt 改动"
-deepact exec "/review 对比 main 分支"
-```
-
-`/review` 是**你主动调用**的内置技能——它被排除在模型可见的技能目录之外，agent 不会自己发起复核。命令后面的文字就是复核范围，且**必须给**：裸 `/review` 会让引擎拿不到任务，只加载技能、不启动任何运行。范围会被映射成事实（`git status` + `git diff HEAD`、某个 commit、某个分支、或某个文档），diff 加一份评审要求交给**独立**的 `sub` 子代理——它有自己的一份上下文，而不是作者那段对话——然后每条发现都要先对着代码核验再报告。发现带优先级（P0–P3）、置信度与 `file:line` 证据；复核者只读，未经你同意不改任何代码。
+在 TUI 里输入 `/review 当前改动`，也可以缩小范围，如 `/review 对比 main 分支`。`/review` 是**你主动调用**的内置技能——它被排除在模型可见的技能目录之外，agent 不会自己发起复核。命令后面的文字就是复核范围，且**必须给**：裸 `/review` 会让引擎拿不到任务，只加载技能、不启动任何运行。范围会被映射成事实（`git status` + `git diff HEAD`、某个 commit、某个分支、或某个文档），diff 加一份评审要求交给**独立**的 `sub` 子代理——它有自己的一份上下文，而不是作者那段对话——然后每条发现都要先对着代码核验再报告。发现带优先级（P0–P3）、置信度与 `file:line` 证据；复核者只读，未经你同意不改任何代码。
 
 ### 项目规范与技能（Skills）
 
@@ -141,8 +122,8 @@ DeepAct 从零为 DeepSeek 构建，不为"通用模型"妥协：
 ```toml
 [model]
 api_key = "sk-..."        # 或：DEEPSEEK_API_KEY 环境变量 / 首次启动 TUI 提示
-default = "flash"         # 主循环使用的模型
-escalation = "pro"        # 复杂任务使用的模型（可选）
+default = "deepseek-v4-flash"  # 子代理与压缩使用的模型
+escalation = "<主循环模型>"     # 主循环使用的模型（可选；不填则用 flash 模型）
 reasoning_effort = "high" # 思考强度：none | low | high | max（可选，默认 high）
 
 [search]
@@ -164,7 +145,7 @@ reason   = "生产环境禁地"
 > 危险命令分四层判定，越靠前越权威：① 系统级不可逆操作（硬拦，规则无法放行）② `decision = "forbidden"` 规则 ③ `decision = "allow"` 规则与你在会话中确认过的命令 ④ 项目级危险与 `decision = "prompt"` 规则（按 `mode` 决定是否询问）。你在弹窗里确认过的命令会被**原样记住**并跨会话生效（存于 `~/.deepact/approvals.toml`）；要放行一整类命令，请显式声明 `[[approval.rules]]`，而不是指望确认一次就自动放宽。
 
 > [!TIP]
-> 完整字段见配置文件内注释。模型与路由、上下文预算、UI、LSP、MCP 服务器、自定义子代理角色均可在 TOML 中配置。
+> 所有字段都可通过 TOML 配置：模型、上下文预算、UI、LSP、MCP 服务器、自定义子代理角色；权威列表是 `config/config.go` 里 `File` 结构体的 `toml` tag。
 
 ## ✨ 核心能力
 
@@ -178,16 +159,15 @@ reason   = "生产环境禁地"
 
 子代理遇到需要你决定的问题时会**停下提问**，而不是自行猜：问题会呈现给你，你回答后模型可调用 `agent_resume` 让**同一个 run** 带着已经建立的上下文继续——原 history、前缀缓存分区与预算都延续，不会把已经读过的内容重读一遍。挂起 run 上限 4 个（`[context].max_suspended_subagents`）、30 分钟后过期；挂起态只在进程内，退出 TUI 后回落为普通重新委派。
 
-### 可回退
+### 会话记录
 
-每步操作写入不可变 JSONL：可回退到任意步骤、分叉新分支；工具输出内容寻址存储，落盘前自动脱敏密钥。
+每步操作写入不可变 JSONL，`/resume` 可重新打开早前的会话；工具输出内容寻址存储，落盘前自动脱敏密钥。
 
 ## 📦 CLI 命令一览
 
 | 命令 | 说明 |
 |------|------|
 | `deepact` | 交互式 TUI（首次启动提示输入 API Key） |
-| `deepact exec <prompt>` | 非交互 / CI 模式 |
 | `deepact set api-key <key>` | 将 API Key 写入 `~/.deepact/config.toml` |
 | `deepact eval history` / `stats` / `compare <v1> <v2>` | 提示版本评估与对比 |
 
@@ -198,7 +178,7 @@ cmd/      CLI 入口（Cobra）        ui/       终端 UI（Bubble Tea）
 engine/   代理循环·子代理·共享类型中枢
 context/  提示构建·目录树快照·压缩   llm/      DeepSeek 客户端（流式·重试·限速）
 tools/    内置工具（builtin/）+ MCP（mcp/）   router/   模型路由
-session/  JSONL 会话·分叉·回退       artifact/ 内容寻址存储·自动脱敏
+session/  JSONL 会话日志            artifact/ 内容寻址存储·自动脱敏
 skill/    内置（ratd/collab/review）+ 外部技能加载    config/   共享配置
 memory/   跨会话持久记忆
 ```
