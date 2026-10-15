@@ -3,7 +3,6 @@ package config
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,11 +148,15 @@ type contextConfig struct {
 // Load reads the TOML file at the given path. Returns nil if the file
 // doesn't exist — callers should use Apply with their defaults.
 //
-// Decoding is STRICT: a key the struct does not know about is an error, not a
-// silent no-op. A config key that stops working without saying so is the worst
-// kind of failure — the user believes a guard is in place when it is not (this
-// is how removed keys such as max_iterations / token_budget / max_turns would
-// otherwise behave). Removed keys get a message that says what replaced them.
+// Decoding is strict about REMOVED keys and only warns about the rest:
+//
+//   - a key this binary knows was removed (see removedConfigKeys) fails the
+//     load, because silently ignoring it would leave the user believing in a
+//     guard that no longer exists;
+//   - any other key nothing reads is reported on stderr but the rest of the
+//     file still loads: stale sections from older versions are common, and
+//     turning those into a hard failure would take the whole config (and the
+//     API key in it) down with them.
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -168,13 +171,26 @@ func Load(path string) (*File, error) {
 		return nil, err
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return nil, unknownKeyError(path, undecoded)
+		var removed, unknown []string
+		for _, k := range undecoded {
+			name := k.String()
+			if why, ok := removedConfigKeys[k[len(k)-1]]; ok {
+				removed = append(removed, fmt.Sprintf("%s (%s)", name, why))
+				continue
+			}
+			unknown = append(unknown, name)
+		}
+		if len(removed) > 0 {
+			return nil, fmt.Errorf("%s: configuration key(s) this version removed:\n  - %s", path, strings.Join(removed, "\n  - "))
+		}
+		fmt.Fprintf(os.Stderr, "%s: WARN: ignoring unknown configuration key(s) that nothing reads: %s\n", path, strings.Join(unknown, ", "))
 	}
 	return &f, nil
 }
 
 // removedConfigKeys maps keys that no longer exist to what took their place, so
-// a stale config file fails loud with a fix instead of guessing.
+// a stale config file fails loud with a fix instead of guessing. Only these keys
+// are fatal: any other unread key is a warning (see Load).
 var removedConfigKeys = map[string]string{
 	"max_iterations":             "removed: a sub-agent run's convergence is its engine-computed token budget plus the 3-strike guards",
 	"max_turns":                  "removed: the main agent has no turn cap",
@@ -183,40 +199,33 @@ var removedConfigKeys = map[string]string{
 	"run_sub_agent_token_budget": "removed: the delegation tree has no Run-level spend cap",
 }
 
-// unknownKeyError names every key the config file set that nothing reads.
-func unknownKeyError(path string, keys []toml.Key) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s: unknown configuration key(s) — nothing reads them, so they would silently do nothing:", path)
-	for _, k := range keys {
-		name := k.String()
-		if why, ok := removedConfigKeys[k[len(k)-1]]; ok {
-			fmt.Fprintf(&b, "\n  - %s (%s)", name, why)
-			continue
-		}
-		fmt.Fprintf(&b, "\n  - %s (no such option; check the spelling)", name)
-	}
-	return errors.New(b.String())
-}
-
 // LoadProject reads .deepact/config.toml relative to the given work directory,
 // then falls back to ~/.deepact/config.toml.
-func LoadProject(workDir string) *File {
+//
+// A configuration error is RETURNED, never swallowed: a broken config that
+// silently degraded into "no config" looked exactly like a missing API key and
+// sent the user to the key prompt instead of the real problem.
+func LoadProject(workDir string) (*File, error) {
 	// Project-level config takes priority
 	if workDir != "" {
 		f, err := Load(filepath.Join(workDir, ".deepact", "config.toml"))
-		if err == nil && f != nil {
-			return f
+		if err != nil {
+			return nil, err
+		}
+		if f != nil {
+			return f, nil
 		}
 	}
 	// Fall back to user-level config
 	home, err := os.UserHomeDir()
-	if err == nil {
-		f, err := Load(filepath.Join(home, ".deepact", "config.toml"))
-		if err == nil && f != nil {
-			return f
-		}
+	if err != nil {
+		return nil, nil
 	}
-	return nil
+	f, err := Load(filepath.Join(home, ".deepact", "config.toml"))
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // LoadAPIKey resolves the API key. The DEEPSEEK_API_KEY environment variable
@@ -226,7 +235,9 @@ func LoadAPIKey(workDir string) string {
 	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
 		return key
 	}
-	if f := LoadProject(workDir); f != nil {
+	// A config error here must not look like "no key": callers that need to
+	// report it use LoadProject directly (cmd/run.go fails loud on it).
+	if f, err := LoadProject(workDir); err == nil && f != nil {
 		return f.Model.APIKey
 	}
 	return ""

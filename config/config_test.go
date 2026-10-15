@@ -44,20 +44,22 @@ func TestLoad_RemovedKeyFailsLoud(t *testing.T) {
 	}
 }
 
-// TestLoad_TypoKeyFailsLoud: any key nothing reads is an error, not a silent
-// no-op — the same class of bug as a removed key.
-func TestLoad_TypoKeyFailsLoud(t *testing.T) {
+// TestLoad_UnknownKeyWarnsButLoads: a stale key nothing reads (e.g. a section
+// from an older version) must NOT take the whole config down — the rest of the
+// file, including the API key, still loads. Only removed keys are fatal.
+func TestLoad_UnknownKeyWarnsButLoads(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[model]\napi_ky = \"x\"\n"), 0o600); err != nil {
+	body := "[model]\napi_key = \"k\"\n\n[routing]\nrisk_threshold = 0.5\n\n[guards]\nscope_guard = true\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := func() error { _, e := Load(path); return e }()
-	if err == nil {
-		t.Fatal("a typo'd key must fail loud")
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("unknown-but-not-removed keys must not fail the load: %v", err)
 	}
-	if !strings.Contains(err.Error(), "api_ky") {
-		t.Errorf("error must name the unknown key, got %q", err)
+	if f == nil || f.Model.APIKey != "k" {
+		t.Fatalf("the rest of the config must still load, got %+v", f)
 	}
 }
 
@@ -124,7 +126,10 @@ escalation = "pro"
 		t.Fatalf("write config: %v", err)
 	}
 
-	f := LoadProject(dir)
+	f, err := LoadProject(dir)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
 	if f == nil {
 		t.Fatal("expected non-nil File from LoadProject")
 	}
@@ -141,7 +146,10 @@ func TestLoadProject_NotFound(t *testing.T) {
 	// developer's real ~/.deepact/config.toml.
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	f := LoadProject(dir)
+	f, err := LoadProject(dir)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
 	if f != nil {
 		t.Errorf("expected nil when no config exists, got %+v", f)
 	}

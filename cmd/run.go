@@ -204,10 +204,16 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	config := defaultEngineConfig()
 	config.WorkDir = workDir
 
-	// Load and apply .deepact/config.toml over defaults
+	// Load and apply .deepact/config.toml over defaults. A config error is fatal
+	// and reported as such — degrading to "no config" would surface as a missing
+	// API key and send the user hunting in the wrong place.
 	var lspOverrides map[string]builtin.LSPCommand
 	searchCfg := builtin.WebSearchConfig{}
-	if f := deeplogconfig.LoadProject(workDir); f != nil {
+	f, err := deeplogconfig.LoadProject(workDir)
+	if err != nil {
+		return engine.EngineConfig{}, engine.EngineDeps{}, err
+	}
+	if f != nil {
 		if err := deeplogconfig.Apply(&config, f); err != nil {
 			return engine.EngineConfig{}, engine.EngineDeps{}, err
 		}

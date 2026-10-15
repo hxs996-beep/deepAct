@@ -126,6 +126,12 @@
   （→ `loop_detected`）各计一击，达 3 击结束，真实派发时清零。
 - **M3 `handoffResultStatus` 成为唯一实现**：`Blocked`/`BlockedBy==cancelled` 优先，其余按
   `FinishReason` 排除表；同步路径（`handoff.go`）改调同一函数，附表驱动用例覆盖全部 reason。
-- **F 配置严格解码**：`Load` 改用 `toml.Decode` + `md.Undecoded()`，任何没被读取的键都报错；
-  已删除的 5 个键（`max_iterations`/`max_turns`/`token_budget`/`sub_agent_token_budget`/
-  `run_sub_agent_token_budget`）给出“已删除 + 替代机制”的明确提示。
+- **F 配置严格解码（修正后）**：`Load` 改用 `toml.Decode` + `md.Undecoded()`，但**只对已删除的
+  5 个键**（`max_iterations`/`max_turns`/`token_budget`/`sub_agent_token_budget`/
+  `run_sub_agent_token_budget`）硬报错并给出替代机制；其余没被读取的键（历史的 `[routing]`、
+  `[guards]` 这类）只打一行 stderr WARN，配置照常加载。
+  **踩过的坑（实现后实测发现并修正）**：第一版把所有未读取的键都当致命错，而 `LoadProject`
+  历史上会吞掉错误并返回 nil——两者叠加后，存量配置里的历史段落会把整个配置（连同 api_key）
+  一起弄丢，表现为“不读 `~/.deepact/config.toml`、直接弹 API key 输入框”。修正：
+  未知键降为 WARN；`LoadProject` 改为 `(*File, error)` 且**不再吞错**，`cmd/run.go` 遇到配置
+  错误直接返回——报错就是报错，不再伪装成“没配置”。
