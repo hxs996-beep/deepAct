@@ -310,9 +310,10 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 
 	// Initialize skill registry from multiple skill directories. Deepact's own
 	// ~/.deepact/skills/ takes priority; common agent skill directories
-	// (~/.claude/skills/, .claude/skills/, ~/.agent/skills/) are loaded as
-	// supplemental sources. Later directories override earlier ones on name
-	// conflicts.
+	// (~/.claude/skills/, .claude/skills/, ~/.agents/skills/, ~/.agent/skills/)
+	// are loaded as supplemental sources. Later directories override earlier
+	// ones on name conflicts. Both the plural ~/.agents/skills (the common
+	// agent-skills layout) and the singular ~/.agent/skills are accepted.
 	skillReg := skill.NewRegistry()
 
 	// 内置官方技能（ratd/collab）最先注册，作为最低优先级。
@@ -328,6 +329,7 @@ func buildEngineDeps() (engine.EngineConfig, engine.EngineDeps, error) {
 	if home, err := os.UserHomeDir(); err == nil {
 		skillDirs := []string{
 			filepath.Join(home, ".claude", "skills"),
+			filepath.Join(home, ".agents", "skills"),
 			filepath.Join(home, ".agent", "skills"),
 			filepath.Join(workDir, ".claude", "skills"),
 			filepath.Join(home, ".deepact", "skills"),
